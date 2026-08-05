@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quota Manager</title>
+<link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div class="bg-glow"></div>
+
+  <!-- LOGIN SCREEN -->
+  <div id="login-screen" class="screen hidden">
+    <div class="glass card login-card">
+      <h1 class="logo">Quota<span>Manager</span></h1>
+      <p class="subtitle">Split your monthly internet fairly between devices.</p>
+      <form id="login-form" autocomplete="off">
+        <label for="login-password">Admin password</label>
+        <input type="password" id="login-password" placeholder="••••••••" required>
+        <button type="submit" class="btn primary">Unlock dashboard</button>
+        <p id="login-error" class="error hidden">Wrong password. Try again.</p>
+      </form>
+    </div>
+  </div>
+
+  <!-- MAIN DASHBOARD -->
+  <div id="app" class="screen hidden">
+    <header class="topbar glass">
+      <div class="brand">
+        <h1 class="logo">Quota<span>Manager</span></h1>
+      </div>
+      <div class="topbar-right">
+        <span id="conn-status" class="pill" title="live updates">● live</span>
+        <button id="logout-btn" class="btn ghost small">Log out</button>
+      </div>
+    </header>
+
+    <main class="content">
+      <!-- BUNDLE SUMMARY -->
+      <section class="bundle-card glass">
+        <div class="bundle-ring-wrap">
+          <div class="ring" id="bundle-ring">
+            <div class="ring-center">
+              <span id="bundle-used" class="ring-big">0 GB</span>
+              <span class="ring-small">used of <span id="bundle-total">0</span> GB</span>
+            </div>
+          </div>
+        </div>
+        <div class="bundle-stats">
+          <div class="stat">
+            <span class="stat-label">Remaining</span>
+            <span id="bundle-remaining" class="stat-value purple">0 GB</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Period</span>
+            <span id="bundle-period" class="stat-value">–</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Days left</span>
+            <span id="bundle-days" class="stat-value">–</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Devices</span>
+            <span id="bundle-devices" class="stat-value">0</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Blocked</span>
+            <span id="bundle-blocked" class="stat-value warning">0</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- DEVICES -->
+      <section class="section">
+        <div class="section-head">
+          <h2>Devices</h2>
+          <button id="add-device-btn" class="btn primary small">＋ Add device</button>
+        </div>
+        <div id="devices-list" class="device-grid"></div>
+      </section>
+
+      <!-- USAGE CHART -->
+      <section class="section">
+        <div class="section-head">
+          <h2>Usage this period</h2>
+          <div class="legend">
+            <span class="legend-dot down"></span> Download
+            <span class="legend-dot up"></span> Upload
+          </div>
+        </div>
+        <div class="glass card chart-card">
+          <canvas id="usage-chart"></canvas>
+        </div>
+      </section>
+
+      <!-- SETTINGS + EVENTS -->
+      <section class="two-col">
+        <div class="glass card settings-card">
+          <div id="bundle-source-banner" class="banner hidden"></div>
+          <h3>Bundle settings</h3>
+          <form id="settings-form">
+            <label for="set-total">Bundle size (GB)</label>
+            <input type="number" id="set-total" min="1" step="0.5" value="140">
+            <label for="set-reset-day">Reset day of month <span class="muted small">(0 = manual)</span></label>
+            <input type="number" id="set-reset-day" min="0" max="28" value="1">
+            <button type="submit" class="btn primary small">Save</button>
+          </form>
+          <hr class="sep">
+          <h3>Bundle recharged</h3>
+          <p class="muted small">Bought more data mid-month? Add it here — every auto
+            device's share is recalculated without resetting the period.</p>
+          <div class="recharge-row">
+            <input type="number" id="set-recharge" min="0.1" step="0.5" placeholder="Added GB">
+            <button id="recharge-btn" class="btn primary small">Add</button>
+          </div>
+          <hr class="sep">
+          <h3>Admin</h3>
+          <button id="reset-month-btn" class="btn warning small">Reset month now</button>
+          <a id="password-link" class="link">Change password</a>
+        </div>
+        <div class="glass card events-card">
+          <h3>Activity</h3>
+          <ul id="events-list" class="events"></ul>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ADD / EDIT DEVICE MODAL -->
+  <div id="modal" class="modal hidden">
+    <div class="glass card modal-card">
+      <h3 id="modal-title">Add device</h3>
+      <p id="modal-sub" class="muted">New devices from DHCP appear automatically. Add one by MAC.</p>
+      <form id="device-form">
+        <div id="d-mac-wrap">
+          <label for="d-mac">MAC address</label>
+          <input id="d-mac" placeholder="aa:bb:cc:dd:ee:ff" required>
+        </div>
+        <label for="d-name">Name</label>
+        <input id="d-name" placeholder="e.g. Living room TV">
+        <label for="d-mode">Quota</label>
+        <select id="d-mode">
+          <option value="auto">Auto (share of remainder)</option>
+          <option value="fixed">Fixed GB</option>
+        </select>
+        <div id="d-fixed-wrap" class="hidden">
+          <label for="d-fixed">Fixed GB</label>
+          <input type="number" id="d-fixed" min="0.1" step="0.5" value="10">
+        </div>
+        <div id="d-topup-wrap" class="hidden">
+          <label for="d-topup">Top up (extra GB)</label>
+          <input type="number" id="d-topup" min="0.1" step="0.5" placeholder="0">
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="modal-cancel" class="btn ghost">Cancel</button>
+          <button type="submit" id="modal-submit" class="btn primary">Add</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- PASSWORD MODAL -->
+  <div id="pwd-modal" class="modal hidden">
+    <div class="glass card modal-card">
+      <h3>Change password</h3>
+      <form id="pwd-form">
+        <label for="p-cur">Current password</label>
+        <input type="password" id="p-cur" required>
+        <label for="p-new">New password</label>
+        <input type="password" id="p-new" minlength="4" required>
+        <div class="modal-actions">
+          <button type="button" id="pwd-cancel" class="btn ghost">Cancel</button>
+          <button type="submit" class="btn primary">Change</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/assets/chart.umd.js"></script>
+  <script src="/assets/app.js?v=4"></script>
+</body>
+</html>

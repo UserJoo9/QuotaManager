@@ -1,0 +1,82 @@
+# ============================================================================
+#  Quota Manager — configuration
+#  All values are optional; defaults match what you see here.
+#  Path overridable at runtime via:  python run.py --config path/to/config.yaml
+# ============================================================================
+
+# SQLite database + log file locations (relative to the project root).
+db_path: data/quota.db
+log_file: logs/quota.log
+log_level: INFO
+
+# Timezone for period math (IANA name). Empty => Windows local time.
+# Examples: Africa/Cairo, Africa/Casablanca
+timezone: Africa/Cairo
+
+bundle:
+  # Your ISP monthly bundle size in GB.
+  total_gb: 200.0
+  # Day of month your ISP resets the bundle (1..28).
+  reset_day: 0
+
+web:
+  host: 0.0.0.0      # listen on all interfaces (reachable from the LAN)
+  port: 8080
+
+dhcp:
+  # Our DHCP server. Enable after disabling DHCP on the router.
+  enable: true
+  # THE PC'S OWN STATIC LAN IP. This is what devices get as their default
+  # gateway — they must route through this PC to be counted and controlled.
+  # Set this to the static IP you gave this PC in config/router step 1.
+  gateway_ip: 192.168.1.110
+  # Upstream router IP (reference / DNS option only).
+  router_ip: 192.168.1.1
+  # DNS forwarder: the PC answers udp/53 and relays client queries to these
+  # upstreams. Android/iOS fall back to the gateway as a DNS resolver, so
+  # WITHOUT a forwarder on the PC every device reports "connected, no
+  # internet" (nothing resolves). Keep it ON; needs admin to bind port 53.
+  dns_forward: true
+  dns_servers:
+    - 192.168.1.1
+    - 8.8.8.8
+  subnet: 255.255.255.0
+  pool_start: 192.168.1.111   # first address handed to devices
+  pool_end: 192.168.1.200     # last address handed to devices
+  lease_hours: 24             # lower = devices recover faster after a power cut
+
+  # --- ELECTRIC-CUT FALLBACK (optional) -----------------------------------
+  # When this PC is down (power cut / reboot), devices lose their gateway and
+  # the internet. To keep them online, give the ROUTER its own small DHCP pool
+  # in a range that does NOT overlap ours. Devices then fall back to direct
+  # internet (gateway = router) until the PC returns.
+  #
+  # Router-side setup (one time):
+  #   1) Leave router DHCP ON.
+  #   2) Set its pool to a non-overlapping range, e.g. 192.168.1.201 - 250,
+  #      with gateway = router (default).
+  #   3) Give it a SHORT lease (5-15 min) so devices re-join the PC's pool
+  #      quickly after recovery.
+  #
+  # While a device holds a fallback lease it is NOT counted or controlled by
+  # Quota Manager (no quota enforcement). That is the accepted trade-off of
+  # keeping devices online during a power cut.
+  # fallback_enabled: true
+  # fallback_pool_start: 192.168.1.201
+  # fallback_pool_end: 192.168.1.250
+
+engine:
+  # Packet accounting + hard blocking via WinDivert. Keep enabled on the
+  # gateway PC; disable only when you want the app to run without counting.
+  enabled: true
+  # Count only the inbound sighting of each forwarded packet so kernel-routed
+  # traffic is not double-counted. Options: inbound | outbound.
+  count_direction: inbound
+
+arp:
+  # Proxy-ARP: answers "who has <device IP>" with the PC's MAC so the router
+  # sends return traffic through the PC (needs Npcap + admin). Safe to keep on;
+  # degrades to a no-op if Npcap is missing.
+  enabled: true
+  interface: ""            # empty => scapy picks the LAN interface
+  announce_interval_sec: 60

@@ -1,0 +1,15 @@
+# Linux gateway deps. pydivert (WinDivert) is Windows-only and scapy/Npcap are
+# not needed (no proxy-ARP on the Linux build; clients are on a separate subnet
+# behind kernel NAT), so install from THIS file on Kali/Debian —
+# requirements.txt (Windows) would fail on pip install pydivert here.
+#
+#   python3 -m venv .venv
+#   .venv/bin/pip install -r requirements-linux.txt
+
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+aiosqlite==0.22.1
+PyYAML==6.0.3
+pytest==8.3.5          # dev/tests only
+httpx==0.28.1          # fastapi TestClient
+pyflakes>=3.2,<4       # lint (README Tests section)
