@@ -26,13 +26,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The version is the single source of truth in quota/version.py. Read it
+      # The version is the single source of truth in quota/version.py. Import it
       # so the package metadata, the .deb filename and the Release all agree.
       - name: Resolve version
         id: version
         shell: bash
         run: |
-          VER=$(python3 -c "import re,sys; sys.path.insert(0,'.'); m=re.search(r'__version__\s*=\s*[\"']([^\"']+)[\"']', open('quota/version.py').read()); sys.exit(1) if not m else print(m.group(1))")
+          # Import quota/version directly (it pulls no deps) instead of
+          # regex-parsing the file — a regex with quote-char classes like
+          # [\"'] breaks out of the -c "..." shell quoting (the first live
+          # run failed with a Python SyntaxError for exactly that reason).
+          VER=$(python3 -c "import sys; sys.path.insert(0,'.'); from quota.version import __version__; print(__version__)")
           TAG="${GITHUB_REF#refs/tags/}"
           if [ "$TAG" != "v${VER}" ]; then
             echo "::error::tag '$TAG' does not match quota/version.py version '$VER' (expected tag 'v$VER')"
@@ -67,7 +71,9 @@ jobs:
           cp run.py requirements-linux.txt LICENSE "$STAGE/opt/quota-manager/"
           cp -r core quota api web scripts "$STAGE/opt/quota-manager/"
           # Scripts are only useful with executable bits; dpkg preserves them.
-          chmod 755 "$STAGE/DEBIAN"/*install "$STAGE/DEBIAN"/*erm "$STAGE/opt/quota-manager/scripts"/*.sh
+          # Name the lifecycle scripts explicitly — a *install glob never
+          # matches "postinst" (and an unmatched glob fails under -e).
+          chmod 755 "$STAGE/DEBIAN/postinst" "$STAGE/DEBIAN/prerm" "$STAGE/opt/quota-manager/scripts"/*.sh
           # No source-control noise on the box.
           rm -rf "$STAGE/opt/quota-manager/api/__pycache__" "$STAGE/opt/quota-manager/core/__pycache__" \
                  "$STAGE/opt/quota-manager/quota/__pycache__" "$STAGE/opt/quota-manager/web/__pycache__" \
