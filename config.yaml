@@ -1,82 +1,104 @@
-# ============================================================================
-#  Quota Manager — configuration
-#  All values are optional; defaults match what you see here.
-#  Path overridable at runtime via:  python run.py --config path/to/config.yaml
-# ============================================================================
-
-# SQLite database + log file locations (relative to the project root).
-db_path: data/quota.db
-log_file: logs/quota.log
-log_level: INFO
-
-# Timezone for period math (IANA name). Empty => Windows local time.
-# Examples: Africa/Cairo, Africa/Casablanca
-timezone: Africa/Cairo
+# Quota Manager — gateway configuration (Debian/Kali laptop).
+# The kernel owns the network path: dnsmasq (DHCP+DNS) + nftables NAT/accounting.
+# Clients live on a SEPARATE subnet (192.168.2.0/24, gateway = this laptop) so
+# every byte deterministically crosses the box — no proxy_arp.
+# Values match the defaults baked into scripts/setup_gateway_kali.sh.
+#
+#   python3 run.py --config config.yaml
+# Path overridable at runtime via:  python run.py --config path/to/config.yaml
+#                                   (or the QUOTA_CONFIG env var).
 
 bundle:
-  # Your ISP monthly bundle size in GB.
-  total_gb: 200.0
-  # Day of month your ISP resets the bundle (1..28).
-  reset_day: 0
+  total_gb: 200.0        # <- change to your monthly bundle
+  reset_day: 0           # day of month the ISP resets; 0 = never auto-reset
 
-web:
-  host: 0.0.0.0      # listen on all interfaces (reachable from the LAN)
-  port: 8080
+db_path: /var/lib/quota-gateway/quota.db
+log_file: /var/log/quota-gateway/quota.log
+log_level: INFO
+timezone: ""             # IANA name (e.g. Africa/Cairo); empty = system local time
 
 dhcp:
-  # Our DHCP server. Enable after disabling DHCP on the router.
   enable: true
-  # THE PC'S OWN STATIC LAN IP. This is what devices get as their default
-  # gateway — they must route through this PC to be counted and controlled.
-  # Set this to the static IP you gave this PC in config/router step 1.
-  gateway_ip: 192.168.1.110
-  # Upstream router IP (reference / DNS option only).
-  router_ip: 192.168.1.1
-  # DNS forwarder: the PC answers udp/53 and relays client queries to these
-  # upstreams. Android/iOS fall back to the gateway as a DNS resolver, so
-  # WITHOUT a forwarder on the PC every device reports "connected, no
-  # internet" (nothing resolves). Keep it ON; needs admin to bind port 53.
+  interface: ""          # auto-detected by dnsmasq via the setup script
+  # Clients' gateway = this laptop. It must be the CLIENT-SUBNET address
+  # (192.168.2.1), not the uplink IP: dnsmasq hands it out as option 3
+  # (default gateway) + option 6 (DNS).
+  gateway_ip: 192.168.2.1
+  router_ip: 192.168.1.1      # upstream ISP router (empty "" in WAN mode — the box dials PPPoE)
+  dns_servers: [192.168.1.1, 8.8.8.8]
   dns_forward: true
-  dns_servers:
-    - 192.168.1.1
-    - 8.8.8.8
   subnet: 255.255.255.0
-  pool_start: 192.168.1.111   # first address handed to devices
-  pool_end: 192.168.1.200     # last address handed to devices
-  lease_hours: 24             # lower = devices recover faster after a power cut
-
-  # --- ELECTRIC-CUT FALLBACK (optional) -----------------------------------
-  # When this PC is down (power cut / reboot), devices lose their gateway and
-  # the internet. To keep them online, give the ROUTER its own small DHCP pool
-  # in a range that does NOT overlap ours. Devices then fall back to direct
-  # internet (gateway = router) until the PC returns.
-  #
-  # Router-side setup (one time):
-  #   1) Leave router DHCP ON.
-  #   2) Set its pool to a non-overlapping range, e.g. 192.168.1.201 - 250,
-  #      with gateway = router (default).
-  #   3) Give it a SHORT lease (5-15 min) so devices re-join the PC's pool
-  #      quickly after recovery.
-  #
-  # While a device holds a fallback lease it is NOT counted or controlled by
-  # Quota Manager (no quota enforcement). That is the accepted trade-off of
-  # keeping devices online during a power cut.
-  # fallback_enabled: true
-  # fallback_pool_start: 192.168.1.201
-  # fallback_pool_end: 192.168.1.250
+  pool_start: 192.168.2.100   # first address handed to devices
+  pool_end: 192.168.2.200     # last address handed to devices
+  lease_hours: 24
+  lease_file: /var/lib/misc/dnsmasq.leases
+  # --- LAN-reality snapshot (kept in BOTH topologies so the dashboard WAN-tab
+  # "Revert to LAN" restores exactly what was there, instead of guessing).
+  # WAN mode erases router_ip / dns_servers from the ACTIVE keys above; these
+  # keep the LAN values. Written by the setup script and the panel apply.
+  # uplink_ip + lan_cidr ALSO drive the WAN-mode router-admin alias: the box
+  # re-adds this address so clients can still reach the router admin page.
+  lan_router_ip: 192.168.1.1
+  lan_dns_servers: [192.168.1.1, 8.8.8.8]
+  uplink_ip: 192.168.1.110    # this box's static uplink IP + prefix (lan_cidr)
+  lan_cidr: 24
 
 engine:
-  # Packet accounting + hard blocking via WinDivert. Keep enabled on the
-  # gateway PC; disable only when you want the app to run without counting.
   enabled: true
-  # Count only the inbound sighting of each forwarded packet so kernel-routed
-  # traffic is not double-counted. Options: inbound | outbound.
+  backend: nftables
   count_direction: inbound
+  table: quota_gateway
+  # LOCAL (LAN) traffic never consumes the metered bundle: traffic between
+  # clients, and client <-> the uplink LAN (router admin UI, NAS, the router
+  # as DNS), is excluded from the accounting rules (and from the block drops,
+  # so a quota-blocked device keeps LAN access). Empty => derive: client from
+  # dhcp.gateway_ip + dhcp.subnet, uplink from dhcp.router_ip + dhcp.subnet.
+  # The setup script writes both explicitly (accurate, from the real LAN CIDR).
+  # In WAN mode the box keeps the uplink IP as a router-admin alias (so clients
+  # can still reach the router admin page through it), so the uplink subnet IS
+  # local there too: empty => derived from the LAN snapshot (dhcp.uplink_ip +
+  # dhcp.lan_cidr), else dhcp.router_ip + dhcp.subnet.
+  client_subnet: ""
+  uplink_subnet: ""
+  # ARP gateway-lock (default OFF here; the setup script enables it): actively
+  # deny internet to any device that bypasses the box by using the ROUTER as its
+  # gateway (static-IP cheat). The box captures the router's IP on the client
+  # subnet (ARP responder + nftables arp-filter) and drops the bypasser's
+  # frames. Needs root + the LAN interface; leave OFF unless you run the setup
+  # gateway topology (clients on their own subnet with the box as gateway).
+  gateway_arp_lock: false
+  # Deployment topology: "lan" (default) = the box sits behind the router —
+  # clients on their own subnet, the router keeps WiFi + NAT, and the box counts
+  # / blocks what the kernel forwards. "wan" (optional strong mode) = the box
+  # terminates the WAN itself (dials PPPoE, public IP on ppp0) and the router is
+  # a pure bridge/AP, so a static-IP device has NO second router to bypass to.
+  # In "wan" mode the box keeps the uplink IP as a router-admin alias (clients
+  # still reach the router admin page through it — no extra commands on any
+  # device) and the ARP gateway-lock is forced off. The dashboard WAN tab
+  # switches this LIVE ("Apply now" / "Revert to LAN" — the gateway rewires
+  # itself and restarts; no setup script), writing topology_source/topology into
+  # the DB and this file together so they can never disagree. The setup script
+  # also writes it for QUOTA_TOPOLOGY (first install / fresh box).
+  topology: lan
+  # The ARP gateway-lock value to restore when the WAN tab reverts to LAN (the
+  # setup script enables it in LAN mode). The ACTIVE gateway_arp_lock above
+  # flips to false in WAN mode; this keeps the LAN reality for the revert.
+  lan_gateway_arp_lock: true
 
-arp:
-  # Proxy-ARP: answers "who has <device IP>" with the PC's MAC so the router
-  # sends return traffic through the PC (needs Npcap + admin). Safe to keep on;
-  # degrades to a no-op if Npcap is missing.
+# Speed shaping (tc/HTB + fq_codel): per-device and per-user internet speed caps
+# + low-latency (bufferbloat-free) queues. The runtime totals / per-device /
+# per-user limits are edited in the dashboard's Network tab (stored in the DB);
+# this block only sets the defaults and which NIC to shape on.
+#   enabled: true         # master switch (also toggleable in the dashboard)
+#   interface: ""         # empty = auto-detect (the NIC holding gateway_ip)
+#   client_subnet: ""     # empty = derive from gateway_ip + dhcp.subnet
+#   ifb: ifb0
+shaping:
   enabled: true
-  interface: ""            # empty => scapy picks the LAN interface
-  announce_interval_sec: 60
+  interface: ""
+  client_subnet: ""
+  ifb: ifb0
+
+web:
+  host: 0.0.0.0
+  port: 8080

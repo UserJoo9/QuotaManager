@@ -1,8 +1,0 @@
-# Quota Manager — runtime dependencies (verified against PyPI 2026-08-02)
-fastapi>=0.141,<0.142
-uvicorn[standard]>=0.52,<0.53
-pydivert==3.1.3
-aiosqlite>=0.22,<0.23
-PyYAML>=6.0.3,<6.1
-scapy>=2.5,<2.6
-tzdata>=2024.1

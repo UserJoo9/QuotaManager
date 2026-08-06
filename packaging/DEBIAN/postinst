@@ -1,0 +1,45 @@
+#!/bin/bash
+# Quota Manager postinst — runs as root after the .deb payload lands in /opt/quota-manager.
+#
+# The package payload only carries the application code. Everything stateful is
+# created here:
+#   1. a Python venv + the pinned dependencies (first install; reuses on upgrade)
+#   2. the network stack + config + systemd unit, via scripts/setup_gateway_kali.sh
+#      with QUOTA_NO_APT=1 (the package's Depends already installs dnsmasq/nftables)
+#   3. the gateway service is started
+#
+# The setup script preserves an existing /etc/quota-gateway/config.yaml (bundle,
+# timezone) across installs — re-running it never clobbers a real bundle.
+set -euo pipefail
+
+APP_DIR=/opt/quota-manager
+SERVICE=quota-gateway
+CONF_DIR=/etc/quota-gateway
+
+log() { echo "[quota-manager] $*"; }
+
+log "installing Python runtime into $APP_DIR/.venv"
+if [ ! -x "$APP_DIR/.venv/bin/python" ]; then
+    python3 -m venv "$APP_DIR/.venv"
+fi
+"$APP_DIR/.venv/bin/python" -m pip install --disable-pip-version-check --no-input \
+    --quiet --upgrade -r "$APP_DIR/requirements-linux.txt"
+
+# Re-run the setup script so this install (re)applies sysctl, the client-subnet
+# NAT, dnsmasq, the ifb module, the app config and the systemd unit. It is
+# idempotent and refuses to run while the service is live. We stop it first so
+# an upgrade can re-run setup cleanly.
+systemctl stop "$SERVICE" 2>/dev/null || true
+APP_DIR="$APP_DIR" QUOTA_NO_APT=1 bash "$APP_DIR/scripts/setup_gateway_kali.sh"
+
+log "enabling + starting $SERVICE"
+systemctl enable "$SERVICE" >/dev/null 2>&1 || true
+if systemctl start "$SERVICE" 2>/dev/null; then
+    log "quota-gateway started"
+else
+    echo "[quota-manager] WARNING: could not start quota-gateway — check 'journalctl -u quota-gateway'" >&2
+fi
+
+log "done. Dashboard: http://$(awk '/^[[:space:]]*gateway_ip:/{print $2}' "$CONF_DIR/config.yaml" 2>/dev/null || echo 192.168.2.1):8080"
+
+exit 0

@@ -2,12 +2,17 @@
 
 Schema overview
 ---------------
-devices        -- every known MAC: quota mode, allowance, enforcement state.
+users          -- every person: quota mode, allowance, enforcement state.
+devices        -- every known MAC: name, owning user, per-device override.
 leases         -- current/known DHCP leases (mac <-> ip).
 bundle_config  -- single row: total_gb, reset_day, current period snapshot.
 usage_daily    -- append-only per-device daily byte totals.
 settings       -- key/value store (admin password hash, flags).
 events         -- audit log (blocks, top-ups, config changes).
+
+The monthly allowance lives on the USER (not the device). A user's usage is
+the sum of their devices' usage; when a user exceeds their allowance every
+device they own is blocked together.
 
 All byte counters are stored as integers (bytes). Conversion to GB happens in
 the API/service layer.
@@ -52,10 +57,44 @@ class Device:
     #: on top of the fixed/auto allowance). Survives allowance recomputes and
     #: is reset when the quota period rolls over.
     topup_gb: float = 0.0
+    #: Owning user (every device belongs to a user; quota lives on the user).
+    user_id: Optional[int] = None
+    #: Per-device override: when true this device is exempt from its user's
+    #: quota block (an explicit admin_off block still wins).
+    bypass: bool = False
+    #: Per-device internet speed caps in Mbps (0 = unlimited). Enforced by the
+    #: tc shaper (quota/shaping.py).
+    limit_down_mbps: float = 0.0
+    limit_up_mbps: float = 0.0
 
     @property
     def is_blocked(self) -> bool:
         return self.block_state != BLOCK_OK
+
+
+@dataclass
+class User:
+    id: int
+    name: str = ""
+    quota_mode: str = QUOTA_AUTO
+    fixed_gb: Optional[float] = None
+    #: 'ok' | 'admin_off' only — the per-user 'quota' state is derived from
+    #: usage vs allowance and is never persisted (see service.evaluate_blocks).
+    block_state: str = BLOCK_OK
+    #: Per-period top-up GB granted to this user (added to their allowance).
+    topup_gb: float = 0.0
+    created_at: float = 0.0
+    #: Guest account — auto-registered for a new device while guest mode is on.
+    #: Guests get a fixed quota and are deleted when the quota period resets.
+    guest: bool = False
+    #: Per-user aggregate internet speed cap in Mbps (0 = unlimited): all of a
+    #: user's devices share this ceiling. Enforced by the Linux tc shaper.
+    limit_down_mbps: float = 0.0
+    limit_up_mbps: float = 0.0
+
+    @property
+    def is_admin_blocked(self) -> bool:
+        return self.block_state == BLOCK_ADMIN
 
 
 @dataclass
@@ -70,22 +109,24 @@ class Lease:
 class Bundle:
     total_gb: float = 140.0
     reset_day: int = 1
-    # Snapshot of allowances computed at period start (json dict mac->gb).
-    allowances: dict[str, float] = field(default_factory=dict)
+    # Snapshot of allowances computed at period start (json dict user_id->gb).
+    allowances: dict[int, float] = field(default_factory=dict)
     period_start: str = ""   # ISO date of current period start
     period_end: str = ""     # ISO date of next reset
 
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    mac         TEXT UNIQUE NOT NULL,
-    name        TEXT NOT NULL DEFAULT '',
-    quota_mode  TEXT NOT NULL DEFAULT 'auto',
-    fixed_gb    REAL,
-    block_state TEXT NOT NULL DEFAULT 'ok',
-    created_at  REAL NOT NULL,
-    topup_gb    REAL NOT NULL DEFAULT 0
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    mac              TEXT UNIQUE NOT NULL,
+    name             TEXT NOT NULL DEFAULT '',
+    quota_mode       TEXT NOT NULL DEFAULT 'auto',
+    fixed_gb         REAL,
+    block_state      TEXT NOT NULL DEFAULT 'ok',
+    created_at       REAL NOT NULL,
+    topup_gb         REAL NOT NULL DEFAULT 0,
+    limit_down_mbps  REAL NOT NULL DEFAULT 0,
+    limit_up_mbps    REAL NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS leases (
@@ -122,7 +163,21 @@ CREATE TABLE IF NOT EXISTS events (
     ts        REAL NOT NULL,
     level     TEXT NOT NULL DEFAULT 'info',
     device_id INTEGER,
+    user_id   INTEGER,
     message   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    name             TEXT NOT NULL DEFAULT '',
+    quota_mode       TEXT NOT NULL DEFAULT 'auto',
+    fixed_gb         REAL,
+    block_state      TEXT NOT NULL DEFAULT 'ok',
+    topup_gb         REAL NOT NULL DEFAULT 0,
+    created_at       REAL NOT NULL,
+    guest            INTEGER NOT NULL DEFAULT 0,
+    limit_down_mbps  REAL NOT NULL DEFAULT 0,
+    limit_up_mbps    REAL NOT NULL DEFAULT 0
 );
 """
 
@@ -155,7 +210,75 @@ class Database:
             await self._conn.commit()
         except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
             pass
+        # v2 users migration: devices are grouped under a user and the monthly
+        # allowance lives on the user. Idempotent — ALTER no-ops on already-
+        # migrated DBs, and _backfill_users only touches rows still unowned.
+        try:
+            await self._conn.execute(
+                "ALTER TABLE devices ADD COLUMN user_id INTEGER")
+            await self._conn.commit()
+        except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
+            pass
+        try:
+            await self._conn.execute(
+                "ALTER TABLE devices ADD COLUMN bypass INTEGER NOT NULL DEFAULT 0")
+            await self._conn.commit()
+        except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
+            pass
+        try:
+            await self._conn.execute(
+                "ALTER TABLE events ADD COLUMN user_id INTEGER")
+            await self._conn.commit()
+        except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
+            pass
+        # v10 guest mode: users carry a guest flag (auto-registered guests are
+        # deleted when the quota period resets). ALTER no-ops when present.
+        try:
+            await self._conn.execute(
+                "ALTER TABLE users ADD COLUMN guest INTEGER NOT NULL DEFAULT 0")
+            await self._conn.commit()
+        except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
+            pass
+        # v11 speed shaping: per-device + per-user internet speed caps in Mbps
+        # (0 = unlimited), consumed by the Linux tc shaper (quota/shaping.py).
+        # ALTER no-ops when already present (fresh SCHEMA includes them).
+        for table in ("devices", "users"):
+            for col in ("limit_down_mbps", "limit_up_mbps"):
+                try:
+                    await self._conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {col} "
+                        "REAL NOT NULL DEFAULT 0")
+                    await self._conn.commit()
+                except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
+                    pass
+        await self._backfill_users()
         await self._conn.commit()
+
+    async def _backfill_users(self) -> None:
+        """Give every device without a user its own user (v2 migration).
+
+        Each legacy device becomes a single-device user carrying over its name,
+        quota mode, fixed GB and any per-device top-up. An admin manual block
+        is preserved on the new user (the device keeps its own too). Idempotent:
+        only rows with ``user_id IS NULL`` are touched, so this runs every boot
+        and is a no-op once the migration is complete.
+        """
+        rows = await self.conn.execute_fetchall(
+            "SELECT * FROM devices WHERE user_id IS NULL")
+        for row in rows:
+            user_state = (BLOCK_ADMIN if row["block_state"] == BLOCK_ADMIN
+                          else BLOCK_OK)
+            cur = await self.conn.execute(
+                "INSERT INTO users (name, quota_mode, fixed_gb, block_state, "
+                "topup_gb, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (row["name"], row["quota_mode"], row["fixed_gb"], user_state,
+                 row["topup_gb"] or 0.0, row["created_at"]))
+            await self.conn.execute(
+                "UPDATE devices SET user_id=? WHERE id=?", (cur.lastrowid, row["id"]))
+        if rows:
+            await self.conn.commit()
+            await self.add_event(
+                f"Migrated {len(rows)} device(s) to per-user quotas", "info")
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -179,18 +302,40 @@ class Database:
 
     async def upsert_device(self, mac: str, name: str = "",
                             quota_mode: str = QUOTA_AUTO,
-                            fixed_gb: float | None = None) -> Device:
+                            fixed_gb: float | None = None,
+                            user_id: int | None = None,
+                            user_name: str | None = None,
+                            guest: bool = False,
+                            limit_down_mbps: float = 0.0,
+                            limit_up_mbps: float = 0.0) -> Device:
+        """Register/update a device. A brand-new MAC with no ``user_id`` gets
+        its own managed user (``user_name`` or the device name, same quota), so
+        auto-discovered DHCP devices are quota-managed immediately. Existing
+        rows keep their user_id and block_state (only name/quota are
+        refreshed). ``guest=True`` flags the auto-created user as a guest
+        account (fixed quota, deleted on period reset)."""
         mac = mac.lower()
         now = time.time()
-        await self.conn.execute(
-            """INSERT INTO devices (mac, name, quota_mode, fixed_gb, block_state, created_at)
-               VALUES (?, ?, ?, ?, 'ok', ?)
-               ON CONFLICT(mac) DO UPDATE SET
-                 name=excluded.name, quota_mode=excluded.quota_mode,
-                 fixed_gb=excluded.fixed_gb""",
-            (mac, name, quota_mode, fixed_gb, now),
-        )
-        await self.conn.commit()
+        existing = await self._fetch_one(
+            "SELECT id FROM devices WHERE mac=?", (mac,))
+        if existing is not None:
+            await self.conn.execute(
+                "UPDATE devices SET name=?, quota_mode=?, fixed_gb=?, "
+                "limit_down_mbps=?, limit_up_mbps=? WHERE mac=?",
+                (name, quota_mode, fixed_gb,
+                 limit_down_mbps, limit_up_mbps, mac))
+            await self.conn.commit()
+        else:
+            if user_id is None:
+                user_id = (await self.create_user(
+                    name=user_name or name, quota_mode=quota_mode,
+                    fixed_gb=fixed_gb, guest=guest)).id
+            await self.conn.execute(
+                """INSERT INTO devices (mac, name, quota_mode, fixed_gb, block_state, created_at, user_id, limit_down_mbps, limit_up_mbps)
+                   VALUES (?, ?, ?, ?, 'ok', ?, ?, ?, ?)""",
+                (mac, name, quota_mode, fixed_gb, now, user_id,
+                 limit_down_mbps, limit_up_mbps))
+            await self.conn.commit()
         row = await self._fetch_one("SELECT * FROM devices WHERE mac=?", (mac,))
         return _row_to_device(row)  # type: ignore[arg-type]
 
@@ -210,13 +355,19 @@ class Database:
                WHERE l.ip = ?""", (ip,))
         return _row_to_device(row) if row else None
 
-    async def list_devices(self) -> list[Device]:
-        rows = await self.conn.execute_fetchall(
-            "SELECT * FROM devices ORDER BY name COLLATE NOCASE")
+    async def list_devices(self, user_id: int | None = None) -> list[Device]:
+        if user_id is None:
+            rows = await self.conn.execute_fetchall(
+                "SELECT * FROM devices ORDER BY name COLLATE NOCASE")
+        else:
+            rows = await self.conn.execute_fetchall(
+                "SELECT * FROM devices WHERE user_id=? ORDER BY name COLLATE NOCASE",
+                (user_id,))
         return [_row_to_device(r) for r in rows]
 
     async def update_device(self, device_id: int, **fields: Any) -> Device | None:
-        allowed = {"name", "quota_mode", "fixed_gb", "block_state"}
+        allowed = {"name", "quota_mode", "fixed_gb", "block_state",
+                   "user_id", "bypass", "limit_down_mbps", "limit_up_mbps"}
         sets, args = [], []
         for key, value in fields.items():
             if key in allowed:
@@ -246,7 +397,107 @@ class Database:
 
     async def clear_topups(self) -> None:
         """Reset all top-ups when a new quota period opens."""
+        await self.conn.execute("UPDATE users SET topup_gb = 0")
         await self.conn.execute("UPDATE devices SET topup_gb = 0")
+        await self.conn.commit()
+
+    async def clear_usage(self, since_date: str) -> None:
+        """Delete usage rows from a date onward.
+
+        Used by the manual "Reset month" action. Usage is stored day-granular
+        (one row per device/date), so a reset on a day that already has usage
+        could otherwise never drop the period counter below that day's total —
+        the button would appear to do nothing. History before ``since_date`` is
+        preserved.
+        """
+        await self.conn.execute(
+            "DELETE FROM usage_daily WHERE date >= ?", (since_date,))
+        await self.conn.commit()
+
+    # -- users --------------------------------------------------------------
+
+    async def create_user(self, name: str = "", quota_mode: str = QUOTA_AUTO,
+                          fixed_gb: float | None = None,
+                          block_state: str = BLOCK_OK,
+                          guest: bool = False,
+                          limit_down_mbps: float = 0.0,
+                          limit_up_mbps: float = 0.0) -> User:
+        """Insert a user (no devices). Used by the API, by new-device
+        auto-registration, and by the v2 migration backfill."""
+        cur = await self.conn.execute(
+            "INSERT INTO users (name, quota_mode, fixed_gb, block_state, "
+            "topup_gb, created_at, guest, limit_down_mbps, limit_up_mbps) "
+            "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)",
+            (name, quota_mode, fixed_gb, block_state, time.time(),
+             int(guest), limit_down_mbps, limit_up_mbps))
+        await self.conn.commit()
+        row = await self._fetch_one("SELECT * FROM users WHERE id=?",
+                                    (cur.lastrowid,))
+        return _row_to_user(row)  # type: ignore[arg-type]
+
+    async def get_user(self, user_id: int) -> User | None:
+        row = await self._fetch_one("SELECT * FROM users WHERE id=?", (user_id,))
+        return _row_to_user(row) if row else None
+
+    async def list_users(self) -> list[User]:
+        rows = await self.conn.execute_fetchall(
+            "SELECT * FROM users ORDER BY name COLLATE NOCASE")
+        return [_row_to_user(r) for r in rows]
+
+    async def update_user(self, user_id: int, **fields: Any) -> User | None:
+        allowed = {"name", "quota_mode", "fixed_gb", "block_state",
+                   "limit_down_mbps", "limit_up_mbps"}
+        sets, args = [], []
+        for key, value in fields.items():
+            if key in allowed:
+                sets.append(f"{key}=?")
+                args.append(value)
+        if not sets:
+            return await self.get_user(user_id)
+        args.append(user_id)
+        await self.conn.execute(
+            f"UPDATE users SET {', '.join(sets)} WHERE id=?", args)
+        await self.conn.commit()
+        return await self.get_user(user_id)
+
+    async def delete_user(self, user_id: int, cascade: bool = True) -> int:
+        """Delete a user (cascade removes their devices + usage rows).
+        Returns how many devices were removed with them."""
+        rows = await self.conn.execute_fetchall(
+            "SELECT id FROM devices WHERE user_id=?", (user_id,))
+        if rows and not cascade:
+            raise ValueError(
+                "user still has devices; reassign or delete them first")
+        for r in rows:
+            await self.conn.execute(
+                "DELETE FROM usage_daily WHERE device_id=?", (r["id"],))
+            await self.conn.execute("DELETE FROM devices WHERE id=?", (r["id"],))
+        await self.conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+        await self.conn.commit()
+        return len(rows)
+
+    async def add_topup_user(self, user_id: int, extra_gb: float) -> None:
+        """Accumulate a per-user top-up (survives allowance recomputes)."""
+        await self.conn.execute(
+            "UPDATE users SET topup_gb = topup_gb + ? WHERE id=?",
+            (extra_gb, user_id))
+        await self.conn.commit()
+
+    async def delete_guest_users(self) -> int:
+        """Delete every guest user (cascade removes their devices + usage).
+        Called when a quota period resets — a new period starts with no guests.
+        Returns how many guest users were removed."""
+        rows = await self.conn.execute_fetchall(
+            "SELECT id FROM users WHERE guest=1")
+        for r in rows:
+            await self.delete_user(r["id"], cascade=True)
+        return len(rows)
+
+    async def set_guest_fixed_gb(self, gb: float) -> None:
+        """Re-apply the guest quota to every existing guest user (their
+        allowance changes immediately, not just for future guests)."""
+        await self.conn.execute(
+            "UPDATE users SET fixed_gb=? WHERE guest=1", (gb,))
         await self.conn.commit()
 
     # -- leases ------------------------------------------------------------
@@ -285,7 +536,7 @@ class Database:
         await self.conn.commit()
 
     async def set_lease(self, mac: str, ip: str) -> None:
-        """Direct assignment (used by proxy-ARP announce / static mapping)."""
+        """Direct assignment (used by static ip<->mac mapping)."""
         now = time.time()
         await self.conn.execute(
             """INSERT INTO leases (mac, ip, lease_start, lease_end)
@@ -306,9 +557,17 @@ class Database:
         row = await self._fetch_one("SELECT * FROM bundle_config WHERE id=1")
         if row is None:
             return Bundle()
-        allowances: dict[str, float] = {}
+        # Coerce keys to int and skip stale entries (a pre-v2 DB holds a
+        # MAC-keyed dict; those keys are dropped and the snapshot is rewritten
+        # on the next allowance recompute).
+        allowances: dict[int, float] = {}
         try:
-            allowances = json.loads(row["allowances"] or "{}")
+            raw = json.loads(row["allowances"] or "{}")
+            for k, v in raw.items():
+                try:
+                    allowances[int(k)] = float(v)
+                except (ValueError, TypeError):
+                    pass  # stale MAC-keyed entry from before the users migration
         except json.JSONDecodeError:
             allowances = {}
         return Bundle(
@@ -382,6 +641,21 @@ class Database:
             "WHERE date>=? GROUP BY device_id", (since,))
         return {r["device_id"]: {"up": r["up"], "down": r["down"]} for r in rows}
 
+    async def get_period_usage_by_user(self) -> dict[int, dict[str, int]]:
+        """Aggregate usage since period_start, keyed by user_id."""
+        bundle = await self.get_bundle()
+        since = bundle.period_start or ""
+        rows = await self.conn.execute_fetchall(
+            "SELECT d.user_id user_id, SUM(u.up_bytes) up, SUM(u.down_bytes) down "
+            "FROM usage_daily u JOIN devices d ON u.device_id = d.id "
+            "WHERE u.date>=? GROUP BY d.user_id", (since,))
+        out: dict[int, dict[str, int]] = {}
+        for r in rows:
+            if r["user_id"] is None:
+                continue  # orphaned device (should not happen post-migration)
+            out[r["user_id"]] = {"up": r["up"], "down": r["down"]}
+        return out
+
     # -- settings -----------------------------------------------------------
 
     async def get_setting(self, key: str, default: str = "") -> str:
@@ -402,10 +676,12 @@ class Database:
     # -- events / audit -----------------------------------------------------
 
     async def add_event(self, message: str, level: str = "info",
-                        device_id: int | None = None) -> None:
+                        device_id: int | None = None,
+                        user_id: int | None = None) -> None:
         await self.conn.execute(
-            "INSERT INTO events (ts, level, device_id, message) VALUES (?, ?, ?, ?)",
-            (time.time(), level, device_id, message))
+            "INSERT INTO events (ts, level, device_id, user_id, message) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (time.time(), level, device_id, user_id, message))
         await self.conn.commit()
 
     async def list_events(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -424,4 +700,23 @@ def _row_to_device(row: Any) -> Device:
         block_state=row["block_state"],
         created_at=row["created_at"],
         topup_gb=float(row["topup_gb"] or 0.0),
+        user_id=row["user_id"],
+        bypass=bool(row["bypass"]),
+        limit_down_mbps=float(row["limit_down_mbps"] or 0.0),
+        limit_up_mbps=float(row["limit_up_mbps"] or 0.0),
+    )
+
+
+def _row_to_user(row: Any) -> User:
+    return User(
+        id=row["id"],
+        name=row["name"] or "",
+        quota_mode=row["quota_mode"],
+        fixed_gb=row["fixed_gb"],
+        block_state=row["block_state"],
+        topup_gb=float(row["topup_gb"] or 0.0),
+        created_at=row["created_at"],
+        guest=bool(row["guest"]),
+        limit_down_mbps=float(row["limit_down_mbps"] or 0.0),
+        limit_up_mbps=float(row["limit_up_mbps"] or 0.0),
     )

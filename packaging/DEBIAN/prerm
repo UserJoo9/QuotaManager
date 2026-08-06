@@ -1,0 +1,17 @@
+#!/bin/bash
+# Quota Manager prerm — runs as root before the package is removed/upgraded.
+# Stop + disable the gateway service so removing the package doesn't leave a
+# half-broken systemd unit pointing at files that are about to disappear.
+# The setup script also refuses to re-run while the service is live, so an
+# upgrade needs it stopped first.
+set -euo pipefail
+
+SERVICE=quota-gateway
+
+if [ "$1" = "remove" ] || [ "$1" = "upgrade" ]; then
+    systemctl stop "$SERVICE" 2>/dev/null || true
+    systemctl disable "$SERVICE" 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+fi
+
+exit 0

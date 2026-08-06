@@ -1,1 +1,1 @@
-"""Quota Manager domain layer: packet engine, DHCP, proxy-ARP, quota service, persistence."""
+"""Quota Manager domain layer: nftables engine, shaping, quota service, persistence."""

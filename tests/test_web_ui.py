@@ -29,9 +29,66 @@ def client(tmp_path):
 def test_index_served(client):
     r = client.get("/")
     assert r.status_code == 200
-    for needle in ("Quota Manager", "assets/styles.css",
-                   "assets/app.js", "assets/chart.umd.js"):
+    for needle in ("Quota Manager", "assets/styles.css", "assets/app.js"):
         assert needle in r.text
+    # v10: top-bar tab navigation replaces the stacked sections; the
+    # "Usage this period" chart section stays gone (moved to Management).
+    assert "Usage this period" not in r.text
+    # top-bar nav buttons (v11 adds the Network tab for speed shaping)
+    assert 'data-panel="management"' in r.text
+    assert 'data-panel="bundle"' in r.text
+    assert 'data-panel="network"' in r.text
+    assert 'data-panel="admin"' in r.text
+    assert 'data-panel="logs"' in r.text
+    assert ">Management<" in r.text
+    assert ">Bundle settings<" in r.text
+    assert ">Network<" in r.text
+    assert ">Admin<" in r.text
+    assert ">Logs<" in r.text
+    # Activity tab/panel removed (System logs shows the same info)
+    assert "panel-activity" not in r.text
+    assert "events-list" not in r.text
+    assert "tab-activity" not in r.text
+    # guest-mode UI on the Bundle settings panel
+    assert "Guest mode" in r.text
+    assert 'id="guest-mode-toggle"' in r.text
+    assert 'id="guest-quota"' in r.text
+    # Bundle summary lives INSIDE the Management panel (first tab only), and
+    # the Consumption donut section was removed (no usage-chart canvas).
+    assert 'id="panel-management"' in r.text
+    assert r.text.index('id="panel-management"') < r.text.index("bundle-used")
+    assert 'id="usage-chart"' not in r.text
+    assert "System logs" in r.text
+    assert 'id="panel-logs"' in r.text
+    assert 'class="glass card admin-card"' in r.text
+    assert "assets/app.js?v=27" in r.text
+    # the internet reachability pill lives in the top bar, not the WAN status
+    # panel (probed every 15 s; dot color = reachability).
+    assert 'id="net-status"' in r.text
+    assert "net-label" in r.text
+    assert "Checking…" in r.text
+    assert 'id="wan-internet"' not in r.text
+    # v14: first-run welcome overlay + its form fields
+    assert 'id="welcome-overlay"' in r.text
+    assert 'id="setup-total"' in r.text
+    assert 'id="setup-reset-day"' in r.text
+    assert 'id="setup-cur-pw"' in r.text
+    assert 'id="setup-new-pw"' in r.text
+    assert 'id="welcome-skip"' in r.text
+
+    # v11: Network panel (speed limits + latency) with its controls
+    assert 'id="panel-network"' in r.text
+    assert "Speed limits" in r.text
+    assert 'id="shaping-toggle"' in r.text
+    assert 'id="set-total-down"' in r.text
+    assert 'id="set-total-up"' in r.text
+    assert 'id="aqm-toggle"' in r.text
+    assert 'id="shaping-save-btn"' in r.text
+    # speed-limit inputs in the device + user modals
+    assert 'id="d-limit-down"' in r.text
+    assert 'id="d-limit-up"' in r.text
+    assert 'id="u-limit-down"' in r.text
+    assert 'id="u-limit-up"' in r.text
 
 
 def test_recharge_ui_elements_present(client):
@@ -50,6 +107,84 @@ def test_recharge_ui_elements_present(client):
     assert "days_left < 0" in r.text
 
 
+def test_rogue_section_present(client):
+    """v17: the Management panel shows the 'Unmanaged / rogue devices' card
+    (active-but-unleased hosts), and the JS renders it from the payload."""
+    r = client.get("/")
+    assert 'id="rogue-section"' in r.text
+    assert 'id="rogue-count"' in r.text
+    assert 'id="rogue-list"' in r.text
+    assert "Unmanaged / rogue devices" in r.text
+    rjs = client.get("/assets/app.js")
+    assert "renderRogue" in rjs.text
+    assert "data.rogue" in rjs.text
+
+
+def test_wan_tab_present(client):
+    """v19: the WAN tab + panel expose the live Apply/Revert controls
+    (creds fields, Apply now / Revert to LAN buttons), the step-by-step
+    Egyptian-router guide, and a live status preview from /api/wan."""
+    r = client.get("/")
+    assert 'data-panel="wan"' in r.text
+    assert ">WAN<" in r.text
+    assert 'id="panel-wan"' in r.text
+    assert 'id="wan-toggle"' in r.text
+    assert 'id="wan-restart-banner"' in r.text
+    assert 'id="wan-creds"' in r.text
+    assert 'id="wan-user"' in r.text
+    assert 'id="wan-pass"' in r.text
+    assert 'id="wan-if"' in r.text
+    assert 'id="wan-apply-btn"' in r.text
+    assert 'id="wan-revert-btn"' in r.text
+    assert 'id="wan-test-btn"' in r.text
+    assert 'id="wan-test-msg"' in r.text
+    assert 'id="wan-topology"' in r.text
+    assert 'id="wan-source"' in r.text
+    assert 'id="wan-ppp0"' in r.text
+    assert 'id="wan-ppp-ip"' in r.text
+    # the guide names both physical paths (single-NIC bridge + two-NIC fallback)
+    assert "bridge" in r.text or "AP mode" in r.text
+    assert "Apply now" in r.text
+    assert "Revert to LAN" in r.text
+    assert "Test PPPoE connection" in r.text
+    # v19.5: the box keeps the router's LAN address as a secondary alias, so the
+    # router admin page stays reachable in WAN mode with no extra commands.
+    assert "Router admin" in r.text
+    assert "stays reachable:" in r.text
+    assert "secondary alias" in r.text
+
+    rjs = client.get("/assets/app.js")
+    assert "renderWan" in rjs.text
+    assert "refreshWan" in rjs.text
+    assert "submitWan" in rjs.text
+    assert "revertWan" in rjs.text
+    # v19.6: init prefills the saved creds on page load (not only on tab click)
+    assert "prefill saved PPPoE creds on load" in rjs.text
+    # v19.7: when WAN is configured but ppp0 is down, the panel auto-runs the
+    # throwaway PPPoE test and renders an actionable per-failure verdict.
+    assert "auto-testing the PPPoE line to find out why" in rjs.text
+    assert "renderPppoeVerdict" in rjs.text
+    assert "no-pppoe-server" in rjs.text
+    assert "NOT bridged" in rjs.text
+    assert "maybeAutoDiagnose" in rjs.text
+    assert "testPppoe" in rjs.text
+    assert "wanToggleDirty" in rjs.text
+    assert "/api/wan/test" in rjs.text
+    assert "/api/wan" in rjs.text
+    assert "data.wan" in rjs.text
+    # When WAN is already active and online, "Apply now" is dimmed —
+    # only Test PPPoE connection and Revert to LAN stay active.
+    assert "WAN mode is already active and online — nothing to re-apply." in rjs.text
+    assert "applyBtn.disabled" in rjs.text
+    # the top-bar internet indicator renders from the payload's top-level
+    # `internet` key (the WAN-panel Internet row is gone).
+    assert "renderNetStatus" in rjs.text
+    assert "data.internet" in rjs.text
+    assert '"net-status"' in rjs.text
+    assert "Checking…" in rjs.text
+    assert "wan-internet" not in rjs.text
+
+
 def test_assets_served(client):
     r = client.get("/assets/styles.css")
     assert r.status_code == 200
@@ -58,7 +193,20 @@ def test_assets_served(client):
     r = client.get("/assets/app.js")
     assert r.status_code == 200
     assert "WebSocket" in r.text
-
-    r = client.get("/assets/chart.umd.js")
-    assert r.status_code == 200
-    assert "Chart.js" in r.text
+    # v11 speed-shaping JS: Network-tab fetch/save + modal speed prefills
+    assert "refreshNetwork" in r.text
+    assert "submitNetwork" in r.text
+    assert "/api/network" in r.text
+    assert "d-limit-down" in r.text
+    assert "u-limit-up" in r.text
+    assert "speed-tag" in r.text
+    # v12 regression: the per-user / per-device speed sections must actually be
+    # UNHIDDEN in the modal-open code (u-speed-wrap was stuck `hidden` in v11 —
+    # the fields existed in HTML but no JS ever removed the class).
+    assert '$("u-speed-wrap").classList.remove("hidden")' in r.text
+    assert '$("d-speed-wrap").classList.remove("hidden")' in r.text
+    # v14: welcome panel JS — shown on a fresh install, hides on submit/skip
+    assert "showWelcomeIfNeeded" in r.text
+    assert "/api/setup" in r.text
+    assert "setup_complete" in r.text
+    assert '$("welcome-overlay").classList.remove("hidden")' in r.text

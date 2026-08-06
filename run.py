@@ -1,14 +1,10 @@
 """Quota Manager entrypoint.
 
-Wires every layer together in one process. Two gateway profiles:
-
-* **Windows** — userspace stack: packet engine (WinDivert) in a thread, async
-  DHCP server (UDP 67), DNS forwarder (UDP 53), scapy proxy-ARP responder.
-* **Linux (Kali/Debian, the target)** — the kernel owns the network path:
-  dnsmasq serves DHCP + DNS on a dedicated client subnet (192.168.2.0/24,
-  gateway = this box) which the kernel masquerades out the uplink, and the
-  nftables engine (``quota/nftables.py``) counts + drops at line rate. Only
-  the quota logic, API, DB and web UI are shared.
+Wires every layer together in one process on the Linux gateway (Kali/Debian).
+The kernel owns the network path: dnsmasq serves DHCP + DNS on a dedicated
+client subnet (192.168.2.0/24, gateway = this box) which the kernel
+masquerades out the uplink, and the nftables engine (``quota/nftables.py``)
+counts + drops at line rate.
 
 Always:
 * Non-blocking logging (QueueHandler -> writer thread -> rotating file).
@@ -17,15 +13,15 @@ Always:
   re-evaluates block states, and pushes fresh enforcement maps to the engine.
 * FastAPI/uvicorn (REST + WebSocket push + static glassmorphism UI).
 
-Any sub-component that cannot start (pydivert missing, no admin, no Npcap,
-no ``nft``) degrades gracefully: the rest keeps running and the dashboard
-still reports usage that has been flushed so far. This file never crashes the
-whole app on an optional subsystem failure.
+Any sub-component that cannot start (no ``nft``, no root, no dnsmasq) degrades
+gracefully: the rest keeps running and the dashboard still reports usage that
+has been flushed so far. This file never crashes the whole app on an optional
+subsystem failure.
 
 Usage
 -----
     python run.py
-    python run.py --config config-linux.yaml --port 8080
+    python run.py --config config.yaml --port 8080
 """
 
 from __future__ import annotations
@@ -34,10 +30,10 @@ import argparse
 import asyncio
 import datetime as _dt
 import logging
-import platform
 import signal
 import time
 from pathlib import Path
+from typing import Callable
 
 import uvicorn
 
@@ -45,34 +41,35 @@ from api.app import create_app
 from core import config as cfg_mod
 from core.logging_setup import setup_logging
 from quota import db as _db
-from quota.engine import EngineSnapshot, PacketEngine, SnapshotHolder
+from quota.arp_scan import ArpScanner
+from quota.engine import EngineSnapshot, SnapshotHolder
+from quota.netmgr import TopologyManager
 from quota.nftables import NftablesEngine
 from quota.service import QuotaService
-
-#: True on the Linux gateway. Changes which subsystems start: on Linux the
-#: kernel (dnsmasq + nftables + NAT) replaces the userspace DHCP / DNS /
-#: proxy-ARP stack, so those modules are imported lazily only where needed.
-IS_LINUX = platform.system() == "Linux"
+from quota.topology import check_internet, detect_ppp
 
 log = logging.getLogger("quota.run")
 
 
-def _make_engine(cfg: cfg_mod.Config, holder) -> PacketEngine | NftablesEngine:
-    """Build the accounting/block engine for this host.
+def _make_engine(cfg: cfg_mod.Config, holder) -> NftablesEngine:
+    """Build the accounting/block engine (always nftables on Linux).
 
-    ``engine.backend`` selects the implementation: "auto" picks by OS
-    (nftables on Linux, WinDivert on Windows); "windivert" / "nftables" force
-    a specific one (the latter is handy on Linux and keeps Windows tests
-    deterministic).
+    ``engine.backend`` is accepted for config compatibility but the gateway is
+    Linux-only, so the kernel nftables engine is the only implementation.
     """
-    backend = getattr(cfg.engine, "backend", "auto")
-    if backend == "auto":
-        backend = "nftables" if IS_LINUX else "windivert"
-    if backend == "nftables":
-        return NftablesEngine(cfg, holder)
-    return PacketEngine(
-        cfg, holder, is_blocked_cb=lambda ip: False)  # live maps via update_state
+    return NftablesEngine(cfg, holder)
 
+
+def _make_shaper(cfg: cfg_mod.Config):
+    """Build the tc shaper, or None when shaping is off/unsupported."""
+    from quota.shaping import TcShaper  # lazy: needs tc + ifb + root
+
+    shaping_cfg = getattr(cfg, "shaping", None)
+    if shaping_cfg is not None and not shaping_cfg.enabled:
+        log.warning("speed shaping disabled in config — per-device / per-user "
+                    "speed limits + low-latency queues off")
+        return None
+    return TcShaper(cfg)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -83,93 +80,67 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _build_pool(dhcp_cfg) -> list[str]:
-    """Expand 'pool_start..pool_end' into an explicit list of IPs."""
-    return cfg_mod.expand_ip_range(dhcp_cfg.pool_start, dhcp_cfg.pool_end)
-
-
-def _fallback_reserved(dhcp_cfg) -> set[str]:
-    """The router's electric-cut fallback range, as a set our DHCP must avoid."""
-    if not dhcp_cfg.fallback_enabled:
-        return set()
-    if not dhcp_cfg.fallback_pool_start or not dhcp_cfg.fallback_pool_end:
-        log.warning("electric-cut fallback enabled but fallback_pool_start/end "
-                    "not set — fallback is inactive")
-        return set()
-    return set(cfg_mod.expand_ip_range(dhcp_cfg.fallback_pool_start,
-                                       dhcp_cfg.fallback_pool_end))
-
-
-def _validate_fallback(dhcp_cfg) -> None:
-    """Reject a misconfigured fallback range before DHCP binds (startup fatal)."""
-    if not dhcp_cfg.fallback_enabled:
-        return
-    if not dhcp_cfg.fallback_pool_start or not dhcp_cfg.fallback_pool_end:
-        return  # warned in _fallback_reserved; fallback is inactive
-    pool = set(_build_pool(dhcp_cfg))
-    fallback = set(cfg_mod.expand_ip_range(dhcp_cfg.fallback_pool_start,
-                                           dhcp_cfg.fallback_pool_end))
-    overlap = pool & fallback
-    if overlap:
-        raise ValueError(
-            "electric-cut fallback pool overlaps the DHCP pool: "
-            f"{sorted(overlap)[:5]}{'…' if len(overlap) > 5 else ''}. "
-            "Give the router a range OUTSIDE the DHCP pool (e.g. "
-            "192.168.1.201-250 when our pool is 192.168.1.100-200).")
-    log.warning(
-        "electric-cut fallback ACTIVE: the ROUTER must serve %s..%s "
-        "(gateway=%s, no overlap with our pool) whenever this PC is down. "
-        "Keep lease_hours short so devices return to the PC when it recovers.",
-        dhcp_cfg.fallback_pool_start, dhcp_cfg.fallback_pool_end,
-        dhcp_cfg.router_ip)
-
-
-def _pc_mac_factory() -> str:
-    """Best-effort PC MAC lookup, cached after first call."""
-    cache: dict[str, str] = {}
-
-    def _lookup() -> str:
-        if "mac" in cache:
-            return cache["mac"]
-        try:
-            import uuid
-            mac = ":".join(f"{b:02x}" for b in uuid.getnode().to_bytes(6, "big"))
-        except Exception:  # noqa: BLE001
-            mac = "02:00:00:00:00:00"
-        cache["mac"] = mac
-        return mac
-
-    return _lookup
-
-
 class Gateway:
     """Owns all long-lived objects so tests can construct the wiring once."""
 
-    def __init__(self, cfg: cfg_mod.Config) -> None:
+    #: rogue LAN scan cadence — slower than the 15 s tick on purpose (a raw
+    #: ARP probe of both /24s costs a few hundred frames; every 60 s is plenty).
+    ROGUE_SCAN_INTERVAL = 60.0
+
+    def __init__(self, cfg: cfg_mod.Config,
+                 config_path: str | Path | None = None,
+                 internet_probe: Callable[[], bool] | None = None) -> None:
         self.cfg = cfg
+        # The on-disk config.yaml the app loaded — the runtime topology apply
+        # (WAN tab) patches this file, so we must know exactly which one it is.
+        self.config_path: Path | None = Path(config_path) if config_path else None
+        #: Internet-reachability probe for the WAN tab's green dot (see
+        #: quota.topology.check_internet). Injectable so tests fake the network.
+        self.internet_probe = internet_probe or check_internet
         self.database = _db.Database(cfg.db_path)
         self.service = QuotaService(self.database, timezone=cfg.timezone)
         self.holder = SnapshotHolder()
-        self.engine: PacketEngine | NftablesEngine | None = None
-        self.dhcp: object | None = None  # Windows-only (quota.dhcp.DhcpServer)
-        self.dns: object | None = None   # Windows-only (quota.dns.DnsForwarder)
-        self.arp: object | None = None   # Windows-only (quota.arp.ProxyArp)
+        self.engine: NftablesEngine | None = None
+        self.shaper: object | None = None  # quota.shaping.TcShaper (tc/ifb)
+        self.arp_lock: object | None = None  # quota.arp_lock.ArpLock (opt-in)
+        # Built in startup(), AFTER the DB topology override: the scanner
+        # resolves its probe networks from cfg at construction, so building it
+        # here (before the override exists) would probe the wrong subnets in
+        # WAN mode. A test may inject a fake before startup() (None-guard).
+        self.arp_scanner: ArpScanner | None = None
+        #: Runtime LAN/WAN switch (dashboard WAN tab); built in startup().
+        self.topology_manager: TopologyManager | None = None
+        #: last rogue scan's result, surfaced through the holder every tick
+        self._rogues: list[object] = []
+        #: start the scan clock NOW, not at boot: the first scan fires 60 s
+        #: after startup (leases have settled), never during the boot tick.
+        self._last_rogue_scan = time.monotonic()
+        self._known_rogue_macs: set[str] = set()
         self._maintenance_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
-        #: Last known device IPs (updated by the maintenance loop; read by the
-        #: proxy-ARP responder, which runs on a sniff thread and cannot await).
-        self._known_ips: list[str] = []
 
     # ------------------------------------------------------------- startup
 
     async def startup(self) -> None:
         """Connect DB, ensure period, start optional subsystems."""
         await self.database.connect()
+        # A dashboard WAN-toggle applies on the NEXT restart: the DB override
+        # must land on cfg BEFORE the engine/scanner are built below (they read
+        # engine.topology + the resolved local subnets at construction).
+        await self._apply_topology_override()
+        # The runtime LAN/WAN switch (dashboard WAN tab): patches config.yaml +
+        # the DB together, runs scripts/topology.sh, schedules a detached
+        # restart. Built AFTER the override so its LAN snapshot reads the final
+        # cfg (the override can flip engine.topology from the DB).
+        self.topology_manager = TopologyManager(
+            self.cfg, self.database,
+            config_path=self.config_path,
+            script_path=cfg_mod.PROJECT_ROOT / "scripts" / "topology.sh")
         await self._seed_bundle_from_cfg()
         await self.service.ensure_period()
         log.info("database ready: %s", self.cfg.db_path)
 
-        # -- packet engine (thread on Windows, kernel rules on Linux) -------
+        # -- packet engine (nftables kernel rules) --------------------------
         if self.cfg.engine.enabled:
             self.engine = _make_engine(self.cfg, self.holder)
             self.engine.start()
@@ -177,73 +148,43 @@ class Gateway:
         else:
             log.warning("packet engine disabled in config — no per-packet accounting")
 
-        # -- DHCP + DNS + proxy-ARP -----------------------------------------
-        # On Linux these are the kernel's job: dnsmasq serves DHCP + DNS
-        # (udp/67 + udp/53, no ICS war) on the dedicated client subnet, and
-        # the setup-owned NAT table masquerades clients out the uplink. We
-        # only LEARN device bindings from dnsmasq's lease file (see
-        # _sync_dnsmasq_leases). On Windows the userspace stack below fills
-        # the same role.
-        if IS_LINUX:
-            log.info("Linux gateway: DHCP/DNS via dnsmasq on client subnet "
-                     "+ kernel NAT — Python DHCP/DNS/ARP stack skipped")
-        else:
-            # -- DNS forwarder (async, needs admin) -------------------------
-            # Android/iOS treat the default gateway as a DNS resolver; without
-            # a service on udp/53 every client query is dropped and devices
-            # report "connected, no internet". The forwarder relays to
-            # upstream resolvers.
-            #
-            # It binds the SPECIFIC gateway IP (not 0.0.0.0): Windows ICS
-            # hosts a DNS proxy on 0.0.0.0:53 that silently drops queries from
-            # non-ICS clients, and a more specific socket on the same port
-            # with SO_REUSEADDR still receives the packets destined to that IP
-            # — so we coexist with ICS instead of fighting over the port.
-            from quota import dns as dns_mod  # lazy: scapy-free, no system deps
+        # -- speed shaping (tc) ---------------------------------------------
+        # Kernel-side HTB + fq_codel per-device / per-user speed limits. The
+        # maintenance loop feeds it settings + the live IP map each tick; the
+        # shaper only rebuilds the kernel tree when something changed.
+        self.shaper = _make_shaper(self.cfg)
+        if self.shaper is not None:
+            self.shaper.start()
 
-            advertise_self_dns = False
-            if self.cfg.dhcp.enable and self.cfg.dhcp.dns_forward:
-                self.dns = dns_mod.DnsForwarder(
-                    upstreams=self.cfg.dhcp.dns_servers,
-                    bind_host=self.cfg.dhcp.gateway_ip)
-                asyncio.create_task(self._run_dns(self.dns))
-                advertise_self_dns = True
-            elif self.cfg.dhcp.enable and not self.cfg.dhcp.dns_forward:
-                log.warning("DNS forwarder disabled in config — clients that "
-                            "point at the gateway cannot resolve hostnames")
+        # -- ARP gateway-lock (opt-in) ---------------------------------------
+        # Deny internet to devices that bypass the box by using the ROUTER as
+        # their gateway (static-IP cheat). The engine already programmed the
+        # deny rules (quota/nftables.py, engine.gateway_arp_lock); this starts
+        # the continuous responder that makes the bypasser resolve the router's
+        # IP to the box's MAC so its frames arrive at the box to be dropped.
+        # Skipped in WAN mode — the box terminates the line itself, so there is
+        # no router on the client segment to lock against (no-op anyway, but
+        # don't even start the raw-socket thread).
+        if (getattr(self.cfg.engine, "gateway_arp_lock", False)
+                and getattr(self.cfg.engine, "topology", "lan") != "wan"):
+            from quota.arp_lock import ArpLock  # lazy: raw sockets + a thread
 
-            # -- DHCP server (async, needs admin) --------------------------
-            from quota import dhcp as dhcp_mod  # lazy
+            self.arp_lock = ArpLock(self.cfg)
+            self.arp_lock.start()
 
-            if self.cfg.dhcp.enable:
-                _validate_fallback(self.cfg.dhcp)  # fatal if fallback overlaps pool
-                pool = _build_pool(self.cfg.dhcp)
-                self.dhcp = dhcp_mod.DhcpServer(
-                    cfg=self.cfg.dhcp,
-                    pool=pool,
-                    gateway=self.cfg.dhcp.gateway_ip,  # clients' gateway = the PC
-                    subnet_mask=self.cfg.dhcp.subnet,
-                    on_lease=self._on_lease,
-                    reserved_ips=_fallback_reserved(self.cfg.dhcp),
-                    advertise_self_dns=advertise_self_dns,
-                )
-                asyncio.create_task(self._run_dhcp(self.dhcp))
-            else:
-                log.warning("DHCP server disabled in config")
+        # -- rogue scanner ----------------------------------------------------
+        # Built here (not in __init__) so it resolves its probe networks after
+        # the DB topology override above: in WAN mode it probes ONLY the client
+        # subnet (no uplink LAN). The None-guard lets a test inject a fake.
+        if self.arp_scanner is None:
+            self.arp_scanner = ArpScanner(self.cfg)
 
-            # -- proxy-ARP (async, needs Npcap) ----------------------------
-            from quota import arp as arp_mod  # lazy
-
-            if self.cfg.arp.enabled:
-                self.arp = arp_mod.ProxyArp(
-                    interface=self.cfg.arp.interface,
-                    get_device_ips=self._device_ips,
-                    pc_mac=_pc_mac_factory(),
-                    interval_sec=self.cfg.arp.announce_interval_sec,
-                )
-                asyncio.create_task(self.arp.start())
-            else:
-                log.warning("proxy-ARP disabled in config")
+        # -- DHCP + DNS -----------------------------------------------------
+        # dnsmasq owns these (served on the client subnet by the setup
+        # script). We only LEARN device bindings from its lease file (see
+        # _sync_dnsmasq_leases).
+        log.info("DHCP + DNS via dnsmasq on the client subnet — Python "
+                 "DHCP/DNS/ARP stack not used")
 
         # -- maintenance loop -----------------------------------------------
         self._maintenance_task = asyncio.create_task(self._maintenance_loop())
@@ -277,46 +218,47 @@ class Gateway:
         log.info("bundle synced from config.yaml: %.1f GB, reset day %d",
                  b.total_gb, b.reset_day)
 
+    async def _apply_topology_override(self) -> None:
+        """Apply a dashboard WAN-mode toggle (takes effect on the NEXT restart).
+
+        Mirrors ``_seed_bundle_from_cfg``: config.yaml seeds ``engine.topology``
+        (the setup script writes it), but once the admin toggles the WAN tab a
+        ``topology_source=dashboard`` setting is stored and the DB value wins
+        from then on — until the admin toggles back (which writes ``lan``).
+        Must run BEFORE the engine + rogue scanner are built, because both read
+        ``engine.topology`` / the resolved local subnets at construction.
+        """
+        if await self.database.get_setting("topology_source", "config") != "dashboard":
+            return
+        db_topology = await self.database.get_setting("topology", "lan")
+        if db_topology not in ("lan", "wan"):
+            log.warning("invalid topology setting %r — keeping config.yaml", db_topology)
+            return
+        self.cfg.engine.topology = db_topology
+        log.info("topology from dashboard: %s (overrides config.yaml)", db_topology)
+
     # ------------------------------------------------------------- callbacks
-
-    async def _run_dhcp(self, dhcp: object) -> None:
-        try:
-            await dhcp.start()
-        except asyncio.CancelledError:
-            raise
-        except PermissionError as exc:
-            log.error("DHCP server failed to start: %s", exc)
-        except OSError as exc:
-            log.error("DHCP server stopped: %s", exc)
-
-    async def _run_dns(self, dns: object) -> None:
-        try:
-            await dns.start()
-        except asyncio.CancelledError:
-            raise
-        except PermissionError as exc:
-            log.error("DNS forwarder failed to start: %s", exc)
-        except OSError as exc:
-            log.error("DNS forwarder stopped: %s", exc)
-
-    def _on_lease(self, mac: str, ip: str) -> None:
-        """DHCP granted a lease -> persist the MAC<->IP binding."""
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._persist_lease(mac, ip))
-        except RuntimeError:
-            log.warning("lease for %s (%s) arrived with no running loop", mac, ip)
 
     async def _persist_lease(self, mac: str, ip: str) -> None:
         try:
             await self.database.upsert_lease(mac, ip, self.cfg.dhcp.lease_hours)
-            self._known_ips.append(ip)
-            # Auto-register unknown MACs so they appear in the dashboard.
+            # Auto-register unknown MACs so they appear in the dashboard. With
+            # guest mode on, a brand-new device becomes a GUEST account instead
+            # of a normal managed user.
             existing = await self.database.get_device(mac=mac)
             if existing is None:
-                dev = await self.database.upsert_device(mac, name="")
-                await self.database.add_event(
-                    f"New device on network: {dev.mac} ({ip})", "info", dev.id)
+                if await self.service.is_guest_mode():
+                    gq = await self.service.guest_quota_gb()
+                    dev = await self.database.upsert_device(
+                        mac, name="", quota_mode=_db.QUOTA_FIXED,
+                        fixed_gb=gq, guest=True)
+                    await self.database.add_event(
+                        f"New GUEST device on network: {dev.mac} ({ip}) — "
+                        f"{gq:g} GB allowance", "info", dev.id)
+                else:
+                    dev = await self.database.upsert_device(mac, name="")
+                    await self.database.add_event(
+                        f"New device on network: {dev.mac} ({ip})", "info", dev.id)
                 # A brand-new device must receive its allowance BEFORE the
                 # next evaluate_blocks run, or allowances.get(mac) returns 0.0
                 # and the device is instantly blocked for "quota exceeded".
@@ -326,12 +268,11 @@ class Gateway:
             log.exception("failed to persist lease %s -> %s", mac, ip)
 
     async def _sync_dnsmasq_leases(self) -> None:
-        """Linux: learn MAC<->IP bindings from dnsmasq's lease file.
+        """Learn MAC<->IP bindings from dnsmasq's lease file.
 
-        dnsmasq owns DHCP on the Linux gateway, so the async :meth:`_on_lease`
-        callback never fires. Instead we parse its lease file every maintenance
-        tick and feed each binding through the same :meth:`_persist_lease`
-        path (DB upsert + auto-register unknown devices + allowances).
+        dnsmasq owns DHCP on the gateway, so we parse its lease file every
+        maintenance tick and feed each binding through :meth:`_persist_lease`
+        (DB upsert + auto-register unknown devices + allowances).
         """
         path = Path(self.cfg.dhcp.lease_file)
         if not path.exists():
@@ -363,17 +304,33 @@ class Gateway:
                 if lease.mac not in seen:
                     await self.database.delete_lease(lease.mac)
 
-    def _device_ips(self) -> list[str]:
-        """All IPs currently leased to devices (sync — called from a sniff thread)."""
-        return list(self._known_ips)
+    async def _scan_rogues(self) -> None:
+        """Probe the LAN for active hosts that are NOT known DHCP devices.
 
-    async def _refresh_known_ips(self) -> None:
-        """Pull the latest lease IPs into the thread-safe cache."""
+        Off the event loop (raw ARP socket + ping sweep). New rogues are logged
+        to the events table so the Activity tab tells the story. The scan result
+        is kept in ``self._rogues`` and surfaces in the holder swap every tick;
+        a rogue that disappears just drops out on the next scan.
+        """
+        if self.arp_scanner is None:
+            return  # never built (startup ordering) — nothing to scan
         try:
             leases = await self.database.list_leases()
-            self._known_ips = [l.ip for l in leases]
+            known = {l.mac for l in leases}
+            rogues = await asyncio.to_thread(self.arp_scanner.scan, known)
         except Exception:  # noqa: BLE001
-            log.exception("failed to refresh device IP cache")
+            log.exception("rogue LAN scan failed")
+            return
+        self._rogues = rogues
+        seen = {r.mac for r in rogues}
+        for r in rogues:
+            if r.mac not in self._known_rogue_macs:
+                await self.database.add_event(
+                    f"Rogue device on network: {r.mac} ({r.ip}) — active but "
+                    f"not a DHCP client (static IP / router-gateway bypass); "
+                    f"quota cannot count or block it",
+                    "warning", None)
+        self._known_rogue_macs = seen
 
     # ---------------------------------------------------------- maintenance
 
@@ -396,16 +353,21 @@ class Gateway:
         # 1. Roll the quota period if stale (covers month boundary).
         await self.service.ensure_period()
 
-        # 1b. Linux: learn device bindings from dnsmasq's lease file (this
-        #     replaces the Windows DHCP on_lease callback).
-        if IS_LINUX:
-            await self._sync_dnsmasq_leases()
+        # 1b. Learn device bindings from dnsmasq's lease file.
+        await self._sync_dnsmasq_leases()
+
+        # 1c. Rogue/unmanaged-host scan on a slow cadence (60 s): static-IP
+        #     devices are not in the lease file, so they never show in the
+        #     dashboard. Active-but-unleased hosts are surfaced as rogues.
+        now = time.monotonic()
+        if now - self._last_rogue_scan >= self.ROGUE_SCAN_INTERVAL:
+            self._last_rogue_scan = now
+            await self._scan_rogues()
 
         # 2. Drain the packet engine's counters into usage_daily.
-        #    flush() blocks: on Linux it shells out to `nft -j list counters`
-        #    (a subprocess). Run it off the event loop so a slow nft never
-        #    stalls the WebSocket push or the API. On Windows it is a quick
-        #    lock-protected read — to_thread is harmless there.
+        #    flush() shells out to `nft -j list counters` (a subprocess). Run
+        #    it off the event loop so a slow nft never stalls the WebSocket
+        #    push or the API.
         live_by_ip: dict[str, object] = {}
         if self.engine is not None:
             snap = await asyncio.to_thread(self.engine.flush)
@@ -431,9 +393,6 @@ class Gateway:
         for ch in changes:
             log.warning("device %s (%s) -> %s", ch["device_id"], ch["mac"], ch["state"])
 
-        # 3b. Refresh the thread-safe device IP cache used by proxy-ARP.
-        await self._refresh_known_ips()
-
         # 4. Push fresh enforcement maps into the engine + holder.
         state = await self.service.snapshot_state()
         ip_to_mac = {v["ip"]: mac for mac, v in state.items() if v.get("ip")}
@@ -444,7 +403,104 @@ class Gateway:
         # recent traffic instead of always-zero values.
         self.holder.swap(EngineSnapshot(
             by_ip=live_by_ip,
-            ip_to_mac=ip_to_mac, blocked=blocked, ts=time.time()))
+            ip_to_mac=ip_to_mac, blocked=blocked, rogue=list(self._rogues),
+            wan_status=await self._wan_status(),
+            ts=time.time()))
+
+        # 5. Linux: reconcile the tc speed-shaping tree (settings + live IPs).
+        #    update_state is signature-gated, so an unchanged state does not
+        #    touch the kernel; a DB edit lands here within one tick (<=15 s).
+        await self._sync_shaping(ip_to_mac)
+
+    async def _sync_shaping(self, ip_to_mac: dict[str, str]) -> None:
+        """Push the latest shaping settings + device caps into the tc shaper.
+
+        The rate map holds one entry per device that has a live IP: its own
+        caps (``down``/``up``) and its user's aggregate caps (``user_down`` /
+        ``user_up``). Devices without a live IP cannot be shaped (tc matches
+        IPs), so they stay out until they lease an address.
+        """
+        shaper = self.shaper
+        if shaper is None or not getattr(shaper, "available", False):
+            return
+        try:
+            config = await self.service.get_shaping_config()
+            users = {u.id: u for u in await self.database.list_users()}
+            devices = {d.mac: d for d in await self.database.list_devices()}
+            rate_map: list[dict[str, object]] = []
+            for ip, mac in ip_to_mac.items():
+                dev = devices.get(mac)
+                if dev is None or dev.user_id is None:
+                    continue  # untracked or orphaned — nothing to shape
+                user = users.get(dev.user_id)
+                rate_map.append({
+                    "ip": ip,
+                    "device_id": dev.id,
+                    "user_id": dev.user_id,
+                    "down": float(dev.limit_down_mbps or 0.0),
+                    "up": float(dev.limit_up_mbps or 0.0),
+                    "user_down": (float(user.limit_down_mbps or 0.0)
+                                  if user else 0.0),
+                    "user_up": (float(user.limit_up_mbps or 0.0)
+                                if user else 0.0),
+                })
+            shaper.update_state(
+                rate_map, config["enabled"], config["total_down_mbps"],
+                config["total_up_mbps"], config["aqm"])
+        except Exception:  # noqa: BLE001
+            log.exception("failed to sync speed-shaping rules")
+
+    async def _wan_status(self) -> dict[str, object]:
+        """Live WAN-mode status for the dashboard/API (cheap, every 15 s tick).
+
+        ``topology`` is the EFFECTIVE value — what the running engine actually
+        is (config.yaml, or the DB override the dashboard persisted). It only
+        changes when the gateway restarts, so right after a panel apply it is
+        still the OLD value. ``configured`` is the DESIRED value — what the box
+        will boot into: the DB setting when the dashboard owns the topology,
+        else the effective value. The dashboard WAN toggle keys off
+        ``configured``, so an apply keeps the switch ON across the restart
+        instead of snapping it back off (the v19 flip-off bug). ``pending`` is
+        the dashboard-configured value (takes effect on the next restart) when
+        the dashboard owns the topology, else None. ``source`` is who owns it
+        (``config`` | ``dashboard``). The PPP fields show the ppp0 link state —
+        in LAN mode they are always "n/a" (no ppp0). ``internet`` is a live
+        bool (the WAN-tab green dot) — raw-IP TCP reachability probed every
+        15 s tick so a dial failure or a dead line shows red immediately.
+        """
+        source = await self.database.get_setting("topology_source", "config")
+        effective = getattr(self.cfg.engine, "topology", "lan") or "lan"
+        configured = effective
+        if source == "dashboard":
+            db_topology = await self.database.get_setting("topology", "lan")
+            configured = db_topology if db_topology in ("lan", "wan") else "lan"
+        out: dict[str, object] = {
+            "topology": effective, "configured": configured, "source": source,
+            "pending": configured if source == "dashboard" else None,
+            "ppp0": "n/a", "ppp_ip": "", "ppp_peer": "",
+        }
+        if effective == "wan":
+            ppp = detect_ppp("ppp0")
+            out["ppp0"] = ppp["state"]
+            out["ppp_ip"] = ppp["local"]
+            out["ppp_peer"] = ppp["peer"]
+        # Internet-reachability probe — the WAN tab's green dot. In WAN mode the
+        # router is a bridge so its LED is gone; this is the box's own indicator,
+        # refreshed every maintenance tick (15 s). Run in a thread: a dead line
+        # can hold the connect for up to `timeout` seconds and must never block
+        # the event loop.
+        try:
+            reachable = await asyncio.to_thread(self.internet_probe)
+        except Exception:  # noqa: BLE001 — a probe failure must not kill the tick
+            log.exception("internet probe failed")
+            reachable = False
+        # In WAN mode ppp0 IS the internet path. A down dial means the gateway is
+        # not serving internet even if the box itself still reaches the internet
+        # through a leftover LAN route (e.g. the router not bridged yet) — the
+        # dot must never claim a path the clients can't use. Gate it on the link
+        # so "ppp0 down" and "internet ● Online" can't coexist.
+        out["internet"] = reachable and (effective != "wan" or out["ppp0"] == "up")
+        return out
 
     # ------------------------------------------------------------- signals
 
@@ -453,7 +509,7 @@ class Gateway:
             try:
                 asyncio.get_running_loop().add_signal_handler(sig, self._request_stop)
             except NotImplementedError:
-                pass  # Windows: add_signal_handler unsupported; uvicorn handles Ctrl+C
+                pass  # defensive: add_signal_handler unavailable in some runtimes
 
     def _request_stop(self) -> None:
         self._stop_event.set()
@@ -469,10 +525,10 @@ class Gateway:
                 pass
         if self.engine is not None:
             self.engine.stop()
-        if self.dns is not None:
-            await self.dns.stop()
-        if self.arp is not None:
-            self.arp.stop()
+        if self.shaper is not None:
+            self.shaper.stop()  # leaves tc rules in place (conservative)
+        if self.arp_lock is not None:
+            self.arp_lock.stop()  # responder thread exits; deny rules stay
         await self.database.close()
         log.info("shutdown complete")
 
@@ -489,19 +545,23 @@ def main() -> None:
     log.info("Quota Manager starting (bundle %.1f GB, reset day %d)",
              cfg.bundle.total_gb, cfg.bundle.reset_day)
 
-    gateway = Gateway(cfg)
-    app = create_app(gateway.database, gateway.service, gateway.holder)
-
-    server_config = uvicorn.Config(
-        app,
-        host=cfg.web.host,
-        port=cfg.web.port,
-        log_level="warning",
-    )
-    server = uvicorn.Server(server_config)
+    config_path = args.config or cfg_mod.PROJECT_ROOT / "config.yaml"
+    gateway = Gateway(cfg, config_path=config_path)
 
     async def _serve() -> None:
         await gateway.startup()
+        # Build the app AFTER startup: the WAN tab's topology manager is created
+        # in startup() and the /api/wan endpoint must close over the real one.
+        app = create_app(gateway.database, gateway.service, gateway.holder,
+                         log_path=cfg.log_file,
+                         topology_manager=gateway.topology_manager)
+        server_config = uvicorn.Config(
+            app,
+            host=cfg.web.host,
+            port=cfg.web.port,
+            log_level="warning",
+        )
+        server = uvicorn.Server(server_config)
         try:
             await server.serve()
         finally:

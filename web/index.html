@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quota Manager</title>
-<link rel="stylesheet" href="/assets/styles.css">
+<link rel="stylesheet" href="/assets/styles.css?v=27">
 </head>
 <body>
   <div class="bg-glow"></div>
@@ -29,78 +29,99 @@
       <div class="brand">
         <h1 class="logo">Quota<span>Manager</span></h1>
       </div>
+      <nav class="topnav">
+        <button class="nav-tab active" data-panel="management">Management</button>
+        <button class="nav-tab" data-panel="bundle">Bundle settings</button>
+        <button class="nav-tab" data-panel="network">Network</button>
+        <button class="nav-tab" data-panel="wan">WAN</button>
+        <button class="nav-tab" data-panel="admin">Admin</button>
+        <button class="nav-tab" data-panel="logs">Logs</button>
+      </nav>
       <div class="topbar-right">
-        <span id="conn-status" class="pill" title="live updates">● live</span>
+        <span id="net-status" class="net-status" title="Checking internet connection…">
+          <span class="dot off"></span>
+          <span class="net-label">Checking…</span>
+        </span>
         <button id="logout-btn" class="btn ghost small">Log out</button>
       </div>
     </header>
 
     <main class="content">
-      <!-- BUNDLE SUMMARY -->
-      <section class="bundle-card glass">
-        <div class="bundle-ring-wrap">
-          <div class="ring" id="bundle-ring">
-            <div class="ring-center">
-              <span id="bundle-used" class="ring-big">0 GB</span>
-              <span class="ring-small">used of <span id="bundle-total">0</span> GB</span>
+      <!-- MANAGEMENT: users & devices + bundle stats (first tab only) -->
+      <section id="panel-management" class="nav-panel">
+        <!-- BUNDLE SUMMARY -->
+        <section class="bundle-card glass">
+          <div class="bundle-ring-wrap">
+            <div class="ring" id="bundle-ring">
+              <div class="ring-center">
+                <span id="bundle-used" class="ring-big">0 GB</span>
+                <span class="ring-small">used of <span id="bundle-total">0</span> GB</span>
+              </div>
             </div>
           </div>
-        </div>
-        <div class="bundle-stats">
-          <div class="stat">
-            <span class="stat-label">Remaining</span>
-            <span id="bundle-remaining" class="stat-value purple">0 GB</span>
+          <div class="bundle-stats">
+            <div class="stat">
+              <span class="stat-label">Remaining</span>
+              <span id="bundle-remaining" class="stat-value purple">0 GB</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Period</span>
+              <span id="bundle-period" class="stat-value">–</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Days left</span>
+              <span id="bundle-days" class="stat-value">–</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Users</span>
+              <span id="bundle-users" class="stat-value">0</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Devices</span>
+              <span id="bundle-devices" class="stat-value">0</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Blocked</span>
+              <span id="bundle-blocked" class="stat-value warning">0</span>
+            </div>
           </div>
-          <div class="stat">
-            <span class="stat-label">Period</span>
-            <span id="bundle-period" class="stat-value">–</span>
+        </section>
+
+        <section class="section">
+          <div class="section-head">
+            <h2>Users &amp; devices</h2>
+            <div class="head-actions">
+              <button id="add-user-btn" class="btn ghost small">＋ Add user</button>
+              <button id="add-device-btn" class="btn primary small">＋ Add device</button>
+            </div>
           </div>
-          <div class="stat">
-            <span class="stat-label">Days left</span>
-            <span id="bundle-days" class="stat-value">–</span>
+          <div id="devices-list" class="device-grid"></div>
+        </section>
+
+        <!-- ROGUE / UNMANAGED DEVICES -->
+        <section id="rogue-section" class="section hidden">
+          <div class="section-head">
+            <h2>Unmanaged / rogue devices</h2>
+            <span id="rogue-count" class="muted small"></span>
           </div>
-          <div class="stat">
-            <span class="stat-label">Devices</span>
-            <span id="bundle-devices" class="stat-value">0</span>
-          </div>
-          <div class="stat">
-            <span class="stat-label">Blocked</span>
-            <span id="bundle-blocked" class="stat-value warning">0</span>
-          </div>
-        </div>
+          <p class="muted small" style="margin-bottom:10px">
+            Active on your network but <strong>not</strong> leased by the quota DHCP —
+            a static-IP device bypasses the box (its traffic is never counted or
+            blocked). The ARP gateway-lock cuts its internet when enabled.
+          </p>
+          <div id="rogue-list" class="rogue-list"></div>
+        </section>
       </section>
 
-      <!-- DEVICES -->
-      <section class="section">
-        <div class="section-head">
-          <h2>Devices</h2>
-          <button id="add-device-btn" class="btn primary small">＋ Add device</button>
-        </div>
-        <div id="devices-list" class="device-grid"></div>
-      </section>
-
-      <!-- USAGE CHART -->
-      <section class="section">
-        <div class="section-head">
-          <h2>Usage this period</h2>
-          <div class="legend">
-            <span class="legend-dot down"></span> Download
-            <span class="legend-dot up"></span> Upload
-          </div>
-        </div>
-        <div class="glass card chart-card">
-          <canvas id="usage-chart"></canvas>
-        </div>
-      </section>
-
-      <!-- SETTINGS + EVENTS -->
-      <section class="two-col">
+      <!-- BUNDLE SETTINGS -->
+      <section id="panel-bundle" class="nav-panel hidden">
+        <div class="two-col">
         <div class="glass card settings-card">
           <div id="bundle-source-banner" class="banner hidden"></div>
           <h3>Bundle settings</h3>
           <form id="settings-form">
             <label for="set-total">Bundle size (GB)</label>
-            <input type="number" id="set-total" min="1" step="0.5" value="140">
+            <input type="number" id="set-total" min="1" step="any" value="140">
             <label for="set-reset-day">Reset day of month <span class="muted small">(0 = manual)</span></label>
             <input type="number" id="set-reset-day" min="0" max="28" value="1">
             <button type="submit" class="btn primary small">Save</button>
@@ -108,19 +129,281 @@
           <hr class="sep">
           <h3>Bundle recharged</h3>
           <p class="muted small">Bought more data mid-month? Add it here — every auto
-            device's share is recalculated without resetting the period.</p>
+            user's share is recalculated without resetting the period.</p>
           <div class="recharge-row">
-            <input type="number" id="set-recharge" min="0.1" step="0.5" placeholder="Added GB">
+            <input type="number" id="set-recharge" min="0.1" step="any" placeholder="Added GB">
             <button id="recharge-btn" class="btn primary small">Add</button>
           </div>
           <hr class="sep">
-          <h3>Admin</h3>
+          <h3>Guest mode</h3>
+          <div class="guest-head">
+            <span class="muted small">Every new device that joins the network becomes
+              a guest with its own small allowance. Guests survive disconnects and
+              are deleted when the month resets.</span>
+            <label class="switch" title="Register new devices as guests">
+              <input type="checkbox" id="guest-mode-toggle">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="recharge-row">
+            <input type="number" id="guest-quota" min="0.1" step="any" value="1" title="Guest allowance in GB">
+            <button id="guest-quota-btn" class="btn primary small">Set guest quota (GB)</button>
+          </div>
+          <hr class="sep">
           <button id="reset-month-btn" class="btn warning small">Reset month now</button>
+        </div>
+
+        <!-- LIVE BUNDLE PREVIEW (right column) -->
+        <div class="glass card preview-card">
+          <h3>Live bundle</h3>
+          <div class="stat">
+            <span class="stat-label">Remaining</span>
+            <span id="bundle-preview-remaining" class="stat-value purple">0 GB</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Used</span>
+            <span id="bundle-preview-used" class="stat-value">0 GB</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Period</span>
+            <span id="bundle-preview-period" class="stat-value">–</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Days left</span>
+            <span id="bundle-preview-days" class="stat-value">–</span>
+          </div>
+          <div class="preview-usage">
+            <div class="device-numbers">
+              <span id="bundle-preview-used-num">0 GB used</span>
+              <span id="bundle-preview-pct">0%</span>
+            </div>
+            <div class="bar-track"><div class="bar-fill" id="bundle-preview-fill" style="width:0%"></div></div>
+          </div>
+        </div>
+        </div>
+      </section>
+
+      <!-- NETWORK: speed limits + latency -->
+      <section id="panel-network" class="nav-panel hidden">
+        <div class="two-col">
+        <div class="glass card settings-card">
+          <h3>Speed limits &amp; latency</h3>
+          <p class="muted small">Caps every device's internet speed (set in the
+            device/user modals) and keeps game ping low while others upload or
+            download. Only applies on the Linux gateway.</p>
+          <div class="guest-head">
+            <span class="muted small">Master switch for speed shaping. Off = no
+              limits and no low-latency queues.</span>
+            <label class="switch" title="Enable per-device / per-user speed limits">
+              <input type="checkbox" id="shaping-toggle">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <hr class="sep">
+          <h3>Your real line speed</h3>
+          <p class="muted small">Set these to the REAL download / upload rate your
+            ISP gives you (e.g. 100 / 20 Mbps). The queue then forms at the gateway
+            where it can keep pings low under load — that's what stops bufferbloat.</p>
+          <div class="recharge-row">
+            <input type="number" id="set-total-down" min="0" step="any" placeholder="Down Mbps">
+            <input type="number" id="set-total-up" min="0" step="any" placeholder="Up Mbps">
+          </div>
+          <div class="guest-head">
+            <span class="muted small">Low-latency queues (fq_codel). On = pings
+              stay low even when a user saturates their speed.</span>
+            <label class="switch" title="Bufferbloat avoidance">
+              <input type="checkbox" id="aqm-toggle">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <button id="shaping-save-btn" class="btn primary small">Save</button>
+        </div>
+
+        <!-- SHAPING PREVIEW (right column) -->
+        <div class="glass card preview-card">
+          <h3>Shaping preview</h3>
+          <div class="stat">
+            <span class="stat-label">Status</span>
+            <span id="np-status" class="stat-value off">Off</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Total down</span>
+            <span id="np-down" class="stat-value">—</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Total up</span>
+            <span id="np-up" class="stat-value">—</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Low-latency queues</span>
+            <span id="np-aqm" class="stat-value">Off</span>
+          </div>
+          <hr class="sep">
+          <div class="stat">
+            <span class="stat-label">Devices with caps</span>
+            <span id="np-capped" class="stat-value">0</span>
+          </div>
+          <ul id="np-devices" class="preview-list"></ul>
+        </div>
+        </div>
+      </section>
+
+      <!-- WAN: strong mode — the box dials PPPoE itself -->
+      <section id="panel-wan" class="nav-panel hidden">
+        <div class="two-col">
+        <div class="glass card settings-card">
+          <div id="wan-restart-banner" class="banner hidden"></div>
+          <h3>WAN mode (strong security)</h3>
+          <p class="muted small">By default the box sits <strong>behind</strong> the
+            router: clients get their own subnet from the quota DHCP and the router
+            keeps WiFi + NAT. A determined user can still bypass the quota by setting
+            a static IP + the router as its gateway.</p>
+          <p class="muted small">WAN mode closes that hole at the topology level:
+            the box itself dials the <strong>PPPoE line</strong> (public IP on
+            ppp0) and the router becomes a pure bridge/AP — a static-IP device then
+            has <strong>no second router to bypass to</strong>, so every byte
+            crosses the box.</p>
+          <p class="muted small" style="margin-top:8px"><strong>Router admin
+            stays reachable:</strong> the box keeps the router's LAN address as a
+            secondary alias, so you (and every device) can still open the router
+            admin page — no extra commands on any device.</p>
+          <div class="guest-head">
+            <span class="muted small">Select the mode and press <strong>Apply</strong> —
+              the gateway rewires itself (NIC, DHCP/DNS, the PPPoE dial) and
+              <strong>restarts automatically</strong>. No setup script, no terminal.
+              The saved preference also applies on the next restart.</span>
+            <label class="switch" title="Desired mode: on = WAN (strong), off = LAN">
+              <input type="checkbox" id="wan-toggle">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div id="wan-creds" class="hidden">
+            <p class="muted small">PPPoE credentials for WAN mode — from your ISP
+              card or the router's WAN status page. Leave <em>WAN interface</em>
+              empty unless you use the two-NIC layout.</p>
+            <label for="wan-user">PPPoE username</label>
+            <input id="wan-user" type="text" autocomplete="username"
+                   placeholder="user@isp" spellcheck="false">
+            <label for="wan-pass">PPPoE password</label>
+            <input id="wan-pass" type="password" autocomplete="current-password"
+                   placeholder="••••••••">
+            <label for="wan-if">WAN interface <span class="muted small">(optional — two-NIC only)</span></label>
+            <input id="wan-if" type="text" placeholder="e.g. eth1" spellcheck="false">
+            <p class="muted small" style="margin-top:12px"><strong>Not sure the
+              credentials work?</strong> Test them first — a throwaway dial that
+              reports whether the ISP accepts them, without changing anything.</p>
+            <div class="btn-row">
+              <button id="wan-test-btn" class="btn" type="button">Test PPPoE connection</button>
+            </div>
+            <div id="wan-test-msg" class="test-msg"></div>
+            <div class="btn-row">
+              <button id="wan-apply-btn" class="btn primary" type="button">Apply now</button>
+              <button id="wan-revert-btn" class="btn" type="button">Revert to LAN</button>
+            </div>
+          </div>
+          <hr class="sep">
+          <h3>Guide — how to switch your router</h3>
+          <p class="muted small">Two physical layouts. Both work with the routers
+            most Egyptian homes have (WE ZTE/Huawei, Orange Livebox, Vodafone,
+            e&amp;).</p>
+          <ol class="guide">
+            <li><strong>Put the router in BRIDGE / MODEM mode</strong> (WAN↔LAN
+              bridged, NAT + DHCP off, WiFi on). Look for <code>Bridge</code>,
+              <code>Modem</code> or <code>WAN mode</code> in the router's WAN
+              settings. ISP-locked combos may need a bridge-unlock code or an
+              ISP call.</li>
+            <li><strong>Enter your PPPoE credentials in the fields above</strong>
+              (username + password, from your ISP card or the router's WAN status
+              page). Press <strong>Test PPPoE connection</strong> first — it dials
+              a throwaway link and tells you if the ISP accepts them — then
+              <strong>Apply now</strong>. The gateway dials the line itself and
+              restarts.</li>
+            <li><strong>Two-NIC fallback (universal):</strong> if your router
+              can't bridge, set it to <strong>AP mode</strong> (WiFi only, DHCP
+              off — supported by every router), connect NIC1 of the box straight
+              to the ONT/modem to dial PPPoE, and NIC2 to the AP. Put the second
+              NIC's name (e.g. <code>eth1</code>) in the <strong>WAN
+              interface</strong> field. Needs a cheap USB Ethernet dongle.</li>
+          </ol>
+          <hr class="sep">
+          <p class="muted small"><strong>Reverting:</strong> press <strong>Revert to
+            LAN</strong> above — the gateway restores the router uplink and restarts.
+            The router itself must be back in routed mode first (undo the bridge).</p>
+        </div>
+
+        <!-- WAN STATUS PREVIEW (right column) -->
+        <div class="glass card preview-card">
+          <h3>WAN status</h3>
+          <div class="stat">
+            <span class="stat-label">Topology</span>
+            <span id="wan-topology" class="stat-value">lan</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Source</span>
+            <span id="wan-source" class="stat-value">config</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">ppp0</span>
+            <span id="wan-ppp0" class="stat-value off">n/a</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Public IP</span>
+            <span id="wan-ppp-ip" class="stat-value">—</span>
+          </div>
+          <hr class="sep">
+          <p class="muted small">ppp0 state is read live on the gateway every 60 s.
+            In LAN mode it reads n/a — ppp0 only exists when the box dials the
+            line itself. Internet reachability shows in the top bar.</p>
+          <div id="wan-apply-msg" class="muted small apply-msg"></div>
+        </div>
+        </div>
+      </section>
+
+      <!-- ADMIN -->
+      <section id="panel-admin" class="nav-panel hidden">
+        <div class="two-col">
+        <div class="glass card admin-card">
+          <h3>Admin</h3>
           <a id="password-link" class="link">Change password</a>
         </div>
-        <div class="glass card events-card">
-          <h3>Activity</h3>
-          <ul id="events-list" class="events"></ul>
+
+        <!-- ABOUT -->
+        <div class="glass card preview-card">
+          <h3>About</h3>
+          <div class="about-row">
+            <span class="muted">Application</span>
+            <span class="about-value">Quota Manager</span>
+          </div>
+          <div class="about-row">
+            <span class="muted">Version</span>
+            <span id="app-version" class="about-value">—</span>
+          </div>
+          <hr class="sep">
+          <p class="muted small">Metered-internet quota gateway. Split your monthly
+            allowance fairly between users and devices, cap speeds, and keep game
+            ping low under load.</p>
+        </div>
+        </div>
+      </section>
+
+      <!-- SYSTEM LOGS -->
+      <section id="panel-logs" class="nav-panel hidden">
+        <div class="glass card logs-card">
+          <div class="logs-head">
+            <h3>System logs</h3>
+            <div class="logs-toolbar">
+              <div class="filter-group" id="log-filters" role="group" aria-label="Log level filter">
+                <button type="button" class="filter-btn active" data-level="ALL" aria-pressed="true">ALL</button>
+                <button type="button" class="filter-btn" data-level="INFO" aria-pressed="false">INFO</button>
+                <button type="button" class="filter-btn" data-level="WARNING" aria-pressed="false">WARNING</button>
+                <button type="button" class="filter-btn" data-level="ERROR" aria-pressed="false">ERROR</button>
+              </div>
+              <input type="search" id="log-search" placeholder="Search logs…" aria-label="Search logs">
+              <button type="button" id="log-refresh" class="btn ghost small" title="Reload logs">⟳ Refresh</button>
+              <button type="button" id="log-download" class="btn primary small" title="Download the filtered logs">⬇ Export</button>
+            </div>
+          </div>
+          <pre id="logs-view" class="logs"></pre>
         </div>
       </section>
     </main>
@@ -136,24 +419,92 @@
           <label for="d-mac">MAC address</label>
           <input id="d-mac" placeholder="aa:bb:cc:dd:ee:ff" required>
         </div>
-        <label for="d-name">Name</label>
+        <div id="d-user-wrap">
+          <label for="d-user">User</label>
+          <select id="d-user"></select>
+        </div>
+        <div id="d-newuser-wrap" class="hidden">
+          <label for="d-user-name">User name</label>
+          <input id="d-user-name" placeholder="e.g. Youssef">
+        </div>
+        <label for="d-name">Device name</label>
         <input id="d-name" placeholder="e.g. Living room TV">
-        <label for="d-mode">Quota</label>
-        <select id="d-mode">
-          <option value="auto">Auto (share of remainder)</option>
-          <option value="fixed">Fixed GB</option>
-        </select>
-        <div id="d-fixed-wrap" class="hidden">
-          <label for="d-fixed">Fixed GB</label>
-          <input type="number" id="d-fixed" min="0.1" step="0.5" value="10">
+        <div id="d-quota-wrap">
+          <label for="d-mode">Quota</label>
+          <select id="d-mode">
+            <option value="auto">Auto (share of remainder)</option>
+            <option value="fixed">Fixed GB</option>
+          </select>
+          <div id="d-fixed-wrap" class="hidden">
+            <label for="d-fixed">Fixed GB</label>
+            <input type="number" id="d-fixed" min="0.1" step="any" value="10">
+          </div>
+        </div>
+        <div id="d-bypass-wrap" class="hidden">
+          <label class="check" title="Keep this device online even when its user exceeds the allowance">
+            <input type="checkbox" id="d-bypass">
+            <span>Exempt from user quota</span>
+          </label>
+        </div>
+        <div id="d-speed-wrap" class="hidden">
+          <label>Speed limit (Mbps, 0 = unlimited)</label>
+          <div class="speed-grid">
+            <div>
+              <label for="d-limit-down">Down</label>
+              <input type="number" id="d-limit-down" min="0" step="any" value="0">
+            </div>
+            <div>
+              <label for="d-limit-up">Up</label>
+              <input type="number" id="d-limit-up" min="0" step="any" value="0">
+            </div>
+          </div>
+          <span class="muted small">This device alone cannot exceed these speeds.</span>
         </div>
         <div id="d-topup-wrap" class="hidden">
           <label for="d-topup">Top up (extra GB)</label>
-          <input type="number" id="d-topup" min="0.1" step="0.5" placeholder="0">
+          <input type="number" id="d-topup" min="0.1" step="any" placeholder="0">
         </div>
         <div class="modal-actions">
           <button type="button" id="modal-cancel" class="btn ghost">Cancel</button>
           <button type="submit" id="modal-submit" class="btn primary">Add</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ADD / EDIT USER MODAL -->
+  <div id="user-modal" class="modal hidden">
+    <div class="glass card modal-card">
+      <h3 id="user-modal-title">Add user</h3>
+      <p id="user-modal-sub" class="muted">A user's devices share one allowance.</p>
+      <form id="user-form">
+        <label for="u-name">Name</label>
+        <input id="u-name" placeholder="e.g. Youssef">
+        <label for="u-mode">Quota</label>
+        <select id="u-mode">
+          <option value="auto">Auto (share of remainder)</option>
+          <option value="fixed">Fixed GB</option>
+        </select>
+        <div id="u-fixed-wrap" class="hidden">
+          <label for="u-fixed">Fixed GB</label>
+          <input type="number" id="u-fixed" min="0.1" step="any" value="10">
+        </div>
+        <div id="u-speed-wrap" class="hidden">
+          <label>Total speed for all this user's devices (Mbps, 0 = unlimited)</label>
+          <div class="speed-grid">
+            <div>
+              <label for="u-limit-down">Down</label>
+              <input type="number" id="u-limit-down" min="0" step="any" value="0">
+            </div>
+            <div>
+              <label for="u-limit-up">Up</label>
+              <input type="number" id="u-limit-up" min="0" step="any" value="0">
+            </div>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="user-modal-cancel" class="btn ghost">Cancel</button>
+          <button type="submit" id="user-modal-submit" class="btn primary">Add</button>
         </div>
       </form>
     </div>
@@ -176,7 +527,31 @@
     </div>
   </div>
 
-  <script src="/assets/chart.umd.js"></script>
-  <script src="/assets/app.js?v=4"></script>
+  <!-- FIRST-RUN WELCOME PANEL -->
+  <div id="welcome-overlay" class="welcome-overlay hidden">
+    <div class="glass card welcome-card">
+      <h2>Welcome 👋</h2>
+      <p class="muted">Your Quota Manager gateway is up. Confirm these two
+        things so it remembers your bundle — you can change either later in
+        the dashboard.</p>
+      <form id="welcome-form">
+        <label for="setup-total">Internet bundle this month (GB)</label>
+        <input type="number" id="setup-total" min="1" step="any" required>
+        <label for="setup-reset-day">Reset day of the month (0 = never)</label>
+        <input type="number" id="setup-reset-day" min="0" max="28" step="1" required>
+        <label for="setup-cur-pw">Current admin password</label>
+        <input type="password" id="setup-cur-pw" autocomplete="current-password">
+        <label for="setup-new-pw">New password (optional — leave blank to keep it)</label>
+        <input type="password" id="setup-new-pw" minlength="4" autocomplete="new-password">
+        <div class="welcome-actions">
+          <button type="button" id="welcome-skip" class="btn ghost">Skip for now</button>
+          <button type="submit" id="welcome-submit" class="btn primary">Start using it</button>
+        </div>
+        <p id="welcome-error" class="error hidden"></p>
+      </form>
+    </div>
+  </div>
+
+  <script src="/assets/app.js?v=27"></script>
 </body>
 </html>

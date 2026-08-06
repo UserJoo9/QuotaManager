@@ -22,8 +22,8 @@ LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 class _NonBlockingQueueHandler(logging.handlers.QueueHandler):
     """QueueHandler that never blocks: drops records when the queue is full.
 
-    A blocking ``put()`` would stall the packet engine thread (Windows) or the
-    asyncio event loop the moment a burst of DEBUG/INFO records filled the
+    A blocking ``put()`` would stall the asyncio event loop the moment a burst
+    of DEBUG/INFO records filled the
     5000-record queue — the exact failure the non-blocking design exists to
     prevent. Under pressure it is better to drop a log line than to drop
     packets or freeze the dashboard.

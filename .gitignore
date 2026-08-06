@@ -13,6 +13,9 @@ venv/
 env/
 ENV/
 
+# ---- Packages ----
+*.deb
+
 # ---- Test / tooling caches ----
 .pytest_cache/
 .mypy_cache/

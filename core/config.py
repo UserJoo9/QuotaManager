@@ -8,7 +8,6 @@ and fall back to sensible defaults documented below.
 from __future__ import annotations
 
 import os
-import socket
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -21,67 +20,90 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 
 @dataclass
 class DhcpConfig:
-    """Our DHCP server scope. Defaults assume a 192.168.1.0/24 router LAN."""
+    """DHCP scope. Defaults assume a 192.168.1.0/24 router LAN."""
 
     enable: bool = True
     interface: str = ""  # empty => bind 0.0.0.0
-    #: The PC's own static LAN IP. Handed to clients as their default gateway
-    #: (DHCP option 3) and used as the DHCP server identifier (option 54).
-    #: Traffic can only be counted/blocked if clients route THROUGH this PC.
+    #: The gateway's own static LAN IP. Handed to clients as their default
+    #: gateway (DHCP option 3) and used as the DHCP server identifier.
+    #: Traffic can only be counted/blocked if clients route THROUGH this box.
     gateway_ip: str = "192.168.1.2"
     #: Upstream router IP (used for the DNS option and reference only; the
-    #: PC's default route to the internet is configured on the NIC itself).
+    #: gateway's default route to the internet is configured on the NIC itself).
     router_ip: str = "192.168.1.1"
-    #: DNS servers handed to clients when no forwarder runs on this PC. When
-    #: ``dns_forward`` is on, these become the UPSTREAM resolvers the PC relays
-    #: to (default 8.8.8.8), and clients are instead told "use the gateway" so
-    #: every DNS query deterministically crosses the PC (and is counted).
+    #: DNS servers handed to clients. dnsmasq on the gateway relays to these
+    #: upstream resolvers and is itself advertised as the client's DNS, so
+    #: every DNS query deterministically crosses the box (and is counted).
     dns_servers: list[str] = field(default_factory=lambda: ["192.168.1.1", "8.8.8.8"])
-    #: Run a UDP/53 forwarder on the PC that relays client DNS to upstream
-    #: resolvers. Without it, devices that point at the gateway (Android/iOS
-    #: fallback) can never resolve a hostname and report "connected, no
-    #: internet". Requires Administrator to bind port 53. When enabled, DHCP
-    #: advertises the PC itself as the DNS server.
+    #: Accept a DNS forwarder role (informational on Linux — dnsmasq always
+    #: forwards; kept for API/config compatibility).
     dns_forward: bool = True
     subnet: str = "255.255.255.0"
     pool_start: str = "192.168.1.100"
     pool_end: str = "192.168.1.200"
     lease_hours: int = 24
-    #: Path to dnsmasq's lease file on the Linux gateway. The Windows build
-    #: serves DHCP itself (quota/dhcp.py) and ignores this; on Linux dnsmasq
-    #: owns DHCP and this file is the MAC<->IP binding source.
+    #: Path to dnsmasq's lease file — dnsmasq owns DHCP on the gateway and
+    #: this file is the MAC<->IP binding source the maintenance loop reads.
     lease_file: str = "/var/lib/misc/dnsmasq.leases"
-    #: Electric-cut fallback (optional). When the PC is down, devices have no
-    #: working gateway and lose the internet. Give the ROUTER a small fallback
-    #: DHCP pool (gateway = router) in a NON-OVERLAPPING range; our server
-    #: never hands out these IPs, so devices fall back to direct internet when
-    #: this PC is unavailable. Keep ``lease_hours`` short (e.g. 1) so devices
-    #: quickly return to the PC's pool when it comes back.
-    fallback_enabled: bool = False
-    fallback_pool_start: str = ""
-    fallback_pool_end: str = ""
+    #: --- LAN-reality snapshot (written by the setup script / the runtime
+    #: topology apply in BOTH topologies, so the dashboard's WAN-tab Revert can
+    #: restore exactly what was there before a WAN experiment). WAN mode erases
+    #: ``router_ip`` / ``dns_servers`` from the ACTIVE keys; these keep the LAN
+    #: values. Empty => quota/netmgr.py falls back to the setup defaults.
+    lan_router_ip: str = ""
+    lan_dns_servers: list[str] = field(default_factory=lambda: [])
+    #: The box's static uplink IP + prefix on the router's LAN (e.g. 192.168.1.110/24).
+    uplink_ip: str = ""
+    lan_cidr: int = 24
 
 
 @dataclass
 class EngineConfig:
-    """Packet engine behaviour (WinDivert on Windows, nftables on Linux)."""
+    """Packet engine behaviour (nftables on the Linux gateway)."""
 
     enabled: bool = True
     #: only count the inbound sighting of a forwarded packet to avoid double-count.
     count_direction: str = "inbound"
-    #: engine backend: "auto" (pick by OS), "windivert", or "nftables".
-    backend: str = "auto"
-    #: nftables table used by the Linux engine (see quota/nftables.py).
+    #: Accepted for config compatibility; the Linux gateway always uses the
+    #: nftables engine (run.py ignores the value).
+    backend: str = "nftables"
+    #: nftables table used by the engine (see quota/nftables.py).
     table: str = "quota_gateway"
-
-
-@dataclass
-class ArpConfig:
-    """Proxy-ARP responder behaviour."""
-
-    enabled: bool = True
-    interface: str = ""  # empty => scapy picks the first suitable interface
-    announce_interval_sec: int = 60
+    #: Managed client subnet (e.g. "192.168.2.0/24"). Traffic to/from it is
+    #: LOCAL — same-subnet client<->client is L2 anyway, and this guards against
+    #: stray routed paths — and must never count against the metered bundle.
+    #: Empty => derive from ``dhcp.gateway_ip`` + ``dhcp.subnet``.
+    client_subnet: str = ""
+    #: Uplink LAN subnet (e.g. "192.168.1.0/24") — the router's LAN. Traffic
+    #: between a client and an uplink-subnet host (router admin UI, NAS, the
+    #: router as DNS) crosses this box's forward hook, so WITHOUT this exclusion
+    #: it would be counted against the quota. Empty => derive from
+    #: ``dhcp.router_ip`` + ``dhcp.subnet``.
+    uplink_subnet: str = ""
+    #: ARP gateway-lock: actively deny internet to any device that tries to use
+    #: the ROUTER (not this box) as its gateway — i.e. a static-IP bypass. The
+    #: engine captures the router's IP on the client subnet (ARP interception) so
+    #: the rogue's frames reach the box, then drops client-subnet -> router-IP
+    #: traffic. Requires root + the LAN interface; see quota/nftables.py.
+    gateway_arp_lock: bool = False
+    #: Deployment topology. "lan" (default — byte-for-byte today): the box sits
+    #: behind the router on the LAN, clients on their own subnet, router keeps
+    #: WiFi + NAT; the box counts/blocks what the kernel forwards. "wan" (optional
+    #: strong mode): the box terminates the WAN itself (dials PPPoE, public IP on
+    #: ppp0) and the router is a pure bridge/AP — a static-IP device then has NO
+    #: second router to bypass through. In "wan" mode the box keeps the uplink IP
+    #: as a router-admin alias (clients still reach the router admin page through
+    #: it), so the uplink subnet IS local, and the ARP gateway-lock is forced off
+    #: (no router on the client segment to lock against). The dashboard WAN
+    #: tab overrides this on the NEXT restart via the "topology_source"/"topology"
+    #: settings (the "bundle_source" pattern); the setup script writes the value
+    #: for QUOTA_TOPOLOGY.
+    topology: str = "lan"
+    #: The ARP gateway-lock value used when reverting from WAN to LAN (the
+    #: setup script enables it in LAN mode). Mirrors the ``lan_*`` dhcp keys —
+    #: the active ``gateway_arp_lock`` flips to False in WAN mode but the LAN
+    #: reality is preserved here.
+    lan_gateway_arp_lock: bool = True
 
 
 @dataclass
@@ -97,6 +119,22 @@ class WebConfig:
 
 
 @dataclass
+class ShapingConfig:
+    """Linux tc speed shaping (HTB + fq_codel)."""
+
+    enabled: bool = True
+    #: LAN interface to shape on. Empty => auto-detect (the NIC whose subnet
+    #: contains ``dhcp.gateway_ip``). On the single-NIC gateway this is the
+    #: same interface that carries the uplink + the client alias.
+    interface: str = ""
+    #: Client subnet (e.g. "192.168.2.0/24") whose ingress is redirected into
+    #: the ifb for upload shaping. Empty => derive from gateway_ip + subnet.
+    client_subnet: str = ""
+    #: ifb device used for the upload (ingress-redirect) tree.
+    ifb: str = "ifb0"
+
+
+@dataclass
 class Config:
     db_path: str = "data/quota.db"
     log_file: str = "logs/quota.log"
@@ -104,8 +142,8 @@ class Config:
     bundle: BundleConfig = field(default_factory=BundleConfig)
     dhcp: DhcpConfig = field(default_factory=DhcpConfig)
     engine: EngineConfig = field(default_factory=EngineConfig)
-    arp: ArpConfig = field(default_factory=ArpConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    shaping: ShapingConfig = field(default_factory=ShapingConfig)
     timezone: str = ""  # empty => system local timezone
 
 
@@ -136,9 +174,8 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
     cfg_path = Path(path or os.environ.get("QUOTA_CONFIG") or DEFAULT_CONFIG_PATH)
     if not cfg_path.exists():
         raise FileNotFoundError(
-            f"config file not found: {cfg_path}. Copy config.yaml (or "
-            "config-linux.yaml on the Linux gateway) to that path, or point "
-            "QUOTA_CONFIG at it.")
+            f"config file not found: {cfg_path}. Copy config.yaml to that "
+            "path, or point QUOTA_CONFIG at it.")
     data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
     cfg = Config()
     for section, value in (data or {}).items():
@@ -152,33 +189,3 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         else:
             setattr(cfg, section, value)
     return cfg
-
-
-def expand_ip_range(start: str, end: str) -> list[str]:
-    """Expand an IPv4 ``start..end`` range into a list of dotted-quad strings.
-
-    Raises :class:`ValueError` if ``end < start`` or either value is not a
-    valid IPv4 address. Used to build both the DHCP pool and the reserved
-    fallback range, so both are validated identically.
-    """
-    from ipaddress import ip_address
-    a = int(ip_address(start))
-    b = int(ip_address(end))
-    if b < a:
-        raise ValueError(f"IP range end {end} < start {start}")
-    return [str(ip_address(i)) for i in range(a, b + 1)]
-
-
-def detect_local_interface_ips() -> list[str]:
-    """Return this host's IPv4 addresses (used for self-identification)."""
-    ips: set[str] = set()
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None):
-            ip = info[4][0]
-            if ":" not in ip and not ip.startswith("127."):
-                ips.add(ip)
-    except OSError:
-        pass
-    if not ips:
-        ips.add("127.0.0.1")
-    return sorted(ips)
