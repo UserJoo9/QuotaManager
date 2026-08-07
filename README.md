@@ -53,9 +53,27 @@ tests, release process): [Structure_README.md](Structure_README.md).
 
 ## Installation
 
-You need an old laptop with **one wired Ethernet port**, powered 24/7, running
-**Kali or Debian**. The laptop becomes the gateway that every device routes
-through.
+You need a computer with **one wired Ethernet port**, powered 24/7, running
+**Kali or Debian** — an old laptop, a used mini PC, or a Raspberry Pi all
+work. It becomes the gateway that every device routes through.
+
+### No spare machine? Use the PC or laptop you already have (wired only)
+
+If you don't own a second computer, the gateway can run inside a **Debian
+virtual machine** on the PC or laptop you already use. Three things matter:
+
+- **A wired connection.** The machine must reach the router with an Ethernet
+  cable (a cheap USB-to-Ethernet adapter works). **WiFi will not work** — the
+  gateway must sit on the router's network at the hardware level, which a
+  wireless link can't provide.
+- **Bridged networking.** Set the VM's network adapter to *bridged* so it
+  appears on the router's network like a real computer.
+- **Always on.** The machine must stay running 24/7 — when it sleeps, shuts
+  down, or restarts, everyone loses internet.
+
+From there, follow the steps below as usual: the `.deb` installs *inside* the
+VM, and the whole gateway (routing, network stack, dashboard) runs there. This
+is also a great way to try Quota Manager before committing any hardware.
 
 ### 1. Install the package
 
