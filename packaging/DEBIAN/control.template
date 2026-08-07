@@ -1,5 +1,8 @@
 # Debian control file — rendered by .github/workflows/release.yml, which
 # substitutes the version from quota/version.py for __VERSION__.
+# NOTE: any comment line (starting with '#') here is STRIPPED by the render
+# step — Debian control files don't allow comments, so don't comment out a
+# field as a "disabled" placeholder: it would never reach the built .deb.
 Package: quota-manager
 Version: __VERSION__
 Section: net

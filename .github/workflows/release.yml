@@ -50,7 +50,9 @@ jobs:
       - name: Render the Debian control file
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          sed "s/__VERSION__/${VERSION}/g" packaging/DEBIAN/control.template > "${RUNNER_TEMP}/control"
+          # Strip the template's #-comment lines: Debian control files cannot
+          # contain comments, and dpkg-deb rejects any line starting with '#'.
+          sed -e "s/__VERSION__/${VERSION}/g" -e '/^#/d' packaging/DEBIAN/control.template > "${RUNNER_TEMP}/control"
           # A control file is not valid Debian without a changelog entry for the
           # version it ships; render one so metadata, changelog and .deb agree.
           # (printf, not a heredoc — a heredoc inside a workflow run block breaks
