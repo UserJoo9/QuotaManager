@@ -10,6 +10,7 @@ import pytest
 
 from core import timeutil
 from quota import db as _db
+from quota.engine import GATEWAY_MAC
 from quota.service import GB, QuotaService
 
 TZ = ZoneInfo("Africa/Cairo")
@@ -79,12 +80,14 @@ def test_allowances_all_auto_share_equally(database):
     async def scenario():
         d = await database()
         svc = QuotaService(d, timezone="Africa/Cairo")
-        # bundle 100 GB, 2 auto USERS -> 50 each
+        # bundle 100 GB, 2 auto USERS -> 49.5 each (the protected Gateway user
+        # is always seeded and takes 1.0 fixed off the top)
         await d.set_bundle(_db.Bundle(total_gb=100.0, reset_day=1))
         u1 = await d.create_user("A", _db.QUOTA_AUTO)
         u2 = await d.create_user("B", _db.QUOTA_AUTO)
+        gw = next(u for u in await d.list_users() if u.protected)
         allowances = await svc.compute_allowances()
-        assert allowances == {u1.id: 50.0, u2.id: 50.0}
+        assert allowances == {gw.id: 1.0, u1.id: 49.5, u2.id: 49.5}
         await d.close()
     run(scenario())
 
@@ -98,10 +101,10 @@ def test_allowances_fixed_then_remainder_to_auto(database):
         kid_a = await d.create_user("KidA", _db.QUOTA_AUTO)
         kid_b = await d.create_user("KidB", _db.QUOTA_AUTO)
         allowances = await svc.compute_allowances()
-        # remaining = 100 - 40 = 60 -> 30 each
+        # remaining = 100 - 40 - 1.0 (seeded Gateway) = 59 -> 29.5 each
         assert allowances[parent.id] == 40.0
-        assert allowances[kid_a.id] == 30.0
-        assert allowances[kid_b.id] == 30.0
+        assert allowances[kid_a.id] == 29.5
+        assert allowances[kid_b.id] == 29.5
         await d.close()
     run(scenario())
 
@@ -166,7 +169,8 @@ def test_block_when_usage_exceeds_allowance(database):
     async def scenario():
         d = await database()
         svc = QuotaService(d, timezone="Africa/Cairo")
-        await d.set_bundle(_db.Bundle(total_gb=1.0, reset_day=1))
+        # 2.0 GB so the auto user still gets 1.0 after the seeded Gateway's 1.0
+        await d.set_bundle(_db.Bundle(total_gb=2.0, reset_day=1))
         u = await d.create_user("A", _db.QUOTA_AUTO)
         dev = await d.upsert_device("AA:AA:AA:AA:AA:01", "A", user_id=u.id)
         await svc.open_period()  # allowance = 1 GB (single auto user)
@@ -217,7 +221,8 @@ def test_top_up_clears_quota_block(database):
     async def scenario():
         d = await database()
         svc = QuotaService(d, timezone="Africa/Cairo")
-        await d.set_bundle(_db.Bundle(total_gb=1.0, reset_day=1))
+        # 2.0 GB so the auto user still gets 1.0 after the seeded Gateway's 1.0
+        await d.set_bundle(_db.Bundle(total_gb=2.0, reset_day=1))
         u = await d.create_user("A", _db.QUOTA_AUTO)
         dev = await d.upsert_device("AA:AA:AA:AA:AA:01", "A", user_id=u.id)
         await svc.open_period()
@@ -505,7 +510,7 @@ def test_recharge_grows_bundle_and_auto_shares(database):
         auto2 = await d.create_user("Auto2", _db.QUOTA_AUTO)
         await svc.open_period()
         b = await d.get_bundle()
-        assert b.allowances[auto1.id] == 55.0  # (140-30)/2
+        assert b.allowances[auto1.id] == 54.5  # (140-30-1.0 Gateway)/2
         period_start_before = b.period_start
 
         # ISP re-charge adds 50 GB -> auto share grows, fixed untouched
@@ -514,8 +519,8 @@ def test_recharge_grows_bundle_and_auto_shares(database):
         assert b.total_gb == 190.0
         assert result["added_gb"] == 50.0
         assert b.allowances[fixed.id] == 30.0       # fixed unchanged
-        assert b.allowances[auto1.id] == 80.0       # (190-30)/2
-        assert b.allowances[auto2.id] == 80.0
+        assert b.allowances[auto1.id] == 79.5       # (190-30-1.0 Gateway)/2
+        assert b.allowances[auto2.id] == 79.5
         assert b.period_start == period_start_before            # period NOT rolled
         await d.close()
     run(scenario())
@@ -622,7 +627,8 @@ def test_guest_is_a_fixed_user_with_own_allowance(database):
         await svc.recompute_allowances()  # now the guest is in the period
         allowances = (await d.get_bundle()).allowances
         assert allowances[g.id] == 1.0        # guest takes its own slice
-        assert allowances[auto.id] == 99.0    # auto gets the remainder
+        # auto = 100 - 1.0 guest - 1.0 seeded Gateway = 98.0
+        assert allowances[auto.id] == 98.0
         await d.close()
     run(scenario())
 
@@ -657,14 +663,16 @@ def test_reset_month_deletes_guest_users(database):
         await d.upsert_device("AA:AA:AA:AA:AA:71", "Phone", user_id=g.id)
         await d.create_user("Dad", _db.QUOTA_FIXED, 20.0)
         await svc.recompute_allowances()
-        assert len(await d.list_users()) == 2       # guest present before reset
+        # guest + Dad + the always-seeded protected Gateway user
+        assert len(await d.list_users()) == 3
 
         await svc.reset_month()
         users = await d.list_users()
-        assert [u.name for u in users] == ["Dad"]       # guest wiped, Dad kept
-        # the guest's device went with it (cascade)
+        # guest wiped; Dad + the protected Gateway user remain (name-sorted)
+        assert [u.name for u in users] == ["Dad", "Gateway"]
+        # the guest's device went with it (cascade); the Gateway device remains
         devs = await d.list_devices()
-        assert [dev.mac for dev in devs] == []
+        assert [dev.mac for dev in devs] == [GATEWAY_MAC]
         await d.close()
     run(scenario())
 
@@ -680,13 +688,14 @@ def test_open_period_deletes_guest_users_on_roll(database):
         g = await d.create_user("", _db.QUOTA_FIXED, 1.0, guest=True)
         await d.upsert_device("AA:AA:AA:AA:AA:72", "Phone", user_id=g.id)
         await svc.recompute_allowances()
-        assert len(await d.list_users()) == 1       # guest lives in July
+        # guest + the always-seeded protected Gateway user
+        assert len(await d.list_users()) == 2
 
         # roll into August (open_period deletes the guests of the old period)
         svc._clock = make_clock(_dt.datetime(2026, 8, 1, 0, 5, tzinfo=TZ))
         await svc.ensure_period()
-        assert await d.list_users() == []               # guest gone
-        assert await d.list_devices() == []             # cascade removed the device
+        assert [u.name for u in await d.list_users()] == ["Gateway"]  # guest gone
+        assert [dev.mac for dev in await d.list_devices()] == [GATEWAY_MAC]
         await d.close()
     run(scenario())
 
@@ -727,9 +736,211 @@ def test_user_topup_aggregates(database):
 
         result = await svc.top_up_user(u.id, 5.0)
         assert result is not None
-        assert result["allowance_gb"] >= 15.0
+        # 9.0 auto share (10 - 1.0 seeded Gateway) + 5.0 top-up = 14.0
+        assert result["allowance_gb"] >= 14.0
         # quota fan-out cleared on ALL of the user's devices
         for dev in await d.list_devices():
             assert dev.block_state == _db.BLOCK_OK
+        await d.close()
+    run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# protected "Gateway" user: box accounting + 0-allowance cuts the box
+# ---------------------------------------------------------------------------
+
+def test_quota_blocked_for_protected_zero_allowance(database):
+    """A PROTECTED user (the Gateway account) is blocked once usage reaches its
+    allowance — even at 0. That is the product rule: setting the Gateway to 0
+    GB cuts the box's own internet while clients keep working."""
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        gw_user = next(u for u in await d.list_users()
+                       if getattr(u, "protected", False))
+        # protected + 0 allowance -> blocked at ANY usage (even 0 bytes)
+        assert svc.quota_blocked_for(gw_user, 0.0, 0.0) is True
+        assert svc.quota_blocked_for(gw_user, 0.0, 5.0) is True
+        # protected + a real allowance -> blocked once reached
+        assert svc.quota_blocked_for(gw_user, 1.0, 0.5) is False
+        assert svc.quota_blocked_for(gw_user, 1.0, 1.0) is True
+        # a NORMAL user with 0 allowance stays UNMETERED (never auto-blocked)
+        normal = await d.create_user("Dad", _db.QUOTA_AUTO)
+        assert svc.quota_blocked_for(normal, 0.0, 100.0) is False
+        assert svc.quota_blocked_for(normal, 5.0, 6.0) is True
+        await d.close()
+    run(scenario())
+
+
+def test_is_setup_complete_ignores_gateway_user(database):
+    """A fresh install (only the seeded protected Gateway user) is NOT setup-
+    complete — the welcome panel must show. Any non-protected user flips it."""
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        # only the seeded Gateway user exists
+        assert [u.name for u in await d.list_users()] == ["Gateway"]
+        assert await svc.is_setup_complete() is False
+        # adding any normal user completes setup
+        await d.create_user("Dad", _db.QUOTA_FIXED, 20.0)
+        assert await svc.is_setup_complete() is True
+        await d.close()
+    run(scenario())
+
+
+def test_gateway_usage_counts_inside_quota_math(database):
+    """The box's own traffic (via its device) flows into total usage and its
+    fixed allowance takes its slice off the top — the machine is INSIDE the
+    quota calculations, not invisible."""
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        await d.set_bundle(_db.Bundle(total_gb=50.0, reset_day=1))
+        await svc.open_period()
+        gw_user = next(u for u in await d.list_users()
+                       if getattr(u, "protected", False))
+        auto = await d.create_user("Kid", _db.QUOTA_AUTO)
+        await svc.recompute_allowances()
+        # 50 - 1.0 (Gateway) = 49.0 auto share
+        assert (await d.get_bundle()).allowances[auto.id] == 49.0
+        # box usage is charged to its own device
+        box = await d.get_device(mac=GATEWAY_MAC)
+        await d.add_usage(box.id, "2026-08-01", int(0.4 * GB), 0)
+        await svc.evaluate_blocks()
+        # 0.4 GB used of 1.0 -> box not quota-blocked yet
+        assert svc.quota_blocked_for(gw_user, 1.0, 0.4) is False
+        await d.close()
+    run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# milestone notifications (page-only, per-user)
+# ---------------------------------------------------------------------------
+
+def _fixed_user_with_usage(d, svc, name, allowance_gb, used_gb):
+    """Create a fixed user + one device, record `used_gb` of usage today.
+
+    ``svc.recompute_allowances()`` after creating the user so their allowance
+    is in the snapshot (``open_period`` computed it before they existed).
+    Usage must land ON the current period — a hardcoded date would fall
+    before ``period_start`` and never count.
+    """
+    async def _inner():
+        today = _dt.datetime.now(TZ).date().isoformat()
+        u = await d.create_user(name, _db.QUOTA_FIXED, allowance_gb)
+        dev = await d.upsert_device(
+            f"de:ad:be:ef:{len(name):02x}:01", name=name, user_id=u.id)
+        await d.add_usage(dev.id, today, int(used_gb * GB), 0)
+        await svc.recompute_allowances()
+        return u, dev
+    return _inner
+
+
+def test_milestone_state_crosses_and_once_only(database):
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        await d.set_bundle(_db.Bundle(total_gb=100.0, reset_day=1))
+        await svc.open_period()
+        # 40 GB fixed allowance, used 52% of it
+        u, _ = await _fixed_user_with_usage(d, svc, "Mom", 40.0, 20.8)()
+        ms = await svc.milestone_state()
+        assert u.id in ms
+        state = ms[u.id]["milestones"]
+        assert state[50]["crossed"] is True
+        assert state[50]["pending"] is True
+        assert state[75]["crossed"] is False
+        assert state[100]["crossed"] is False
+
+        # acknowledge 50% -> once-only: not pending anymore, stays notified
+        await svc.mark_milestone_notified(u.id, 50)
+        ms = await svc.milestone_state()
+        assert ms[u.id]["milestones"][50]["notified"] is True
+        assert ms[u.id]["milestones"][50]["pending"] is False
+        await d.close()
+    run(scenario())
+
+
+def test_milestone_state_75_pending_after_50_notified(database):
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        await d.set_bundle(_db.Bundle(total_gb=100.0, reset_day=1))
+        await svc.open_period()
+        # 80% of a 50 GB allowance
+        u, _ = await _fixed_user_with_usage(d, svc, "Dad", 50.0, 40.0)()
+        await svc.mark_milestone_notified(u.id, 50)
+        ms = await svc.milestone_state()
+        m = ms[u.id]["milestones"]
+        assert m[50]["notified"] is True      # stays notified
+        assert m[75]["crossed"] is True
+        assert m[75]["pending"] is True       # new threshold surfaced
+        assert m[100]["pending"] is False
+        await d.close()
+    run(scenario())
+
+
+def test_milestone_state_skips_protected_gateway_user(database):
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        await d.set_bundle(_db.Bundle(total_gb=100.0, reset_day=1))
+        await svc.open_period()
+        gw = next(u for u in await d.list_users()
+                  if getattr(u, "protected", False))
+        ms = await svc.milestone_state()
+        assert gw.id not in ms   # the box's own usage is the admin's concern
+        await d.close()
+    run(scenario())
+
+
+def test_milestone_100_crossed_and_pending(database):
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        await d.set_bundle(_db.Bundle(total_gb=100.0, reset_day=1))
+        await svc.open_period()
+        u, _ = await _fixed_user_with_usage(d, svc, "Kid", 10.0, 12.0)()  # 120%
+        ms = await svc.milestone_state()
+        m = ms[u.id]["milestones"]
+        assert all(m[th]["crossed"] and m[th]["pending"] for th in (50, 75, 100))
+        await d.close()
+    run(scenario())
+
+
+def test_milestone_flags_reset_on_period_open(database):
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        await d.set_bundle(_db.Bundle(total_gb=100.0, reset_day=1))
+        await svc.open_period()
+        u, _ = await _fixed_user_with_usage(d, svc, "Sis", 30.0, 24.0)()  # 80%
+        await svc.mark_milestone_notified(u.id, 50)
+        await svc.mark_milestone_notified(u.id, 75)
+        u = await d.get_user(u.id)
+        assert u.notified_50 is True and u.notified_75 is True
+
+        # period roll re-arms every flag
+        await svc.open_period()
+        u = await d.get_user(u.id)
+        assert u.notified_50 is False
+        assert u.notified_75 is False
+        assert u.notified_100 is False
+        await d.close()
+    run(scenario())
+
+
+def test_milestone_mark_invalid_value_raises(database):
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        await d.set_bundle(_db.Bundle(total_gb=100.0, reset_day=1))
+        await svc.open_period()
+        u = await d.create_user("Test", _db.QUOTA_FIXED, 10.0)
+        try:
+            await svc.mark_milestone_notified(u.id, 37)
+            raise AssertionError("expected ValueError for milestone 37")
+        except ValueError:
+            pass
         await d.close()
     run(scenario())

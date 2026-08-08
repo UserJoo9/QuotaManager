@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.app import create_app
+from core.config import ReportConfig
 from quota import db as _db
 from quota.engine import EngineSnapshot, RogueHost, SnapshotHolder
 from quota.service import GB, QuotaService
@@ -68,12 +69,13 @@ def test_device_crud_and_dashboard(client):
     dev_id = r.json()["id"]
     assert r.json()["user_id"] is not None  # auto-created a user for the device
 
-    # dashboard should list it (owned by an auto-created user)
+    # dashboard should list it (owned by an auto-created user). The gateway
+    # box's own protected user + device are always seeded alongside.
     r = c.get("/api/dashboard")
     data = r.json()
-    assert data["total_devices"] == 1
-    assert data["total_users"] == 1
-    dev = data["devices"][0]
+    assert data["total_devices"] == 2
+    assert data["total_users"] == 2
+    dev = next(d for d in data["devices"] if d["id"] == dev_id)
     assert dev["name"] == "Phone"
     assert dev["allowance_gb"] == 20.0
     assert dev["blocked"] is False
@@ -109,7 +111,8 @@ def test_device_crud_and_dashboard(client):
     # delete
     r = c.delete(f"/api/devices/{dev_id}")
     assert r.status_code == 200
-    assert c.get("/api/dashboard").json()["total_devices"] == 0
+    # only the gateway box's own device remains
+    assert c.get("/api/dashboard").json()["total_devices"] == 1
 
 
 def test_network_and_user_speed_caps(client):
@@ -176,7 +179,8 @@ def test_topup_clears_block(client):
     r = c.post("/api/devices", json={"mac": "aa:bb:cc:dd:ee:01",
                                      "quota_mode": "auto"})
     dev_id = r.json()["id"]
-    # use more than allowance (bundle default 140, one auto device -> 140)
+    # use more than allowance (bundle default 140, the protected Gateway user
+    # takes 1.0 fixed off the top, so one auto device -> 139)
     # simulate usage directly in DB
     import asyncio
     async def _add():
@@ -189,7 +193,7 @@ def test_topup_clears_block(client):
 
     r = c.post(f"/api/devices/{dev_id}/topup", json={"extra_gb": 20})
     assert r.status_code == 200
-    assert r.json()["allowance_gb"] >= 160
+    assert r.json()["allowance_gb"] >= 159
 
     r = c.get("/api/dashboard")
     assert r.json()["blocked_count"] == 0
@@ -217,7 +221,8 @@ def test_usage_series(client):
 def test_bundle_recharge_grows_total(client):
     c, db, _ = client
     _login(c)
-    # one auto device: share = 140 at first
+    # one auto device: share = 139 at first (the protected Gateway user takes
+    # 1.0 fixed off the top)
     r = c.post("/api/devices", json={"mac": "aa:bb:cc:dd:ee:03",
                                      "quota_mode": "auto"})
     assert r.status_code == 201
@@ -237,7 +242,7 @@ def test_bundle_recharge_grows_total(client):
 
     b = c.get("/api/bundle").json()
     assert b["total_gb"] == 190.0
-    assert b["allowances"][str(user_id)] == 190.0  # auto share grew
+    assert b["allowances"][str(user_id)] == 189.0  # auto share grew (Gateway keeps 1.0)
 
     dash = c.get("/api/dashboard").json()
     assert dash["bundle"]["remaining_gb"] == pytest.approx(190.0)
@@ -407,8 +412,9 @@ def test_user_crud_and_block(client):
                                  "user_id": uid})
 
     dash = c.get("/api/dashboard").json()
-    assert dash["total_users"] == 1 and dash["total_devices"] == 2
-    u = dash["users"][0]
+    # the protected Gateway user + its device are always seeded alongside
+    assert dash["total_users"] == 2 and dash["total_devices"] == 3
+    u = next(u for u in dash["users"] if u["id"] == uid)
     assert u["name"] == "Dad"
     assert u["allowance_gb"] == 20.0
     assert len(u["devices"]) == 2
@@ -418,22 +424,25 @@ def test_user_crud_and_block(client):
     assert r.status_code == 200
     assert c.get("/api/dashboard").json()["blocked_count"] == 2
     # resolved, not persisted: the device row reports the user cut
-    assert c.get("/api/devices").json()[0]["block_state"] == "admin_off"
+    d = c.get("/api/devices").json()
+    assert next(x for x in d if x["user_id"] == uid)["block_state"] == "admin_off"
 
     c.patch(f"/api/users/{uid}", json={"block": False})
     assert c.get("/api/dashboard").json()["blocked_count"] == 0
 
     # rename
     c.patch(f"/api/users/{uid}", json={"name": "Dad ✱"})
-    assert c.get("/api/dashboard").json()["users"][0]["name"] == "Dad ✱"
+    assert next(u for u in c.get("/api/dashboard").json()["users"]
+                if u["id"] == uid)["name"] == "Dad ✱"
 
     # delete cascades: user + both devices
     r = c.delete(f"/api/users/{uid}")
     assert r.status_code == 200
     assert r.json()["devices_removed"] == 2
     dash = c.get("/api/dashboard").json()
-    assert dash["total_devices"] == 0
-    assert dash["total_users"] == 0
+    # only the protected Gateway user + device remain
+    assert dash["total_devices"] == 1
+    assert dash["total_users"] == 1
 
 
 def test_user_topup_via_api(client):
@@ -442,7 +451,8 @@ def test_user_topup_via_api(client):
     uid = c.post("/api/users", json={"name": "Kid", "quota_mode": "auto"}).json()["id"]
     dev_id = c.post("/api/devices", json={"mac": "aa:bb:cc:dd:ee:43",
                                           "user_id": uid}).json()["id"]
-    # use more than the user's allowance (bundle 140, one auto user -> 140)
+    # use more than the user's allowance (bundle 140, one auto user -> 139;
+    # the protected Gateway user takes 1.0 fixed off the top)
     import asyncio
     async def _add():
         await db.add_usage(dev_id, "2026-08-01", int(150 * GB), 0)
@@ -452,7 +462,7 @@ def test_user_topup_via_api(client):
 
     r = c.post(f"/api/users/{uid}/topup", json={"extra_gb": 20})
     assert r.status_code == 200
-    assert r.json()["allowance_gb"] >= 160
+    assert r.json()["allowance_gb"] >= 159
     assert c.get("/api/dashboard").json()["blocked_count"] == 0
 
 
@@ -495,8 +505,10 @@ def test_device_bypass_and_quota_edit_via_api(client):
     # a device-card quota edit forwards to the owning USER
     c.patch(f"/api/devices/{d1}", json={"fixed_gb": 200, "quota_mode": "fixed"})
     dash = c.get("/api/dashboard").json()
+    # (the protected Gateway device belongs to the Gateway user, not A)
     for dv in dash["devices"]:
-        assert dv["allowance_gb"] == 200.0
+        if dv["user_id"] == uid:
+            assert dv["allowance_gb"] == 200.0
     assert dash["blocked_count"] == 0
 
 
@@ -530,7 +542,8 @@ def test_device_consumption_is_per_device(client):
     assert by_mac["aa:bb:cc:dd:ee:61"]["used_gb"] == pytest.approx(6.0)
     assert by_mac["aa:bb:cc:dd:ee:62"]["used_gb"] == pytest.approx(6.0)
     # ...and the per-user bar reports the same aggregate
-    assert dash["users"][0]["used_gb"] == pytest.approx(6.0)
+    # (find Dad by id — the protected Gateway user is seeded first)
+    assert next(u for u in dash["users"] if u["id"] == uid)["used_gb"] == pytest.approx(6.0)
 
 
 def test_guest_defaults(client):
@@ -575,7 +588,8 @@ def test_guest_quota_updates_existing_guest(client):
     guest = next(u for u in dash["users"] if u["guest"])
     assert guest["name"] == ""            # guest users have no name
     assert guest["allowance_gb"] == 3.0   # existing guest updated immediately
-    assert dash["devices"][0]["guest"] is True
+    by_mac = {d["mac"]: d for d in dash["devices"]}
+    assert by_mac["aa:bb:cc:dd:ee:91"]["guest"] is True
 
 
 def test_guest_and_connected_flags_in_views(client):
@@ -598,7 +612,8 @@ def test_guest_and_connected_flags_in_views(client):
     assert by_mac["aa:bb:cc:dd:ee:92"]["connected"] is True
     assert by_mac["aa:bb:cc:dd:ee:92"]["guest"] is True
     assert by_mac["aa:bb:cc:dd:ee:93"]["connected"] is False
-    assert all(u["guest"] for u in dash["users"])
+    # every non-protected user is a guest (the Gateway user is protected)
+    assert all(u["guest"] for u in dash["users"] if not u["protected"])
 
 
 def test_reset_month_deletes_guests(client):
@@ -615,12 +630,14 @@ def test_reset_month_deletes_guests(client):
         await db.upsert_device("aa:bb:cc:dd:ee:95", name="Phone", user_id=n.id)
     asyncio.get_event_loop().run_until_complete(_seed())
 
-    assert c.get("/api/dashboard").json()["total_users"] == 2
+    # guest + Dad + the always-seeded protected Gateway user
+    assert c.get("/api/dashboard").json()["total_users"] == 3
     r = c.post("/api/reset-month")
     assert r.status_code == 200, r.text
     dash = c.get("/api/dashboard").json()
-    assert dash["total_users"] == 1
-    assert dash["users"][0]["name"] == "Dad"
+    # the guest is gone; Dad + the protected Gateway user remain
+    assert dash["total_users"] == 2
+    assert next(u for u in dash["users"] if not u["protected"])["name"] == "Dad"
     assert all(not u["guest"] for u in dash["users"])
 
 
@@ -982,4 +999,391 @@ def test_logs_endpoint_tails_file(tmp_path):
         assert "ERROR" in full["lines"][0]
         tail = c.get("/api/logs?limit=2").json()
         assert len(tail["lines"]) == 2 and tail["truncated"] is True
+    asyncio.get_event_loop().run_until_complete(database.close())
+
+
+# ---------------------------------------------------------------------------
+# protected "Gateway" user + guest-deletion suppression (v20)
+# ---------------------------------------------------------------------------
+
+def test_gateway_user_seeded_and_protected(client):
+    """connect() seeds a protected Gateway user + the box's device: the user
+    can be edited (allowance, block) but never deleted, and its device is
+    marked ``gateway`` with an empty vendor (the sentinel MAC resolves to
+    "XEROX CORPORATION" in oui.txt otherwise)."""
+    c, _, _ = client
+    _login(c)
+    dash = c.get("/api/dashboard").json()
+    gwu = next(u for u in dash["users"] if u.get("protected"))
+    assert gwu["name"] == "Gateway"
+    assert gwu["guest"] is False
+    assert gwu["allowance_gb"] == 1.0
+    gwd = next(d for d in dash["devices"] if d.get("gateway"))
+    assert gwd["mac"] == "00:00:00:00:00:00"
+    assert gwd["vendor"] == ""
+    assert gwd["name"] == "Gateway box"
+
+    # the protected user cannot be deleted
+    r = c.delete(f"/api/users/{gwu['id']}")
+    assert r.status_code == 400, r.text
+    # ...but its allowance can be dropped to 0 (cuts the box's own internet)
+    r = c.patch(f"/api/users/{gwu['id']}", json={"fixed_gb": 0})
+    assert r.status_code == 200
+    assert next(u for u in c.get("/api/dashboard").json()["users"]
+                if u.get("protected"))["allowance_gb"] == 0.0
+
+
+def test_gateway_payload_reports_desired_vs_programmed_block(client):
+    """The dashboard's ``gateway`` object separates the box's DESIRED block
+    (the Gateway user's resolved state) from what the engine actually pushed
+    to the kernel (blocked_programmed / engine_available). This is what lets
+    the UI show "Blocked but NOT cut at the kernel" — the exact failure the
+    user hit — instead of silently claiming enforcement."""
+    c, _, _ = client
+    _login(c)
+    dash = c.get("/api/dashboard").json()
+    gwu = next(u for u in dash["users"] if u.get("protected"))
+    # holder is a bare SnapshotHolder -> engine state is the default
+    # (gateway_blocked=None = never programmed, engine_available=True).
+    assert dash["gateway"]["blocked_desired"] is False
+    assert dash["gateway"]["blocked_programmed"] is None
+    assert dash["gateway"]["engine_available"] is True
+
+    # Block the box in the UI (user-level admin cut, resolved at render time).
+    assert c.patch(f"/api/users/{gwu['id']}", json={"block": True}).status_code == 200
+    dash = c.get("/api/dashboard").json()
+    assert dash["gateway"]["blocked_desired"] is True
+    # ...but the engine never programmed the set -> the UI would show a warning.
+    assert dash["gateway"]["blocked_programmed"] is None
+
+
+def test_gateway_payload_engine_programmed_but_ui_free(tmp_path):
+    """A programmed cut with a free UI toggle: the box is cut at the kernel
+    even though the Gateway user card reads unblocked — the reconciliation
+    (desired False vs programmed True) is the reverse of the stale-engine
+    case and is surfaced the same way."""
+    import asyncio
+    database = _db.Database(tmp_path / "gw.db")
+    holder = SnapshotHolder()
+    holder.swap(EngineSnapshot(gateway_blocked=True, engine_available=True))
+    service = QuotaService(database, timezone="Africa/Cairo")
+    asyncio.get_event_loop().run_until_complete(database.connect())
+    app = create_app(database, service, holder)
+    try:
+        with TestClient(app) as c:
+            _login(c)
+            dash = c.get("/api/dashboard").json()
+            assert dash["gateway"]["blocked_desired"] is False
+            assert dash["gateway"]["blocked_programmed"] is True
+            assert dash["gateway"]["engine_available"] is True
+    finally:
+        asyncio.get_event_loop().run_until_complete(database.close())
+
+
+def test_gateway_device_cannot_be_recreated_or_reassigned(client):
+    """The box's sentinel MAC is reserved: no create, no reassign to a user."""
+    c, _, _ = client
+    _login(c)
+    r = c.post("/api/devices", json={"mac": "00:00:00:00:00:00"})
+    assert r.status_code == 400, r.text
+    dash = c.get("/api/dashboard").json()
+    gwd = next(d for d in dash["devices"] if d.get("gateway"))
+    u2 = c.post("/api/users", json={"name": "Dad"}).json()["id"]
+    r = c.patch(f"/api/devices/{gwd['id']}", json={"user_id": u2})
+    assert r.status_code == 400, r.text
+    # deleting the box's device is also refused (the user owns it)
+    r = c.delete(f"/api/devices/{gwd['id']}")
+    assert r.status_code == 400, r.text
+
+
+def test_delete_guest_device_suppresses_re_registration(client):
+    """A manual DELETE of a guest device records its MAC so run.py never
+    auto-registers it again while it stays connected."""
+    import asyncio
+    c, db, _ = client
+    _login(c)
+    g = asyncio.get_event_loop().run_until_complete(db.create_user(
+        name="", quota_mode=_db.QUOTA_FIXED, fixed_gb=1.0, guest=True))
+    dev = asyncio.get_event_loop().run_until_complete(db.upsert_device(
+        "aa:bb:cc:dd:ee:99", name="Phone", user_id=g.id))
+    assert asyncio.get_event_loop().run_until_complete(
+        db.is_mac_suppressed("aa:bb:cc:dd:ee:99")) is False
+
+    r = c.delete(f"/api/devices/{dev.id}")
+    assert r.status_code == 200, r.text
+    assert asyncio.get_event_loop().run_until_complete(
+        db.is_mac_suppressed("aa:bb:cc:dd:ee:99")) is True
+
+
+def test_delete_guest_user_suppresses_its_macs(client):
+    """Deleting a guest USER suppresses every device MAC it owned."""
+    import asyncio
+    c, db, _ = client
+    _login(c)
+    g = asyncio.get_event_loop().run_until_complete(db.create_user(
+        name="", quota_mode=_db.QUOTA_FIXED, fixed_gb=1.0, guest=True))
+    asyncio.get_event_loop().run_until_complete(db.upsert_device(
+        "aa:bb:cc:dd:ee:98", user_id=g.id))
+    r = c.delete(f"/api/users/{g.id}")
+    assert r.status_code == 200, r.text
+    assert asyncio.get_event_loop().run_until_complete(
+        db.is_mac_suppressed("aa:bb:cc:dd:ee:98")) is True
+
+
+def test_delete_normal_user_does_not_suppress(client):
+    """Only GUEST deletions suppress MACs — a normal user's device re-joins
+    normally if its MAC comes back."""
+    import asyncio
+    c, db, _ = client
+    _login(c)
+    u = asyncio.get_event_loop().run_until_complete(db.create_user(
+        name="Dad", quota_mode=_db.QUOTA_FIXED, fixed_gb=20.0))
+    asyncio.get_event_loop().run_until_complete(db.upsert_device(
+        "aa:bb:cc:dd:ee:97", name="Phone", user_id=u.id))
+    r = c.delete(f"/api/users/{u.id}")
+    assert r.status_code == 200, r.text
+    assert asyncio.get_event_loop().run_until_complete(
+        db.is_mac_suppressed("aa:bb:cc:dd:ee:97")) is False
+    # the device is gone but the MAC was not suppressed
+    assert asyncio.get_event_loop().run_until_complete(
+        db.get_device(mac="aa:bb:cc:dd:ee:97")) is None
+
+
+def test_speed_cap_edit_triggers_immediate_shaping_sync(tmp_path):
+    """A Network-tab save or a device/user cap edit schedules an immediate
+    shaper re-sync — the tc tree changes in the kernel right away instead of
+    waiting up to 15 s for the next maintenance tick (the "needs a page
+    refresh" lag)."""
+    import asyncio
+    import time
+    database = _db.Database(tmp_path / "api.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    asyncio.get_event_loop().run_until_complete(database.connect())
+
+    fired = []
+
+    async def fake_sync():
+        fired.append("sync")
+
+    app = create_app(database, service, holder, shaping_sync=fake_sync)
+    with TestClient(app) as c:
+        _login(c)
+        # every speed-affecting write must schedule a kernel re-sync:
+        # 1 network settings save
+        r = c.post("/api/network", json={"enabled": True, "total_down_mbps": 100})
+        assert r.status_code == 200
+        # 2 + 3 two device creates (each carries caps)
+        d1 = c.post("/api/devices", json={"mac": "aa:bb:cc:dd:ee:01",
+                                          "name": "Phone",
+                                          "quota_mode": "fixed",
+                                          "fixed_gb": 10.0}).json()["id"]
+        c.post("/api/devices", json={"mac": "aa:bb:cc:dd:ee:02",
+                                     "name": "Tablet",
+                                     "quota_mode": "fixed",
+                                     "fixed_gb": 10.0})
+        # 4 a device cap edit
+        assert c.patch(f"/api/devices/{d1}",
+                       json={"limit_down_mbps": 2}).status_code == 200
+        # 5 a user create carrying an aggregate cap
+        uid = c.post("/api/users", json={"name": "Mom", "quota_mode": "auto",
+                                         "limit_down_mbps": 50}).json()["id"]
+        # 6 a user cap edit
+        assert c.patch(f"/api/users/{uid}",
+                       json={"limit_up_mbps": 10}).status_code == 200
+
+        # create_task is fire-and-forget on the portal loop; give it a moment
+        # to drain before asserting (the HTTP responses return first).
+        deadline = time.monotonic() + 2
+        while len(fired) < 6 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(fired) >= 6, fired
+
+    asyncio.get_event_loop().run_until_complete(database.close())
+
+
+
+# ---------------------------------------------------------------------------
+# milestone page (public, on-demand) + source-IP-gated report
+# ---------------------------------------------------------------------------
+
+def _client_from(app, ip):
+    """A TestClient that presents ``ip`` as its source address — sets
+    ``request.client.host`` for the report/milestone IP logic."""
+    return TestClient(app, client=(ip, 50000))
+
+
+def _seed_milestone_user(d, svc, name, allowance_gb, used_gb, ip):
+    """Fixed user + one device with a DHCP lease at ``ip`` + `used_gb` today."""
+    from zoneinfo import ZoneInfo as _ZI
+    from datetime import datetime as _dt
+    TZ2 = _ZI("Africa/Cairo")
+    async def _inner():
+        await d.set_bundle(_db.Bundle(total_gb=100.0, reset_day=1))
+        await svc.open_period()
+        u = await d.create_user(name, _db.QUOTA_FIXED, allowance_gb)
+        dev = await d.upsert_device(f"de:ad:be:ef:{abs(hash(name)) % 0xffff:04x}",
+                                    name="Phone", user_id=u.id)
+        await svc.recompute_allowances()
+        today = _dt.now(TZ2).date().isoformat()
+        await d.add_usage(dev.id, today, int(used_gb * GB), 0)
+        await d.set_lease(dev.mac, ip)
+        return u, dev
+    return _inner
+
+
+def test_milestone_api_public_from_leased_device(tmp_path):
+    """GET /api/milestone needs no session: the device's source IP resolves to
+    its user and the payload carries the per-device breakdown."""
+    import asyncio
+    database = _db.Database(tmp_path / "ms.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    asyncio.get_event_loop().run_until_complete(database.connect())
+    asyncio.get_event_loop().run_until_complete(
+        _seed_milestone_user(database, service, "Mom", 40.0, 20.8,
+                             "192.168.2.55")())
+    app = create_app(database, service, holder)
+    with _client_from(app, "192.168.2.55") as c:
+        r = c.get("/api/milestone")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["recognized"] is True
+        assert data["user"]["name"] == "Mom"
+        assert data["user"]["percent"] > 50
+        # JSON serializes int keys to strings: "50"/"75"/"100"
+        ms = data["user"]["milestones"]
+        assert ms["50"]["crossed"] is True
+        assert ms["50"]["pending"] is True
+        assert ms["75"]["crossed"] is False
+        # per-device breakdown has the exact bytes
+        assert len(data["devices"]) == 1
+        dv = data["devices"][0]
+        assert dv["name"] == "Phone"
+        assert dv["device_used_gb"] > 20 and dv["device_used_gb"] < 21
+    asyncio.get_event_loop().run_until_complete(database.close())
+
+
+def test_milestone_api_unrecognized_ip(tmp_path):
+    """A device with no lease gets a friendly 'unrecognized' payload, not an
+    error."""
+    import asyncio
+    database = _db.Database(tmp_path / "ms.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    asyncio.get_event_loop().run_until_complete(database.connect())
+    app = create_app(database, service, holder)
+    with _client_from(app, "192.168.2.99") as c:
+        data = c.get("/api/milestone").json()
+        assert data["recognized"] is False
+        assert data["user"] is None
+    asyncio.get_event_loop().run_until_complete(database.close())
+
+
+def test_milestone_notify_marks_once(tmp_path):
+    """POST /api/milestone/notify (no session) acknowledges a pending milestone;
+    a re-read shows it notified + no longer pending."""
+    import asyncio
+    database = _db.Database(tmp_path / "ms.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    asyncio.get_event_loop().run_until_complete(database.connect())
+    user, _ = asyncio.get_event_loop().run_until_complete(
+        _seed_milestone_user(database, service, "Mom", 40.0, 20.8,
+                             "192.168.2.55")())
+    app = create_app(database, service, holder)
+    with _client_from(app, "192.168.2.55") as c:
+        assert c.post("/api/milestone/notify",
+                      json={"user_id": user.id,
+                            "milestone": 50}).status_code == 200
+        data = c.get("/api/milestone").json()
+        assert data["user"]["milestones"]["50"]["notified"] is True
+        assert data["user"]["milestones"]["50"]["pending"] is False
+    asyncio.get_event_loop().run_until_complete(database.close())
+
+
+def test_milestone_page_is_public(tmp_path):
+    """GET /milestone serves the HTML page with no session cookie."""
+    import asyncio
+    database = _db.Database(tmp_path / "ms.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    asyncio.get_event_loop().run_until_complete(database.connect())
+    app = create_app(database, service, holder)
+    with _client_from(app, "192.168.2.55") as c:
+        r = c.get("/milestone")
+        assert r.status_code == 200
+        assert "text/html" in r.headers["content-type"]
+        assert b"Quota" in r.content
+    asyncio.get_event_loop().run_until_complete(database.close())
+
+
+def test_report_gated_by_source_ip(tmp_path):
+    """/api/report: client-subnet IP -> 200, outside IP -> 403, explicit
+    allow-list entry -> 200."""
+    import asyncio
+    database = _db.Database(tmp_path / "rep.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    asyncio.get_event_loop().run_until_complete(database.connect())
+    app = create_app(database, service, holder,
+                     report_config=ReportConfig(
+                         enabled=True, allow_client_subnet=True,
+                         allowed_ips=["192.168.1.10"],
+                         client_subnet="192.168.2.0/24"))
+
+    # managed client subnet admitted
+    with _client_from(app, "192.168.2.77") as c:
+        r = c.get("/api/report")
+        assert r.status_code == 200
+        data = r.json()
+        assert "bundle" in data and "users" in data and "logs" in data
+        assert "events" in data
+
+    # explicit allow-list entry admitted (not on the client subnet)
+    with _client_from(app, "192.168.1.10") as c:
+        assert c.get("/api/report").status_code == 200
+
+    # anything else is denied
+    with _client_from(app, "8.8.8.8") as c:
+        assert c.get("/api/report").status_code == 403
+    asyncio.get_event_loop().run_until_complete(database.close())
+
+
+def test_report_page_respects_gate(tmp_path):
+    """GET /report HTML page: allowed source -> 200 text/html, outside -> 403."""
+    import asyncio
+    database = _db.Database(tmp_path / "rep.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    asyncio.get_event_loop().run_until_complete(database.connect())
+    app = create_app(database, service, holder,
+                     report_config=ReportConfig(
+                         enabled=True, allow_client_subnet=True,
+                         allowed_ips=[], client_subnet="192.168.2.0/24"))
+    with _client_from(app, "192.168.2.77") as c:
+        r = c.get("/report")
+        assert r.status_code == 200
+        assert "text/html" in r.headers["content-type"]
+        assert b"Consumption report" in r.content
+    with _client_from(app, "8.8.8.8") as c:
+        assert c.get("/report").status_code == 403
+    asyncio.get_event_loop().run_until_complete(database.close())
+
+
+def test_report_disabled_denies_everyone(tmp_path):
+    """report.enabled=false -> /api/report 403 for every source."""
+    import asyncio
+    database = _db.Database(tmp_path / "rep.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    asyncio.get_event_loop().run_until_complete(database.connect())
+    app = create_app(database, service, holder,
+                     report_config=ReportConfig(
+                         enabled=False, allow_client_subnet=True,
+                         allowed_ips=["192.168.1.10"],
+                         client_subnet="192.168.2.0/24"))
+    for ip in ("192.168.2.77", "192.168.1.10"):
+        with _client_from(app, ip) as c:
+            assert c.get("/api/report").status_code == 403
     asyncio.get_event_loop().run_until_complete(database.close())

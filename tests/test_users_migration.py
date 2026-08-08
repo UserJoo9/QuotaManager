@@ -107,9 +107,9 @@ def test_connect_migrates_legacy_db(tmp_path):
 
     async def migrate():
         await d.connect()
-        # v2 tables/columns exist
+        # v2 tables/columns exist (Phone + Laptop + the seeded Gateway user)
         users = await d.list_users()
-        assert len(users) == 2, "every legacy device must get its own user"
+        assert len(users) == 3, "every legacy device must get its own user"
         phone = next(u for u in users if u.name == "Phone")
         assert phone.quota_mode == _db.QUOTA_FIXED
         assert phone.fixed_gb == 20.0
@@ -140,7 +140,7 @@ def test_connect_migrates_legacy_db(tmp_path):
         # idempotent: reconnecting does not add more users
         await d.close()
         await d.connect()
-        assert len(await d.list_users()) == 2
+        assert len(await d.list_users()) == 3
     try:
         run(migrate())
     finally:
@@ -163,5 +163,118 @@ def test_bundle_allowances_drop_stale_mac_keys(tmp_path):
         b = run(d.get_bundle())
         assert b.allowances == {7: 12.5}, \
             "int keys survive, stale MAC keys are dropped"
+    finally:
+        run(d.close())
+
+
+# --------------------------------------------------------------------------- #
+# protected "Gateway" seed + guest-deletion suppression (v20)
+# --------------------------------------------------------------------------- #
+
+def test_gateway_seed_is_idempotent(tmp_path):
+    """connect() seeds the protected Gateway user + box device exactly once —
+    a re-connect (every boot) never duplicates either row."""
+    from quota.engine import GATEWAY_MAC
+
+    path = tmp_path / "seed.db"
+    d = _db.Database(path)
+    run(d.connect())
+    try:
+        users = run(d.list_users())
+        gateway = next(u for u in users if getattr(u, "protected", False))
+        assert gateway.name == "Gateway"
+        assert gateway.quota_mode == _db.QUOTA_FIXED
+        assert gateway.fixed_gb == 1.0
+        box = run(d.get_device(mac=GATEWAY_MAC))
+        assert box is not None and box.name == "Gateway box"
+        assert box.user_id == gateway.id
+        n_users, n_devices = len(users), len(run(d.list_devices()))
+
+        # reconnect (a restart) must not duplicate anything
+        run(d.close())
+        run(d.connect())
+        assert len(run(d.list_users())) == n_users
+        assert len(run(d.list_devices())) == n_devices
+    finally:
+        run(d.close())
+
+
+def test_suppressed_mac_roundtrip(tmp_path):
+    """add / check / clear lifecycle of the suppressed_macs table (case-
+    normalized + idempotent adds + clear_suppressed_macs_not_in)."""
+    path = tmp_path / "sup.db"
+    d = _db.Database(path)
+    run(d.connect())
+    try:
+        run(d.add_suppressed_mac("AA:BB:CC:DD:EE:10"))
+        assert run(d.is_mac_suppressed("aa:bb:cc:dd:ee:10")) is True
+        assert run(d.is_mac_suppressed("AA:BB:CC:DD:EE:10")) is True
+        # idempotent add
+        run(d.add_suppressed_mac("aa:bb:cc:dd:ee:10"))
+        assert run(d.is_mac_suppressed("aa:bb:cc:dd:ee:10")) is True
+        # clearing keeps the still-present MAC, drops the gone one
+        run(d.add_suppressed_mac("AA:BB:CC:DD:EE:11"))
+        n = run(d.clear_suppressed_macs_not_in({"aa:bb:cc:dd:ee:10"}))
+        assert n == 1
+        assert run(d.is_mac_suppressed("aa:bb:cc:dd:ee:10")) is True
+        assert run(d.is_mac_suppressed("aa:bb:cc:dd:ee:11")) is False
+    finally:
+        run(d.close())
+
+
+def test_delete_guest_device_suppresses_mac(tmp_path):
+    """delete_device(..., suppress_guest_mac=True) records the MAC ONLY when
+    the device belongs to a GUEST user (the month-reset path never does)."""
+    path = tmp_path / "supdev.db"
+    d = _db.Database(path)
+    run(d.connect())
+    try:
+        g = run(d.create_user(name="", quota_mode=_db.QUOTA_FIXED,
+                              fixed_gb=1.0, guest=True))
+        gdev = run(d.upsert_device("aa:bb:cc:dd:ee:20", "Phone", user_id=g.id))
+        run(d.delete_device(gdev.id, suppress_guest_mac=True))
+        assert run(d.is_mac_suppressed("aa:bb:cc:dd:ee:20")) is True
+
+        # a NON-guest (normal user) delete does NOT suppress
+        n = run(d.create_user(name="Dad", quota_mode=_db.QUOTA_FIXED,
+                              fixed_gb=20.0))
+        ndev = run(d.upsert_device("aa:bb:cc:dd:ee:21", "Laptop", user_id=n.id))
+        run(d.delete_device(ndev.id, suppress_guest_mac=True))
+        assert run(d.is_mac_suppressed("aa:bb:cc:dd:ee:21")) is False
+
+        # delete_user with suppress_guest_macs covers every device of a guest
+        g2 = run(d.create_user(name="", quota_mode=_db.QUOTA_FIXED,
+                               fixed_gb=1.0, guest=True))
+        run(d.upsert_device("aa:bb:cc:dd:ee:22", user_id=g2.id))
+        run(d.upsert_device("aa:bb:cc:dd:ee:23", user_id=g2.id))
+        run(d.delete_user(g2.id, cascade=True, suppress_guest_macs=True))
+        assert run(d.is_mac_suppressed("aa:bb:cc:dd:ee:22")) is True
+        assert run(d.is_mac_suppressed("aa:bb:cc:dd:ee:23")) is True
+
+        # a normal user delete with the flag suppresses nothing
+        n2 = run(d.create_user(name="Mom", quota_mode=_db.QUOTA_FIXED,
+                               fixed_gb=20.0))
+        run(d.upsert_device("aa:bb:cc:dd:ee:24", user_id=n2.id))
+        run(d.delete_user(n2.id, cascade=True, suppress_guest_macs=True))
+        assert run(d.is_mac_suppressed("aa:bb:cc:dd:ee:24")) is False
+    finally:
+        run(d.close())
+
+
+def test_delete_guest_users_does_not_suppress(tmp_path):
+    """The month-reset path (delete_guest_users) NEVER writes suppression rows
+    — a returning guest after a reset re-registers fresh."""
+    path = tmp_path / "supreset.db"
+    d = _db.Database(path)
+    run(d.connect())
+    try:
+        g = run(d.create_user(name="", quota_mode=_db.QUOTA_FIXED,
+                              fixed_gb=1.0, guest=True))
+        run(d.upsert_device("aa:bb:cc:dd:ee:30", user_id=g.id))
+        run(d.delete_guest_users())
+        assert run(d.is_mac_suppressed("aa:bb:cc:dd:ee:30")) is False
+        # ...and the Gateway seed survives the guest wipe
+        assert len(run(d.list_users())) == 1
+        assert run(d.list_users())[0].protected is True
     finally:
         run(d.close())

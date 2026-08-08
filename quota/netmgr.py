@@ -382,7 +382,8 @@ class TopologyManager:
         no DB write, no ``ppp0`` (the real dial), no default-route change.
 
         Returns a result dict consumed by the WAN tab:
-        ``status`` = success|auth-failed|no-pppoe-server|link-down|error;
+        ``status`` = success|auth-failed|concurrent-session|no-pppoe-server|
+        link-down|error;
         ``ok`` bool; ``local_ip`` / ``peer_ip`` when a link came up;
         ``internet`` bool (ping to 8.8.8.8/1.1.1.1 over the test link);
         ``detail`` human text; ``script_output`` the raw script log tail.

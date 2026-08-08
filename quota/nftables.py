@@ -177,6 +177,19 @@ def _match(seed: str, negated_key: str, networks: list[str]) -> str:
     return " ".join([seed] + [f"{negated_key} != {n}" for n in networks])
 
 
+def _gateway_exclusions(negated_key: str, networks: list[str]) -> str:
+    """Local-net exclusions for a gateway hook rule (no device IP to anchor).
+
+    ``_match`` needs a seed expression; the box's own rules have none — they
+    match any IP except the LOCAL networks. Emits just the negated key
+    (``ip daddr != <net> ip daddr != <net>``), or ``""`` when no local network
+    resolves (count/drop everything the box sends or receives).
+    """
+    if not networks:
+        return ""
+    return " ".join(f"{negated_key} != {n}" for n in networks)
+
+
 def _which_network(networks: list[str], host: str) -> str | None:
     """The network in ``networks`` that contains ``host`` (CIDR string)."""
     for net_str in networks:
@@ -250,6 +263,13 @@ class NftablesEngine:
         self._installed: set[str] = set()
         #: last-seen kernel byte totals per IP (for delta computation).
         self._last: dict[str, EngineCounters] = {}
+        #: Account the box's OWN internet (input/output hooks, q_gw_up/q_gw_down)
+        #: against the protected "Gateway" user (engine.count_gateway, default on).
+        self._count_gateway = bool(getattr(engine_cfg, "count_gateway", True))
+        #: last-seen box-own byte totals (gateway delta baseline).
+        self._last_gateway = EngineCounters()
+        #: last-programmed ``gw_blocked`` membership (None = never programmed).
+        self._gateway_blocked: bool | None = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -284,6 +304,11 @@ class NftablesEngine:
                             self._local_networks) + " drop"
         self._run(["add", "rule", f"{FAMILY} {self.table} forward", saddr_drop])
         self._run(["add", "rule", f"{FAMILY} {self.table} forward", daddr_drop])
+        # The box's own internet: input/output hooks with q_gw_up/q_gw_down
+        # counters (count_gateway) + a gw_blocked set the admin toggles. Runs
+        # BEFORE the counter reset below so a carried-over q_gw_* total is
+        # captured as the baseline first (see _reseed_gateway_baseline).
+        self._program_gateway()
         # `flush table` removes rules but NOT named counter objects. After a
         # restart the per-device counters keep their cumulative totals and the
         # in-memory delta baseline (_last) is gone, so the first drain would
@@ -420,6 +445,107 @@ class NftablesEngine:
         log.info("nftables: ARP gateway-lock active (router %s, client subnet "
                  "%s)", self._router_ip, self._client_net)
 
+    def _program_gateway(self) -> None:
+        """Program the box's OWN internet accounting + block (input/output hooks).
+
+        The box's packets never cross the ``forward`` chain (they originate and
+        terminate on the box itself), so its own bundle consumption would be
+        invisible and unbounded. Two hooked chains cover it:
+
+        * ``output`` (hook output) — the box's uploads; ``input`` (hook input) —
+          the box's downloads. When ``engine.count_gateway`` is on, a counter
+          rule in each chain (``q_gw_up`` / ``q_gw_down``) counts non-LOCAL
+          traffic, drained by the maintenance loop into the protected "Gateway"
+          user's device usage.
+        * a ``gw_blocked`` interval set + two drop rules toggle the box's own
+          internet cut (see :meth:`set_gateway_blocked`). DNS-exemption accepts
+          (udp 53) keep dnsmasq's upstream queries flowing for CLIENTS while the
+          box itself is cut, and DHCP-exemption accepts (udp 67/68) keep NEW
+          clients able to complete the lease handshake — both added BEFORE the
+          drops ("0 GB Gateway allowance => clients keep their internet").
+
+        The counter rules sit FIRST in each chain so they count before any drop;
+        LAN traffic is excluded from every rule (dashboard/SSH from the LAN stay
+        reachable). The rules are programmed once — only the set's membership
+        changes.
+        """
+        for hook in ("input", "output"):
+            self._run(["add", "chain", f"{FAMILY} {self.table} {hook}",
+                       f"{{ type filter hook {hook} priority 0; policy accept; }}"])
+        self._run(["add", "set", f"{FAMILY} {self.table} gw_blocked",
+                   "{ type ipv4_addr; flags interval; }"])
+        if self._count_gateway:
+            out_count = _gateway_exclusions("ip daddr", self._local_networks)
+            in_count = _gateway_exclusions("ip saddr", self._local_networks)
+            carried_up = self._add_counter("q_gw_up")
+            carried_down = self._add_counter("q_gw_down")
+            if carried_up or carried_down:
+                # A restart kept the named counters (and their cumulative
+                # totals); seed the delta baseline so the old total is never
+                # drained as new usage.
+                self._reseed_gateway_baseline()
+            self._run(["add", "rule", f"{FAMILY} {self.table} output",
+                       f"{out_count} counter name q_gw_up".strip()])
+            self._run(["add", "rule", f"{FAMILY} {self.table} input",
+                       f"{in_count} counter name q_gw_down".strip()])
+        # DNS exemptions BEFORE the drops: dnsmasq keeps resolving for clients
+        # even while the box itself is cut.
+        self._run(["add", "rule", f"{FAMILY} {self.table} output",
+                   "udp dport 53 accept"])
+        self._run(["add", "rule", f"{FAMILY} {self.table} input",
+                   "udp sport 53 accept"])
+        # DHCP exemptions BEFORE the drops: a NEW client's DISCOVER/REQUEST has
+        # no IP yet (saddr 0.0.0.0, not a local subnet) and the OFFER/ACK reply
+        # goes to the broadcast 255.255.255.255 — both would match the gw_blocked
+        # drop rules below and leave the device stuck on "Obtaining IP address"
+        # while the box's own internet is cut. Input accepts client requests
+        # (sport 68 -> dport 67); output accepts the server's replies (sport 67).
+        self._run(["add", "rule", f"{FAMILY} {self.table} output",
+                   "udp sport 67 accept"])
+        self._run(["add", "rule", f"{FAMILY} {self.table} input",
+                   "udp sport 68 udp dport 67 accept"])
+        out_drop = _match("ip daddr @gw_blocked", "ip daddr",
+                          self._local_networks) + " drop"
+        in_drop = _match("ip saddr @gw_blocked", "ip saddr",
+                         self._local_networks) + " drop"
+        self._run(["add", "rule", f"{FAMILY} {self.table} output", out_drop])
+        self._run(["add", "rule", f"{FAMILY} {self.table} input", in_drop])
+        log.info("nftables: gateway box accounting + block programmed "
+                 "(count_gateway=%s)", self._count_gateway)
+
+    def set_gateway_blocked(self, blocked: bool) -> None:
+        """Toggle the box's OWN internet cut (``gw_blocked`` set membership).
+
+        Cache-gated on ``_gateway_blocked`` (mirror the ``blocked`` set — see
+        :meth:`update_state`): re-flushing an identical set every ~15 s would
+        re-open a small free window each tick. An empty set drops nothing (box
+        free); ``{ 0.0.0.0/0 }`` drops every non-LOCAL packet the box sends or
+        receives. Not gated on ``count_gateway`` — the admin's block toggle
+        must work even when counting is off.
+        """
+        if not self.available:
+            return
+        if blocked == self._gateway_blocked:
+            return
+        self._gateway_blocked = None  # not yet committed; retry next tick on failure
+        if not self._run(["flush", "set", f"{FAMILY} {self.table} gw_blocked"]):
+            return
+        if blocked and not self._run(
+                ["add", "element", f"{FAMILY} {self.table} gw_blocked",
+                 "{ 0.0.0.0/0 }"]):
+            return
+        self._gateway_blocked = blocked
+
+    @property
+    def gateway_blocked(self) -> bool | None:
+        """Last ``gw_blocked`` membership pushed to the kernel (None = never).
+
+        Exposed so the maintenance loop can copy it into the snapshot and the
+        dashboard can show whether the box's own internet is ACTUALLY cut at
+        the kernel — not just what the UI toggle says.
+        """
+        return self._gateway_blocked
+
     def flush(self) -> EngineSnapshot:
         """Return byte deltas since the last flush, as an EngineSnapshot."""
         if not self.available:
@@ -448,10 +574,22 @@ class NftablesEngine:
                 by_ip[ip] = cur
             self._last[ip] = EngineCounters(up=up, down=down)
 
+        # The box's OWN internet (input/output hooks, q_gw_* counters): delta
+        # since the last flush, drained into the Gateway user's device usage by
+        # the maintenance loop.
+        gw_up = raw.get("q_gw_up", 0)
+        gw_down = raw.get("q_gw_down", 0)
+        gateway = EngineCounters(
+            up=max(0, gw_up - self._last_gateway.up),
+            down=max(0, gw_down - self._last_gateway.down),
+        )
+        self._last_gateway = EngineCounters(up=gw_up, down=gw_down)
+
         return EngineSnapshot(
             by_ip=by_ip,
             ip_to_mac=dict(self._ip_to_mac),
             blocked=dict(self._blocked),
+            gateway=gateway,
             ts=now,
         )
 
@@ -469,7 +607,7 @@ class NftablesEngine:
         if args[0] == "add" and any(s in out for s in ("File exists",
                                                        "already exists")):
             return True
-        self._fail(f"nft {args[0]} failed: {out.strip()}")
+        self._fail(f"nft {args[0]} failed: {out.strip()}", command=args)
         return False
 
     def _run_best_effort(self, args: list[str]) -> None:
@@ -499,7 +637,8 @@ class NftablesEngine:
             return False
         if any(s in out for s in ("File exists", "already exists")):
             return True
-        self._fail(f"nft add counter failed: {out.strip()}")
+        self._fail(f"nft add counter failed: {out.strip()}",
+                   command=["add", "counter", f"{FAMILY} {self.table}", name])
         return False
 
     def _add_device(self, ip: str) -> bool:
@@ -557,6 +696,31 @@ class NftablesEngine:
         log.info("nftables: reseeded %d carried-over counter baseline(s) "
                  "after restart", len(ips))
 
+    def _reseed_gateway_baseline(self) -> None:
+        """Point ``_last_gateway`` at a carried-over ``q_gw_*`` restart total.
+
+        Mirrors :meth:`_reseed_baselines` for the box's own counters: after a
+        restart ``flush table`` keeps the named ``q_gw_up``/``q_gw_down``
+        counters and their cumulative totals, so without a baseline the first
+        drain would charge the whole carried-over total to the Gateway user as
+        NEW usage.
+        """
+        code, out = self._run_command(["nft", "-j", "list", "counters"])
+        if code != 0:
+            self._fail(f"nft -j list counters failed: {out.strip()}")
+            return
+        try:
+            raw = self._parse_counters(out)
+        except ValueError as exc:
+            self._fail(f"could not parse nft counter output: {exc}")
+            return
+        self._last_gateway = EngineCounters(
+            up=raw.get("q_gw_up", 0),
+            down=raw.get("q_gw_down", 0),
+        )
+        log.info("nftables: reseeded carried-over gateway counter baseline(s) "
+                 "after restart")
+
     def _parse_counters(self, json_text: str) -> dict[str, int]:
         """Flatten ``nft -j list counters`` into {counter_name: bytes}."""
         data = json.loads(json_text)
@@ -576,11 +740,12 @@ class NftablesEngine:
                 raise ValueError(f"bad bytes value in counter {name!r}")
         return out
 
-    def _fail(self, reason: str) -> None:
+    def _fail(self, reason: str, command: list[str] | None = None) -> None:
         self.available = False
         if not self._warned:
+            argv = f"nft {' '.join(command)}" if command else "nft <unknown>"
             log.error("nftables engine unavailable: %s — no per-packet "
                       "accounting on this host (the dashboard still shows "
                       "DB usage). Run as root and check `nft --version`.",
-                      reason)
+                      f"{reason} [{argv}]")
             self._warned = True

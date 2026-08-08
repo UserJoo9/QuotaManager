@@ -9,6 +9,9 @@ deltas that ``flush()`` returns.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 
 from core.config import Config
 from quota.engine import SnapshotHolder
@@ -562,3 +565,182 @@ def test_arp_lock_does_not_break_counters():
     fake.counters["q_up_192_168_2_111"] = 100
     snap = eng.flush()
     assert snap.by_ip["192.168.2.111"].up == 100
+
+
+# --------------------------------------------------------------------------- #
+# Gateway box accounting + block (input/output hooks, q_gw_* counters)
+# --------------------------------------------------------------------------- #
+
+def _gateway_set(fake: FakeNft) -> set[str]:
+    return fake._sets["inet quota_gateway"].setdefault("gw_blocked", set())
+
+
+def test_gateway_chains_and_counters_programmed():
+    """start() adds hooked input/output chains, the gw_blocked set, and the
+    q_gw_up/q_gw_down counters with LAN exclusions. The counter rules come
+    FIRST (before the DNS accepts + drops) so bytes count before any drop."""
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    joined = " | ".join(fake.rules)
+    assert "type filter hook input priority 0; policy accept;" in joined
+    assert "type filter hook output priority 0; policy accept;" in joined
+    assert "q_gw_up" in fake.counters
+    assert "q_gw_down" in fake.counters
+    # counters exclude the two local subnets (local traffic is never charged)
+    assert ("ip daddr != 192.168.1.0/24 ip daddr != 192.168.2.0/24 "
+            "counter name q_gw_up") in joined
+    assert ("ip saddr != 192.168.1.0/24 ip saddr != 192.168.2.0/24 "
+            "counter name q_gw_down") in joined
+    # DNS exemptions come before the gw_blocked drops (clients keep DNS while
+    # the box itself is cut), and the drops carry the same LAN exclusions.
+    out_idx = joined.index("udp dport 53 accept")
+    drop_idx = joined.index("ip daddr @gw_blocked")
+    assert out_idx < drop_idx
+    assert ("ip daddr @gw_blocked ip daddr != 192.168.1.0/24 "
+            "ip daddr != 192.168.2.0/24 drop") in joined
+    assert ("ip saddr @gw_blocked ip saddr != 192.168.1.0/24 "
+            "ip saddr != 192.168.2.0/24 drop") in joined
+    # DHCP exemptions also come BEFORE the drops: a NEW client's DISCOVER/REQUEST
+    # has saddr 0.0.0.0 (not a local subnet) and the OFFER/ACK replies go to the
+    # broadcast 255.255.255.255 — both would match the drops and leave the device
+    # stuck on "Obtaining IP address" while the box's own internet is cut.
+    assert "udp sport 67 accept" in joined
+    assert "udp sport 68 udp dport 67 accept" in joined
+    assert joined.index("udp sport 67 accept") < drop_idx
+    assert joined.index("udp sport 68 udp dport 67 accept") < drop_idx
+
+
+def test_gateway_blocked_toggle_and_cache_gate():
+    """set_gateway_blocked flips the gw_blocked set membership and is
+    cache-gated: an identical state adds no commands (no re-flush window)."""
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    assert eng.gateway_blocked is None  # never programmed yet
+    eng.set_gateway_blocked(True)
+    assert _gateway_set(fake) == {"0.0.0.0/0"}
+    assert eng.gateway_blocked is True  # the property mirrors the programmed set
+    n_calls = len(fake.calls)
+    eng.set_gateway_blocked(True)
+    assert len(fake.calls) == n_calls  # unchanged state -> no kernel touches
+    eng.set_gateway_blocked(False)
+    assert _gateway_set(fake) == set()
+    assert eng.gateway_blocked is False
+    n_calls = len(fake.calls)          # the False transition legitimately flushed
+    eng.set_gateway_blocked(False)
+    assert len(fake.calls) == n_calls  # unchanged state -> still no-op
+
+
+def test_flush_reports_gateway_delta():
+    """The box's own q_gw_* bytes flow out of flush() as snap.gateway (the
+    maintenance loop drains them into the Gateway user's device usage)."""
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    fake.counters["q_gw_up"] = 1000
+    fake.counters["q_gw_down"] = 500
+    snap = eng.flush()
+    assert snap.gateway.up == 1000
+    assert snap.gateway.down == 500
+    # no new traffic -> empty delta
+    assert eng.flush().gateway.up == 0
+    assert eng.flush().gateway.down == 0
+    # more traffic -> only the growth is reported
+    fake.counters["q_gw_up"] = 1500
+    fake.counters["q_gw_down"] = 800
+    snap2 = eng.flush()
+    assert snap2.gateway.up == 500
+    assert snap2.gateway.down == 300
+
+
+def test_gateway_carried_over_counters_reseed_baseline():
+    """A restart keeps the named q_gw_* counters (and their totals); the first
+    flush after boot must not re-drain the whole pre-restart total."""
+    fake = FakeNft()
+    fake.counters = {"q_gw_up": 6_000_000_000, "q_gw_down": 3_000_000_000}
+    eng = _engine(fake)
+    eng.start()
+    assert eng.flush().gateway.up == 0
+    assert eng.flush().gateway.down == 0
+    fake.counters["q_gw_up"] += 1024
+    fake.counters["q_gw_down"] += 2048
+    snap = eng.flush()
+    assert snap.gateway.up == 1024
+    assert snap.gateway.down == 2048
+
+
+def test_count_gateway_false_skips_counters_but_blocks():
+    """count_gateway=False disables the box's q_gw_* accounting, but the
+    gw_blocked drop-set + toggle still work — the box's block must always
+    function, even when counting is off."""
+    fake = FakeNft()
+    cfg = Config()
+    cfg.engine.client_subnet = "192.168.2.0/24"
+    cfg.engine.uplink_subnet = "192.168.1.0/24"
+    cfg.engine.count_gateway = False
+    eng = NftablesEngine(cfg, SnapshotHolder(), run_command=fake)
+    eng.start()
+    assert "q_gw_up" not in fake.counters
+    assert "q_gw_down" not in fake.counters
+    joined = " | ".join(fake.rules)
+    assert "counter name q_gw_up" not in joined
+    # the drop + DNS-exemption rules are still programmed
+    assert "ip daddr @gw_blocked" in joined
+    assert "udp dport 53 accept" in joined
+    # ...and the DHCP exemptions (a blocked box must still give the LAN's DHCP
+    # so new devices can obtain an address and reach the quota gateway)
+    assert "udp sport 67 accept" in joined
+    assert "udp sport 68 udp dport 67 accept" in joined
+    # and the toggle still programs membership
+    eng.set_gateway_blocked(True)
+    assert _gateway_set(fake) == {"0.0.0.0/0"}
+
+
+def test_gateway_dhcp_exemption_rules_are_valid_nft_grammar():
+    """The DHCP exemptions must parse on a REAL nftables grammar.
+
+    The FakeNft above only records argv — it never validates the rule text,
+    which is how the ``udp sport 68 dport 67 accept`` bug sailed through the
+    suite and killed the whole engine on a real box ("No symbol type
+    information": nft needs the protocol prefix repeated on every match, so a
+    bare ``dport`` is an unresolvable symbol). On a host with real ``nft`` we
+    pin the exact grammar by compiling the ruleset with ``nft -c`` (parse-only,
+    no root, no kernel change); without ``nft`` we fall back to the exact rule
+    text, so a revert to the broken form still fails CI.
+    """
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    # Both DHCP-exemption rules, as the engine programs them (source order).
+    dhcp_rules = [r for r in fake.rules if "udp sport 68" in r or
+                  "udp sport 67 accept" in r]
+    for rule in dhcp_rules:
+        assert "udp sport 68 udp dport 67 accept" == rule or \
+            "udp sport 67 accept" == rule, f"unexpected DHCP rule: {rule}"
+
+    nft = shutil.which("nft")
+    if nft is None:
+        return  # no real parser on this host — the text pin above is the guard
+    # nft opens the kernel netlink cache even for -c, so this check needs root
+    # (a non-root host would return EPERM on valid rules and fail falsely).
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return
+    # Build a minimal `nft -c -f -` ruleset containing the two exemption rules in
+    # a hooked input/output chain, mirroring the engine's table. Parsing fails
+    # exit 1; risky/unknown symbols error like the box did.
+    ruleset = (
+        "table inet f {\n"
+        "  chain input { type filter hook input priority 0; policy accept;\n"
+        "    udp sport 68 udp dport 67 accept\n"
+        "    udp sport 53 accept\n"
+        "  }\n"
+        "  chain output { type filter hook output priority 0; policy accept;\n"
+        "    udp sport 67 accept\n"
+        "    udp dport 53 accept\n"
+        "  }\n"
+        "}\n"
+    )
+    proc = subprocess.run([nft, "-c", "-f", "-"], input=ruleset, capture_output=True,
+                          text=True)
+    assert proc.returncode == 0, f"nft -c rejected the DHCP exemption rules:\n{proc.stderr}"

@@ -4,14 +4,16 @@
 carries — all reads go through an injected ``run_command`` + a ``sysfs_root``
 so the tests need no real ``ip`` binary, no root, and no /sys (Windows dev box).
 ``check_internet`` probes public reachability through an injected ``connect`` so
-the tests fake the network instead of dialing out.
+the tests fake the network instead of dialing out. ``check_internet_dns`` is the
+same idea via an injected ``query`` (raw UDP DNS, used while the box's own
+internet is cut — UDP 53 is exempted from the gateway block).
 """
 
 from __future__ import annotations
 
 import socket
 
-from quota.topology import check_internet, detect_ppp
+from quota.topology import check_internet, check_internet_dns, detect_ppp
 
 
 def _mk_fake(responses: dict[str, tuple[int, str]]) -> callable:
@@ -171,3 +173,25 @@ def test_internet_uses_raw_ips_not_dns():
             return socket.socket()
         raise OSError("no such host")
     assert check_internet(hosts=("1.1.1.1",), connect=connect) is True
+
+
+# check_internet_dns — the green dot's fallback while the box itself is cut
+# (the gateway block exempts UDP 53, so DNS still proves the line delivers)
+# ---------------------------------------------------------------------------
+
+def test_internet_dns_up_when_any_server_answers():
+    """True when ANY resolver answers the raw DNS query."""
+    assert check_internet_dns(servers=("8.8.8.8", "1.1.1.1"),
+                              query=lambda s, t: s == "1.1.1.1") is True
+
+
+def test_internet_dns_down_when_no_server_answers():
+    """False when every resolver is unreachable (line down / no route)."""
+    assert check_internet_dns(servers=("8.8.8.8", "1.1.1.1"),
+                              query=lambda s, t: False) is False
+
+
+def test_internet_dns_falls_through_to_second_server():
+    """The first resolver failing does not stop the probe — the next is tried."""
+    assert check_internet_dns(servers=("8.8.8.8", "1.1.1.1"),
+                              query=lambda s, t: s == "8.8.8.8") is True

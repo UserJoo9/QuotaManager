@@ -95,3 +95,49 @@ def check_internet(hosts: tuple[str, ...] = ("1.1.1.1", "8.8.8.8"),
         except OSError:
             continue
     return False
+
+
+def _dns_query(server: str, timeout: float) -> bool:
+    """One raw UDP DNS A-query to ``server``; True when a reply arrives.
+
+    A direct query — NOT through dnsmasq — so its cache can't fake an answer.
+    UDP port 53 is exempted from the gateway block (``udp dport 53 accept``), so
+    this reaches the public resolver even while the box's own browsing is cut.
+    """
+    import struct
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.settimeout(timeout)
+        header = struct.pack(">HHHHHH", 0x7B1C, 0x0100, 1, 0, 0, 0)  # id, RD
+        question = b"\x07example\x03com\x00" + struct.pack(">HH", 1, 1)  # A IN
+        sock.sendto(header + question, (server, 53))
+        sock.recvfrom(512)
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def check_internet_dns(servers: tuple[str, ...] = ("8.8.8.8", "1.1.1.1"),
+                       timeout: float = 2.0,
+                       query: Callable[[str, float], bool] | None = None) -> bool:
+    """Prove the line delivers internet via DNS — works while the box is cut.
+
+    The gateway block drops the box's own TCP egress (``0.0.0.0/0`` in the
+    ``gw_blocked`` set), so the TCP probe reads "down" even though the PPPoE
+    line and every client are fine. DNS is deliberately exempted (that is how
+    clients keep resolving), so a raw UDP query that gets a real answer proves
+    the line carries internet. Returns True when ANY server answers; a timeout,
+    no route, or an unreachable resolver all mean "not reachable now". ``query``
+    is injectable for tests (default :func:`_dns_query`).
+    """
+    query = query or _dns_query
+    for server in servers:
+        try:
+            if query(server, timeout):
+                return True
+        except Exception:  # noqa: BLE001 — a resolver failure must not crash a tick
+            continue
+    return False

@@ -13,6 +13,12 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+#: Sentinel MAC for the gateway box itself. The box's own internet consumption
+#: is charged to a protected "Gateway" user under this MAC (see
+#: db._seed_gateway); the nftables engine counts/blocked it via input/output
+#: hooks, never via a forward-chain device rule.
+GATEWAY_MAC = "00:00:00:00:00:00"
+
 
 @dataclass
 class EngineCounters:
@@ -56,6 +62,20 @@ class EngineSnapshot:
     #: live WAN-mode status ({topology, source, pending, ppp0, ppp_ip, ppp_peer});
     #: empty dict until the maintenance loop populates it (mirrors ``rogue``).
     wan_status: dict = field(default_factory=dict)
+    #: the box's OWN internet bytes since the last flush (input/output hooks —
+    #: the box's packets never cross the forward chain). Drained into the
+    #: Gateway user's device usage by the maintenance loop.
+    gateway: EngineCounters = field(default_factory=EngineCounters)
+    #: last ``gw_blocked`` set membership the engine pushed to the kernel for
+    #: the box itself (True = cut, False = free, None = never programmed). The
+    #: maintenance loop copies it from the engine after ``set_gateway_blocked``
+    #: so the dashboard can show when the UI toggle and the kernel disagree.
+    gateway_blocked: bool | None = None
+    #: is the packet engine running? False when it was never built (config
+    #: ``engine.enabled=false``) or failed at start — nothing is counted or
+    #: blocked in that state, so the dashboard must say so instead of implying
+    #: enforcement is live.
+    engine_available: bool = True
     ts: float = field(default_factory=time.time)
 
     def counters_for(self, mac: str) -> EngineCounters:

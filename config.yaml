@@ -84,6 +84,13 @@ engine:
   # setup script enables it in LAN mode). The ACTIVE gateway_arp_lock above
   # flips to false in WAN mode; this keeps the LAN reality for the revert.
   lan_gateway_arp_lock: true
+  # Count the gateway box's OWN internet consumption (its input/output traffic,
+  # not the clients it forwards) and charge it to the protected "Gateway" user
+  # that the dashboard seeds on first run — so the machine's bundle use sits
+  # INSIDE the quota math instead of being invisible. Off = the box's traffic is
+  # uncounted (its quota block, if the admin sets one, still applies via the
+  # gateway chains).
+  count_gateway: true
 
 # Speed shaping (tc/HTB + fq_codel): per-device and per-user internet speed caps
 # + low-latency (bufferbloat-free) queues. The runtime totals / per-device /
@@ -102,3 +109,15 @@ shaping:
 web:
   host: 0.0.0.0
   port: 8080
+
+# On-demand internal reporting dashboard (/report + /api/report). A read-only
+# consumption view (exact bytes/quota per user and device, events, log tail)
+# that does NOT need the admin session — access is gated by the client's source
+# IP. Passive: nothing auto-opens it; it is a URL you visit on demand.
+#   enabled: true              # false => /report + /api/report always 403
+#   allow_client_subnet: true  # admit any managed client (the DHCP pool)
+#   allowed_ips: []            # extra CIDRs/IPs, e.g. ["192.168.1.0/24"]
+report:
+  enabled: true
+  allow_client_subnet: true
+  allowed_ips: []

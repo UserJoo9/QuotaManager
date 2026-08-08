@@ -24,6 +24,23 @@ def test_engine_gateway_arp_lock_is_opt_in():
     assert engine.gateway_arp_lock is True
 
 
+def test_engine_count_gateway_defaults_true():
+    """The box's own traffic is counted by default (charged to the protected
+    "Gateway" user) — the admin can disable it, but the block still applies."""
+    cfg = cfg_mod.Config()
+    assert cfg.engine.count_gateway is True
+    engine = cfg_mod.EngineConfig(count_gateway=False)
+    assert engine.count_gateway is False
+    # and a config-file value lands on the dataclass field
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "config.yaml"
+        p.write_text("engine:\n  count_gateway: false\n", encoding="utf-8")
+        loaded = cfg_mod.load_config(p)
+    assert loaded.engine.count_gateway is False
+
+
 def test_engine_topology_defaults_lan():
     """The deployment topology defaults to the current LAN behaviour (box behind
     the router) and accepts the opt-in WAN ("strong") value."""
@@ -58,3 +75,44 @@ def test_default_config_is_linux_gateway():
     assert cfg.dhcp.lease_file == "/var/lib/misc/dnsmasq.leases"
     assert cfg.engine.backend == "nftables"
     assert cfg.engine.table == "quota_gateway"
+
+
+def test_report_config_defaults():
+    """The report section defaults to on, client-subnet admission, no extra
+    allow-list. ``client_subnet`` is empty until run.py fills it from the
+    engine's resolved subnet."""
+    cfg = cfg_mod.Config()
+    assert cfg.report.enabled is True
+    assert cfg.report.allow_client_subnet is True
+    assert cfg.report.allowed_ips == []
+    assert cfg.report.client_subnet == ""
+    # explicit overrides land on the dataclass fields from a config file
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "config.yaml"
+        p.write_text(
+            "report:\n"
+            "  enabled: true\n"
+            "  allow_client_subnet: false\n"
+            "  allowed_ips:\n"
+            "    - 192.168.1.0/24\n"
+            "    - 10.0.0.5\n"
+            "  client_subnet: 192.168.2.0/24\n",
+            encoding="utf-8")
+        loaded = cfg_mod.load_config(p)
+    assert loaded.report.allow_client_subnet is False
+    assert loaded.report.allowed_ips == ["192.168.1.0/24", "10.0.0.5"]
+    assert loaded.report.client_subnet == "192.168.2.0/24"
+
+
+def test_report_config_disable_via_yaml():
+    """Turning the report off in config.yaml must reach the dataclass so both
+    /report + /api/report 403 everywhere."""
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "config.yaml"
+        p.write_text("report:\n  enabled: false\n", encoding="utf-8")
+        loaded = cfg_mod.load_config(p)
+    assert loaded.report.enabled is False

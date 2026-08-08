@@ -94,6 +94,22 @@ def _rate(mbps: float) -> str:
     return f"{mbps:g}mbit"
 
 
+def _burst(mbps: float) -> list[str]:
+    """tc ``burst``/``cburst`` args for an HTB class at ``mbps``.
+
+    HTB's default token bucket is ~1 second of traffic at the class rate
+    (``buffer = rate.rate`` when unset), so a class can transmit at full line
+    speed for up to a second before settling at ``rate`` — a short speed test
+    then reads ~1.5x the configured cap ("2 Mbps cap shows ~3 Mbps"). The
+    bucket only needs to hold ``rate/HZ`` to sustain the rate; 50 ms of
+    traffic (``rate/20``) keeps a 2 s test within a few percent of the cap
+    while leaving a wide margin over the scheduler tick (HZ is 250 on modern
+    kernels, rarely as low as 100) so the class is never starved.
+    """
+    burst = max(1500, round(mbps * 1_000_000 / 8 / 20))
+    return ["burst", str(burst), "cburst", str(burst)]
+
+
 def _effective(dev_cap: float, user_cap: float, total: float) -> float | None:
     """Effective per-device cap: min(device cap, user cap), clamped to the
     direction total. ``0`` means unlimited; None => no cap -> default class."""
@@ -325,21 +341,22 @@ class TcShaper:
                 "cap_up": float(e.get("user_up") or 0.0), "devs": []})
             by_user[uid]["devs"].append(e)
 
+        base_burst = _burst(total)
         cmds: list[list[str]] = [
             ["tc", "qdisc", "add", "dev", dev, "root", "handle", "1:",
              "htb", "default", "2"],
             ["tc", "class", "add", "dev", dev, "parent", "1:", "classid",
-             "1:1", "htb", "rate", base],
+             "1:1", "htb", "rate", base, *base_burst],
             # Default class: everything without a device leaf (unlimited
             # devices AND the box's own traffic). Capped at the direction
             # total so no traffic escapes the line-rate ceiling that makes
             # fq_codel effective (a 1000mbit pass-through would let one
             # unlimited downloader flood the modem buffer and inflate pings).
             ["tc", "class", "add", "dev", dev, "parent", "1:1", "classid",
-             "1:2", "htb", "rate", base, "ceil", base],
+             "1:2", "htb", "rate", base, "ceil", base, *base_burst],
             # Aggregate class under which all user/device classes live.
             ["tc", "class", "add", "dev", dev, "parent", "1:1", "classid",
-             "1:100", "htb", "rate", base, "ceil", base],
+             "1:100", "htb", "rate", base, "ceil", base, *base_burst],
         ]
         if self._aqm:
             cmds.append(["tc", "qdisc", "add", "dev", dev, "parent", "1:2",
@@ -363,7 +380,7 @@ class TcShaper:
             user_cid = _user_class(uid)
             cmds.append(["tc", "class", "add", "dev", dev, "parent", "1:100",
                          "classid", user_cid, "htb", "rate", _rate(user_rate),
-                         "ceil", _rate(user_rate)])
+                         "ceil", _rate(user_rate), *_burst(user_rate)])
             for e in sorted(leaves, key=lambda x: str(x.get("ip", ""))):
                 dev_cap = float(e.get("down") or 0.0) if match_field == "dst" \
                     else float(e.get("up") or 0.0)
@@ -373,7 +390,8 @@ class TcShaper:
                 dev_cid = _device_class(int(e["device_id"]))
                 cmds.append(["tc", "class", "add", "dev", dev, "parent",
                              user_cid, "classid", dev_cid, "htb",
-                             "rate", _rate(eff), "ceil", _rate(eff)])
+                             "rate", _rate(eff), "ceil", _rate(eff),
+                             *_burst(eff)])
                 if self._aqm:
                     cmds.append(["tc", "qdisc", "add", "dev", dev, "parent",
                                  dev_cid, "handle", _device_qdisc(int(e["device_id"])),

@@ -37,6 +37,11 @@ log = logging.getLogger("quota.service")
 
 GB = 1024 ** 3
 
+#: Consumption-milestone thresholds (percent of the user's allowance). When a
+#: user's usage crosses one, the milestone page surfaces it and marks it
+#: notified so each threshold is shown once per period.
+MILESTONES = (50, 75, 100)
+
 
 class QuotaService:
     def __init__(self, database: _db.Database, timezone: str = "",
@@ -106,6 +111,9 @@ class QuotaService:
         await self.db.clear_topups()
         # A new period starts with no guests: guest accounts are period-scoped.
         await self._clear_guest_users()
+        # Milestone notices (50/75/100%) are period-scoped: a fresh period
+        # re-arms them so each threshold is surfaced again in the new month.
+        await self.db.reset_milestone_flags()
         start, end = timeutil.period_bounds(now, bundle.reset_day)
         bundle.allowances = await self.compute_allowances()
         # reset_day<=0 -> period_bounds returns "today"; period_end stays "".
@@ -176,6 +184,23 @@ class QuotaService:
     # -- enforcement state -----------------------------------------------------
 
     @staticmethod
+    def quota_blocked_for(user: _db.User | None, allowance: float,
+                          used_gb: float) -> bool:
+        """Is the user over their allowance (quota-blocked)?
+
+        A PROTECTED user (the Gateway box account) is blocked once their usage
+        reaches their allowance — even when the allowance is 0. That is the
+        product behaviour the admin wants: setting the Gateway allowance to 0
+        cuts the box's own internet immediately ("0 MB to only connect other
+        users"). Every other user keeps the historical guard: an allowance of
+        0 means UNMETERED (no limit), so an empty/over-subscribed bundle never
+        blocks anyone.
+        """
+        if user is not None and user.protected:
+            return used_gb >= allowance
+        return allowance > 0 and used_gb >= allowance
+
+    @staticmethod
     def resolve_device_state(user: _db.User | None, dev: _db.Device,
                              user_quota_blocked: bool) -> str:
         """Resolve a device's effective block state through its owner user.
@@ -205,15 +230,18 @@ class QuotaService:
     async def _user_quota_map(self, allowances: dict[int, float]) -> dict[int, bool]:
         """user_id -> True when the user is over their allowance.
 
-        Same "no allowance => unmetered" guard as before: an allowance of 0.0
-        (empty user list, over-subscribed bundle) never quota-blocks anyone.
+        Deferred to :meth:`quota_blocked_for` so a PROTECTED user (the Gateway
+        box) is blocked at any usage when its allowance is 0 — the admin can
+        cut the box's own internet with a 0 GB allowance. Other users keep the
+        "no allowance => unmetered" guard.
         """
+        users = {u.id: u for u in await self.db.list_users()}
         usage_by_user = await self.db.get_period_usage_by_user()
         out: dict[int, bool] = {}
         for uid, allowance in allowances.items():
             u = usage_by_user.get(uid, {"up": 0, "down": 0})
             used_gb = (u["up"] + u["down"]) / GB
-            out[uid] = allowance > 0 and used_gb >= allowance
+            out[uid] = self.quota_blocked_for(users.get(uid), allowance, used_gb)
         return out
 
     async def evaluate_blocks(self) -> list[dict[str, Any]]:
@@ -270,7 +298,7 @@ class QuotaService:
                 u = usage_by_user.get(user.id, {"up": 0, "down": 0})
                 used_gb = (u["up"] + u["down"]) / GB
                 allowance = allowances.get(user.id, 0.0)
-                quota_blocked = allowance > 0 and used_gb >= allowance
+                quota_blocked = self.quota_blocked_for(user, allowance, used_gb)
             state = self.resolve_device_state(user, dev, quota_blocked)
             out[dev.mac] = {
                 "ip": leases.get(dev.mac, ""),
@@ -286,6 +314,66 @@ class QuotaService:
             }
         return out
 
+    # -- milestone notifications (page-only, per-user) ------------------------
+
+    async def milestone_state(self) -> dict[int, dict[str, Any]]:
+        """Per-user milestone-flag state for the milestone page.
+
+        For each NON-protected user returns::
+
+            {"allowance_gb", "used_gb", "percent",
+             "milestones": {m: {"crossed", "notified", "pending"}}}
+
+        where ``crossed`` = usage has reached ``m`` % of the allowance,
+        ``notified`` = the milestone page already marked it, and ``pending`` =
+        crossed but not yet notified (what the page surfaces + acknowledges).
+        The protected Gateway account is skipped — its own usage is the admin's
+        concern, not a household consumption notice.
+        """
+        users = {u.id: u for u in await self.db.list_users()}
+        usage_by_user = await self.db.get_period_usage_by_user()
+        allowances = (await self.db.get_bundle()).allowances
+        out: dict[int, dict[str, Any]] = {}
+        for u in users.values():
+            if u.protected:
+                continue
+            usage = usage_by_user.get(u.id, {"up": 0, "down": 0})
+            used_gb = (usage["up"] + usage["down"]) / GB
+            allowance = allowances.get(u.id, 0.0)
+            percent = used_gb / allowance * 100 if allowance > 0 else 0.0
+            flags = {50: u.notified_50, 75: u.notified_75, 100: u.notified_100}
+            milestones: dict[int, dict[str, Any]] = {}
+            for m in MILESTONES:
+                crossed = percent >= m
+                notified = bool(flags[m])
+                milestones[m] = {
+                    "crossed": crossed,
+                    "notified": notified,
+                    "pending": crossed and not notified,
+                }
+            out[u.id] = {
+                "allowance_gb": round(allowance, 3),
+                "used_gb": round(used_gb, 3),
+                "percent": round(percent, 1),
+                "milestones": milestones,
+            }
+        return out
+
+    async def mark_milestone_notified(self, user_id: int, milestone: int) -> None:
+        """Mark a crossed milestone as notified (the milestone page's acknowledge).
+
+        Validates ``milestone`` ∈ :data:`MILESTONES`; an unknown value raises
+        :class:`ValueError`. Protected users are a no-op — they never appear in
+        :meth:`milestone_state`, so nothing is ever surfaced for them.
+        """
+        if milestone not in MILESTONES:
+            raise ValueError(
+                f"milestone must be one of {MILESTONES}, got {milestone!r}")
+        user = await self.db.get_user(user_id)
+        if user is None or user.protected:
+            return
+        await self.db.update_user(user_id, **{f"notified_{milestone}": True})
+
     # -- first-run setup ------------------------------------------------------
 
     #: Settings key for the one-time welcome panel. Fresh installs show it until
@@ -296,14 +384,15 @@ class QuotaService:
     async def is_setup_complete(self) -> bool:
         """True once the first-run welcome is done.
 
-        Heuristic: the setting is set to "1", OR the DB already has any users.
-        The second clause keeps an existing deployment (the developer's own box,
-        or any DB that has been running) from ever showing the welcome panel —
-        only a genuinely fresh install sees it.
+        Heuristic: the setting is set to "1", OR the DB already has any
+        NON-protected users. The protected "Gateway" account is seeded at
+        connect, so it must not count — otherwise a genuinely fresh install
+        would never show the welcome panel. The non-protected clause keeps an
+        existing deployment from ever showing it.
         """
         if (await self.db.get_setting(self.SETUP_COMPLETE_KEY, "")) == "1":
             return True
-        return len(await self.db.list_users()) > 0
+        return any(not u.protected for u in await self.db.list_users())
 
     async def mark_setup_complete(self) -> None:
         """Record that the first-run welcome was completed."""
@@ -490,6 +579,8 @@ class QuotaService:
         # A manual reset is a fresh period: guests are period-scoped, so they
         # are wiped too (a new guest just re-registers when it reconnects).
         await self._clear_guest_users()
+        # Milestone notices are period-scoped too — re-arm for the new period.
+        await self.db.reset_milestone_flags()
         old_start = bundle.period_start
         if old_start:
             await self.db.clear_usage(old_start)

@@ -104,6 +104,11 @@ class EngineConfig:
     #: the active ``gateway_arp_lock`` flips to False in WAN mode but the LAN
     #: reality is preserved here.
     lan_gateway_arp_lock: bool = True
+    #: Count the gateway box's OWN internet traffic (input/output hooks,
+    #: ``q_gw_up``/``q_gw_down``) and charge it to the protected "Gateway"
+    #: user. Off => the box's traffic is uncounted (its quota block, if any,
+    #: still applies via the gateway chains).
+    count_gateway: bool = True
 
 
 @dataclass
@@ -135,6 +140,33 @@ class ShapingConfig:
 
 
 @dataclass
+class ReportConfig:
+    """On-demand internal reporting dashboard (source-IP gated).
+
+    Served at ``/report`` + ``/api/report`` — a read-only consumption view
+    (exact bytes/quota per user and device, events, log tail) that does NOT
+    require the admin session. Access is gated by the requesting client's IP:
+    clients on the managed subnet and/or an explicit allow-list are admitted,
+    everything else gets a 403. Passive/on-demand only — nothing ever
+    auto-opens it.
+    """
+
+    enabled: bool = True
+    #: Admit any request whose source IP is inside the managed client subnet
+    #: (the DHCP pool the box hands out, e.g. 192.168.2.0/24). On by default:
+    #: the household's own devices are the intended audience.
+    allow_client_subnet: bool = True
+    #: Extra CIDRs/IPs admitted regardless of subnet (admin machines, the box's
+    #: own uplink IP, a VPN range). e.g. ["192.168.1.0/24", "10.0.0.5"].
+    allowed_ips: list[str] = field(default_factory=list)
+    #: The managed client subnet as a CIDR (e.g. "192.168.2.0/24"). run.py
+    #: fills this from ``engine.client_subnet`` (or derives it from the dhcp
+    #: block), so the app never needs to re-derive it. Empty => the subnet
+    #: admission is a no-op (only ``allowed_ips`` admits).
+    client_subnet: str = ""
+
+
+@dataclass
 class Config:
     db_path: str = "data/quota.db"
     log_file: str = "logs/quota.log"
@@ -144,6 +176,7 @@ class Config:
     engine: EngineConfig = field(default_factory=EngineConfig)
     web: WebConfig = field(default_factory=WebConfig)
     shaping: ShapingConfig = field(default_factory=ShapingConfig)
+    report: ReportConfig = field(default_factory=ReportConfig)
     timezone: str = ""  # empty => system local timezone
 
 

@@ -224,8 +224,14 @@ select option { background: #1b112b; }
   border-color: var(--glass-border);
 }
 @media (max-width: 720px) {
-  .topbar { flex-wrap: wrap; justify-content: center; gap: 10px; }
-  .topnav { order: 3; width: 100%; justify-content: center; }
+  /* phone: brand on row 1 with the status pill, tabs become a swipeable strip */
+  .topbar { flex-wrap: wrap; gap: 10px; padding: 12px 16px; margin: 12px 12px 0; }
+  .topbar-right { order: 2; margin-left: auto; }
+  .topnav { order: 3; width: 100%; margin: 0; padding: 4px 0 8px;
+            justify-content: flex-start; overflow-x: auto; scrollbar-width: none;
+            -webkit-overflow-scrolling: touch; }
+  .topnav::-webkit-scrollbar { display: none; }
+  .nav-tab { flex: 0 0 auto; white-space: nowrap; }
 }
 
 /* ---------- layout ---------- */
@@ -419,6 +425,41 @@ select option { background: #1b112b; }
   text-transform: uppercase;
   letter-spacing: 0.4px;
   margin-left: 6px;
+}
+
+/* the gateway box itself — permanent, charged to its own protected user */
+.gateway-tag {
+  font-family: inherit;
+  font-size: 0.62rem;
+  font-weight: 700;
+  color: #f472b6;
+  background: rgba(244, 114, 182, 0.14);
+  border: 1px solid rgba(244, 114, 182, 0.35);
+  border-radius: 999px;
+  padding: 1px 7px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-left: 6px;
+}
+
+/* Gateway card enforcement line — whether the box's own cut is REALLY in the
+   kernel (gw_blocked set), not just what the block toggle resolves to. */
+.gw-enforce {
+  margin: 2px 0 8px;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  padding: 5px 9px;
+  border-radius: 8px;
+}
+.gw-enforce.warn {
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+.gw-enforce.ok {
+  color: #6ee7b7;
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.28);
 }
 
 /* per-device / per-user internet speed caps (↓ down · ↑ up, Mbps) */
@@ -808,10 +849,18 @@ select option { background: #1b112b; }
   position: fixed; inset: 0; z-index: 50;
   background: rgba(5, 3, 10, 0.65);
   backdrop-filter: blur(6px);
-  display: grid; place-items: center;
+  display: grid;
   padding: 20px;
+  overflow-y: auto;
 }
-.modal-card { width: 100%; max-width: 400px; padding: 28px; }
+/* `margin: auto` centers short cards AND lets a tall one (the device modal on a
+   phone) scroll instead of clipping off the top. */
+.modal-card {
+  width: 100%; max-width: 400px; padding: 28px;
+  margin: auto;
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+}
 .modal-card .muted { margin-bottom: 6px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
 
@@ -820,10 +869,16 @@ select option { background: #1b112b; }
   position: fixed; inset: 0; z-index: 60;
   background: rgba(5, 3, 10, 0.72);
   backdrop-filter: blur(8px);
-  display: grid; place-items: center;
+  display: grid;
   padding: 20px;
+  overflow-y: auto;
 }
-.welcome-overlay .welcome-card { width: 100%; max-width: 440px; padding: 32px; }
+.welcome-overlay .welcome-card {
+  width: 100%; max-width: 440px; padding: 32px;
+  margin: auto;
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+}
 .welcome-overlay h2 { margin: 0 0 6px 0; }
 .welcome-overlay .muted { margin: 0 0 20px 0; }
 .welcome-actions {
@@ -841,3 +896,38 @@ select option { background: #1b112b; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(167, 139, 250, 0.3); border-radius: 999px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(167, 139, 250, 0.5); }
+
+/* ---------- phones (touch-first) ---------- */
+@media (max-width: 720px) {
+  #login-screen { overflow-y: auto; }
+  .content { padding: 0 14px; margin: 16px auto 60px; gap: 20px; }
+  .card { padding: 20px 18px; }
+  .user-card { padding: 16px 14px; }
+  .bundle-card { justify-content: center; gap: 20px; padding: 22px 18px; }
+  .bundle-stats { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .net-status { font-size: 0.72rem; padding: 5px 10px; }
+  .device-live { flex-wrap: wrap; gap: 10px 16px; }
+  .device-numbers { flex-wrap: wrap; gap: 6px 12px; }
+  .device-actions { flex-wrap: wrap; }
+  .logs-toolbar { width: 100%; }
+  #log-search { width: 100%; }
+  .filter-group { flex-wrap: wrap; width: 100%; justify-content: center; }
+  .recharge-row { flex-wrap: wrap; }
+  .section-head { align-items: flex-start; }
+  .btn-row { width: 100%; }
+}
+
+@media (max-width: 480px) {
+  .logo { font-size: 1.4rem; }
+  .ring { width: 150px; height: 150px; }
+  .ring-big { font-size: 1.35rem; }
+  .ring-small { font-size: 0.72rem; }
+  .icon-btn, .accordion-toggle { width: 36px; height: 36px; }
+  .btn.small { padding: 10px 12px; font-size: 0.82rem; }
+  .modal, .welcome-overlay { padding: 12px; }
+  .modal-card { padding: 22px 16px; max-height: calc(100vh - 24px); }
+  .welcome-overlay .welcome-card { padding: 24px 18px; max-height: calc(100vh - 24px); }
+  .login-card { padding: 28px 20px; }
+  .topbar { margin: 10px 10px 0; padding: 10px 12px; }
+  body { padding-bottom: env(safe-area-inset-bottom); }
+}

@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Consumption report — Quota Manager</title>
+<link rel="stylesheet" href="/assets/styles.css?v=32">
+<style>
+  /* Report page: read-only consumption view, source-IP gated (no session). */
+  body { padding: 24px; }
+  .rep-wrap { max-width: 1100px; margin: 0 auto; }
+  .rep-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+  .rep-head .logo { font-size: 1.3rem; }
+  .rep-meta { color: var(--text-dim); font-size: 0.78rem; }
+  .rep-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .rep-card { padding: 20px 22px; }
+  .rep-card h3 { font-size: 0.95rem; margin-bottom: 12px; color: var(--accent-3); }
+  .rep-stat { display: flex; justify-content: space-between; padding: 5px 0; font-size: 0.85rem; border-bottom: 1px solid rgba(255,255,255,0.06); }
+  .rep-stat:last-child { border-bottom: none; }
+  .rep-stat span:first-child { color: var(--text-dim); }
+  .rep-stat b { font-family: ui-monospace, monospace; }
+  .rep-user { margin-top: 18px; padding: 18px 20px; }
+  .rep-user-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .rep-user-head h3 { font-size: 1rem; }
+  .rep-tag { font-size: 0.68rem; padding: 2px 8px; border-radius: 8px; background: var(--glass-bg-2); color: var(--text-dim); }
+  .rep-tag.protected { color: var(--accent-3); }
+  .rep-tag.blocked { color: var(--danger); background: rgba(248,113,113,0.15); border: 1px solid rgba(248,113,113,0.35); }
+  .rep-bar { height: 8px; border-radius: 6px; background: var(--glass-bg-2); overflow: hidden; margin: 10px 0 4px; }
+  .rep-bar > div { height: 100%; border-radius: 6px; background: linear-gradient(90deg, var(--accent-2), var(--accent)); }
+  .rep-bar > div.over { background: linear-gradient(90deg, var(--danger), var(--warn)); }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.82rem; }
+  th { text-align: left; color: var(--text-dim); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--glass-border); }
+  td { padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+  td.num, th.num { text-align: right; font-family: ui-monospace, monospace; }
+  .rep-sections { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 18px; }
+  @media (max-width: 900px) { .rep-sections { grid-template-columns: 1fr; } }
+  @media (max-width: 600px) {
+    body { padding: 12px; }
+    .rep-head { flex-direction: column; align-items: flex-start; gap: 8px; }
+    .rep-card { padding: 16px 14px; }
+    .rep-user { padding: 14px 12px; }
+    .rep-user-head { align-items: flex-start; }
+    /* wide tables scroll inside their card instead of stretching the page */
+    .rep-user table { display: block; overflow-x: auto; white-space: nowrap; }
+    .rep-user-head h3 { word-break: break-word; }
+    .rep-stat { font-size: 0.8rem; gap: 8px; }
+    .rep-stat b { text-align: right; }
+  }
+  @media (max-width: 420px) {
+    .rep-cards { grid-template-columns: 1fr; }
+    .ev { flex-wrap: wrap; }
+  }
+  .rep-events, .rep-logs { max-height: 320px; overflow: auto; }
+  .ev { padding: 5px 0; font-size: 0.8rem; border-bottom: 1px solid rgba(255,255,255,0.05); }
+  .ev .lvl { font-weight: 600; margin-right: 6px; }
+  .lvl.warn { color: var(--warn); }
+  .lvl.error { color: var(--danger); }
+  .lvl.info { color: var(--accent-3); }
+  .ev .ts { color: var(--text-dim); font-size: 0.7rem; margin-right: 8px; }
+  .log-line { font-family: ui-monospace, monospace; font-size: 0.7rem; color: var(--text-dim); padding: 2px 0; white-space: pre-wrap; word-break: break-word; }
+  .rep-err { color: var(--danger); }
+</style>
+</head>
+<body>
+  <div class="bg-glow"></div>
+  <div class="rep-wrap screen">
+    <header class="rep-head">
+      <h1 class="logo">Quota<span>Manager</span> <span style="font-size:0.7em; color:var(--text-dim);">report</span></h1>
+      <div class="rep-meta" id="rep-meta"></div>
+    </header>
+
+    <div id="rep-err" class="banner hidden">Could not load the report. Access is restricted to
+    allowed IPs.</div>
+
+    <div id="rep-body" class="hidden">
+      <div class="rep-cards">
+        <div class="glass card rep-card" id="rep-bundle"></div>
+        <div class="glass card rep-card" id="rep-stats"></div>
+        <div class="glass card rep-card" id="rep-wan"></div>
+      </div>
+      <div id="rep-users"></div>
+      <div class="rep-sections">
+        <div class="glass card rep-card">
+          <h3>Recent events</h3>
+          <div class="rep-events" id="rep-events"></div>
+        </div>
+        <div class="glass card rep-card">
+          <h3>Gateway log tail</h3>
+          <div class="rep-logs" id="rep-logs"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  function fmt(gb) {
+    if (gb >= 1000) return (gb / 1024).toFixed(2) + ' TB';
+    return gb.toFixed(2) + ' GB';
+  }
+  function fmtBytes(b) {
+    if (!b) return '0 B';
+    var u = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var i = 0; while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+    return b.toFixed(b < 10 && i ? 1 : 0) + ' ' + u[i];
+  }
+  function esc(s) {
+    var div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
+  }
+  function stat(label, value) {
+    return '<div class="rep-stat"><span>' + label + '</span><b>' + value + '</b></div>';
+  }
+
+  function renderBundle(b) {
+    document.getElementById('rep-bundle').innerHTML =
+      '<h3>Bundle</h3>' +
+      stat('Total', fmt(b.total_gb)) +
+      stat('Used', fmt(b.used_gb) + ' <span style="color:var(--text-dim)">(' +
+           fmtBytes(b.used_bytes) + ')</span>') +
+      stat('Remaining', fmt(b.remaining_gb)) +
+      stat('Reset day', b.reset_day > 0 ? 'Day ' + b.reset_day : 'Manual (recharge only)') +
+      stat('Period', b.period_start + (b.period_end ? ' → ' + b.period_end : ' → open'));
+  }
+
+  function renderStats(d) {
+    var nUsers = d.users.length;
+    var nDevices = d.users.reduce(function (a, u) { return a + u.devices.length; }, 0);
+    var blocked = d.users.filter(function (u) { return u.blocked; }).length;
+    document.getElementById('rep-stats').innerHTML =
+      '<h3>Overview</h3>' +
+      stat('Users', nUsers) +
+      stat('Devices', nDevices) +
+      stat('Blocked users', blocked) +
+      stat('Version', esc(d.version));
+  }
+
+  function renderWan(d) {
+    var wan = d.wan || {};
+    var topo = wan.topology === 'wan' ? 'WAN (PPPoE)' : 'LAN (behind router)';
+    // ppp0 is a plain string ("up" | "down" | "n/a"), not an object.
+    var ppp = wan.ppp0 || '';
+    var pppTxt = ppp ? ppp : '—';
+    var internet = wan.internet === true ? 'Online' : (wan.internet === false ? 'Offline' : '—');
+    document.getElementById('rep-wan').innerHTML =
+      '<h3>Network</h3>' +
+      stat('Topology', topo) +
+      stat('ppp0', pppTxt) +
+      stat('Internet', internet);
+  }
+
+  function renderUsers(d) {
+    var box = document.getElementById('rep-users');
+    box.innerHTML = '';
+    d.users.forEach(function (u) {
+      var card = document.createElement('div');
+      card.className = 'glass card rep-user';
+      var tags = '';
+      if (u.protected) tags += ' <span class="rep-tag protected">gateway</span>';
+      if (u.guest) tags += ' <span class="rep-tag">guest</span>';
+      if (u.blocked) tags += ' <span class="rep-tag blocked">blocked</span>';
+      var barClass = u.percent >= 100 ? 'over' : '';
+      var rows = u.devices.map(function (dv) {
+        return '<tr><td>' + esc(dv.name || dv.mac) + '</td>' +
+               '<td class="num">' + fmt(dv.device_up_gb) + ' / ' + fmt(dv.device_down_gb) + '</td>' +
+               '<td class="num">' + fmt(dv.device_used_gb) + '</td>' +
+               '<td class="num">' + dv.device_percent.toFixed(1) + '%</td></tr>';
+      }).join('');
+      card.innerHTML =
+        '<div class="rep-user-head">' +
+        '  <h3>' + esc(u.name || '(unnamed)') + tags + '</h3>' +
+        '  <div class="rep-meta">' + fmt(u.used_gb) + ' / ' + fmt(u.allowance_gb) +
+        ' · ' + u.percent.toFixed(1) + '%</div>' +
+        '</div>' +
+        '<div class="rep-bar"><div class="' + barClass + '" style="width:' +
+        Math.min(100, u.percent) + '%"></div></div>' +
+        '<table><thead><tr><th>Device</th><th class="num">↑ / ↓</th>' +
+        '<th class="num">Used</th><th class="num">%</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody></table>';
+      box.appendChild(card);
+    });
+  }
+
+  function renderEvents(d) {
+    var box = document.getElementById('rep-events');
+    box.innerHTML = '';
+    if (!d.events.length) { box.innerHTML = '<div class="ev">No events recorded.</div>'; return; }
+    d.events.forEach(function (ev) {
+      var el = document.createElement('div');
+      el.className = 'ev';
+      var ts = new Date(ev.ts * 1000);
+      el.innerHTML = '<span class="ts">' + esc(ts.toLocaleString()) + '</span>' +
+                     '<span class="lvl ' + esc(ev.level) + '">' + esc(ev.level.toUpperCase()) + '</span>' +
+                     esc(ev.message);
+      box.appendChild(el);
+    });
+  }
+
+  function renderLogs(d) {
+    var box = document.getElementById('rep-logs');
+    box.innerHTML = '';
+    if (!d.logs.lines.length) { box.innerHTML = '<div class="log-line">(no log file yet)</div>'; return; }
+    d.logs.lines.slice(0, 200).forEach(function (line) {
+      var el = document.createElement('div');
+      el.className = 'log-line';
+      el.textContent = line;
+      box.appendChild(el);
+    });
+  }
+
+  function load() {
+    fetch('/api/report').then(function (r) {
+      if (!r.ok) throw new Error('status ' + r.status);
+      return r.json();
+    }).then(function (d) {
+      document.getElementById('rep-err').classList.add('hidden');
+      document.getElementById('rep-body').classList.remove('hidden');
+      document.getElementById('rep-meta').textContent =
+        'Generated ' + new Date(d.generated_at).toLocaleString();
+      renderBundle(d.bundle);
+      renderStats(d);
+      renderWan(d);
+      renderUsers(d);
+      renderEvents(d);
+      renderLogs(d);
+    }).catch(function () {
+      document.getElementById('rep-body').classList.add('hidden');
+      document.getElementById('rep-err').classList.remove('hidden');
+    });
+  }
+
+  load();
+})();
+</script>
+</body>
+</html>

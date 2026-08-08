@@ -153,6 +153,13 @@ if echo "$LOG_TEXT" | grep -qi "Timeout waiting for PADO" ||
 elif echo "$LOG_TEXT" | grep -qi "Authentication failed"; then
     echo "RESULT=auth-failed"
     echo "DETAIL=the ISP rejected the PPPoE user/password — double-check the credentials from your ISP"
+elif echo "$LOG_TEXT" | grep -qi "concurr\|already.*session\|session.*already"; then
+    # The peer's PAP AuthNak says the SAME username already holds a session.
+    # On metered Egyptian lines (ETIS/We) that is almost always the box's own
+    # live ppp0 — the throwaway test dial reuses the saved creds and the ISP's
+    # concurrency control refuses a SECOND session. Not a line/creds failure.
+    echo "RESULT=concurrent-session"
+    echo "DETAIL=the ISP rejected the test dial: 'Reject by concurrency control' — the same PPPoE username already holds a live session (almost always the box's own ppp0). ETIS/We allow only ONE session per username, so a second throwaway dial is refused. If ppp0 is up and devices have internet, this is a FALSE ALARM: the line and credentials are fine, nothing to fix. If ppp0 is NOT up, check the router isn't still dialing PPPoE itself (it must be bridged, not routed/NAT)."
 elif echo "$LOG_TEXT" | grep -qi "peer refused to authenticate"; then
     echo "RESULT=link-down"
     echo "DETAIL=pppd required the peer to authenticate and the peer refused — the peer file is missing 'noauth'; re-sync the scripts (this build should already have it)"

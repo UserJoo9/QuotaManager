@@ -209,6 +209,36 @@ def test_user_aggregate_caps_device_leaves():
                     "ceil", "10mbit")
 
 
+def test_every_class_has_tight_burst():
+    """HTB's default token bucket is ~1 second of traffic at the class rate,
+    so a class can burst at full line speed for up to a second — a short speed
+    test then reads ~1.5x the configured cap. Every class must carry an
+    explicit small burst/cburst (rate/20, floored at one frame) that is large
+    enough to sustain the rate but too small to measurably overshoot it."""
+    fake = FakeTc()
+    shaper = TcShaper(make_cfg(), run_command=fake)
+    shaper.start()
+    shaper.update_state(
+        [entry("192.168.2.100", device_id=1, user_id=1, down=2, up=2)],
+        True, 100.0, 20.0, True)
+    classes = [a for a in fake.calls if a[:3] == ["tc", "class", "add"]]
+    assert classes, "the two HTB trees must create classes"
+    for argv in classes:
+        assert "burst" in argv and "cburst" in argv, \
+            f"class missing burst/cburst: {argv}"
+        burst = int(argv[argv.index("burst") + 1])
+        cburst = int(argv[argv.index("cburst") + 1])
+        assert burst == cburst >= 1500, f"tiny/negative burst: {argv}"
+    # 2 Mbps leaf -> rate/20 = 250 KB/s / 20 = 12.5 KB (not 1s = 250 KB)
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:0x301",
+                    "classid", "1:0x8001", "htb", "rate", "2mbit",
+                    "ceil", "2mbit", "burst", "12500", "cburst", "12500")
+    # 100 Mbps root/default/aggregate -> 12.5 MB/s / 20 = 625 KB
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:",
+                    "classid", "1:1", "htb", "rate", "100mbit",
+                    "burst", "625000", "cburst", "625000")
+
+
 def test_aqm_off_no_fq_codel():
     fake = FakeTc()
     shaper = TcShaper(make_cfg(), run_command=fake)

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>My quota — Quota Manager</title>
+<link rel="stylesheet" href="/assets/styles.css?v=32">
+<style>
+  /* Milestone page: a lightweight, public view — no admin session. */
+  body { display: flex; align-items: center; justify-content: center; padding: 24px; }
+  .ms-wrap { width: 100%; max-width: 560px; }
+  .ms-card { padding: 28px 30px; }
+  .ms-hero { text-align: center; margin-bottom: 22px; }
+  .ms-hero .logo { font-size: 1.4rem; }
+  .ms-hero .subtitle { color: var(--text-dim); font-size: 0.9rem; margin-top: 4px; }
+  .ms-num { font-size: 2.6rem; font-weight: 800; letter-spacing: -1px;
+            background: linear-gradient(120deg, var(--accent-3), var(--accent));
+            -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .ms-bar { height: 10px; border-radius: 6px; background: var(--glass-bg-2);
+            overflow: hidden; margin: 12px 0 6px; }
+  .ms-bar > div { height: 100%; border-radius: 6px;
+                  background: linear-gradient(90deg, var(--accent-2), var(--accent)); }
+  .ms-devices { list-style: none; margin-top: 16px; }
+  .ms-device { display: flex; align-items: center; justify-content: space-between;
+               gap: 12px; padding: 10px 12px; border-radius: var(--radius-md);
+               background: rgba(255,255,255,0.03); border: 1px solid var(--glass-border); }
+  .ms-device + .ms-device { margin-top: 8px; }
+  .ms-name { font-weight: 600; }
+  .ms-mac { color: var(--text-dim); font-size: 0.75rem; font-family: ui-monospace, monospace; }
+  .ms-bytes { text-align: right; font-size: 0.85rem; color: var(--text-dim); white-space: nowrap; }
+  .ms-bytes b { color: var(--text); }
+  .ms-milestones { display: flex; gap: 10px; margin-top: 18px; }
+  .ms-pill { flex: 1; text-align: center; padding: 10px 8px; border-radius: var(--radius-md);
+            border: 1px solid var(--glass-border); background: var(--glass-bg); font-size: 0.8rem; }
+  .ms-pill.reached { border-color: rgba(52, 211, 153, 0.45); color: var(--ok); }
+  .ms-pill.warn { border-color: rgba(251, 191, 36, 0.5); color: var(--warn); }
+  .ms-pill.done { border-color: rgba(170, 130, 255, 0.35); color: var(--text-dim); }
+  .ms-note { margin-top: 14px; font-size: 0.78rem; color: var(--text-dim); line-height: 1.5; }
+  .ms-actions { margin-top: 18px; display: flex; gap: 10px; }
+  @media (max-width: 480px) {
+    /* align to the top so a long device list scrolls naturally instead of
+       clipping off both ends of the centered flex */
+    body { padding: 12px; align-items: flex-start; padding-top: 16px; }
+    .ms-card { padding: 22px 18px; }
+    .ms-num { font-size: 2.2rem; }
+    .ms-milestones { gap: 6px; }
+    .ms-pill { padding: 8px 4px; font-size: 0.72rem; }
+    .ms-device { gap: 8px; padding: 10px; }
+    .ms-bytes { font-size: 0.78rem; }
+  }
+</style>
+</head>
+<body>
+  <div class="bg-glow"></div>
+  <div class="ms-wrap screen">
+    <div class="glass card ms-card">
+      <div class="ms-hero">
+        <h1 class="logo">Quota<span>Manager</span></h1>
+        <p class="subtitle">Your internet allowance this period</p>
+      </div>
+
+      <div id="ms-loading" class="ms-note">Loading…</div>
+
+      <div id="ms-content" class="hidden">
+        <div class="ms-num" id="ms-percent">—</div>
+        <div class="ms-note" id="ms-summary"></div>
+        <div class="ms-bar"><div id="ms-bar-fill" style="width:0%"></div></div>
+
+        <div id="ms-milestones" class="ms-milestones"></div>
+
+        <h3 style="margin-top:20px; font-size:0.95rem;">Your devices</h3>
+        <ul class="ms-devices" id="ms-devices"></ul>
+
+        <p class="ms-note" id="ms-noted" style="display:none; color: var(--ok);">✔ Noted — you're on track.</p>
+
+        <div class="ms-actions">
+          <button id="ms-refresh" class="btn ghost">Refresh</button>
+        </div>
+      </div>
+
+      <div id="ms-unrecognized" class="hidden">
+        <p class="ms-note">This device isn't recognized on the quota network. It has no active
+        DHCP lease, so there's nothing to show here yet. Reconnect to the gateway
+        Wi-Fi and try again.</p>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  var fmt = function (gb) {
+    if (gb >= 1000) return (gb / 1024).toFixed(2) + ' TB';
+    return gb.toFixed(2) + ' GB';
+  };
+  var pendingNotified = [];
+
+  function render(data) {
+    if (!data || !data.recognized) {
+      document.getElementById('ms-loading').classList.add('hidden');
+      document.getElementById('ms-unrecognized').classList.remove('hidden');
+      return;
+    }
+    var u = data.user;
+    var pct = u.percent;
+    document.getElementById('ms-loading').classList.add('hidden');
+    document.getElementById('ms-content').classList.remove('hidden');
+
+    document.getElementById('ms-percent').textContent = pct.toFixed(0) + '%';
+    var used = fmt(u.used_gb), allowance = fmt(u.allowance_gb);
+    document.getElementById('ms-summary').textContent =
+      'You have used ' + used + ' of your ' + allowance + ' allowance.';
+    var fill = document.getElementById('ms-bar-fill');
+    fill.style.width = Math.min(100, pct) + '%';
+
+    // milestone pills: 50/75/100
+    var box = document.getElementById('ms-milestones');
+    box.innerHTML = '';
+    var labels = {50: 'Halfway', 75: 'Almost there', 100: 'Cap reached'};
+    var ms = u.milestones;
+    [50, 75, 100].forEach(function (m) {
+      var pill = document.createElement('div');
+      pill.className = 'ms-pill';
+      var state = ms[m];
+      if (!state.crossed) {
+        pill.classList.add('done');
+        pill.textContent = labels[m] + ' · ' + m + '%';
+      } else if (!state.notified) {
+        pill.classList.add('warn');
+        pill.textContent = '⚠ ' + labels[m] + ' (' + m + '%) — new';
+        pendingNotified.push({user_id: u.id, milestone: m});
+      } else {
+        pill.classList.add('reached');
+        pill.textContent = '✓ ' + labels[m] + ' (' + m + '%)';
+      }
+      box.appendChild(pill);
+    });
+
+    // per-device breakdown
+    var list = document.getElementById('ms-devices');
+    list.innerHTML = '';
+    if (!data.devices.length) {
+      var li = document.createElement('li');
+      li.className = 'ms-device';
+      li.innerHTML = '<span class="ms-name">No devices on record</span>';
+      list.appendChild(li);
+    }
+    data.devices.forEach(function (d) {
+      var li = document.createElement('li');
+      li.className = 'ms-device';
+      var name = d.name || d.mac;
+      li.innerHTML =
+        '<div><div class="ms-name">' + esc(name) + '</div>' +
+        '<div class="ms-mac">' + esc(d.mac) + '</div></div>' +
+        '<div class="ms-bytes"><b>' + fmt(d.device_used_gb) + '</b> total' +
+        '<br>↑ ' + fmt(d.device_up_gb) + ' · ↓ ' + fmt(d.device_down_gb) + '</div>';
+      list.appendChild(li);
+    });
+
+    // acknowledge pending milestones once
+    if (pendingNotified.length) {
+      ack();
+    }
+  }
+
+  function ack() {
+    var first = pendingNotified.shift();
+    if (!first) {
+      var n = document.getElementById('ms-noted');
+      n.style.display = 'block';
+      return;
+    }
+    fetch('/api/milestone/notify', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(first)
+    }).then(function (r) { return r.json(); })
+      .then(function () { ack(); })
+      .catch(function () { ack(); });
+  }
+
+  function esc(s) {
+    var div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
+  }
+
+  function load() {
+    pendingNotified = [];
+    fetch('/api/milestone')
+      .then(function (r) { return r.json(); })
+      .then(render)
+      .catch(function () {
+        document.getElementById('ms-loading').textContent =
+          'Could not reach the gateway. Try again later.';
+      });
+  }
+
+  document.getElementById('ms-refresh').addEventListener('click', load);
+  load();
+})();
+</script>
+</body>
+</html>

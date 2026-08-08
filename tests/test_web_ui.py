@@ -61,7 +61,7 @@ def test_index_served(client):
     assert "System logs" in r.text
     assert 'id="panel-logs"' in r.text
     assert 'class="glass card admin-card"' in r.text
-    assert "assets/app.js?v=27" in r.text
+    assert "assets/app.js?v=30" in r.text
     # the internet reachability pill lives in the top bar, not the WAN status
     # panel (probed every 15 s; dot color = reachability).
     assert 'id="net-status"' in r.text
@@ -166,6 +166,11 @@ def test_wan_tab_present(client):
     assert "renderPppoeVerdict" in rjs.text
     assert "no-pppoe-server" in rjs.text
     assert "NOT bridged" in rjs.text
+    # v29.1: when the saved creds already hold a live ppp0 session, the ISP's
+    # concurrency control refuses the throwaway test dial — the verdict says so
+    # (a FALSE ALARM), instead of "modem/ISP side, the real dial fails too".
+    assert "concurrent-session" in rjs.text
+    assert "FALSE ALARM" in rjs.text
     assert "maybeAutoDiagnose" in rjs.text
     assert "testPppoe" in rjs.text
     assert "wanToggleDirty" in rjs.text
@@ -210,3 +215,10 @@ def test_assets_served(client):
     assert "/api/setup" in r.text
     assert "setup_complete" in r.text
     assert '$("welcome-overlay").classList.remove("hidden")' in r.text
+    # gateway enforcement-status JS: the protected Gateway card renders whether
+    # the box's own cut is REALLY in the kernel (gw_blocked set), not just what
+    # the block toggle resolves to — so "Blocked in the UI but not cut" shows.
+    assert "gatewayEnforceHtml" in r.text
+    assert "engine_available" in r.text
+    assert "blocked_programmed" in r.text
+    assert "gw-enforce" in r.text

@@ -118,6 +118,17 @@ class SetupComplete(BaseModel):
     new_password: Optional[str] = Field(None, min_length=4)
 
 
+class MilestoneNotify(BaseModel):
+    """Milestone-page acknowledge: mark a crossed threshold as notified.
+
+    Public (no admin session) — the milestone page is for the household's own
+    devices on the LAN. The service validates ``milestone`` ∈ {50, 75, 100}.
+    """
+
+    user_id: int
+    milestone: int
+
+
 class LoginRequest(BaseModel):
     password: str
 

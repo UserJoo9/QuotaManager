@@ -5,6 +5,8 @@ Schema overview
 users          -- every person: quota mode, allowance, enforcement state.
 devices        -- every known MAC: name, owning user, per-device override.
 leases         -- current/known DHCP leases (mac <-> ip).
+suppressed_macs-- guest device MACs the admin manually deleted: while present
+                 they are not auto-registered (cleared once they leave).
 bundle_config  -- single row: total_gb, reset_day, current period snapshot.
 usage_daily    -- append-only per-device daily byte totals.
 settings       -- key/value store (admin password hash, flags).
@@ -27,6 +29,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import aiosqlite
+
+from quota.engine import GATEWAY_MAC
 
 # ---------------------------------------------------------------------------
 # Domain enums (kept as plain strings so the schema stays simple)
@@ -87,10 +91,21 @@ class User:
     #: Guest account — auto-registered for a new device while guest mode is on.
     #: Guests get a fixed quota and are deleted when the quota period resets.
     guest: bool = False
+    #: Protected user (the "Gateway" box account): seeded at connect, cannot
+    #: be deleted by the admin, and the box's own internet usage is charged
+    #: here. Editable like any other user — setting its allowance to 0 cuts
+    #: the box's internet while clients keep working.
+    protected: bool = False
     #: Per-user aggregate internet speed cap in Mbps (0 = unlimited): all of a
     #: user's devices share this ceiling. Enforced by the Linux tc shaper.
     limit_down_mbps: float = 0.0
     limit_up_mbps: float = 0.0
+    #: Milestone-notification flags: once the user's usage crosses a threshold
+    #: (50%/75%/100% of their allowance), the milestone page marks it notified
+    #: so it is only surfaced ONCE. Reset when the quota period rolls.
+    notified_50: bool = False
+    notified_75: bool = False
+    notified_100: bool = False
 
     @property
     def is_admin_blocked(self) -> bool:
@@ -176,8 +191,17 @@ CREATE TABLE IF NOT EXISTS users (
     topup_gb         REAL NOT NULL DEFAULT 0,
     created_at       REAL NOT NULL,
     guest            INTEGER NOT NULL DEFAULT 0,
+    protected        INTEGER NOT NULL DEFAULT 0,
     limit_down_mbps  REAL NOT NULL DEFAULT 0,
-    limit_up_mbps    REAL NOT NULL DEFAULT 0
+    limit_up_mbps    REAL NOT NULL DEFAULT 0,
+    notified_50      INTEGER NOT NULL DEFAULT 0,
+    notified_75      INTEGER NOT NULL DEFAULT 0,
+    notified_100     INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS suppressed_macs (
+    mac        TEXT PRIMARY KEY,
+    created_at REAL NOT NULL
 );
 """
 
@@ -251,7 +275,28 @@ class Database:
                     await self._conn.commit()
                 except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
                     pass
+        # v20 protected users: the Gateway box account cannot be deleted. ALTER
+        # no-ops when already present (fresh SCHEMA includes it).
+        try:
+            await self._conn.execute(
+                "ALTER TABLE users ADD COLUMN protected "
+                "INTEGER NOT NULL DEFAULT 0")
+            await self._conn.commit()
+        except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
+            pass
+        # v21 milestone flags: per-user consumption-threshold notices (50/75/100
+        # % of allowance). Fresh SCHEMA includes them; ALTER no-ops on existing
+        # DBs (default 0 = not yet notified).
+        for col in ("notified_50", "notified_75", "notified_100"):
+            try:
+                await self._conn.execute(
+                    f"ALTER TABLE users ADD COLUMN {col} "
+                    "INTEGER NOT NULL DEFAULT 0")
+                await self._conn.commit()
+            except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
+                pass
         await self._backfill_users()
+        await self._seed_gateway()
         await self._conn.commit()
 
     async def _backfill_users(self) -> None:
@@ -381,7 +426,21 @@ class Database:
         await self.conn.commit()
         return await self.get_device(device_id)
 
-    async def delete_device(self, device_id: int) -> None:
+    async def delete_device(self, device_id: int,
+                            suppress_guest_mac: bool = False) -> None:
+        """Delete a device. When ``suppress_guest_mac`` is set AND the device
+        belongs to a guest user, its MAC is recorded in ``suppressed_macs`` so
+        run.py does not auto-register it again while it stays connected (the
+        manual-delete-never-returns rule). The month-reset path calls without
+        the flag — a returning guest after a reset re-registers fresh."""
+        row = await self._fetch_one(
+            "SELECT mac, user_id FROM devices WHERE id=?", (device_id,))
+        if suppress_guest_mac and row is not None:
+            if row["user_id"] is not None:
+                user = await self._fetch_one(
+                    "SELECT guest FROM users WHERE id=?", (row["user_id"],))
+                if user is not None and user["guest"]:
+                    await self.add_suppressed_mac(row["mac"])
         await self.conn.execute("DELETE FROM devices WHERE id=?", (device_id,))
         await self.conn.commit()
 
@@ -399,6 +458,17 @@ class Database:
         """Reset all top-ups when a new quota period opens."""
         await self.conn.execute("UPDATE users SET topup_gb = 0")
         await self.conn.execute("UPDATE devices SET topup_gb = 0")
+        await self.conn.commit()
+
+    async def reset_milestone_flags(self) -> None:
+        """Clear every user's milestone-notification flags (period roll).
+
+        A fresh quota period re-arms the 50/75/100% notices so each threshold
+        is surfaced again in the new month. Idempotent — safe to call on any
+        period open/manual reset.
+        """
+        await self.conn.execute(
+            "UPDATE users SET notified_50=0, notified_75=0, notified_100=0")
         await self.conn.commit()
 
     async def clear_usage(self, since_date: str) -> None:
@@ -420,16 +490,19 @@ class Database:
                           fixed_gb: float | None = None,
                           block_state: str = BLOCK_OK,
                           guest: bool = False,
+                          protected: bool = False,
                           limit_down_mbps: float = 0.0,
                           limit_up_mbps: float = 0.0) -> User:
         """Insert a user (no devices). Used by the API, by new-device
-        auto-registration, and by the v2 migration backfill."""
+        auto-registration, by the v2 migration backfill, and by
+        :meth:`_seed_gateway` (``protected=True`` for the Gateway account)."""
         cur = await self.conn.execute(
             "INSERT INTO users (name, quota_mode, fixed_gb, block_state, "
-            "topup_gb, created_at, guest, limit_down_mbps, limit_up_mbps) "
-            "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)",
+            "topup_gb, created_at, guest, protected, "
+            "limit_down_mbps, limit_up_mbps) "
+            "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
             (name, quota_mode, fixed_gb, block_state, time.time(),
-             int(guest), limit_down_mbps, limit_up_mbps))
+             int(guest), int(protected), limit_down_mbps, limit_up_mbps))
         await self.conn.commit()
         row = await self._fetch_one("SELECT * FROM users WHERE id=?",
                                     (cur.lastrowid,))
@@ -446,7 +519,8 @@ class Database:
 
     async def update_user(self, user_id: int, **fields: Any) -> User | None:
         allowed = {"name", "quota_mode", "fixed_gb", "block_state",
-                   "limit_down_mbps", "limit_up_mbps"}
+                   "limit_down_mbps", "limit_up_mbps",
+                   "notified_50", "notified_75", "notified_100"}
         sets, args = [], []
         for key, value in fields.items():
             if key in allowed:
@@ -460,15 +534,23 @@ class Database:
         await self.conn.commit()
         return await self.get_user(user_id)
 
-    async def delete_user(self, user_id: int, cascade: bool = True) -> int:
-        """Delete a user (cascade removes their devices + usage rows).
-        Returns how many devices were removed with them."""
+    async def delete_user(self, user_id: int, cascade: bool = True,
+                          suppress_guest_macs: bool = False) -> int:
+        """Delete a user (cascade removes their devices + usage rows). When
+        ``suppress_guest_macs`` is set AND the user is a guest, their device
+        MACs are recorded in ``suppressed_macs`` first, so run.py will not
+        auto-register those devices again while they stay connected. Returns
+        how many devices were removed with them."""
+        user = await self._fetch_one("SELECT guest FROM users WHERE id=?",
+                                     (user_id,))
         rows = await self.conn.execute_fetchall(
-            "SELECT id FROM devices WHERE user_id=?", (user_id,))
+            "SELECT id, mac FROM devices WHERE user_id=?", (user_id,))
         if rows and not cascade:
             raise ValueError(
                 "user still has devices; reassign or delete them first")
         for r in rows:
+            if suppress_guest_macs and user is not None and user["guest"]:
+                await self.add_suppressed_mac(r["mac"])
             await self.conn.execute(
                 "DELETE FROM usage_daily WHERE device_id=?", (r["id"],))
             await self.conn.execute("DELETE FROM devices WHERE id=?", (r["id"],))
@@ -499,6 +581,70 @@ class Database:
         await self.conn.execute(
             "UPDATE users SET fixed_gb=? WHERE guest=1", (gb,))
         await self.conn.commit()
+
+    async def _seed_gateway(self) -> None:
+        """Idempotently create the protected "Gateway" user + the box's device.
+
+        The gateway machine's own internet consumption is charged to this user
+        (default 1 GB fixed allowance), so the box's traffic is INSIDE the
+        quota math — and the admin can cut the box's own internet by setting
+        the allowance to 0 (or using the block toggle). The user is
+        ``protected``: it cannot be deleted (API 400 + no delete button), only
+        edited. Anchored on the GATEWAY_MAC device so a re-seed (every boot)
+        never duplicates either row.
+        """
+        if await self._fetch_one("SELECT 1 FROM devices WHERE mac=?",
+                                 (GATEWAY_MAC,)):
+            return  # already seeded
+        row = await self._fetch_one("SELECT id FROM users WHERE protected=1")
+        if row is not None:
+            user_id = row["id"]
+        else:
+            user_id = (await self.create_user(
+                name="Gateway", quota_mode=QUOTA_FIXED, fixed_gb=1.0,
+                protected=True)).id
+        await self.conn.execute(
+            "INSERT INTO devices (mac, name, quota_mode, fixed_gb, block_state, "
+            "created_at, user_id) VALUES (?, 'Gateway box', 'fixed', 1.0, "
+            "'ok', ?, ?)",
+            (GATEWAY_MAC, time.time(), user_id))
+        await self.conn.commit()
+
+    # -- suppressed MACs ------------------------------------------------------
+    # A manually-deleted guest device's MAC is recorded here so run.py does not
+    # auto-register it again while it stays connected. The row is cleared once
+    # the MAC drops out of the dnsmasq lease file (device genuinely left), so a
+    # later return registers a fresh guest. The month-reset path NEVER writes
+    # here — returning guests after a reset re-register normally.
+
+    async def add_suppressed_mac(self, mac: str) -> None:
+        """Record a MAC that must not auto-register. Lowercased + idempotent."""
+        await self.conn.execute(
+            "INSERT INTO suppressed_macs (mac, created_at) VALUES (?, ?) "
+            "ON CONFLICT(mac) DO NOTHING",
+            (mac.lower(), time.time()))
+        await self.conn.commit()
+
+    async def is_mac_suppressed(self, mac: str) -> bool:
+        row = await self._fetch_one(
+            "SELECT 1 FROM suppressed_macs WHERE mac=?", (mac.lower(),))
+        return row is not None
+
+    async def clear_suppressed_macs_not_in(self, keep: set[str]) -> int:
+        """Drop suppression rows for MACs no longer on the network.
+
+        ``keep`` is the set of currently-leased MACs (dnsmasq lease file). A
+        MAC that left the network loses its suppression, so a future return
+        registers fresh. Returns how many rows were cleared."""
+        keep_l = {m.lower() for m in keep}
+        rows = await self.conn.execute_fetchall("SELECT mac FROM suppressed_macs")
+        gone = [r["mac"] for r in rows if r["mac"] not in keep_l]
+        if gone:
+            ph = ",".join("?" for _ in gone)
+            await self.conn.execute(
+                f"DELETE FROM suppressed_macs WHERE mac IN ({ph})", gone)
+            await self.conn.commit()
+        return len(gone)
 
     # -- leases ------------------------------------------------------------
 
@@ -717,6 +863,10 @@ def _row_to_user(row: Any) -> User:
         topup_gb=float(row["topup_gb"] or 0.0),
         created_at=row["created_at"],
         guest=bool(row["guest"]),
+        protected=bool(row["protected"]),
         limit_down_mbps=float(row["limit_down_mbps"] or 0.0),
         limit_up_mbps=float(row["limit_up_mbps"] or 0.0),
+        notified_50=bool(row["notified_50"]),
+        notified_75=bool(row["notified_75"]),
+        notified_100=bool(row["notified_100"]),
     )

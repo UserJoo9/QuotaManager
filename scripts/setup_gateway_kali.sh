@@ -412,6 +412,9 @@ bind-interfaces
 # NAKed and re-DISCOVERs onto $CLIENT_NET immediately.
 dhcp-authoritative
 # DHCP: hand devices IPs on the CLIENT subnet with gateway + DNS = THIS laptop
+# dhcp-sequential-ip: allocate STRICTLY in order from POOL_START (the dnsmasq
+# default hashes by MAC across the whole pool -> gapped leases like .155/.185)
+dhcp-sequential-ip
 dhcp-range=$POOL_START,$POOL_END,$SUBNET_MASK,${LEASE_HOURS}h
 dhcp-option=3,$CLIENT_IP          # default gateway = the quota laptop
 dhcp-option=6,$CLIENT_IP          # DNS = the quota laptop (its dnsmasq forwards)
@@ -434,6 +437,9 @@ bind-interfaces
 # instead of keeping its bypassing gateway until the old lease expires.
 dhcp-authoritative
 # DHCP: hand devices IPs on the CLIENT subnet with gateway + DNS = THIS laptop
+# dhcp-sequential-ip: allocate STRICTLY in order from POOL_START (the dnsmasq
+# default hashes by MAC across the whole pool -> gapped leases like .155/.185)
+dhcp-sequential-ip
 dhcp-range=$POOL_START,$POOL_END,$SUBNET_MASK,${LEASE_HOURS}h
 dhcp-option=3,$CLIENT_IP          # default gateway = the quota laptop
 dhcp-option=6,$CLIENT_IP          # DNS = the quota laptop (its dnsmasq forwards)

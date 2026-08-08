@@ -82,7 +82,7 @@ function showApp() {
 function render(data) {
   dashboard = data;
   renderBundle(data.bundle, data.devices, data.users);
-  renderUsers(data.users, data.devices);
+  renderUsers(data.users, data.devices, data.gateway);
   renderRogue(data.rogue);
   renderWan(data.wan); // null-safe — {} before the first Gateway tick
   renderNetStatus(data.internet);
@@ -161,7 +161,7 @@ function statusTag(state) {
   return "";
 }
 
-function renderUsers(users, devices) {
+function renderUsers(users, devices, gw) {
   const list = $("devices-list");
   if ((!users || !users.length) && (!devices || !devices.length)) {
     list.innerHTML = `<div class="empty">No users yet. Add a user or a device — a
@@ -176,7 +176,7 @@ function renderUsers(users, devices) {
   }
   const parts = [];
   for (const u of users || []) {
-    parts.push(userCard(u, byUser.get(u.id) || []));
+    parts.push(userCard(u, byUser.get(u.id) || [], gw));
   }
   // orphan devices (no user) — should not happen post-migration, but render
   // them so they stay controllable if the DB is mid-migration.
@@ -186,7 +186,7 @@ function renderUsers(users, devices) {
       { id: null, name: "Unassigned devices", quota_mode: "auto",
         allowance_gb: 0, used_gb: 0, percent: 0, blocked: false,
         block_state: "ok" },
-      orphan, true));
+      orphan, gw, true));
   }
   list.innerHTML = parts.join("");
 }
@@ -221,21 +221,49 @@ function renderRogue(rogue) {
   }).join("");
 }
 
-function userCard(u, udevs, ghost) {
+/* The box's own enforcement: the Gateway card shows whether the UI toggle and
+   the kernel agree. "Blocked" in the dashboard is the resolved DB state; the
+   actual cut lives in the engine's gw_blocked set (blocked_programmed). When
+   they diverge — a stale engine, a failed set program, or the engine off —
+   the box would still reach the internet while the card says Blocked. Make
+   that visible instead of silent. */
+function gatewayEnforceHtml(gw) {
+  if (!gw) return "";
+  if (!gw.engine_available) {
+    return `<div class="gw-enforce warn" title="The packet engine is not running (config engine.enabled=false, or it failed to start) — no device is counted or blocked right now.">⚠ Packet engine is off — nothing is being counted or blocked</div>`;
+  }
+  if (gw.blocked_desired && !gw.blocked_programmed) {
+    return `<div class="gw-enforce warn" title="The dashboard says Blocked, but the kernel's gw_blocked set does not contain 0.0.0.0/0 — the box can still reach the internet. Check the gateway journal / nft list set inet quota_gateway gw_blocked.">⚠ Blocked in the UI but NOT cut at the kernel — the box can still reach the internet</div>`;
+  }
+  if (gw.blocked_desired && gw.blocked_programmed) {
+    return `<div class="gw-enforce ok" title="The kernel's gw_blocked set holds 0.0.0.0/0 — the box's own internet is dropped at the input/output hooks.">✓ Box internet is cut at the kernel</div>`;
+  }
+  return "";
+}
+
+function userCard(u, udevs, gw, ghost) {
   ghost = ghost || u.id == null;
   const key = u.id == null ? "orphan" : String(u.id);
   const open = expandedUsers.has(key);
   const connected = (udevs || []).some((d) => d.connected);
+  // The protected Gateway user is permanent: the admin cuts the box's own
+  // internet with the block toggle + edit, but it can never be deleted.
+  const delBtn = u.protected ? "" : `
+      <button class="icon-btn danger" data-ua="delete" data-uid="${u.id}" title="Remove user + devices">🗑</button>`;
   const actions = ghost ? "" : `
       <label class="switch" title="Cut / restore all of this user's devices">
         <input type="checkbox" class="toggle-user" data-uid="${u.id}" ${u.blocked ? "" : "checked"}>
         <span class="slider"></span>
       </label>
       <button class="icon-btn" data-ua="edit" data-uid="${u.id}" title="Edit user">✎</button>
-      <button class="icon-btn danger" data-ua="delete" data-uid="${u.id}" title="Remove user + devices">🗑</button>`;
+      ${delBtn}`;
   const devHtml = udevs.map(deviceRow).join("");
   const guestTag = u.guest
     ? ` <span class="guest-tag" title="Guest account — auto-created, deleted on month reset">guest</span>` : "";
+  // the box itself: its own internet consumption is charged here, and it is
+  // permanent (edit + block work, delete does not)
+  const gatewayTag = u.protected
+    ? ` <span class="gateway-tag" title="The gateway box itself — its own internet is charged to this user. Cannot be deleted.">gateway</span>` : "";
   // per-user aggregate speed caps (Mbps; shown only when one is set)
   const speedTag = (u.limit_down_mbps || u.limit_up_mbps)
     ? ` <span class="speed-tag" title="Total speed for all this user's devices">↓${u.limit_down_mbps || "∞"} ↑${u.limit_up_mbps || "∞"}</span>` : "";
@@ -250,7 +278,7 @@ function userCard(u, udevs, ghost) {
         </svg>
       </button>
       <div class="user-head-info">
-        <div class="user-name">${statusDot(u.block_state, connected)}${esc(u.name || (u.guest ? "Guest" : "Unnamed user"))}${guestTag}${speedTag}${statusTag(u.block_state)}</div>
+        <div class="user-name">${statusDot(u.block_state, connected)}${esc(u.name || (u.guest ? "Guest" : "Unnamed user"))}${guestTag}${gatewayTag}${speedTag}${statusTag(u.block_state)}</div>
         <div class="user-sub">${udevs.length} device${udevs.length === 1 ? "" : "s"} ·
           ${u.quota_mode === "fixed" ? `Fixed ${u.fixed_gb ?? u.allowance_gb} GB` : "Auto (share of remainder)"}</div>
       </div>
@@ -262,6 +290,7 @@ function userCard(u, udevs, ghost) {
         <span>${(u.percent || 0).toFixed(1)}%</span>
       </div>
     </div>
+    ${u.protected ? gatewayEnforceHtml(gw) : ""}
     <div class="device-actions actions">${actions}</div>
     <div class="user-devices ${open ? "" : "hidden"}">
       ${devHtml || `<div class="empty small">No devices yet.</div>`}
@@ -278,6 +307,10 @@ function deviceRow(d) {
   // guests are auto-created period-scoped accounts (deleted on month reset)
   const guestTag = d.guest
     ? `<span class="guest-tag" title="Guest account — auto-created, deleted on month reset">guest</span>` : "";
+  // the box's own device — controlled from its user card (no per-device block
+  // toggle, no delete; edit/top-up stays)
+  const gatewayTag = d.gateway
+    ? `<span class="gateway-tag" title="The gateway box itself — controlled from its user card">gateway</span>` : "";
   // vendor: fallback title for unnamed devices, small tag next to the MAC otherwise
   const vendorTag = (d.name && d.vendor)
     ? ` · <span class="device-vendor">${esc(d.vendor)}</span>` : "";
@@ -293,12 +326,22 @@ function deviceRow(d) {
         <span>${fmt(d.device_used_gb)} of <b>${fmt(d.allowance_gb)}</b> · ${(d.device_percent || 0).toFixed(1)}%</span>
       </div>
     </div>`;
+  // The box's own device is controlled via its user card: no per-device block
+  // toggle (that would double up with the Gateway user's toggle) and no delete.
+  // Edit stays — rename/top-up/caps are still allowed.
+  const blockSwitch = d.gateway ? "" : `
+      <label class="switch" title="Toggle internet access">
+        <input type="checkbox" class="toggle-block" data-id="${d.id}" ${d.blocked ? "" : "checked"}>
+        <span class="slider"></span>
+      </label>`;
+  const deleteBtn = d.gateway ? "" : `
+      <button class="icon-btn danger" data-act="delete" data-id="${d.id}" title="Remove">🗑</button>`;
   return `
   <div class="device-row ${d.blocked ? "blocked" : ""}" data-id="${d.id}">
     <div class="device-head">
       <div>
         <div class="device-name">${esc(d.name || (d.guest ? "Guest" : d.vendor) || "Unnamed device")}${speedTag}</div>
-        <div class="device-mac">${esc(d.mac)}${statusDot(d.block_state, d.connected)}${d.ip ? ` · <span class="device-ip">${esc(d.ip)}</span>` : ""}${vendorTag}${guestTag}${bypassTag}${statusTag(d.block_state)}</div>
+        <div class="device-mac">${esc(d.mac)}${statusDot(d.block_state, d.connected)}${d.ip ? ` · <span class="device-ip">${esc(d.ip)}</span>` : ""}${vendorTag}${guestTag}${gatewayTag}${bypassTag}${statusTag(d.block_state)}</div>
       </div>
     </div>
     ${devBar}
@@ -307,12 +350,9 @@ function deviceRow(d) {
       <span class="live-up">Upload <b>${fmtBytes(d.live_up)}</b></span>
     </div>
     <div class="device-actions actions">
-      <label class="switch" title="Toggle internet access">
-        <input type="checkbox" class="toggle-block" data-id="${d.id}" ${d.blocked ? "" : "checked"}>
-        <span class="slider"></span>
-      </label>
+      ${blockSwitch}
       <button class="icon-btn" data-act="edit" data-id="${d.id}" title="Edit / top up">✎</button>
-      <button class="icon-btn danger" data-act="delete" data-id="${d.id}" title="Remove">🗑</button>
+      ${deleteBtn}
     </div>
   </div>`;
 }
@@ -437,6 +477,7 @@ async function doAction(act, id) {
     await API.patch(`/api/devices/${id}`, { block: blocked });
   } else if (act === "delete") {
     const dev = (dashboard.devices || []).find((d) => d.id === id);
+    if (dev && dev.gateway) return;  // the box cannot be deleted (API 400s too)
     if (!confirm(`Remove ${dev && dev.name ? `“${dev.name}”` : "this device"}?`)) return;
     await API.del(`/api/devices/${id}`);
   } else if (act === "edit") {
@@ -453,6 +494,7 @@ async function doUserAction(act, uid) {
     await API.patch(`/api/users/${uid}`, { block: blocked });
   } else if (act === "delete") {
     const user = (dashboard.users || []).find((x) => x.id === uid);
+    if (user && user.protected) return;  // the Gateway user is permanent (API 400s too)
     const names = ((user && user.devices) || [])
       .map((d) => `“${d.name || d.mac}”`).join(", ");
     const msg = `Remove ${user && user.name ? `“${user.name}”` : `user #${uid}`}` +
@@ -991,6 +1033,13 @@ function renderPppoeVerdict(msg, r) {
     "auth-failed":
       "\n→ The ISP rejected the username/password. Re-check them on your ISP card " +
       "or the router's WAN status page, fix the fields above, and Test again.",
+    "concurrent-session":
+      "\n→ This is usually a FALSE ALARM: the same PPPoE username already holds a " +
+      "live session — almost always the box's own ppp0, which is up and working. " +
+      "ETIS/We allow only ONE session per username, so the throwaway test dial is " +
+      "refused. Check the ppp0 status above: if it's up and devices have internet, " +
+      "the line + credentials are fine — nothing to fix. (If ppp0 is NOT up, the " +
+      "router may still be dialing PPPoE itself — it must be bridged, not routed/NAT.)",
     "link-down":
       "\n→ A PPPoE server was found but the session stalled — usually the modem/ISP " +
       "side. Wait a minute and Test again, or check the quota-wan-ppp service (the " +
@@ -1000,7 +1049,10 @@ function renderPppoeVerdict(msg, r) {
       "quota-wan-ppp service and that the WAN interface above is the NIC that " +
       "reaches the ONT/modem.",
   }[st] || "";
-  msg.textContent = `✗ PPPoE test failed — ${detail}${fix}`;
+  const lead = st === "concurrent-session"
+    ? "ℹ PPPoE test: the ISP refused a SECOND dial (same username already online)"
+    : `✗ PPPoE test failed — ${detail}`;
+  msg.textContent = `${lead}${fix}`;
   if (r && r.script_output) msg.textContent += `\n${r.script_output}`;
 }
 

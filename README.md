@@ -19,7 +19,8 @@ gateway:
 - Caps any device's or user's **internet speed** and keeps gaming ping low while
   others download
 - Serves a **dark-purple glassmorphism dashboard** you can open from any phone on
-  the LAN
+  the LAN — the whole UI (dashboard, the household milestone page, and the
+  consumption report) is phone-friendly and touch-first
 
 ```
 ┌──────────────┐   Ethernet    ┌───────────────────────────────────────────┐
@@ -161,6 +162,11 @@ See [Structure_README.md](Structure_README.md) → *Running from source*.
 | **Admin** | change password, see the installed version |
 | **System logs** | the app's log tail, with filters, search, refresh and export |
 
+**On a phone?** The whole UI is built for it. The tab bar becomes a swipeable
+strip, the bundle ring shrinks and the cards stack to one column, and every
+modal/overlay scrolls instead of clipping. The same applies to the household
+milestone page and the consumption report — nothing needs a desktop.
+
 **Speed limits per device/user** — set them in the Network tab first (switch ON
 and enter your real down/up Mbps), then open a user's or device's **edit** modal
 and set `limit down` / `limit up` (`0` = unlimited). Limits apply within seconds.
@@ -181,6 +187,21 @@ helps tell phones from TVs). That's the whole loop.
 
 **To top up a user mid-month:** user card → *top-up* → enter GB. They're
 unblocked instantly if they were cut.
+
+**"How much do I have left?" — the household page.** Any device on the quota
+network can open `http://<gateway-ip>:8080/milestone` (no login). It shows that
+device's user: their used / allowance, a progress bar, and a **per-device
+breakdown** (each device's own GB, with ↑/↓ split). Crossing 50% / 75% / 100%
+is flagged once per month on the page (a "new" pill), and acknowledging it is
+a one-time click — the flag won't nag again until the period rolls.
+
+**Internal consumption report.** From a whitelisted machine (any device on the
+client subnet, or an IP in the `report.allowed_ips` list — see
+`config.yaml`), open `http://<gateway-ip>:8080/report` for a read-only,
+admin-free view: exact bundle bytes, per-user cards with exact per-device
+bytes, recent events and the gateway log tail. Nothing on the box ever opens
+it automatically — it's there when you want it, and every other source gets a
+403.
 
 ---
 

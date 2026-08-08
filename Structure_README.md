@@ -399,6 +399,13 @@ These are the non-obvious choices that keep the system correct and cheap:
   takes down the whole app: the dashboard still shows stored usage, quota
   blocks + accounting degrade independently, and each subsystem logs once and
   continues.
+- **A phone-first control plane.** The dashboard, the public `/milestone` page
+  and the `/report` page are all responsive + touch-first: the topbar tabs
+  become a horizontally swipeable strip, grids stack to one column, the bundle
+  ring shrinks, modals/overlays scroll instead of clipping (a tall modal on a
+  phone never loses its buttons off-screen), and touch targets are ≥ 36 px. The
+  family's day-to-day loop — checking quota, topping up, viewing the milestone
+  page, reading the report — works entirely from a phone.
 
 ---
 
@@ -559,6 +566,14 @@ shaping:
   interface: ""               # NIC that carries the client subnet; empty => auto-detect
   client_subnet: ""           # client CIDR; empty => derived from dhcp.gateway_ip + subnet
   ifb: ifb0                   # virtual device used to shape uploads (modprobe ifb)
+
+report:
+  enabled: true               # on-demand internal report (/report + /api/report).
+                              #   false => every source gets a 403.
+  allow_client_subnet: true   # admit any managed client (the DHCP pool subnet)
+  allowed_ips: []             # extra CIDRs/IPs, e.g. ["192.168.1.0/24", "10.0.0.5"].
+                              #   run.py fills client_subnet from the engine's
+                              #   resolved subnet automatically.
 ```
 
 > **Speed shaping is switched on in the dashboard, not in this YAML.**
@@ -589,6 +604,11 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | GET/POST | `/api/network` | speed-shaping settings: `enabled`, `total_down_mbps`, `total_up_mbps`, `aqm` |
 | GET/POST | `/api/wan` | strong-mode topology: `GET` live status (topology/source/pending/ppp0), `POST {"topology": "lan"\|"wan", "pppoe_user", "pppoe_password", "wan_if"}` APPLIES the topology live — rewrites config.yaml + the DB together, runs `scripts/topology.sh` (NIC + dnsmasq + PPPoE dial) and schedules a restart (`restart_scheduled`, `script_output`). Creds travel to the applier via the environment, never argv. On an applier failure config.yaml + the DB are ROLLED BACK to the previous state (no restart) |
 | POST | `/api/wan/test` | test the PPPoE credentials WITHOUT changing anything: dials a throwaway `ppp200` link via `scripts/test_pppoe.sh` with `{"pppoe_user", "pppoe_password", "wan_if"}` and reports `status` (success/auth-failed/no-pppoe-server/link-down/error), the negotiated local/peer IPs, `internet` (ping check), and `detail` — never touches config.yaml, the DB, `ppp0`, routing or DNS |
+| GET | `/api/milestone` | **public** — the requesting device's user's consumption + per-device breakdown (resolved by source IP via its DHCP lease; `recognized: false` for a lease-less IP). Pairs with the `/milestone` page |
+| POST | `/api/milestone/notify` | **public** — acknowledge a crossed milestone (`{"user_id", "milestone": 50\|75\|100}`); sets the flag once per period |
+| GET | `/api/report` | **source-IP gated** (client subnet + `report.allowed_ips`, else 403) — read-only consumption report: exact bundle bytes, per-user + per-device bytes, events tail, log tail, WAN status. No session cookie needed |
+| GET | `/report` | **source-IP gated** — the HTML page that renders `/api/report` |
+| GET | `/milestone` | **public** — the household milestone page (own usage + per-device split, one-time milestone acknowledge) |
 | POST | `/api/login` · `/api/logout` | session auth |
 | GET | `/api/me` | session check |
 | POST | `/api/password` | change admin password |
@@ -649,8 +669,13 @@ QuotaManager/
 │   └── schemas.py            # pydantic request models
 ├── web/
 │   ├── index.html            # login + dashboard + modals
+│   ├── milestone.html        # public household page: own usage + per-device split,
+│   │                         #   one-time 50/75/100% milestone acknowledge
+│   ├── report.html           # source-IP-gated read-only consumption report
 │   └── assets/
-│       ├── styles.css        # dark purple glassmorphism
+│       ├── styles.css        # dark purple glassmorphism; responsive + touch-first
+│       │                     #   (topbar tabs -> swipeable strip, cards stack,
+│       │                     #   modals scroll) on phones
 │       └── app.js            # WS client, dashboard render, user-grouped device cards
 └── tests/
     ├── test_quota_service.py # period math, per-user allowance math, block fan-out

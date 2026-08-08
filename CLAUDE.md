@@ -239,6 +239,12 @@ QuotaManager/
 │   │                         #   table + devices.user_id/bypass + idempotent
 │   │                         #   migration (legacy devices → own user);
 │   │                         #   speed caps: devices/users limit_down/up_mbps
+│   ├── engine.py             # shared snapshot types (Linux): EngineCounters,
+│   │                         #   RogueHost, EngineSnapshot, SnapshotHolder +
+│   │                         #   GATEWAY_MAC sentinel — the thread-safe handoff
+│   │                         #   between the kernel-side engine and asyncio;
+│   │                         #   the type hub (imported by db/nftables/arp_scan/
+│   │                         #   api/run; a field rename ripples everywhere)
 │   ├── service.py            # per-user quota math (allowance on the user,
 │   │                         #   usage = Σ devices), block fan-out + bypass
 │   │                         #   precedence, top-up, recharge, reset_day=0,
@@ -297,7 +303,28 @@ the packet hot path). On Linux the hot path has **no Python at all** — the
 kernel counts and drops.
 
 ## [ORPHANS & PENDING]
-_(empty — all components are integrated and verified)_
+_Pending work lives in TASKS.md; orphans + debt are tracked in
+[LEGACY_DEBT_AND_RISKS] below. Version history (newest first):_
+
+Checked 2026-08-08 (v20 in-flight — UNCOMMITTED; working tree is the audit baseline):
+- [ ] **the working tree carries an uncommitted "v20" bundle** (~1,855 lines / 25 files,
+      `git status`): (1) `engine.count_gateway` — the box's OWN traffic is counted +
+      chargeable (`q_gw_up/down` input/output hooks, `gw_blocked` set,
+      `set_gateway_blocked`, restart-safe reseed; `false` skips counters but keeps drops);
+      (2) protected **Gateway** user + sentinel `GATEWAY_MAC` device (fixed 1.0 GB,
+      seeded idempotently; `service.quota_blocked_for` cuts at `used >= allowance` even
+      at 0; API/UI guards; **silently deducts 1.0 GB from every auto-share bundle — a
+      behavioral change on upgrade**); (3) **guest-deletion suppression**
+      (`suppressed_macs` table, checked FIRST in `_persist_lease`); (4) **immediate
+      shaping re-sync** (`_shaping_lock` + `_reshaping_now` — no page refresh on cap
+      edits); (5) **tc burst/cburst fix** (`_burst` = rate/20 ≈ 50 ms bucket — fixes the
+      "2 Mbps cap reads 3 Mbps" overshoot); (6) **DNS-probe fallback**
+      (`check_internet_dns`, raw UDP) so the WAN dot stays honest while the box's own
+      egress is kernel-dropped; (7) PPPoE **concurrent-session** test verdict.
+      `quota/engine.py` now owns the shared snapshot types (single definition; every
+      consumer imports it). **TASKS.md is stale on 2 of 3 bug reports**: speed-drift +
+      page-refresh are FIXED here; "per-device block not working" is NOT — see
+      [LEGACY_DEBT_AND_RISKS]. Verified by the 2026-08-08 deep audit (Gatekeeper PASS).
 
 Checked 2026-08-07 (PPPoE creds no longer wiped by panel applies + Apply dimmed when WAN is online):
 - [x] **creds prefill empty = the DB was wiped, not the JS**: the WAN tab
@@ -754,6 +781,73 @@ Checked 2026-08-05 (Linux pivot + bundle-source fix + per-user quota model):
       + speed fields in device/user modals + `↓N ↑M` tags; setup script loads
       `ifb` (iproute2) (`?v=11`, FakeTc tests)
 - [x] full suite: **119 passed**, pyflakes clean (code)
+
+## [LEGACY_DEBT_AND_RISKS] (deep audit 2026-08-08 — pre-breaking-change baseline)
+_From the 5-agent audit; working-tree state in the v20 entry above. Not yet fixed — this is the
+inventory the refactor phase should address before TASKS.md's breaking changes land._
+
+**Dead code (zero production callers — safe to remove in the refactor phase):**
+- `quota/db.py`: `add_topup` (:430), `has_bundle` (:665), `Device.is_admin_blocked` (:105),
+  `Device.is_blocked` (:75), `get_device_by_ip` (:377); `get_ip_for_mac` (:632) + `set_lease`
+  (:652) are test-only.
+- **Orphaned endpoints** (no UI/JS consumer since the v9 chart removal): `GET /api/usage`,
+  `GET /api/usage/{id}`, `GET /api/events` (+ the `events` table's ~25 `add_event` write sites —
+  the Activity tab that read them is gone). `get_usage` / `get_usage_series` (db.py) are
+  exercised only by tests.
+
+**Known open defects (root-cause located, NOT fixed):**
+- **Per-device block can silently not cut a lease-less device.** The kernel `@blocked` set is
+  keyed by IP from lease rows (`service.snapshot_state`); a device with no active lease (static
+  IP / expired at snapshot time) gets `ip=""` → excluded from `ip_to_mac` → never blocked. The
+  only cover is the ARP gateway-lock `known_ips` deny, which defaults OFF in config.yaml and is
+  forced OFF in WAN mode — so default/WAN configs leave a lease-less blocked device uncut
+  (`service.py:272-307`, `nftables.py:333-406`; the regression test passes only because its
+  fixture gives the device a lease row). **This matches TASKS.md's "per-device block not
+  working".**
+- **Network-tab preview staleness:** the WS payload carries NO shaping key, so
+  `renderNetworkPreview` renders cached `networkConfig`; a second admin's cap change is invisible
+  until that client opens the Network tab. `_reshaping_now` also no-ops before the first tick
+  (`_last_ip_to_mac` is empty at boot).
+
+**Performance risks (static audit — live measurement still pending):**
+- `TcShaper.update_state` runs ~80 `tc` subprocesses synchronously ON the event loop on any tree
+  change (~0.5–2 s stall); `detect_ppp` runs a subprocess on-loop per WAN tick; `GET /api/logs`
+  blocks the loop reading the whole 5 MB log per call; the OUI 1.7 MB lazy-load parses on-loop
+  once. **No per-tick timing telemetry exists anywhere** — drift/stall can't be quantified. WS
+  payload is built twice per client every 5 s (per-client loop + `_push_loop`); the renderer does
+  a full DOM rebuild each push.
+- **DB:** ~30 separate commits per tick (no batching); `get_period_usage_by_user` runs twice per
+  tick and `get_bundle` three times; the `events` table is UNBOUNDED (no prune — the only real
+  disk-growth risk); usage/lease writes are per-item serialized awaits.
+
+**Security (low severity for a LAN admin box, but honest):**
+- PBKDF2-SHA256 at 200k iterations (OWASP 2023+ recommends 600k for SHA-256).
+- Session cookie `httponly` + `samesite=lax` but no `secure=True`; no login rate-limiting.
+- Deps: all pins current-latest (Aug 2026), no applicable CVEs. Starlette 1.4.1 is above both
+  the 2025 Range-header and 2026 HTTPEndpoint fixes, but `StaticFiles` is in the latter
+  advisory's blast radius — re-pin when a newer starlette ships.
+
+**Simplicity debt (advisory seams — see audit):**
+- 3 sources of truth for bundle & topology (config.yaml + DB + ownership flag); **two on/off
+  switches for shaping** (`config.yaml shaping.enabled` gates existence, DB `shaping_enabled`
+  gates activity).
+- WS payload: 26 keys/device with the user's aggregates duplicated per device; no schema
+  versioning / delta projection.
+- Topology state written by THREE writers (`netmgr.render_config`, `scripts/topology.sh`,
+  `scripts/setup_gateway_kali.sh`) — the bug class behind the v18 revert + v19 creds-wipe.
+- `run.py` `_maintenance_tick` is a 7-job god method; `quota/db.py` is 837 lines of schema +
+  CRUD + events + settings + gateway seeding in one file.
+
+**Top break points for the pending breaking change (blast radius order):**
+1. `run.py` `_maintenance_tick` + `_sync_shaping` (:389-516) — the single orchestration point.
+2. `nftables.update_state` / `set_gateway_blocked` cache-gated rebuilds (:333-377, :505-526) —
+   a same-set re-flush opens a short unblock window.
+3. `shaping.update_state` / `_state_signature` / `_burst` (:261-402, :97-110).
+4. `service.resolve_device_state` / `quota_blocked_for` precedence (:178-220).
+5. `api._dashboard_payload` wire format (:139-295) — app.js has no schema check.
+6. `db.py` idempotent migrations (must stay re-run safe against a migrated box DB).
+7. **`quota/engine.py` is the cross-cutting choke point** — a field rename there ripples
+   through 1, 2, 3, 5 and 6 simultaneously.
 
 ## [KNOWN LIMITS] (honest)
 - Counting is approximate ("≈" in the UI) — nftables counters are read every

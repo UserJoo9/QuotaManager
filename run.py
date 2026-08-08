@@ -42,11 +42,11 @@ from core import config as cfg_mod
 from core.logging_setup import setup_logging
 from quota import db as _db
 from quota.arp_scan import ArpScanner
-from quota.engine import EngineSnapshot, SnapshotHolder
+from quota.engine import GATEWAY_MAC, EngineSnapshot, SnapshotHolder
 from quota.netmgr import TopologyManager
 from quota.nftables import NftablesEngine
 from quota.service import QuotaService
-from quota.topology import check_internet, detect_ppp
+from quota.topology import check_internet, check_internet_dns, detect_ppp
 
 log = logging.getLogger("quota.run")
 
@@ -89,7 +89,8 @@ class Gateway:
 
     def __init__(self, cfg: cfg_mod.Config,
                  config_path: str | Path | None = None,
-                 internet_probe: Callable[[], bool] | None = None) -> None:
+                 internet_probe: Callable[[], bool] | None = None,
+                 dns_probe: Callable[[], bool] | None = None) -> None:
         self.cfg = cfg
         # The on-disk config.yaml the app loaded — the runtime topology apply
         # (WAN tab) patches this file, so we must know exactly which one it is.
@@ -97,6 +98,10 @@ class Gateway:
         #: Internet-reachability probe for the WAN tab's green dot (see
         #: quota.topology.check_internet). Injectable so tests fake the network.
         self.internet_probe = internet_probe or check_internet
+        #: DNS-reachability probe used INSTEAD of ``internet_probe`` while the
+        #: box's own internet is deliberately cut (``gw_blocked`` drops the TCP
+        #: probe, but UDP 53 is exempted — see quota.topology.check_internet_dns).
+        self.dns_probe = dns_probe or check_internet_dns
         self.database = _db.Database(cfg.db_path)
         self.service = QuotaService(self.database, timezone=cfg.timezone)
         self.holder = SnapshotHolder()
@@ -116,6 +121,18 @@ class Gateway:
         #: after startup (leases have settled), never during the boot tick.
         self._last_rogue_scan = time.monotonic()
         self._known_rogue_macs: set[str] = set()
+        #: the live ip->mac map from the last maintenance tick. A speed-limit
+        #: edit re-syncs the shaper immediately (no 15 s wait), and that re-sync
+        #: needs the same map — rebuilt fresh every tick, kept here for the API
+        #: callback (_reshaping_now) to reuse between ticks.
+        self._last_ip_to_mac: dict[str, str] = {}
+        #: serializes _sync_shaping (the maintenance tick + an API-triggered
+        #: immediate re-sync). _sync_shaping reads the DB before it programs tc,
+        #: so without a lock a tick that read the caps BEFORE an edit committed
+        #: could re-apply its stale snapshot AFTER the immediate re-sync and
+        #: briefly undo the user's fresh caps. Whoever runs second re-reads the
+        #: DB, so the lock makes both orderings end on the fresh state.
+        self._shaping_lock = asyncio.Lock()
         self._maintenance_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
 
@@ -247,6 +264,19 @@ class Gateway:
             # of a normal managed user.
             existing = await self.database.get_device(mac=mac)
             if existing is None:
+                # A manually-deleted guest stays deleted while its device is
+                # still on the network (suppressed_macs). Checked FIRST, before
+                # the guest-mode branch: suppression rows only ever hold guest
+                # MACs (the API records them on a guest delete), and gating on
+                # guest mode would re-register a deleted guest as a NORMAL user
+                # the moment guest mode is turned off while the device is still
+                # connected — violating "stays deleted while present". The lease
+                # binding above is kept, so the device keeps internet — it just
+                # has no quota account until it leaves and reconnects.
+                if await self.database.is_mac_suppressed(mac):
+                    log.info("suppressed MAC %s stays deleted — not "
+                             "re-registered (%s)", mac, ip)
+                    return
                 if await self.service.is_guest_mode():
                     gq = await self.service.guest_quota_gb()
                     dev = await self.database.upsert_device(
@@ -303,6 +333,13 @@ class Gateway:
             for lease in db_leases:
                 if lease.mac not in seen:
                     await self.database.delete_lease(lease.mac)
+            # A MAC that LEFT the network loses its suppression: when the same
+            # device reconnects later it registers as a brand-new guest with a
+            # fresh allowance (the user's "same guest connected again after
+            # deletation it shows but start fresh"). Guarded on `seen` like the
+            # lease prune above, so a transiently empty lease file (dnsmasq
+            # just restarted) never wipes every suppression.
+            await self.database.clear_suppressed_macs_not_in(seen)
 
     async def _scan_rogues(self) -> None:
         """Probe the LAN for active hosts that are NOT known DHCP devices.
@@ -372,8 +409,8 @@ class Gateway:
         if self.engine is not None:
             snap = await asyncio.to_thread(self.engine.flush)
             live_by_ip = snap.by_ip
+            today = _dt.date.today().isoformat()
             if snap.by_ip:
-                today = _dt.date.today().isoformat()
                 for ip, counters in snap.by_ip.items():
                     if counters.up == 0 and counters.down == 0:
                         continue
@@ -387,6 +424,15 @@ class Gateway:
                         continue
                     await self.database.add_usage(
                         dev.id, today, counters.up, counters.down)
+            # The box's OWN internet (input/output hooks, q_gw_* counters):
+            # charged to the protected "Gateway" user's device so the machine's
+            # bundle consumption sits inside the quota math. The box's MAC has
+            # no lease, so it never appears in snap.by_ip — only in snap.gateway.
+            if snap.gateway.up or snap.gateway.down:
+                box = await self.database.get_device(mac=GATEWAY_MAC)
+                if box is not None:
+                    await self.database.add_usage(
+                        box.id, today, snap.gateway.up, snap.gateway.down)
 
         # 3. Recompute block states from usage vs allowances.
         changes = await self.service.evaluate_blocks()
@@ -396,15 +442,33 @@ class Gateway:
         # 4. Push fresh enforcement maps into the engine + holder.
         state = await self.service.snapshot_state()
         ip_to_mac = {v["ip"]: mac for mac, v in state.items() if v.get("ip")}
+        self._last_ip_to_mac = ip_to_mac  # for an immediate shaping re-sync
         blocked = {mac: v["blocked"] for mac, v in state.items()}
+        engine_available = False
+        gateway_blocked = None
         if self.engine is not None:
             self.engine.update_state(ip_to_mac, blocked)
+            # The box's own internet is cut via the gateway chains (gw_blocked
+            # set) — its MAC has no lease/IP, so it never enters the forward
+            # blocked set above. The Gateway user's resolved state drives the
+            # toggle; the engine cache-gates a no-op on an unchanged state.
+            self.engine.set_gateway_blocked(
+                bool(state.get(GATEWAY_MAC, {}).get("blocked", False)))
+            # getattr: some test fakes implement only the minimal engine
+            # surface; the real engine always carries both attributes.
+            engine_available = bool(getattr(self.engine, "available", True))
+            # What the kernel actually holds for the box's cut (True/False), or
+            # None if it was never programmed — copied into the snapshot so the
+            # dashboard can show "Blocked in the UI but not cut at the kernel".
+            gateway_blocked = getattr(self.engine, "gateway_blocked", None)
         # Live counters = the flushed delta, so the dashboard shows real
         # recent traffic instead of always-zero values.
         self.holder.swap(EngineSnapshot(
             by_ip=live_by_ip,
             ip_to_mac=ip_to_mac, blocked=blocked, rogue=list(self._rogues),
             wan_status=await self._wan_status(),
+            gateway_blocked=gateway_blocked,
+            engine_available=engine_available,
             ts=time.time()))
 
         # 5. Linux: reconcile the tc speed-shaping tree (settings + live IPs).
@@ -424,31 +488,43 @@ class Gateway:
         if shaper is None or not getattr(shaper, "available", False):
             return
         try:
-            config = await self.service.get_shaping_config()
-            users = {u.id: u for u in await self.database.list_users()}
-            devices = {d.mac: d for d in await self.database.list_devices()}
-            rate_map: list[dict[str, object]] = []
-            for ip, mac in ip_to_mac.items():
-                dev = devices.get(mac)
-                if dev is None or dev.user_id is None:
-                    continue  # untracked or orphaned — nothing to shape
-                user = users.get(dev.user_id)
-                rate_map.append({
-                    "ip": ip,
-                    "device_id": dev.id,
-                    "user_id": dev.user_id,
-                    "down": float(dev.limit_down_mbps or 0.0),
-                    "up": float(dev.limit_up_mbps or 0.0),
-                    "user_down": (float(user.limit_down_mbps or 0.0)
-                                  if user else 0.0),
-                    "user_up": (float(user.limit_up_mbps or 0.0)
-                                if user else 0.0),
-                })
-            shaper.update_state(
-                rate_map, config["enabled"], config["total_down_mbps"],
-                config["total_up_mbps"], config["aqm"])
+            async with self._shaping_lock:
+                config = await self.service.get_shaping_config()
+                users = {u.id: u for u in await self.database.list_users()}
+                devices = {d.mac: d for d in await self.database.list_devices()}
+                rate_map: list[dict[str, object]] = []
+                for ip, mac in ip_to_mac.items():
+                    dev = devices.get(mac)
+                    if dev is None or dev.user_id is None:
+                        continue  # untracked or orphaned — nothing to shape
+                    user = users.get(dev.user_id)
+                    rate_map.append({
+                        "ip": ip,
+                        "device_id": dev.id,
+                        "user_id": dev.user_id,
+                        "down": float(dev.limit_down_mbps or 0.0),
+                        "up": float(dev.limit_up_mbps or 0.0),
+                        "user_down": (float(user.limit_down_mbps or 0.0)
+                                      if user else 0.0),
+                        "user_up": (float(user.limit_up_mbps or 0.0)
+                                    if user else 0.0),
+                    })
+                shaper.update_state(
+                    rate_map, config["enabled"], config["total_down_mbps"],
+                    config["total_up_mbps"], config["aqm"])
         except Exception:  # noqa: BLE001
             log.exception("failed to sync speed-shaping rules")
+
+    async def _reshaping_now(self) -> None:
+        """Apply a speed-limit edit immediately instead of waiting for the next
+        15 s maintenance tick. The API schedules this after a Network-tab save
+        or a device/user cap edit; ``update_state`` is signature-gated, so a
+        no-op call is free and the tick's next call still sees the same state.
+        """
+        try:
+            await self._sync_shaping(self._last_ip_to_mac)
+        except Exception:  # noqa: BLE001
+            log.exception("failed to apply speed-limit change immediately")
 
     async def _wan_status(self) -> dict[str, object]:
         """Live WAN-mode status for the dashboard/API (cheap, every 15 s tick).
@@ -489,8 +565,18 @@ class Gateway:
         # refreshed every maintenance tick (15 s). Run in a thread: a dead line
         # can hold the connect for up to `timeout` seconds and must never block
         # the event loop.
+        # When the box's own internet is deliberately cut (the Gateway user is
+        # blocked -> `gw_blocked` carries 0.0.0.0/0), the TCP egress probe is
+        # dropped at the kernel and would read "down" even though the line and
+        # every client are fine. DNS (UDP 53) is exempted from that block, so we
+        # switch to a DNS probe: it proves the LINE delivers internet, and the
+        # box's cut stays surfaced on the Gateway card instead of a false red.
+        gateway_blocked = bool(getattr(self.engine, "gateway_blocked", False))
         try:
-            reachable = await asyncio.to_thread(self.internet_probe)
+            if gateway_blocked:
+                reachable = await asyncio.to_thread(self.dns_probe)
+            else:
+                reachable = await asyncio.to_thread(self.internet_probe)
         except Exception:  # noqa: BLE001 — a probe failure must not kill the tick
             log.exception("internet probe failed")
             reachable = False
@@ -552,9 +638,18 @@ def main() -> None:
         await gateway.startup()
         # Build the app AFTER startup: the WAN tab's topology manager is created
         # in startup() and the /api/wan endpoint must close over the real one.
+        # The on-demand report gate needs the CLIENT subnet; the engine resolved
+        # it from config at startup (explicit engine.client_subnet, else derived
+        # from the dhcp block), so reuse its answer rather than re-derive.
+        report_cfg = cfg.report
+        client_net = getattr(getattr(gateway, "engine", None), "_client_net", "") or ""
+        if client_net:
+            report_cfg.client_subnet = client_net
         app = create_app(gateway.database, gateway.service, gateway.holder,
                          log_path=cfg.log_file,
-                         topology_manager=gateway.topology_manager)
+                         topology_manager=gateway.topology_manager,
+                         shaping_sync=gateway._reshaping_now,
+                         report_config=report_cfg)
         server_config = uvicorn.Config(
             app,
             host=cfg.web.host,

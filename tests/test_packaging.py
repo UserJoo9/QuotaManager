@@ -190,6 +190,25 @@ def test_setup_script_has_quota_no_apt_guard():
 
 
 # --------------------------------------------------------------------------- #
+# dnsmasq config: sequential IP allocation (no gapped leases)
+# --------------------------------------------------------------------------- #
+
+def test_dnsmasq_configs_allocate_sequential_ips():
+    """Both config writers (setup_gateway_kali.sh + topology.sh) must set
+    dhcp-sequential-ip in EVERY dhcp-range heredoc (WAN + LAN). Without it
+    dnsmasq's default MAC-hash allocation spreads leases across the whole pool
+    (e.g. .155 then .185) instead of filling contiguously from POOL_START."""
+    for script in ("setup_gateway_kali.sh", "topology.sh"):
+        text = _read(REPO / "scripts" / script)
+        assert text.count("dhcp-range=") == 2, \
+            f"{script} must write two dnsmasq heredocs (WAN + LAN)"
+        # the directive itself is a bare config line; the comment mentions it too
+        seq_lines = re.findall(r"(?m)^dhcp-sequential-ip$", text)
+        assert len(seq_lines) == 2, \
+            f"{script} must set dhcp-sequential-ip in both heredocs"
+
+
+# --------------------------------------------------------------------------- #
 # .gitignore
 # --------------------------------------------------------------------------- #
 

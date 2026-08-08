@@ -13,6 +13,7 @@ import asyncio
 import datetime as _dt
 import hashlib
 import hmac
+import ipaddress
 import logging
 import os
 import secrets
@@ -20,16 +21,17 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
 from api.schemas import (BundleUpdate, DeviceCreate, DeviceUpdate, GuestUpdate,
-                         LoginRequest, NetworkUpdate, PasswordUpdate,
-                         SetupComplete, TopUpRequest, UserCreate, UserUpdate,
-                         WanTest, WanUpdate)
+                         LoginRequest, MilestoneNotify, NetworkUpdate,
+                         PasswordUpdate, SetupComplete, TopUpRequest,
+                         UserCreate, UserUpdate, WanTest, WanUpdate)
 from core import timeutil
 from quota import db as _db
-from quota.engine import EngineSnapshot, SnapshotHolder
+from quota.engine import GATEWAY_MAC, EngineSnapshot, SnapshotHolder
 from quota.service import GB, QuotaService
 from quota.vendor import vendor_for
 from quota.version import __version__
@@ -101,12 +103,26 @@ def create_app(
     now_provider: Optional[Callable[[], _dt.datetime]] = None,
     log_path: str | Path | None = None,
     topology_manager: object | None = None,
+    shaping_sync: Optional[Callable[[], object]] = None,
+    report_config: object | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Quota Manager", version=__version__,
                   docs_url="/api/docs", openapi_url="/api/openapi.json")
 
     def _now() -> _dt.datetime:
         return now_provider() if now_provider else _dt.datetime.now().astimezone()
+
+    def _schedule_shaping_sync() -> None:
+        """Apply a speed-limit edit in the kernel right away (no 15 s tick
+        wait). Fire-and-forget: the HTTP response returns first, the shaper
+        reconciles in the background. ``shaping_sync`` is run.py's callback;
+        without one (tests/degraded boot) this is a no-op."""
+        if shaping_sync is None:
+            return
+        try:
+            asyncio.create_task(shaping_sync())
+        except RuntimeError:  # no running event loop (should not happen in a route)
+            pass
 
     async def _require_auth(request: Request) -> None:
         """FastAPI dependency: every admin route (and the WS handshake) needs a
@@ -117,6 +133,37 @@ def create_app(
         stored = await database.get_setting("session_token", "")
         if not token or not stored or not hmac.compare_digest(token, stored):
             raise HTTPException(401, "not logged in")
+
+    # -- report IP gate (source-IP whitelist for /report) ---------------------
+
+    def _ip_in_network(ip: str, cidr: str) -> bool:
+        """Is ``ip`` inside a CIDR (or equal to a bare IP)? Malformed entries
+        never match — a bad config value must deny, not allow."""
+        try:
+            return ipaddress.ip_address(ip) in ipaddress.ip_network(cidr, strict=False)
+        except ValueError:
+            return False
+
+    async def _require_report_ip(request: Request) -> None:
+        """FastAPI dependency: only admit requesters whose source IP is on the
+        report whitelist (managed client subnet and/or the explicit
+        ``report.allowed_ips`` list). Everything else -> 403.
+
+        Deliberately no session cookie required — this is the on-demand internal
+        view for the household's own devices. ``report.enabled: false`` (or no
+        report_config wired) denies every source.
+        """
+        if report_config is None or not getattr(report_config, "enabled", False):
+            raise HTTPException(403, "report access denied")
+        host = request.client.host if request.client else ""
+        allowed = [
+            entry for entry in getattr(report_config, "allowed_ips", []) or []
+        ]
+        client_subnet = (getattr(report_config, "client_subnet", "") or "").strip()
+        if getattr(report_config, "allow_client_subnet", True) and client_subnet:
+            allowed.append(client_subnet)
+        if not allowed or not any(_ip_in_network(host, e) for e in allowed):
+            raise HTTPException(403, "report access denied")
 
     # -- serialization helper ------------------------------------------------
 
@@ -139,7 +186,12 @@ def create_app(
             "id": dev.id,
             "mac": dev.mac,
             "name": dev.name,
-            "vendor": vendor_for(dev.mac),
+            # The gateway sentinel MAC would otherwise resolve to a real OUI
+            # ("XEROX CORPORATION"); the box has no vendor.
+            "vendor": "" if dev.mac == GATEWAY_MAC else vendor_for(dev.mac),
+            # The box's own device (protected "Gateway" user) — the UI shows a
+            # badge and hides its block/delete controls (controlled via its user).
+            "gateway": dev.mac == GATEWAY_MAC,
             "user_id": dev.user_id,
             "user_name": user.name if user else "",
             "ip": leases.get(dev.mac, ""),
@@ -186,7 +238,10 @@ def create_app(
             usage = usage_by_user.get(u.id, {"up": 0, "down": 0})
             used_gb = (usage["up"] + usage["down"]) / GB
             allowance = allowances.get(u.id, 0.0)
-            quota_blocked = allowance > 0 and used_gb >= allowance
+            # quota_blocked_for special-cases protected users: an allowance of
+            # 0 cuts the box IMMEDIATELY (the engine's `allowance > 0` guard
+            # would otherwise treat 0 as "unmetered").
+            quota_blocked = service.quota_blocked_for(u, allowance, used_gb)
             admin_blocked = u.block_state == _db.BLOCK_ADMIN
             state = (_db.BLOCK_ADMIN if admin_blocked
                      else (_db.BLOCK_QUOTA if quota_blocked else _db.BLOCK_OK))
@@ -194,6 +249,9 @@ def create_app(
                 "id": u.id, "name": u.name, "quota_mode": u.quota_mode,
                 "fixed_gb": u.fixed_gb,
                 "guest": bool(u.guest),
+                # protected users (the Gateway user) are permanent: editable but
+                # never deletable — the UI hides the delete control.
+                "protected": bool(u.protected),
                 # per-user aggregate speed caps (Mbps, 0 = unlimited)
                 "limit_down_mbps": float(u.limit_down_mbps or 0.0),
                 "limit_up_mbps": float(u.limit_up_mbps or 0.0),
@@ -219,6 +277,12 @@ def create_app(
             if uv is not None:
                 uv["devices"].append(dev_view)
 
+        # What the box's own block toggle resolves to (the protected Gateway
+        # user's user-level view — the same resolve_device_state the tick uses).
+        gw_view = next((v for v in user_views.values() if v.get("protected")),
+                       None)
+        gw_desired = bool(gw_view["blocked"]) if gw_view else False
+
         total_used = sum((u["up"] + u["down"]) / GB
                          for u in usage_by_user.values())
         days_left = timeutil.days_remaining(_now(), bundle.reset_day)
@@ -239,6 +303,19 @@ def create_app(
                 {"ip": r.ip, "mac": r.mac, "vendor": r.vendor, "online": r.online}
                 for r in live.rogue
             ],
+            # The box's OWN enforcement: what the protected Gateway user's
+            # resolved state WANTS (blocked_desired) vs what the engine last
+            # pushed to the kernel (blocked_programmed — None = never
+            # programmed / engine off). The Gateway card shows a warning when
+            # they disagree, so "Blocked in the UI but the box still reaches the
+            # internet" (a stale engine / failed set program) is visible instead
+            # of silent.
+            "gateway": {
+                "blocked_desired": gw_desired,
+                "blocked_programmed": getattr(live, "gateway_blocked", None),
+                "engine_available": bool(
+                    getattr(live, "engine_available", True)),
+            },
             "wan": live.wan_status,
             # Top-level internet reachability (probed every 15 s tick) so the
             # top-bar indicator can read it without digging into wan_status;
@@ -250,6 +327,171 @@ def create_app(
             "version": __version__,
             "ts": _now().isoformat(),
         }
+
+    # -- milestone page (public, on-demand) -----------------------------------
+
+    async def _milestone_payload(request: Request) -> dict[str, Any]:
+        """The requesting device's user's consumption + per-device breakdown.
+
+        Public by design: the milestone page is how a household device learns
+        its own progress toward the quota cap — no admin session. The device is
+        resolved by its source IP (a current DHCP lease); without one it gets a
+        friendly "unrecognized" payload instead of an error.
+        """
+        host = request.client.host if request.client else ""
+        dev = await database.get_device_by_ip(host)
+        if dev is None or dev.user_id is None:
+            return {"recognized": False, "user": None, "devices": []}
+        user = await database.get_user(dev.user_id)
+        if user is None or user.protected:
+            return {"recognized": False, "user": None, "devices": []}
+        ms = (await service.milestone_state()).get(user.id)
+        if ms is None:
+            return {"recognized": False, "user": None, "devices": []}
+        # per-device breakdown: exact bytes per device for THIS user
+        usage_by_device = await database.get_period_usage()
+        devices = await database.list_devices(user_id=user.id)
+        allowance = ms["allowance_gb"]
+        device_rows = []
+        for d in devices:
+            dusage = usage_by_device.get(d.id, {"up": 0, "down": 0})
+            dused_gb = (dusage.get("up", 0) + dusage.get("down", 0)) / GB
+            device_rows.append({
+                "id": d.id,
+                "name": d.name,
+                "mac": d.mac,
+                "device_used_gb": round(dused_gb, 3),
+                "device_up_gb": round(dusage.get("up", 0) / GB, 3),
+                "device_down_gb": round(dusage.get("down", 0) / GB, 3),
+                "device_percent": round(
+                    dused_gb / allowance * 100, 1) if allowance > 0 else 0.0,
+            })
+        return {
+            "recognized": True,
+            "user": {
+                "id": user.id,
+                "name": user.name,
+                "allowance_gb": ms["allowance_gb"],
+                "used_gb": ms["used_gb"],
+                "percent": ms["percent"],
+                "milestones": ms["milestones"],
+            },
+            "devices": device_rows,
+        }
+
+    @app.get("/api/milestone", response_model=None)
+    async def milestone_api(request: Request) -> dict[str, Any]:
+        return await _milestone_payload(request)
+
+    @app.post("/api/milestone/notify", response_model=None)
+    async def milestone_notify(body: MilestoneNotify) -> dict[str, Any]:
+        """Mark a crossed milestone as notified (the page's acknowledge).
+
+        No session required — a household device acknowledging its own usage
+        notice. Unknown/duplicate milestones are harmless: the service validates
+        the value and setting an already-notified flag is a no-op.
+        """
+        await service.mark_milestone_notified(body.user_id, body.milestone)
+        return {"ok": True}
+
+    # -- on-demand report (source-IP gated) -----------------------------------
+
+    async def _report_payload() -> dict[str, Any]:
+        """Read-only consumption report: exact bytes/quota per user and device,
+        plus events + log tail. No session; gated by ``_require_report_ip``."""
+        bundle = await database.get_bundle()
+        users = await database.list_users()
+        devices = await database.list_devices()
+        usage_by_user = await database.get_period_usage_by_user()
+        usage_by_device = await database.get_period_usage()
+        allowances = bundle.allowances
+        live = holder.get()
+
+        total_used = sum((u["up"] + u["down"]) / GB
+                         for u in usage_by_user.values())
+
+        user_rows = []
+        for u in users:
+            usage = usage_by_user.get(u.id, {"up": 0, "down": 0})
+            used_gb = (usage["up"] + usage["down"]) / GB
+            allowance = allowances.get(u.id, 0.0)
+            quota_blocked = service.quota_blocked_for(u, allowance, used_gb)
+            admin_blocked = u.block_state == _db.BLOCK_ADMIN
+            user_rows.append({
+                "id": u.id,
+                "name": u.name,
+                "quota_mode": u.quota_mode,
+                "protected": bool(u.protected),
+                "guest": bool(u.guest),
+                "allowance_gb": round(allowance, 3),
+                "used_gb": round(used_gb, 3),
+                "used_bytes": int(usage.get("up", 0) + usage.get("down", 0)),
+                "percent": round(used_gb / allowance * 100, 1) if allowance > 0 else 0.0,
+                "blocked": admin_blocked or quota_blocked,
+                "block_state": (_db.BLOCK_ADMIN if admin_blocked
+                                else (_db.BLOCK_QUOTA if quota_blocked
+                                      else _db.BLOCK_OK)),
+                "devices": [],
+            })
+        by_uid = {u["id"]: u for u in user_rows}
+
+        for d in devices:
+            urow = by_uid.get(d.user_id)
+            dusage = usage_by_device.get(d.id, {"up": 0, "down": 0})
+            dused_gb = (dusage.get("up", 0) + dusage.get("down", 0)) / GB
+            allowance = urow["allowance_gb"] if urow else 0.0
+            dev_row = {
+                "id": d.id,
+                "name": d.name,
+                "mac": d.mac,
+                "ip": next((l.ip for l in await database.list_leases()
+                            if l.mac == d.mac), ""),
+                "device_used_gb": round(dused_gb, 3),
+                "device_up_gb": round(dusage.get("up", 0) / GB, 3),
+                "device_down_gb": round(dusage.get("down", 0) / GB, 3),
+                "device_percent": round(
+                    dused_gb / allowance * 100, 1) if allowance > 0 else 0.0,
+            }
+            if urow is not None:
+                urow["devices"].append(dev_row)
+
+        return {
+            "generated_at": _now().isoformat(),
+            "bundle": {
+                "total_gb": bundle.total_gb,
+                "used_gb": round(total_used, 3),
+                "used_bytes": int(sum(u["up"] + u["down"]
+                                      for u in usage_by_user.values())),
+                "remaining_gb": round(max(0.0, bundle.total_gb - total_used), 3),
+                "reset_day": bundle.reset_day,
+                "period_start": bundle.period_start,
+                "period_end": bundle.period_end,
+            },
+            "users": user_rows,
+            "events": await database.list_events(50),
+            "logs": _read_log_tail(log_path, 200),
+            "wan": live.wan_status or {},
+            "version": __version__,
+        }
+
+    @app.get("/api/report", dependencies=[Depends(_require_report_ip)],
+             response_model=None)
+    async def report_api() -> dict[str, Any]:
+        return await _report_payload()
+
+    @app.get("/report", dependencies=[Depends(_require_report_ip)],
+             response_class=FileResponse)
+    async def report_page() -> FileResponse:
+        """The reporting dashboard HTML. Gated by source IP (no admin session),
+        so a whitelisted machine can open it on demand."""
+        page = WEB_DIR / "report.html"
+        return FileResponse(str(page))
+
+    @app.get("/milestone", response_class=FileResponse)
+    async def milestone_page() -> FileResponse:
+        """The household milestone page — public, on-demand."""
+        page = WEB_DIR / "milestone.html"
+        return FileResponse(str(page))
 
     # -- REST routes ----------------------------------------------------------
 
@@ -369,6 +611,9 @@ def create_app(
         mac = body.mac.strip().lower()
         if not mac:
             raise HTTPException(400, "mac is required")
+        if mac == GATEWAY_MAC:
+            raise HTTPException(400, "the gateway box MAC is reserved — it "
+                                "cannot be re-created")
         # user_id=None => upsert_device auto-creates a user carrying
         # body.user_name (or the device name) + quota.
         dev = await database.upsert_device(mac, body.name, body.quota_mode,
@@ -378,6 +623,7 @@ def create_app(
                                            limit_up_mbps=body.limit_up_mbps or 0.0)
         await service.recompute_allowances()
         await database.add_event(f"Device added: {body.name or mac}", "info", dev.id)
+        _schedule_shaping_sync()  # the new device's caps land in tc immediately
         return {"id": dev.id, "mac": dev.mac, "user_id": dev.user_id}
 
     @app.patch("/api/devices/{device_id}", dependencies=[Depends(_require_auth)])
@@ -385,6 +631,9 @@ def create_app(
         dev = await database.get_device(device_id)
         if dev is None:
             raise HTTPException(404, "device not found")
+        if dev.mac == GATEWAY_MAC and body.user_id is not None:
+            raise HTTPException(400, "the gateway box device cannot be moved "
+                                "to another user")
         fields: dict[str, Any] = {}
         if body.name is not None:
             fields["name"] = body.name
@@ -421,14 +670,23 @@ def create_app(
             await database.add_event(
                 f"Device '{dev.name or dev.mac}' moved to user #{body.user_id}",
                 "info", device_id)
+        # Cap edits must reach tc now, not on the next 15 s maintenance tick.
+        _schedule_shaping_sync()
         return {"id": device_id, "updated": True}
 
     @app.delete("/api/devices/{device_id}", dependencies=[Depends(_require_auth)])
     async def delete_device(device_id: int) -> dict[str, Any]:
         dev = await database.get_device(device_id)
-        await database.delete_device(device_id)
+        if dev is None:
+            raise HTTPException(404, "device not found")
+        if dev.mac == GATEWAY_MAC:
+            raise HTTPException(400, "the gateway box device cannot be deleted")
+        # Deleting a guest's device records its MAC as suppressed so it does
+        # not re-register while it is still connected (run.py _persist_lease
+        # skips suppressed MACs). A normal device delete does not suppress.
+        await database.delete_device(device_id, suppress_guest_mac=True)
         await database.add_event(
-            f"Device removed: {dev.name if dev else device_id}", "warn")
+            f"Device removed: {dev.name or dev.mac}", "warn")
         return {"id": device_id, "deleted": True}
 
     @app.post("/api/devices/{device_id}/topup", dependencies=[Depends(_require_auth)])
@@ -453,6 +711,7 @@ def create_app(
         await service.recompute_allowances()
         await database.add_event(
             f"User added: {body.name or 'unnamed'}", "info", user_id=user.id)
+        _schedule_shaping_sync()  # the user's aggregate cap lands in tc now
         return {"id": user.id, "name": user.name}
 
     @app.patch("/api/users/{user_id}", dependencies=[Depends(_require_auth)])
@@ -471,6 +730,7 @@ def create_app(
         if body.block is not None:
             await service.set_admin_block_user(user_id, body.block)
         await service.recompute_allowances()
+        _schedule_shaping_sync()  # the user's aggregate cap lands in tc now
         return {"id": user_id, "updated": True}
 
     @app.delete("/api/users/{user_id}", dependencies=[Depends(_require_auth)])
@@ -478,7 +738,14 @@ def create_app(
         user = await database.get_user(user_id)
         if user is None:
             raise HTTPException(404, "user not found")
-        removed = await database.delete_user(user_id, cascade=True)
+        if getattr(user, "protected", False):
+            raise HTTPException(400, "the protected Gateway user cannot be "
+                                "deleted — edit it instead")
+        # Deleting a guest user records its devices' MACs as suppressed so they
+        # do not re-register while still connected (run.py _persist_lease skips
+        # suppressed MACs). Month-reset cleanup never sets this flag.
+        removed = await database.delete_user(user_id, cascade=True,
+                                             suppress_guest_macs=True)
         await database.add_event(
             f"User removed: {user.name or user_id} ({removed} device(s))", "warn")
         await service.recompute_allowances()
@@ -616,11 +883,15 @@ def create_app(
 
     @app.post("/api/network", dependencies=[Depends(_require_auth)])
     async def set_network(body: NetworkUpdate) -> dict[str, Any]:
-        return await service.set_shaping(
+        result = await service.set_shaping(
             enabled=body.enabled,
             total_down_mbps=body.total_down_mbps,
             total_up_mbps=body.total_up_mbps,
             aqm=body.aqm)
+        # Apply to the kernel NOW — no 15 s wait for the maintenance tick, so a
+        # saved Network-tab change is enforced immediately (no page refresh).
+        _schedule_shaping_sync()
+        return result
 
     # -- auth -----------------------------------------------------------------
 
