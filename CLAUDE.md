@@ -37,7 +37,12 @@ the uplink — deterministic, no proxy_arp.
    `LEASE_HOURS`), a masquerade NAT table for the client subnet, systemd
    drop-ins (dnsmasq waits for `network-online.target`; nftables `ExecStop`
    scoped to `quota_nat` only so it never wipes the live app table), and a
-   systemd unit for the app.
+   systemd unit for the app. **The box's uplink address must be fixed**: the
+   script sets it static (nmcli / `/etc/network/interfaces`, default
+   `192.168.1.110`, verified landed) — and on a VM the same address should also
+   be **reserved on the router** for the machine's MAC, since a drifting or
+   clashing address is an access outage (clients lose their gateway + DNS; the
+   dashboard is unreachable).
 2. `run.py --config config.yaml` starts. Clients are on their own subnet
    (`192.168.2.0/24`, gateway = the box's real address) and the kernel
    masquerades them out the uplink — every byte deterministically crosses the
@@ -909,3 +914,12 @@ inventory the refactor phase should address before TASKS.md's breaking changes l
   source or `report.allowed_ips`) shows full household usage + events + log
   tail with no admin login. Both assume a trusted LAN — keep the box's
   dashboard port LAN-only.
+- **LAN mode needs a fixed uplink address on the box**: either a **router DHCP
+  reservation** for the machine's MAC or a **static address set on the machine
+  itself** (the setup script sets `192.168.1.110` static via nmcli /
+  `/etc/network/interfaces` and verifies it landed). If the box's IP can
+  change — a lease expires, a reboot, or the router leasing that address to
+  another device — every client loses its gateway + DNS and the dashboard is
+  unreachable. The uplink address must also sit outside (or be excluded from)
+  the router's DHCP pool so the router can't hand it out. Not an issue in WAN
+  mode, where the box dials PPPoE itself.

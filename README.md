@@ -45,6 +45,7 @@ tests, release process): [Structure_README.md](Structure_README.md).
 - [Installation](#installation)
 - [After install — the router](#after-install--the-router)
 - [Using the dashboard](#using-the-dashboard)
+- [Strong (WAN) mode](#strong-wan-mode)
 - [Day to day](#day-to-day)
 - [Upgrading / removing](#upgrading--removing)
 - [Troubleshooting](#troubleshooting)
@@ -71,6 +72,13 @@ virtual machine** on the PC or laptop you already use. Three things matter:
   appears on the router's network like a real computer.
 - **Always on.** The machine must stay running 24/7 — when it sleeps, shuts
   down, or restarts, everyone loses internet.
+- **A fixed address — reserve it or set it static.** The gateway must keep a
+  permanent IP on the router's network: either **reserve one on the router**
+  (a DHCP reservation for the VM's MAC) or **set it static on the box** (the
+  setup script does this by default). If the VM's IP ever changes, everyone
+  loses access — see *The gateway's addresses (LAN mode)* below. In a VM,
+  bridged networking puts the box on the router's LAN exactly like a real
+  machine, so the same rule applies.
 
 From there, follow the steps below as usual: the `.deb` installs *inside* the
 VM, and the whole gateway (routing, network stack, dashboard) runs there. This
@@ -82,8 +90,16 @@ Download the latest `quota-manager_<version>_all.deb` from the
 [Releases](https://github.com/UserJoo9/QuotaManager/releases) page, then:
 
 ```bash
-sudo apt install ./quota-manager_0.1.0_all.deb
+sudo apt install ./quota-manager_0.1.1_all.deb
 ```
+
+> **Fresh Kali/Debian box? Run `sudo apt-get update` first.** A brand-new
+> install has never downloaded package lists, so apt reports *"no installation
+> candidate"* for every dependency (`python3-venv`, `dnsmasq`, …) and aborts.
+> On Kali a missing signing key shows up first as `NO_PUBKEY …` / *"repository
+> … is not signed"* — fix with `sudo apt install --reinstall
+> kali-archive-keyring`, then `sudo apt-get update`, then retry the install.
+> (Full table in Troubleshooting.)
 
 The package installs everything automatically: the Python app, the network
 stack (dnsmasq, nftables), and a service that starts the gateway at boot.
@@ -145,6 +161,34 @@ Default password is **`admin`** — **change it immediately** (Admin tab).
 **Done.** New devices appear in the dashboard automatically the first time they
 join. Set each person's allowance from **Add user** and you're running.
 
+### The gateway's addresses (LAN mode)
+
+> **The machine must have a fixed address — don't skip this.** In LAN mode the
+> gateway box needs a permanent IP on the router's network. Either **reserve an
+> IP on the router** (a DHCP reservation for the machine's MAC) or **set it
+> static on the machine itself** (the setup script does this automatically,
+> default `192.168.1.110`). If the box's IP can change — a lease expires, the
+> box reboots, or the router hands the address to another device — **everyone
+> loses access**: devices lose their gateway + DNS and the dashboard becomes
+> unreachable.
+
+The gateway box runs on **two fixed addresses**:
+
+- **Uplink** — on the router's subnet, toward the router (default
+  `192.168.1.110/24`).
+- **Client subnet** — the network it serves (`192.168.2.1/24`). Devices get a
+  `192.168.2.x` address from the box's DHCP, and their **gateway + DNS is the
+  box**.
+
+Whichever way you fix the box's address, make sure it's one the router's DHCP
+pool won't hand to another device (reserve/exclude it on the router, or pick an
+address outside the pool). If the box's uplink IP drifts or clashes, devices
+lose their gateway and DNS.
+
+The dashboard lives on both addresses: `http://192.168.2.1:8080` from client
+devices, or `http://192.168.1.110:8080` from the uplink LAN (useful when a
+device still holds an old `192.168.1.x` lease).
+
 ### Running from source (developers)
 
 See [Structure_README.md](Structure_README.md) → *Running from source*.
@@ -171,10 +215,69 @@ milestone page and the consumption report — nothing needs a desktop.
 and enter your real down/up Mbps), then open a user's or device's **edit** modal
 and set `limit down` / `limit up` (`0` = unlimited). Limits apply within seconds.
 
-**Strong (WAN) mode** *(optional)* — if you need a fully airtight setup (a
-static-IP cheat that can't be blocked at the LAN level), the laptop can dial the
-PPPoE line itself and demote the router to a pure bridge/AP. It's off by
-default; the WAN tab has a step-by-step guide and applies the switch live.
+---
+
+## Strong (WAN) mode
+
+The default LAN setup has two ways a determined static-IP cheater can slip past
+the box (a *static ARP entry*, or a static IP on the uplink subnet). **Strong
+(WAN) mode closes them by moving the quota boundary to the line itself**: the
+gateway laptop dials the PPPoE session itself (the public IP lands on `ppp0`)
+and the router is demoted to a pure **bridge/AP**. A static-IP device then has
+**no second router to bypass to** — every byte must cross the box.
+
+It's **off by default**, and the default LAN topology is byte-for-byte unchanged
+until you switch. Turn it on only if you need the airtight boundary.
+
+**What changes on the box.** `ppp0` carries the public IP, dnsmasq still serves
+the `192.168.2.x` client pool, and the kernel masquerades that subnet out
+`ppp0`. The ARP gateway-lock is forced off (no router on the client segment).
+The box keeps its old uplink IP as a *secondary alias*, so the **router admin
+page stays reachable from every device through the box** — and traffic to that
+uplink subnet never consumes the metered bundle (not a bypass: the masquerade
+only covers the client subnet).
+
+**Two physical layouts** (pick one):
+
+1. **Single NIC — router in bridge/modem mode (primary).** One cable from the
+   box to a router LAN port; switch the router to bridge/modem mode (WAN↔LAN
+   bridged, NAT + DHCP off, WiFi kept as an AP if supported). Most Egyptian
+   FTTH/DSL combos support bridge (WE ZTE/Huawei, Orange Livebox, Vodafone,
+   e&); some ISP-locked combos need a bridge-unlock code or an ISP call.
+2. **Two NICs — router in AP mode (universal fallback).** Box NIC1 → ONT
+   (fiber) or the modem in bridge (DSL) dials PPPoE; box NIC2 → router in
+   **AP mode** (WiFi only, DHCP off). Every router supports AP mode; it costs a
+   cheap USB Ethernet dongle. Put the second NIC's name in the panel's *WAN
+   interface* field.
+
+**PPPoE credentials** come from the ISP contract card (the same username /
+password printed for the router's WAN page) or the router's WAN status page.
+They're stored in `/etc/ppp/chap-secrets` + `/etc/ppp/pap-secrets` (not the
+world-readable peer file) and prefill in the panel.
+
+**Workflow — all from the WAN tab.** Rewire the router → **Test PPPoE
+connection** first (a throwaway dial on `ppp200` that never touches the running
+topology; it reports whether the ISP accepts your credentials) → **Apply now**
+(the box rewires itself and restarts — a few seconds of internet downtime). To
+leave WAN mode: put the router back in routed/NAT mode, then **Revert to LAN**.
+The one always-hands-on step is the physical router rewiring — no panel can
+move the cable.
+
+**Cases to be aware of:**
+
+- **Applied WAN before the router is actually bridged/AP** — internet is cut
+  for everyone until it is. The box itself stays up (no restart into a
+  half-applied state) and the WAN tab auto-diagnoses the likely cause.
+- **PPPoE outage (ISP side / line)** — no internet for anyone until the line
+  redials. The `quota-wan-ppp` service redials automatically
+  (`Restart=always`), so this usually clears itself.
+- **Wrong credentials** — the Test button reports `auth-failed` before you
+  Apply, so you catch it early.
+- **The box's own internet is still metered** — the Gateway user /
+  `count_gateway` behaviour (see *Known limits*) applies in both topologies.
+
+The architecture behind this is in
+[Structure_README.md](Structure_README.md) → *Strong (WAN) mode*.
 
 ---
 
@@ -240,6 +343,10 @@ stopped) — it holds every device, allowance and month of usage.
 | Speed limits don't apply | Network tab never configured (switch off or rates still 0) | Network tab → toggle ON → set your **real** down/up Mbps → Save. A device's own cap is in its edit modal |
 | No speed shaping at all | `tc` missing, no `ifb` module, or not root | `apt-get install iproute2`; `modprobe ifb numifbs=1`; run the service as root; re-run the setup script |
 | Internet died after a reboot | gateway service not enabled, or rules not persisted | `sudo systemctl enable --now quota-gateway`; re-run the setup script (idempotent) |
+| `E: Package 'python3-venv' has no installation candidate` | Fresh box — package lists never downloaded | `sudo apt-get update`, then retry the install |
+| `The repository … is not signed` / `NO_PUBKEY ED65462EC8D5E4C5` | Missing Kali signing key on a fresh install | `sudo apt install --reinstall kali-archive-keyring`, then `sudo apt-get update` |
+| *"not available, but is referred to by another package"* / "replaced by dnsmasq-base" | Stale lists — the package exists, apt just doesn't know it yet | `sudo apt-get update` and retry |
+| *"Target Packages … configured multiple times"* | Duplicate repo lines (`sources.list` + a `sources.list.d` file) | Remove the duplicate `deb … kali-rolling …` line, keep one |
 
 ---
 
