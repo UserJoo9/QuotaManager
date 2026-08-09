@@ -896,3 +896,16 @@ inventory the refactor phase should address before TASKS.md's breaking changes l
   egress tree shares one NIC's bandwidth between uplink traffic and client
   downloads. Shaping needs `tc` (iproute2) + root + the `ifb` module; without
   them it degrades silently — limits off, quota blocks + accounting unaffected.
+- **The box's own internet is metered by default** (`engine.count_gateway`,
+  default ON — and defaults ON even on upgraded configs that predate the key):
+  traffic from the box itself is counted and charged to the protected Gateway
+  user (fixed 1.0 GB). That 1.0 GB is silently deducted from every auto-share
+  bundle when the period first opens (behavioral change on upgrade; fixed-mode
+  allowances unaffected). A Gateway block (`gw_blocked`, input/output hooks
+  only) cuts the box's own internet — clients on the forward chain are
+  unaffected. `count_gateway: false` skips the counters but keeps the drops.
+- **/milestone is public and /report is source-IP-gated, not session-gated**:
+  /milestone shows only the requester's own user; /report (any client-subnet
+  source or `report.allowed_ips`) shows full household usage + events + log
+  tail with no admin login. Both assume a trusted LAN — keep the box's
+  dashboard port LAN-only.

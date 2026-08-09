@@ -262,6 +262,20 @@ stopped) — it holds every device, allowance and month of usage.
   (bridge/AP mode) is always manual — no panel can move the cable. A PPPoE
   outage means no internet until the line redials (the service does that
   automatically).
+- **The gateway's own internet is metered** (`engine.count_gateway`, on by
+  default). The box's traffic is charged to a protected **Gateway** user with a
+  fixed 1.0 GB allowance — a heavy download *on the laptop itself* can cut the
+  box's own internet until the Gateway user is topped up or the period rolls
+  (clients are unaffected). The 1.0 GB is silently deducted from every
+  auto-share bundle the first time the period opens after an upgrade; set
+  `count_gateway: false` to skip the counters.
+- **The household milestone page (`/milestone`) is public** — no login, by
+  design. It only ever shows the *requesting device's own user* (resolved by
+  its source IP); it never reveals other users' data.
+- **The consumption report (`/report`) is gated by source IP, not the admin
+  password.** Any device on the client subnet (or in `report.allowed_ips`) can
+  open it with no login — it shows the full household usage, recent events and
+  the log tail. Keep the box's dashboard port LAN-only; don't port-forward it.
 
 ---
 
