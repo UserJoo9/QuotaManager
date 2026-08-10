@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import ipaddress
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def _cap_field() -> Field:
@@ -151,6 +152,106 @@ class WanUpdate(BaseModel):
     pppoe_user: Optional[str] = None
     pppoe_password: Optional[str] = None
     wan_if: Optional[str] = None
+
+
+class DnsServerUpdate(BaseModel):
+    """Per-user or per-device upstream DNS-server override.
+
+    Rendered as a tag-restricted dnsmasq ``server=`` line (see
+    quota/dns_rules.py). Empty string clears the override (falls back to the
+    user's override, then the gateway's default upstreams). Must be a bare
+    IPv4/IPv6 address — this string is written directly into generated
+    dnsmasq config, so anything else (in particular embedded whitespace/
+    newlines) is rejected rather than risk a config-injection line.
+    """
+
+    dns_server: str = Field("", max_length=64)
+
+    @field_validator("dns_server")
+    @classmethod
+    def _validate_ip_or_empty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            return v
+        try:
+            ipaddress.ip_address(v)
+        except ValueError:
+            raise ValueError(
+                f"dns_server must be a bare IP address, got {v!r}") from None
+        return v
+
+
+class DomainRuleCreate(BaseModel):
+    """One domain-filtering rule. ``scope``/``scope_id`` together decide who
+    it applies to: ``global`` (scope_id ignored), ``user`` (scope_id = a
+    user id — fanned out to every device that user owns), or ``device``
+    (scope_id = a device id). ``domain`` accepts an optional leading
+    ``*.`` (stripped — dnsmasq's match already includes every subdomain);
+    any other ``*`` is rejected as unenforceable. ``target_ip`` is only used
+    when ``action == "redirect"`` and must be a bare IP — like
+    ``dns_server``, it is written directly into generated dnsmasq config.
+    """
+
+    scope: str = Field("global", pattern="^(global|user|device)$")
+    scope_id: Optional[int] = None
+    action: str = Field("block", pattern="^(block|allow|redirect)$")
+    domain: str = Field(..., min_length=1, max_length=253)
+    target_ip: Optional[str] = None
+    enabled: bool = True
+
+    @field_validator("target_ip")
+    @classmethod
+    def _validate_target_ip(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not v.strip():
+            return None
+        v = v.strip()
+        try:
+            ipaddress.ip_address(v)
+        except ValueError:
+            raise ValueError(
+                f"target_ip must be a bare IP address, got {v!r}") from None
+        return v
+
+
+class DomainRuleUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    target_ip: Optional[str] = None
+
+    @field_validator("target_ip")
+    @classmethod
+    def _validate_target_ip(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not v.strip():
+            return v  # None = "leave unchanged" for a PATCH; see api/app.py
+        v = v.strip()
+        try:
+            ipaddress.ip_address(v)
+        except ValueError:
+            raise ValueError(
+                f"target_ip must be a bare IP address, got {v!r}") from None
+        return v
+
+
+class DnsPresetEnable(BaseModel):
+    """Turn a built-in blocklist preset on/off for a scope (default: the
+    whole household). Enabling fetches + compiles the preset's source(s)
+    (or uses the curated inline list for presets with none) into
+    ``domain_rules`` rows tagged ``source='preset:<preset_id>'``; disabling
+    removes exactly those rows."""
+
+    scope: str = Field("global", pattern="^(global|user|device)$")
+    scope_id: Optional[int] = None
+
+
+class DnsImportRequest(BaseModel):
+    """Paste raw hosts-format or AdBlock-Plus-format blocklist text and turn
+    it into domain_rules rows (source='import'). ``format`` picks the
+    parser; "auto" tries hosts-format first, then AdBlock-Plus."""
+
+    text: str = Field(..., min_length=1)
+    format: str = Field("auto", pattern="^(auto|hosts|adblock)$")
+    scope: str = Field("global", pattern="^(global|user|device)$")
+    scope_id: Optional[int] = None
+    action: str = Field("block", pattern="^(block|allow)$")
 
 
 class WanTest(BaseModel):

@@ -477,6 +477,25 @@ else
     warn "dnsmasq config did not validate — fix it before starting the app"
 fi
 
+# --- 4b. dnsmasq: domain-filtering base files (blacklists/DNS overrides) ----
+# quota/dns_rules.py (the DNS-filtering feature) writes generated rules into
+# these two files whenever the admin edits a domain rule / preset / per-client
+# DNS server in the dashboard. They start EMPTY here — the app owns their
+# content from the first rule onward — this step only guarantees they exist
+# so a stock Debian/Kali install (which ships `conf-dir=/etc/dnsmasq.d` in
+# /etc/dnsmasq.conf by default) picks them up without any extra config.
+log "[4b/8] preparing dnsmasq domain-filtering files (empty until rules are added)"
+for f in quota-tags.conf quota-domains.conf; do
+    [ -f "/etc/dnsmasq.d/$f" ] || printf '# Quota Manager — generated, do not edit by hand.\n' \
+        > "/etc/dnsmasq.d/$f"
+done
+# Belt-and-braces: explicitly enable conf-dir in case /etc/dnsmasq.conf was
+# customized to NOT already include it (the Debian/Kali package default does).
+if ! grep -q '^conf-dir=/etc/dnsmasq\.d' /etc/dnsmasq.conf 2>/dev/null; then
+    echo 'conf-dir=/etc/dnsmasq.d/,*.conf' >> /etc/dnsmasq.conf
+    log "   added conf-dir=/etc/dnsmasq.d to /etc/dnsmasq.conf (was missing)"
+fi
+
 # --- 5. nftables: NAT for the client subnet ----------------------------------
 log "[5/8] writing nftables NAT ruleset"
 # The app (run.py, quota/nftables.py) owns the `inet quota_gateway` table —

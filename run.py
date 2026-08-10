@@ -41,6 +41,7 @@ from api.app import create_app
 from core import config as cfg_mod
 from core.logging_setup import setup_logging
 from quota import db as _db
+from quota import dns_rules as _dns_rules
 from quota.arp_scan import ArpScanner
 from quota.engine import GATEWAY_MAC, EngineSnapshot, SnapshotHolder
 from quota.netmgr import TopologyManager
@@ -70,6 +71,20 @@ def _make_shaper(cfg: cfg_mod.Config):
                     "speed limits + low-latency queues off")
         return None
     return TcShaper(cfg)
+
+
+def _make_dns_manager(cfg: cfg_mod.Config) -> _dns_rules.DnsRuleManager | None:
+    """Build the DNS-filtering config writer, or None when disabled."""
+    dns_cfg = getattr(cfg, "dns_filter", None)
+    if dns_cfg is not None and not dns_cfg.enabled:
+        log.warning("DNS filtering disabled in config — domain rules, "
+                    "presets, and per-client DNS-server overrides are inert")
+        return None
+    if dns_cfg is None:
+        return _dns_rules.DnsRuleManager()
+    return _dns_rules.DnsRuleManager(
+        conf_dir=dns_cfg.conf_dir, tags_file=dns_cfg.tags_file,
+        rules_file=dns_cfg.rules_file, reload_dnsmasq=dns_cfg.reload_dnsmasq)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -107,6 +122,7 @@ class Gateway:
         self.holder = SnapshotHolder()
         self.engine: NftablesEngine | None = None
         self.shaper: object | None = None  # quota.shaping.TcShaper (tc/ifb)
+        self.dns_manager: _dns_rules.DnsRuleManager | None = None  # domain filtering
         self.arp_lock: object | None = None  # quota.arp_lock.ArpLock (opt-in)
         # Built in startup(), AFTER the DB topology override: the scanner
         # resolves its probe networks from cfg at construction, so building it
@@ -133,6 +149,10 @@ class Gateway:
         #: briefly undo the user's fresh caps. Whoever runs second re-reads the
         #: DB, so the lock makes both orderings end on the fresh state.
         self._shaping_lock = asyncio.Lock()
+        #: serializes DNS-rule regeneration the same way ``_shaping_lock``
+        #: does for the tc tree (a maintenance tick and an API-triggered
+        #: immediate apply must not race each other's DB read + file write).
+        self._dns_lock = asyncio.Lock()
         self._maintenance_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
 
@@ -172,6 +192,15 @@ class Gateway:
         self.shaper = _make_shaper(self.cfg)
         if self.shaper is not None:
             self.shaper.start()
+
+        # -- DNS filtering (dnsmasq domain rules + per-client DNS servers) --
+        # Pure config-generation, no kernel/socket state to "start" — built
+        # here (not __init__) for symmetry with the shaper/engine and so a
+        # future config-driven rebuild has the same lifecycle shape. An
+        # initial apply happens after the maintenance loop's first tick
+        # (device tags need a device list, which _sync_dnsmasq_leases fills
+        # in), not here — see _maintenance_tick.
+        self.dns_manager = _make_dns_manager(self.cfg)
 
         # -- ARP gateway-lock (opt-in) ---------------------------------------
         # Deny internet to devices that bypass the box by using the ROUTER as
@@ -476,6 +505,12 @@ class Gateway:
         #    touch the kernel; a DB edit lands here within one tick (<=15 s).
         await self._sync_shaping(ip_to_mac)
 
+        # 6. Regenerate dnsmasq's domain-rule + tag config if anything
+        #    changed (new device -> new tag, or a rule/preset/DNS-server
+        #    edit that arrived without going through the API's immediate
+        #    apply — e.g. a test or a future non-HTTP caller).
+        await self._sync_dns_rules()
+
     async def _sync_shaping(self, ip_to_mac: dict[str, str]) -> None:
         """Push the latest shaping settings + device caps into the tc shaper.
 
@@ -525,6 +560,51 @@ class Gateway:
             await self._sync_shaping(self._last_ip_to_mac)
         except Exception:  # noqa: BLE001
             log.exception("failed to apply speed-limit change immediately")
+
+    async def _sync_dns_rules(self) -> None:
+        """Regenerate the dnsmasq domain-rule + tag config from the DB and
+        reload dnsmasq if anything changed.
+
+        Mirrors ``_sync_shaping``: reads devices/users/rules fresh every
+        call and lets ``DnsRuleManager.apply`` decide (by content diff)
+        whether a reload is actually needed, so a call with nothing new to
+        say is free. Called once per maintenance tick (new devices need a
+        tag even with no rule edits) and immediately after any DNS-related
+        API edit via ``_apply_dns_now``.
+        """
+        manager = self.dns_manager
+        if manager is None:
+            return
+        try:
+            async with self._dns_lock:
+                devices = await self.database.list_devices()
+                users = {u.id: u for u in await self.database.list_users()}
+                rules = await self.database.list_domain_rules(enabled_only=True)
+                device_ids_by_user: dict[int, list[int]] = {}
+                for dev in devices:
+                    if dev.user_id is not None:
+                        device_ids_by_user.setdefault(dev.user_id, []).append(dev.id)
+                # Per-client DNS-server overrides: a device's own override
+                # wins; otherwise it inherits its user's override (if any).
+                # Rendered as (scope, scope_id, ip) triples, same shape as a
+                # domain rule's scope so render_rules' _tags_for is reused.
+                dns_servers: list[tuple[str, int | None, str]] = []
+                for user in users.values():
+                    if user.dns_server:
+                        dns_servers.append((_db.DNS_SCOPE_USER, user.id, user.dns_server))
+                for dev in devices:
+                    if dev.dns_server:
+                        dns_servers.append((_db.DNS_SCOPE_DEVICE, dev.id, dev.dns_server))
+                await asyncio.to_thread(
+                    manager.apply, devices, rules, dns_servers, device_ids_by_user)
+        except Exception:  # noqa: BLE001
+            log.exception("failed to sync DNS filtering rules")
+
+    async def _apply_dns_now(self) -> None:
+        """Apply a domain-rule / preset / DNS-server edit immediately instead
+        of waiting for the next maintenance tick. The API schedules this
+        after every /api/dns/* and /api/{users,devices}/{id}/dns edit."""
+        await self._sync_dns_rules()
 
     async def _wan_status(self) -> dict[str, object]:
         """Live WAN-mode status for the dashboard/API (cheap, every 15 s tick).
@@ -649,7 +729,8 @@ def main() -> None:
                          log_path=cfg.log_file,
                          topology_manager=gateway.topology_manager,
                          shaping_sync=gateway._reshaping_now,
-                         report_config=report_cfg)
+                         report_config=report_cfg,
+                         dns_apply=gateway._apply_dns_now)
         server_config = uvicorn.Config(
             app,
             host=cfg.web.host,

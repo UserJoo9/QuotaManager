@@ -280,6 +280,79 @@ either way.
 
 ---
 
+## DNS filtering (domain rules, presets, per-client DNS servers)
+
+`quota/dns_rules.py` is a **third** generated-config layer, alongside
+nftables (packet accounting/blocking) and tc (speed shaping) — but it never
+touches either. It rides entirely on the DHCP+DNS server the box already
+runs (`dnsmasq`), writing two extra files into its `conf-dir`
+(`/etc/dnsmasq.d` by default):
+
+- **`quota-tags.conf`** — `dhcp-host=<mac>,set:qmdev<id>` for every known
+  device. This is the whole mechanism that makes *per-device* or *per-user*
+  rules possible: dnsmasq selects config lines by DHCP tag, so binding a MAC
+  to a tag is the "is this rule for THIS device" selector.
+- **`quota-domains.conf`** — the actual rules, as tag-restricted
+  `address=/domain/target` (block/redirect) or `server=/domain/#`
+  (allow-list override) lines, plus tag-restricted `server=<ip>` lines for
+  per-user/per-device upstream DNS servers. A user-scoped rule/override is
+  fanned out to one line per device that user currently owns (dnsmasq only
+  understands per-device tags).
+
+```
+domain_rules (DB) ──┐
+dns_presets  (DB) ──┼─► DnsRuleManager.apply() ─► write quota-tags.conf
+users.dns_server ───┤                              write quota-domains.conf
+devices.dns_server ─┘                              (only if content changed)
+                                                            │
+                                                   dnsmasq --test (validate)
+                                                            │
+                                                  systemctl restart dnsmasq
+```
+
+Both files are rewritten and diffed on every maintenance tick and
+immediately after any `/api/dns/*` (or `/api/{users,devices}/{id}/dns`)
+edit — same signature-gated pattern as the nftables blocked set and the tc
+tree: an unchanged render never touches dnsmasq. Unlike a SIGHUP (which only
+re-reads `/etc/hosts` and lease-adjacent files), new `address=`/`server=`/
+`dhcp-host=` lines need a **restart** to take effect, so a rule change costs
+every client a brief (~1 s) DNS blip — acceptable for an admin edit, not
+something that happens on its own.
+
+**Blocklist presets** (`ads-tracking`, `social-media`, `streaming`,
+`gambling`) are curated source lists — hosts-format or AdBlock-Plus-format —
+fetched and compiled down to a flat domain set by `compile_source_text`.
+Enabling one inserts `domain_rules` rows tagged
+`source='preset:<id>:<scope>:<scope_id>'`; disabling deletes exactly those
+rows. Only the network-address-shaped subset of an AdBlock-Plus list
+(`||domain^`) has a DNS-layer equivalent — element-hiding, path, and regex
+rules are dropped during compilation, which is an honest ceiling, not a bug.
+
+**Known limitation, by design of the technique**: this is DNS-layer
+filtering. A client using DNS-over-HTTPS/TLS to a resolver outside the box,
+or one that hardcodes a destination IP, bypasses it — the same way it
+already bypasses the box's regular DNS. Nothing about this feature changes
+that.
+
+**Known limitation, parallel to an existing one**: per-device/per-user rules
+and DNS-server overrides depend entirely on the DHCP tag
+(`quota-tags.conf`'s `dhcp-host=<mac>,set:qmdev<id>`), which dnsmasq only
+assigns to a MAC it has actually leased. A **static-IP device is invisible
+to tagging** the exact same way it is already invisible to the per-device
+block enforcement documented in `CLAUDE.md`'s `[LEGACY_DEBT_AND_RISKS]`
+("Per-device block can silently not cut a lease-less device") — a
+per-device/per-user domain rule or DNS-server override on a static-IP
+client silently does nothing, with no error surfaced anywhere.
+**Global-scope rules are unaffected** (no tag needed). The ARP gateway-lock
+(`engine.gateway_arp_lock`) only narrows this: it denies a static-IP device
+that points at the ROUTER as its gateway (the common bypass), but a
+static-IP device that already points at the BOX as its gateway is counted
+and blocked normally by IP yet still never gets a tag — it is not a full
+fix for the tagging gap, the same way it is not a full fix for the
+per-device block gap.
+
+---
+
 ## Rogue devices & the ARP gateway-lock
 
 Because the router keeps WiFi and shares the client segment, a device can assign
@@ -574,6 +647,15 @@ report:
   allowed_ips: []             # extra CIDRs/IPs, e.g. ["192.168.1.0/24", "10.0.0.5"].
                               #   run.py fills client_subnet from the engine's
                               #   resolved subnet automatically.
+
+dns_filter:
+  enabled: true               # domain rules / presets / per-client DNS servers.
+                              #   false => the feature is entirely inert.
+  conf_dir: /etc/dnsmasq.d    # dnsmasq's conf-dir (Debian/Kali default)
+  tags_file: quota-tags.conf     # per-device DHCP tag bindings (generated)
+  rules_file: quota-domains.conf # domain rules + DNS-server overrides (generated)
+  reload_dnsmasq: true        # restart dnsmasq when the generated files change
+  preset_cache_dir: data/dns_presets
 ```
 
 > **Speed shaping is switched on in the dashboard, not in this YAML.**
@@ -602,6 +684,12 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | POST | `/api/reset-month` | force an early period roll-over |
 | GET/POST | `/api/guest` | guest mode: auto-register new devices with their own small allowance |
 | GET/POST | `/api/network` | speed-shaping settings: `enabled`, `total_down_mbps`, `total_up_mbps`, `aqm` |
+| GET/POST/PATCH/DELETE | `/api/dns/rules` | domain-filtering rules: list (optionally `?scope=&scope_id=`) / create (`{"scope","scope_id","action":"block"\|"allow"\|"redirect","domain","target_ip"}`) / enable-disable via PATCH / delete |
+| POST | `/api/dns/import` | paste raw hosts-format or AdBlock-Plus-format blocklist text (`{"text","format":"auto"\|"hosts"\|"adblock","scope","scope_id","action"}`) → bulk-creates domain rules |
+| GET | `/api/dns/presets` | list built-in blocklist presets (ads-tracking, social-media, streaming, gambling) with their enabled state + domain count |
+| POST | `/api/dns/presets/{id}/enable` · `/disable` | fetch + compile a preset's sources into domain rules for a scope (`{"scope","scope_id"}`), or remove exactly those rules |
+| POST | `/api/dns/apply` | force an immediate dnsmasq regeneration + reload (normally automatic after every DNS-related edit) |
+| PATCH | `/api/users/{id}/dns` · `/api/devices/{id}/dns` | set/clear a per-user or per-device upstream DNS-server override (`{"dns_server": "1.1.1.1"}`, `""` clears it) |
 | GET/POST | `/api/wan` | strong-mode topology: `GET` live status (topology/source/pending/ppp0), `POST {"topology": "lan"\|"wan", "pppoe_user", "pppoe_password", "wan_if"}` APPLIES the topology live — rewrites config.yaml + the DB together, runs `scripts/topology.sh` (NIC + dnsmasq + PPPoE dial) and schedules a restart (`restart_scheduled`, `script_output`). Creds travel to the applier via the environment, never argv. On an applier failure config.yaml + the DB are ROLLED BACK to the previous state (no restart) |
 | POST | `/api/wan/test` | test the PPPoE credentials WITHOUT changing anything: dials a throwaway `ppp200` link via `scripts/test_pppoe.sh` with `{"pppoe_user", "pppoe_password", "wan_if"}` and reports `status` (success/auth-failed/no-pppoe-server/link-down/error), the negotiated local/peer IPs, `internet` (ping check), and `detail` — never touches config.yaml, the DB, `ppp0`, routing or DNS |
 | GET | `/api/milestone` | **public** — the requesting device's user's consumption + per-device breakdown (resolved by source IP via its DHCP lease; `recognized: false` for a lease-less IP). Pairs with the `/milestone` page |
@@ -655,6 +743,9 @@ QuotaManager/
 │   │                         #   + ARP gateway-lock deny rules (known_ips set)
 │   ├── shaping.py            # TcShaper (Linux): per-device + per-user speed caps,
 │   │                         #   low-latency fq_codel queues (HTB), two-tree design
+│   ├── dns_rules.py          # DnsRuleManager: domain blacklist/allow/redirect rules,
+│   │                         #   blocklist presets, per-client DNS-server overrides —
+│   │                         #   generated dnsmasq config, no new service
 │   ├── arp_scan.py           # rogue static-IP detection: raw-socket ARP probe of
 │   │                         #   both LAN subnets -> hosts not leased by DHCP
 │   ├── arp_lock.py           # ARP gateway-lock responder: claims the router's IP

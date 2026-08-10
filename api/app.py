@@ -25,12 +25,15 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
-from api.schemas import (BundleUpdate, DeviceCreate, DeviceUpdate, GuestUpdate,
+from api.schemas import (BundleUpdate, DeviceCreate, DeviceUpdate,
+                         DnsImportRequest, DnsPresetEnable, DnsServerUpdate,
+                         DomainRuleCreate, DomainRuleUpdate, GuestUpdate,
                          LoginRequest, MilestoneNotify, NetworkUpdate,
                          PasswordUpdate, SetupComplete, TopUpRequest,
                          UserCreate, UserUpdate, WanTest, WanUpdate)
 from core import timeutil
 from quota import db as _db
+from quota import dns_rules as _dns_rules
 from quota.engine import GATEWAY_MAC, EngineSnapshot, SnapshotHolder
 from quota.service import GB, QuotaService
 from quota.vendor import vendor_for
@@ -105,6 +108,7 @@ def create_app(
     topology_manager: object | None = None,
     shaping_sync: Optional[Callable[[], object]] = None,
     report_config: object | None = None,
+    dns_apply: Optional[Callable[[], object]] = None,
 ) -> FastAPI:
     app = FastAPI(title="Quota Manager", version=__version__,
                   docs_url="/api/docs", openapi_url="/api/openapi.json")
@@ -121,6 +125,18 @@ def create_app(
             return
         try:
             asyncio.create_task(shaping_sync())
+        except RuntimeError:  # no running event loop (should not happen in a route)
+            pass
+
+    def _schedule_dns_apply() -> None:
+        """Apply a domain-rule / DNS-server edit to dnsmasq right away (no
+        15 s tick wait). Fire-and-forget, same pattern as
+        ``_schedule_shaping_sync``; ``dns_apply`` is run.py's callback and is
+        a no-op when unset (tests / degraded boot)."""
+        if dns_apply is None:
+            return
+        try:
+            asyncio.create_task(dns_apply())
         except RuntimeError:  # no running event loop (should not happen in a route)
             pass
 
@@ -757,6 +773,196 @@ def create_app(
         if result is None:
             raise HTTPException(404, "user not found")
         return result
+
+    @app.patch("/api/users/{user_id}/dns", dependencies=[Depends(_require_auth)])
+    async def set_user_dns(user_id: int, body: DnsServerUpdate) -> dict[str, Any]:
+        user = await database.get_user(user_id)
+        if user is None:
+            raise HTTPException(404, "user not found")
+        await database.update_user(user_id, dns_server=body.dns_server.strip())
+        await database.add_event(
+            f"DNS server for user '{user.name or user_id}' set to "
+            f"{body.dns_server.strip() or '(inherit default)'}", "info",
+            user_id=user_id)
+        _schedule_dns_apply()
+        return {"id": user_id, "dns_server": body.dns_server.strip()}
+
+    @app.patch("/api/devices/{device_id}/dns", dependencies=[Depends(_require_auth)])
+    async def set_device_dns(device_id: int, body: DnsServerUpdate) -> dict[str, Any]:
+        dev = await database.get_device(device_id)
+        if dev is None:
+            raise HTTPException(404, "device not found")
+        await database.update_device(device_id, dns_server=body.dns_server.strip())
+        await database.add_event(
+            f"DNS server for device '{dev.name or dev.mac}' set to "
+            f"{body.dns_server.strip() or '(inherit default)'}", "info",
+            device_id)
+        _schedule_dns_apply()
+        return {"id": device_id, "dns_server": body.dns_server.strip()}
+
+    # -- domain filtering (blacklist / allow-list / custom hosts) -----------
+
+    def _rule_view(rule: _db.DomainRule) -> dict[str, Any]:
+        return {
+            "id": rule.id, "scope": rule.scope, "scope_id": rule.scope_id,
+            "action": rule.action, "domain": rule.domain,
+            "target_ip": rule.target_ip, "enabled": rule.enabled,
+            "source": rule.source, "created_at": rule.created_at,
+        }
+
+    @app.get("/api/dns/rules", dependencies=[Depends(_require_auth)])
+    async def list_dns_rules(scope: Optional[str] = None,
+                             scope_id: Optional[int] = None) -> list[dict[str, Any]]:
+        rules = await database.list_domain_rules(scope, scope_id)
+        return [_rule_view(r) for r in rules]
+
+    @app.post("/api/dns/rules", status_code=201, dependencies=[Depends(_require_auth)])
+    async def create_dns_rule(body: DomainRuleCreate) -> dict[str, Any]:
+        if body.scope != "global" and body.scope_id is None:
+            raise HTTPException(400, "scope_id is required for a user/device rule")
+        if body.action == "redirect" and not body.target_ip:
+            raise HTTPException(400, "target_ip is required for a redirect rule")
+        try:
+            domain = _dns_rules.normalize_pattern(body.domain)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        if body.scope == "user" and await database.get_user(body.scope_id) is None:
+            raise HTTPException(404, "user not found")
+        if body.scope == "device" and await database.get_device(body.scope_id) is None:
+            raise HTTPException(404, "device not found")
+        rule = await database.create_domain_rule(
+            body.scope, body.action, domain, scope_id=body.scope_id,
+            target_ip=body.target_ip, enabled=body.enabled, source="manual")
+        await database.add_event(
+            f"DNS rule added: {body.action} {domain} ({body.scope})", "info")
+        _schedule_dns_apply()
+        return _rule_view(rule)
+
+    @app.patch("/api/dns/rules/{rule_id}", dependencies=[Depends(_require_auth)])
+    async def update_dns_rule(rule_id: int, body: DomainRuleUpdate) -> dict[str, Any]:
+        rule = await database.get_domain_rule(rule_id)
+        if rule is None:
+            raise HTTPException(404, "rule not found")
+        fields: dict[str, Any] = {}
+        if body.enabled is not None:
+            fields["enabled"] = body.enabled
+        if body.target_ip is not None:
+            fields["target_ip"] = body.target_ip
+        if fields:
+            await database.update_domain_rule(rule_id, **fields)
+        _schedule_dns_apply()
+        return {"id": rule_id, "updated": True}
+
+    @app.delete("/api/dns/rules/{rule_id}", dependencies=[Depends(_require_auth)])
+    async def delete_dns_rule(rule_id: int) -> dict[str, Any]:
+        rule = await database.get_domain_rule(rule_id)
+        if rule is None:
+            raise HTTPException(404, "rule not found")
+        await database.delete_domain_rule(rule_id)
+        await database.add_event(f"DNS rule removed: {rule.action} {rule.domain}", "info")
+        _schedule_dns_apply()
+        return {"id": rule_id, "deleted": True}
+
+    @app.post("/api/dns/import", dependencies=[Depends(_require_auth)])
+    async def import_dns_rules(body: DnsImportRequest) -> dict[str, Any]:
+        """Paste raw hosts-format or AdBlock-Plus-format text -> domain_rules
+        rows. Individual malformed domains are skipped, not fatal — a large
+        pasted list commonly has a handful of stray lines."""
+        if body.scope != "global" and body.scope_id is None:
+            raise HTTPException(400, "scope_id is required for a user/device rule")
+        domains = _dns_rules.compile_source_text(body.text, body.format)
+        created, skipped = 0, 0
+        for raw_domain in domains:
+            try:
+                domain = _dns_rules.normalize_pattern(raw_domain)
+            except ValueError:
+                skipped += 1
+                continue
+            await database.create_domain_rule(
+                body.scope, body.action, domain, scope_id=body.scope_id,
+                source="import")
+            created += 1
+        await database.add_event(
+            f"Imported {created} domain rule(s) ({body.action}, {skipped} skipped)",
+            "info")
+        _schedule_dns_apply()
+        return {"created": created, "skipped": skipped}
+
+    @app.get("/api/dns/presets", dependencies=[Depends(_require_auth)])
+    async def list_dns_presets() -> list[dict[str, Any]]:
+        states = {s["preset_id"]: s for s in await database.list_preset_states()}
+        out = []
+        for preset in _dns_rules.PRESETS.values():
+            state = states.get(preset.id, {})
+            out.append({
+                "id": preset.id, "name": preset.name,
+                "description": preset.description,
+                "enabled": bool(state.get("enabled", 0)),
+                "scope": state.get("scope", "global"),
+                "scope_id": state.get("scope_id"),
+                "domain_count": state.get("domain_count", 0),
+                "updated_at": state.get("updated_at", 0),
+            })
+        return out
+
+    @app.post("/api/dns/presets/{preset_id}/enable", dependencies=[Depends(_require_auth)])
+    async def enable_dns_preset(preset_id: str, body: DnsPresetEnable) -> dict[str, Any]:
+        preset = _dns_rules.PRESETS.get(preset_id)
+        if preset is None:
+            raise HTTPException(404, "unknown preset")
+        if body.scope != "global" and body.scope_id is None:
+            raise HTTPException(400, "scope_id is required for a user/device preset")
+        # Fetching runs in a thread — it's a blocking network call (urllib)
+        # and must never stall the event loop / WebSocket push.
+        try:
+            domains = await asyncio.to_thread(_dns_rules.fetch_preset, preset)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, f"failed to fetch preset sources: {exc}") from None
+        source_tag = f"preset:{preset_id}:{body.scope}:{body.scope_id or 0}"
+        # Replace any previous rules from this exact preset+scope (a refresh
+        # re-enables cleanly instead of accumulating stale domains forever).
+        await database.delete_domain_rules_by_source(source_tag)
+        count = 0
+        for raw_domain in domains:
+            try:
+                domain = _dns_rules.normalize_pattern(raw_domain)
+            except ValueError:
+                continue
+            await database.create_domain_rule(
+                body.scope, "block", domain, scope_id=body.scope_id,
+                source=source_tag)
+            count += 1
+        await database.set_preset_state(
+            preset_id, True, scope=body.scope, scope_id=body.scope_id,
+            domain_count=count)
+        await database.add_event(
+            f"DNS preset enabled: {preset.name} ({count} domains, {body.scope})",
+            "info")
+        _schedule_dns_apply()
+        return {"id": preset_id, "enabled": True, "domain_count": count}
+
+    @app.post("/api/dns/presets/{preset_id}/disable", dependencies=[Depends(_require_auth)])
+    async def disable_dns_preset(preset_id: str, body: DnsPresetEnable) -> dict[str, Any]:
+        if preset_id not in _dns_rules.PRESETS:
+            raise HTTPException(404, "unknown preset")
+        source_tag = f"preset:{preset_id}:{body.scope}:{body.scope_id or 0}"
+        removed = await database.delete_domain_rules_by_source(source_tag)
+        await database.set_preset_state(
+            preset_id, False, scope=body.scope, scope_id=body.scope_id,
+            domain_count=0)
+        await database.add_event(
+            f"DNS preset disabled: {preset_id} ({removed} rules removed)", "info")
+        _schedule_dns_apply()
+        return {"id": preset_id, "enabled": False, "removed": removed}
+
+    @app.post("/api/dns/apply", dependencies=[Depends(_require_auth)])
+    async def apply_dns_now() -> dict[str, Any]:
+        """Force an immediate dnsmasq regeneration + reload (normally
+        automatic after every rule/preset/DNS-server edit above)."""
+        if dns_apply is None:
+            return {"applied": False, "reason": "dns manager not wired"}
+        await dns_apply()
+        return {"applied": True}
 
     @app.get("/api/usage/{device_id}", dependencies=[Depends(_require_auth)])
     async def usage_series(device_id: int, since: str = "") -> list[dict[str, Any]]:

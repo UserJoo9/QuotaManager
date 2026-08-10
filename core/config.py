@@ -167,6 +167,44 @@ class ReportConfig:
 
 
 @dataclass
+class DnsFilterConfig:
+    """Domain-level filtering: per-user/per-device blacklists, allow-list
+    exceptions, custom host redirects, curated blocklist presets, and
+    per-user/per-device upstream DNS-server overrides.
+
+    Implemented entirely as GENERATED dnsmasq configuration — this box
+    already owns DHCP + DNS (see ``DhcpConfig``), so no new service is
+    started and the nftables/tc packet paths are untouched. See
+    ``quota/dns_rules.py`` for the renderer/parsers and
+    ``quota.db``'s ``domain_rules`` / ``dns_presets`` tables for storage.
+    """
+
+    enabled: bool = True
+    #: Directory dnsmasq scans for ``*.conf`` (Debian/Kali ship
+    #: ``conf-dir=/etc/dnsmasq.d`` in ``/etc/dnsmasq.conf`` by default — the
+    #: setup script does not need to add this on a stock install).
+    conf_dir: str = "/etc/dnsmasq.d"
+    #: Filenames written INSIDE conf_dir. Kept separate from
+    #: ``quota-gateway.conf`` (the DHCP/DNS base config written by the setup
+    #: script) so a domain-rule edit never touches the base file, and kept
+    #: separate from EACH OTHER so tags (rarely change) and rules (change
+    #: often) can be diffed/rewritten independently.
+    tags_file: str = "quota-tags.conf"
+    rules_file: str = "quota-domains.conf"
+    #: dnsmasq only picks up NEW ``address=``/``server=``/``dhcp-host=``
+    #: lines on a restart — SIGHUP only re-reads ``/etc/hosts`` and
+    #: lease-adjacent files. True (default) restarts dnsmasq whenever the
+    #: generated files actually changed (~1 s DNS blip for clients); False
+    #: writes the files but skips the reload, for an admin who wants to
+    #: batch several edits before a manual ``systemctl restart dnsmasq``.
+    reload_dnsmasq: bool = True
+    #: Where fetched blocklist presets are cached on disk (raw text, so a
+    #: restart does not need to re-fetch before an already-enabled preset's
+    #: rules can be rebuilt). Relative paths resolve under the project root.
+    preset_cache_dir: str = "data/dns_presets"
+
+
+@dataclass
 class Config:
     db_path: str = "data/quota.db"
     log_file: str = "logs/quota.log"
@@ -177,6 +215,7 @@ class Config:
     web: WebConfig = field(default_factory=WebConfig)
     shaping: ShapingConfig = field(default_factory=ShapingConfig)
     report: ReportConfig = field(default_factory=ReportConfig)
+    dns_filter: DnsFilterConfig = field(default_factory=DnsFilterConfig)
     timezone: str = ""  # empty => system local timezone
 
 
