@@ -16,6 +16,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch: # Enables manual execution from the GitHub Actions UI
 
 permissions:
   contents: write   # needed to create the Release + attach the .deb asset
@@ -26,8 +27,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The version is the single source of truth in quota/version.py. Import it
-      # so the package metadata, the .deb filename and the Release all agree.
+      # Parses the version from code. If triggered via a Git push tag, it validates 
+      # the tag against version.py. If triggered manually, it dynamically infers the tag.
       - name: Resolve version
         id: version
         shell: bash
@@ -37,11 +38,20 @@ jobs:
           # [\"'] breaks out of the -c "..." shell quoting (the first live
           # run failed with a Python SyntaxError for exactly that reason).
           VER=$(python3 -c "import sys; sys.path.insert(0,'.'); from quota.version import __version__; print(__version__)")
-          TAG="${GITHUB_REF#refs/tags/}"
-          if [ "$TAG" != "v${VER}" ]; then
-            echo "::error::tag '$TAG' does not match quota/version.py version '$VER' (expected tag 'v$VER')"
-            exit 1
+          
+          # Check if the execution context is a Git tag push or a manual dispatch
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            if [ "$TAG" != "v${VER}" ]; then
+              echo "::error::tag '$TAG' does not match quota/version.py version '$VER' (expected tag 'v$VER')"
+              exit 1
+            fi
+          else
+            # On manual runs, dynamically generate the target tag from version.py
+            TAG="v${VER}"
+            echo "::notice::Manually triggered workflow. Using tag '$TAG' from code."
           fi
+          
           echo "version=$VER"
           echo "tag=$TAG"
           echo "version=$VER" >> "$GITHUB_OUTPUT"
@@ -96,13 +106,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/quota-manager_*.deb
+          tag_name: ${{ steps.version.outputs.tag }} # Explicitly pass the resolved tag for manual runs
           body: |
             Quota Manager **v${{ steps.version.outputs.version }}**.
 
             Install on the gateway laptop:
 
             ```bash
-            sudo apt install ./quota-manager_${{ steps.version.outputs.version }}_all.deb
+            sudo apt install ./quota-manager_\${{ steps.version.outputs.version }}_all.deb
             ```
 
             The package configures the network stack, installs the Python
