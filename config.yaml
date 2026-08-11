@@ -121,3 +121,15 @@ report:
   enabled: true
   allow_client_subnet: true
   allowed_ips: []
+
+# Per-device DNS browsing history (dashboard History tab). The setup script
+# writes an app-owned dnsmasq fragment (log-queries=extra + log-facility) so
+# every query carries its requestor IP; the app tails that log, buckets
+# queries per device/minute/domain, and prunes rows older than the retention.
+#   enabled: true            # false = stop recording (nothing attributed)
+#   dnsmasq_log_file: /var/log/quota-dnsmasq.log
+#   retention_days: 7        # global default; per-user "history_days" overrides
+history:
+  enabled: true
+  dnsmasq_log_file: /var/log/quota-dnsmasq.log
+  retention_days: 7

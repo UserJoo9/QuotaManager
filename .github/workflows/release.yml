@@ -92,20 +92,33 @@ jobs:
           dpkg-deb --info "dist/quota-manager_${{ steps.version.outputs.version }}_all.deb"
           dpkg-deb --contents "dist/quota-manager_${{ steps.version.outputs.version }}_all.deb" | head -40
 
+      # The release description = a short install note + this version's
+      # CHANGELOG section (from "## [<ver>]" up to the next top-level "## ["
+      # header; "###" sub-headings stay). Keeps the release notes in sync with
+      # CHANGELOG.md automatically — the file is the single source of truth.
+      - name: Compose release notes (install note + CHANGELOG)
+        id: release_body
+        shell: bash
+        run: |
+          VER="${{ steps.version.outputs.version }}"
+          { printf 'Quota Manager **v%s**.\n\n' "${VER}"
+            printf 'Install on the gateway laptop:\n\n'
+            printf '```bash\nsudo apt install ./quota-manager_%s_all.deb\n```\n\n' "${VER}"
+            printf 'The package configures the network stack, installs the Python\n'
+            printf 'dependencies into `/opt/quota-manager/.venv`, wires the\n'
+            printf '`quota-gateway` systemd service and starts it. See the README for\n'
+            printf 'the post-install router steps (disable DHCP, disable IPv6/RA).\n\n'
+            printf -- '---\n\n'
+            awk -v ver="${VER}" '
+              /^## / { if (insec) exit }
+              index($0, "## [" ver "]") { insec = 1; next }
+              insec { print }
+            ' CHANGELOG.md
+          } > "${RUNNER_TEMP}/release_body.md"
+          echo "body_path=${RUNNER_TEMP}/release_body.md" >> "$GITHUB_OUTPUT"
+
       - name: Upload to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           files: dist/quota-manager_*.deb
-          body: |
-            Quota Manager **v${{ steps.version.outputs.version }}**.
-
-            Install on the gateway laptop:
-
-            ```bash
-            sudo apt install ./quota-manager_${{ steps.version.outputs.version }}_all.deb
-            ```
-
-            The package configures the network stack, installs the Python
-            dependencies into `/opt/quota-manager/.venv`, wires the
-            `quota-gateway` systemd service and starts it. See the README for
-            the post-install router steps (disable DHCP, disable IPv6/RA).
+          body_path: ${{ steps.release_body.outputs.body_path }}

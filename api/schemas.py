@@ -56,6 +56,9 @@ class UserUpdate(BaseModel):
     block: Optional[bool] = None  # true => admin_off (cut all devices), false => clear
     limit_down_mbps: Optional[float] = _cap_field()
     limit_up_mbps: Optional[float] = _cap_field()
+    #: Per-user DNS-history retention in days; None = global default. 0 = keep
+    #: nothing (history is effectively off for this user).
+    history_days: Optional[int] = Field(None, ge=0, le=365)
 
 
 class NetworkUpdate(BaseModel):

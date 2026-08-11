@@ -20,6 +20,7 @@ the project layout, tests, and the release process.
 - [Rogue devices & the ARP gateway-lock](#rogue-devices--the-arp-gateway-lock)
 - [Strong (WAN) mode](#strong-wan-mode)
 - [Key design decisions](#key-design-decisions)
+- [Known bottlenecks & technical debt](#known-bottlenecks--technical-debt)
 - [Requirements](#requirements)
 - [Running from source](#running-from-source)
 - [Configuration](#configuration)
@@ -166,6 +167,18 @@ Every **60 s** (slower than the tick, on purpose) it also runs the **rogue LAN
 scan** (`quota/arp_scan.py`) — a raw-socket ARP probe of both local subnets;
 any active host NOT in the lease file is surfaced as a rogue (see
 [Rogue devices](#rogue-devices--the-arp-gateway-lock)).
+
+**Per-device browsing history** (when `cfg.history.enabled`, default on):
+`_dns_history_tick` drains a bounded queue from the `DnslogTailer` thread
+(`quota/dnslog.py` — it tails dnsmasq's query log every 0.5 s, parsing both
+the bare `query[A] name from <ip>` shape and the verbose extra shape with the
+client ip/port between serial and `query[`), resolves each
+distinct requestor IP to a device via the leases join, batch-upserts
+per-(device, minute, domain) counts into `dns_history`, persists the read
+cursor (`dnslog_state` setting) and — past a 1 h gate — prunes each user's rows
+at *their* `history_days` (NULL = the global `history.retention_days`). See
+the [REST API](#rest-api) `/api/history/{device_id}` row and the
+[Configuration](#configuration) `history:` block.
 
 ---
 
@@ -409,6 +422,67 @@ These are the non-obvious choices that keep the system correct and cheap:
 
 ---
 
+## Known bottlenecks & technical debt
+
+Audited 2026-08-10 (5-agent deep audit — reverse engineer, conflict/regression,
+refactoring architect, performance auditor, gatekeeper; **Gatekeeper PASS, zero
+code changes**; suite green at **297 passed**). The canonical, living inventory is
+`CLAUDE.md` → [LEGACY_DEBT_AND_RISKS]; this section is the summary a developer
+needs before touching the code. None of this is fixed yet — it is the pre-
+breaking-change baseline.
+
+**Correctness / honesty gaps:**
+- **A lease-less blocked device is not cut.** The kernel `@blocked` set is keyed by
+  IP from lease rows (`service.snapshot_state`); a device with no active lease gets
+  `ip=""` → dropped from `ip_to_mac` (run.py) → never enters the kernel set
+  (nftables.py). The only cover is the ARP-lock `known_ips` deny, which defaults
+  OFF in config.yaml and is forced OFF in WAN mode — so default/WAN configs leave a
+  lease-less blocked device uncut. No test drives this path.
+- **`/api/milestone/notify` has no auth or IP-ownership check** — any LAN host can
+  POST another user's `user_id` and clear/re-arm their 50/75/100% milestone pills
+  (display-integrity only; the GET reader IS resolved to the requester's own user).
+- **`/report` is default-ON for the whole client subnet** (`allow_client_subnet:
+  true`) — a rogue static-IP device passes the subnet gate and reads full household
+  usage + events + log tail. The gate reads `request.client.host` (no XFF
+  handling), so the exposure is the documented "trusted LAN" assumption, not a
+  spoofable bypass.
+- **A deleted-but-still-connected guest is untracked.** Its suppressed MAC keeps its
+  lease (internet works) but has no device row → no counter rule until it
+  disconnects and re-registers.
+
+**Performance (no timing telemetry exists — drift/stall is unquantifiable):**
+- **On-loop subprocess storms.** `shaper.update_state` rebuilds the tc tree via
+  ~70–115+ sequential `subprocess.run` on the event loop (≈1.5–5 s freeze on a slow
+  laptop), and an API cap-edit fires it immediately via `_reshaping_now`; the
+  nftables `update_state` / `set_gateway_blocked` calls also run `nft` on-loop (~80
+  at first boot); `detect_ppp` runs `ip` on-loop every WAN tick. Easy win:
+  `asyncio.to_thread`.
+- **Whole-file reads on the loop.** `/api/logs` and `/report` read the entire (up
+  to 5 MB) log synchronously; `/report` also does `list_leases()` once per device
+  (the dashboard payload hoists it once).
+- **WS payload built N+1 times per 5 s** (per-client loop + `_push_loop`), and
+  app.js does a full DOM rebuild per push.
+- **DB:** no batching (~30+ commits/tick), `get_period_usage_by_user` ×2/tick,
+  `get_bundle` ~×5/tick, and the `events` table is unbounded (no prune — the only
+  real disk-growth risk).
+
+**Simplicity debt (the refactor targets):**
+- Three sources of truth for bundle & topology (config.yaml + DB + ownership flags);
+  two on/off switches for shaping (YAML `shaping.enabled` vs the DB Network-tab
+  switch); three writers of topology state (`netmgr.render_config`,
+  `scripts/topology.sh`, `scripts/setup_gateway_kali.sh`).
+- `_dashboard_payload` / `_milestone_payload` / `_report_payload` each re-implement
+  the usage/allowance/percent math — a change must be re-applied in three places.
+- The protected **Gateway user** is a real DB row forcing ~6 special cases across
+  service/run/api/UI — and its fixed 1.0 GB is silently deducted from every
+  auto-share bundle.
+- Big files, big coupling: `web/app.js` (1297 lines), `api/app.py` (999),
+  `quota/db.py` (872), `quota/nftables.py` (751), `run.py` (672) — each a god
+  module; `quota/engine.py` is the cross-cutting type hub (a field rename ripples
+  through every consumer).
+
+---
+
 ## Requirements
 
 | Component | Requirement | Why |
@@ -537,6 +611,11 @@ engine:
   backend: nftables           # Linux: the kernel owns the packet path
   count_direction: inbound    # inbound | outbound — avoids double-counting routed traffic
   table: quota_gateway        # nftables table
+  # Meter the box's OWN internet into the protected Gateway user (fixed 1.0 GB).
+  # Default ON (even on configs that predate the key) — a heavy download on the
+  # laptop itself counts against it and can cut the box until topped up / the
+  # period rolls. false skips the counters but keeps the drop rules.
+  count_gateway: true
   # LOCAL (LAN) traffic never consumes the bundle: client<->client and
   # client<->uplink-LAN (router admin, NAS, router-as-DNS) are excluded from
   # the counting rules (and the block drops keep LAN access for blocked
@@ -574,6 +653,14 @@ report:
   allowed_ips: []             # extra CIDRs/IPs, e.g. ["192.168.1.0/24", "10.0.0.5"].
                               #   run.py fills client_subnet from the engine's
                               #   resolved subnet automatically.
+
+history:
+  enabled: true               # per-device DNS browsing history (History tab).
+                              #   false = stop recording (the app never reads
+                              #   the query log; DNS/DHCP are untouched).
+  dnsmasq_log_file: /var/log/quota-dnsmasq.log  # log-facility the setup
+                              #   fragment points log-queries=extra at
+  retention_days: 7           # global default; a user's "history_days" overrides
 ```
 
 > **Speed shaping is switched on in the dashboard, not in this YAML.**
@@ -598,6 +685,7 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | GET | `/api/usage/{id}` · `/api/usage` | daily usage series per device / aggregated |
 | GET | `/api/events?limit=30` | audit events |
 | GET | `/api/logs?limit=300` | tail of the rotating log (newest first) |
+| GET | `/api/history/{device_id}?window=24&limit=100` | a device's DNS browsing history — `top_domains`, `activity` (minute buckets), `recent` (latest queries), `total_queries`. Auth-gated; `window` hours clamped 1–336, `limit` capped. Bandwidth is NOT duplicated here — the History tab reads live/per-period bytes from the dashboard payload |
 | GET/POST | `/api/bundle` | read / update bundle (`total_gb`, `reset_day`, or `add_gb` to recharge mid-month). A POST makes the dashboard the bundle owner (`bundle_source=dashboard`) |
 | POST | `/api/reset-month` | force an early period roll-over |
 | GET/POST | `/api/guest` | guest mode: auto-register new devices with their own small allowance |
@@ -626,28 +714,31 @@ QuotaManager/
 ├── README.md                 # end-user quick-start docs
 ├── Structure_README.md       # this file — developer docs
 ├── LICENSE                   # MIT license
+├── CHANGELOG.md              # release changelog (newest first)
 ├── .github/workflows/
 │   └── release.yml           # builds the .deb on a version tag -> GitHub Releases
 ├── packaging/DEBIAN/
 │   ├── control.template      # Debian control file (Version rendered from quota/version.py)
 │   ├── postinst              # venv + setup script + start the gateway service
-│   ├── prerm                 # stop + disable the gateway service on remove/upgrade
-│   └── changelog             # Debian changelog
+│   └── prerm                 # stop + disable the gateway service on remove/upgrade
 ├── config.yaml               # Linux gateway settings (dnsmasq + nftables)
 ├── run.py                    # gateway wiring: engine + maintenance + shaper + uvicorn
 ├── requirements-linux.txt    # Linux deps (fastapi, uvicorn, aiosqlite, PyYAML + test deps)
 ├── scripts/
-│   ├── setup_gateway_kali.sh # Linux: sysctl, client-subnet NAT, dnsmasq, ifb, systemd unit
+│   ├── setup_gateway_kali.sh # Linux: sysctl, client-subnet NAT, dnsmasq, ifb,
+│   │                         #   dnslog fragment + logrotate, systemd unit
 │   ├── topology.sh           # runtime LAN/WAN applier (panel-invoked, env-fed)
 │   ├── test_pppoe.sh         # throwaway PPPoE dial — test creds, no config change
-│   └── update_oui.py         # regenerate quota/oui.txt from the IEEE registry
+│   ├── update_oui.py         # regenerate quota/oui.txt from the IEEE registry
+│   └── replay_nft_startup.sh # replay the engine's startup nft command sequence (debug)
 ├── core/
 │   ├── config.py             # config.yaml -> typed Config dataclasses
 │   ├── logging_setup.py      # non-blocking QueueHandler -> writer thread -> rotating file
 │   └── timeutil.py           # month-boundary math (zoneinfo)
 ├── quota/
 │   ├── db.py                 # SQLite schema + async access (aiosqlite); users table,
-│   │                         #   devices.user_id/bypass, speed-cap columns
+│   │                         #   devices.user_id/bypass, speed-cap columns,
+│   │                         #   dns_history table + per-user history_days
 │   ├── service.py            # per-user quota math, block fan-out + bypass precedence,
 │   │                         #   top-ups, bundle recharge, reset_day=0, period roll,
 │   │                         #   shaping settings (get/set)
@@ -659,6 +750,8 @@ QuotaManager/
 │   │                         #   both LAN subnets -> hosts not leased by DHCP
 │   ├── arp_lock.py           # ARP gateway-lock responder: claims the router's IP
 │   │                         #   on the client subnet so bypassers' frames hit the box
+│   ├── dnslog.py             # DNS browsing history: dnsmasq query-log parser +
+│   │                         #   DnslogTailer thread (bounded queue) -> dns_history
 │   ├── topology.py           # WAN-topology detection: is ppp0 up (for the WAN tab)?
 │   ├── netmgr.py             # TopologyManager: the WAN tab's live LAN/WAN switch
 │   ├── vendor.py             # MAC OUI -> manufacturer (IEEE registry, lazy load)
@@ -689,8 +782,12 @@ QuotaManager/
     ├── test_users_migration.py # legacy device-only DB -> users backfill
     ├── test_vendor.py        # OUI -> vendor lookup (MA-L/MA-M/MA-S longest-prefix)
     ├── test_nftables.py      # NftablesEngine vs a fake `nft` binary (incl. ARP lock)
-    ├── test_arp_scan.py      # ArpScanner + ARP frame build/parse + ArpLock responder
+    ├── test_arp_scan.py      # ArpScanner + ARP frame build/parse
+    ├── test_arp_lock.py      # ARP gateway-lock responder (fake frames/socket)
+    ├── test_dnslog.py        # dnsmasq query-log parser + tailer + dns_history DB
     ├── test_config.py        # typed config parsing (Linux settings)
+    ├── test_netmgr.py        # TopologyManager WAN/LAN apply + rollback + PPPoE test
+    ├── test_topology.py      # detect_ppp / check_internet probes (fake `ip`)
     └── test_run_wiring.py    # run.py wiring + live boot + bundle reconcile +
                               #   dnsmasq lease sync + live-counter regression
 ```
@@ -726,6 +823,9 @@ The suite covers:
 - **The ARP scanner + gateway-lock responder** — frame parse/serialize +
   fake socket, no root.
 - **The WAN topology detector** — `detect_ppp` vs a fake `ip`, no root.
+- **The topology manager** — `TopologyManager` WAN/LAN live apply (config.yaml +
+  DB written together), applier-failure rollback, creds-via-env (never argv), the
+  throwaway PPPoE test verdict.
 - **The speed shaper** — against a fake `tc`: the full two-tree program, the
   signature-gated rebuild, degradation paths, ifb0 bring-up.
 - **The packaging contract** — GitHub-Actions release workflow, Debian
@@ -734,7 +834,13 @@ The suite covers:
   data-preserving).
 - **MAC vendor lookup** — vs the bundled IEEE registry.
 - **`run.py` wiring** — config → DB bundle reconcile, dnsmasq lease sync,
-  live-counter regression, the topology override.
+  live-counter regression, the topology override, the DNS-history drain /
+  persist / prune / disabled paths.
+- **The DNS-history pipeline** — `quota/dnslog.py` parser (extra-mode shapes
+  including the client ip/port between serial and `query[` — the live-box shape
+  — and the bare shape, PTR filtering, non-query lines rejected), the tailer
+  (EOF seek, rotation/truncation, partial lines, NUL holes, missing file), and
+  the `dns_history` DB (upserts, aggregation, per-user prune).
 
 Everything that needs hardware/root (nftables, tc, DHCP, raw sockets, PPPoE) is
 simulated or disabled in tests, so the suite runs anywhere.
@@ -747,12 +853,12 @@ The `.deb` is built **only by GitHub Actions** and published to **GitHub
 Releases** — there is no local build step.
 
 1. **Bump the version** — edit `quota/version.py`
-   (`__version__ = "0.1.0"` → next semver) and add a changelog entry if you want
-   one.
+   (`__version__ = "0.1.2"` → next semver) and add a `CHANGELOG.md` entry if you
+   want one.
 2. **Commit + push**:
 
 ```bash
-git add quota/version.py
+git add quota/version.py CHANGELOG.md
 git commit -m "Bump version to 0.2.0"
 git push origin main
 ```
@@ -768,6 +874,9 @@ git push origin v0.2.0
 The `release` workflow (`.github/workflows/release.yml`) builds
 `quota-manager_0.2.0_all.deb` and uploads it to a GitHub Release named
 `v0.2.0`. GitHub Releases are immutable, so each version needs a **new** tag.
+The release description is auto-composed from the `CHANGELOG.md` section for
+the released version (plus the install note), so keep the CHANGELOG current —
+it IS the release notes.
 
 > Version tags are what trigger the release — pushing a commit to `main` alone
 > (even a version bump) does **not** release. Tag and push when you're ready to

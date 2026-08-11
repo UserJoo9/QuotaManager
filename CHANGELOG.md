@@ -4,6 +4,84 @@ All notable changes to **Quota Manager** are documented here, newest first.
 The version is the single source of truth in `quota/version.py`; a release tag
 (`v<major>.<minor>.<patch>`) must match it.
 
+## [Unreleased]
+
+## [0.1.2] — 2026-08-11
+
+### Added
+
+- **Per-device browsing history** (dashboard **History** tab). Pick a device
+  and a look-back window (24 h / 3 d / 7 d / 14 d) to see its **top domains**
+  with share %, an **hourly activity** list, and the **most recent queries**
+  (minute buckets). Capture rides the box's own dnsmasq (`log-queries=extra` —
+  every query line carries its requestor IP), so bandwidth is not re-tracked:
+  the tab reuses the existing per-device live/period bytes from the dashboard
+  payload.
+- **`GET /api/history/{device_id}`** (auth-gated; `window` hours clamped
+  1–336, `limit` capped) returns `top_domains`, `activity`, `recent`,
+  `total_queries`.
+- **Per-user retention** — `users.history_days` (NULL = the global default).
+  Set it in a user's edit modal ("History retention (days, blank = default)").
+- **Storage bounds, no DNS slowdown**: the setup script writes an app-owned
+  dnsmasq fragment (`/etc/dnsmasq.d/quota-dnslog.conf`) + a logrotate snippet
+  (copytruncate, 5 MB, rotate 3) so the raw log stays ≤ ~20 MB; a dedicated
+  tailer thread (`quota/dnslog.py`) buckets queries into a `dns_history` table
+  (per device × minute × domain) and an hourly gate prunes each user's rows at
+  *their* retention. Overflow drops query lines, never blocks DNS or the loop.
+- **Household "All devices" history overview** — the History tab opens on an
+  **All devices** default: combined recent activity across every device in
+  chronological order, each query badged with its owning device/user
+  (`[Yahya]`, `[Youssef]`, `[Mom]`), plus a unified top-domains + total-query
+  summary for the household (bandwidth summed over devices). Picking a specific
+  device filters to that device only, byte-for-byte unchanged. `GET
+  /api/history/all` (alias `/api/history/0`) returns the aggregate — same wire
+  shape as a device, with `recent[].device_id` stamped for the badges; per-device
+  responses stay identical.
+
+### Changed
+
+- `setup_gateway_kali.sh` installs the dnslog fragment + logrotate and writes
+  the `history:` block (`enabled: true`, `dnsmasq_log_file:
+  /var/log/quota-dnsmasq.log`, `retention_days: 7`) into the generated
+  config.yaml. `history.enabled: false` stops recording entirely (DNS/DHCP
+  untouched).
+
+### Fixed
+
+- **History stayed empty even though dnsmasq was logging.** Real
+  `log-queries=extra` lines stamp the client ip/port after the serial
+  (`1 192.168.2.186/16773 query[A] ...`), but the parser regex expected
+  `query[` directly after the serial — so every real line was silently
+  dropped (`parse_dnslog_line` → `None`). The regex now accepts the optional
+  ip/port chunk; bare and serial-only shapes are unchanged, and
+  `forwarded`/`reply` lines with the same prefix are still skipped.
+- `setup_gateway_kali.sh` now enables `conf-dir=` in `/etc/dnsmasq.conf` when
+  it is commented out or missing — otherwise dnsmasq silently ignores every
+  `/etc/dnsmasq.d/` fragment (DHCP pool, DNS, the query-log fragment).
+
+### Changed
+
+- **Dashboard theme — vivid purple "obsidian glass"** (`web/assets/styles.css`,
+  CSS-only; zero JS/HTML-structure changes): background shifted to a deep
+  purple-tinted obsidian gradient (`#08070d → #0f0b18`), cards are dark
+  translucent frosted glass (`rgba(20,15,30,0.6)` + 16 px blur + a 1 px glossy
+  edge), and all accents moved to the vivid purple family (`#8b5cf6` /
+  `#7c3aed`) — primary buttons, selected tab (now with a neon glow), badges and
+  progress. **Users & Devices cards are now stacked full-width in a single
+  column** (`.device-grid` → `1fr`, media-query overrides removed) so names,
+  IP/MAC badges, bars, toggles and actions get horizontal room. All pages
+  bumped to `?v=35` (index/milestone/report + test pins); `.ms-pill.done`
+  border retuned to match.
+- Dashboard theme retuned, CSS-only (`web/assets/styles.css`): pitch-black
+  base (`#000000`), all purple accents desaturated to a calm cool periwinkle
+  (`#8FA0C9`), and a much stronger glassmorphism (32 px blur, translucent
+  frosty-white fills, 1 px frosted-white edge on cards *and* buttons, subtle
+  periwinkle light flare behind the cards). Status dots, block/limit colors
+  and all data remain exactly as before. The **milestone** and **report**
+  pages (own inline styles + `?v=32` links) are bumped to the same `?v=34`
+  cache-bust so the new theme reaches every page, and their one remaining
+  purple literal (`.ms-pill.done` border) is retuned to match.
+
 ## [0.1.1] — 2026-08-08
 
 ### Added

@@ -4,8 +4,10 @@ Gateway that splits a metered internet bundle (e.g. Egypt 140 GB/month) fairly
 across USERS — a person's allowance covers all of their devices (phone +
 tablet + laptop share one slice). When a user exceeds their allowance, every
 device they own is cut at once; a per-device override can exempt a single
-device. Admin dashboard: dark-purple glassmorphism web UI. Deployment target:
-**Linux on an old laptop** (Kali/Debian) — the kernel owns the network path.
+device. Admin dashboard: dark glassmorphism web UI (purple-tinted obsidian
+gradient, vivid purple neon accents, dark frosted-glass cards, stacked user
+cards). Deployment target: **Linux on an old
+laptop** (Kali/Debian) — the kernel owns the network path.
 
 ## [TECH_STACK]
 - Python -> **3.11** (runtime venv; 3.10+ supported by all deps)
@@ -156,6 +158,43 @@ the uplink — deterministic, no proxy_arp.
    reports the ppp0 link state into the snapshot's `wan_status` (surfaced by
    `/api/wan` + the WAN tab). The default LAN topology is byte-for-byte
    unchanged.
+10. **Per-device browsing history** (`quota/dnslog.py`, ON by default): the box
+   is already every client's only resolver, so the setup script installs an
+   **app-owned dnsmasq fragment** (`/etc/dnsmasq.d/quota-dnslog.conf` —
+   `log-queries=extra` + `log-async=20` + `log-facility=/var/log/quota-dnsmasq.log`;
+   both scripts only ever rewrite `quota-gateway.conf`, so the fragment survives
+   setup re-runs and WAN/LAN toggles; the script also **enables `conf-dir=` in
+   `/etc/dnsmasq.conf`** when it is commented/missing — dnsmasq otherwise
+   silently ignores every fragment, the live-box failure behind an empty
+   History tab) plus a **logrotate** snippet
+   (`copytruncate`, size 5M, rotate 3 — bounds the raw file ≤ ~20 MB even if
+   the app is down). A **dedicated tailer thread** (`DnslogTailer`, the
+   `arp_lock.py` pattern) polls the log every 0.5 s, strips the `\x00` sparse
+   hole `copytruncate`+`log-async` can leave, caps the partial-line buffer at
+   1 MB, and pushes parsed `(minute, ip, domain)` events onto a **bounded queue
+   (`put_nowait`/`except queue.Full`) — overflow drops lines, never blocks DNS
+   or the event loop**. The parser accepts both the bare shape
+   (`query[A] example.com from 192.168.2.100`) and the verbose extra shape
+   where dnsmasq ≥2.90 stamps the client ip/port between the serial and
+   `query[` (`1 192.168.2.186/16773 query[A] …`). Each ~15 s tick
+   `_dns_history_tick` drains the queue,
+   resolves each distinct IP to a device via the leases join (rogue/lease-gap
+   IPs skipped), batch-upserts per-(device, minute, domain) counts into the
+   `dns_history` table, persists the read cursor (`dnslog_state` setting →
+   restart-resume; first start seeks to EOF so pre-feature lines are never
+   attributed), and — past a 1 h gate — prunes each user's rows at **their**
+   `history_days` (NULL = the global `history.retention_days`; the per-user
+   scoping means a short retention never wipes a longer one). The dashboard
+   **History tab** (`GET /api/history/{device_id}`, auth-gated) shows top
+   domains, hourly activity and recent queries; bandwidth reuses the existing
+   per-device snapshot fields — nothing new is tracked for bytes. Rotation
+   (new inode or size shrink) resets the tailer cursor; a missing log file is
+   not an error (the app degrades gracefully if the fragment isn't installed).
+   `history.enabled: false` stops recording entirely. The tab also offers a
+   household **All devices** overview (default): `GET /api/history/all` (alias
+   `0`) aggregates `dns_history` across every device — combined top domains +
+   total queries, and recent rows badged with their owning device/user
+   (`get_dns_history(device_id=None)`, the `get_usage_series` None pattern).
 
 **Quota model (per user)**: the monthly allowance lives on a **user**, not a
 device (`users` table; `devices.user_id` links them). Auto users equally share
@@ -201,7 +240,10 @@ while the gateway is down.
 a `v*` tag must match it or the workflow fails loudly), stages the runtime
 payload (run.py, core/, quota/, api/, web/, scripts/, requirements-linux.txt,
 LICENSE) into `/opt/quota-manager`, runs `dpkg-deb --build --root-owner-group`,
-and uploads to GitHub Releases. `packaging/DEBIAN/postinst` builds the venv,
+and uploads to GitHub Releases — the release description is auto-composed from
+the released version's `CHANGELOG.md` section (plus the install note), so the
+release notes and the changelog never drift. `packaging/DEBIAN/postinst` builds
+the venv,
 runs `setup_gateway_kali.sh` with `QUOTA_NO_APT=1` (the package `Depends`
 already pulls dnsmasq/nftables/iproute2/kmod/python3-venv), and enables +
 starts `quota-gateway`. `prerm` stops/disables the service on remove/upgrade.
@@ -217,24 +259,26 @@ QuotaManager/
 ├── Structure_README.md       # developer docs (architecture, config, API,
 │                             #   tests, release process)
 ├── LICENSE                   # MIT license
+├── CHANGELOG.md              # release changelog
 ├── .github/workflows/
 │   └── release.yml           # on a v* tag: build .deb -> GitHub Releases
 ├── packaging/DEBIAN/
 │   ├── control.template      # Debian control (Version rendered from version.py)
 │   ├── postinst              # venv + setup_gateway_kali.sh (QUOTA_NO_APT=1) + start
-│   ├── prerm                 # stop + disable quota-gateway on remove/upgrade
-│   └── changelog             # Debian changelog (rendered with the version)
+│   └── prerm                 # stop + disable quota-gateway on remove/upgrade
 ├── config.yaml               # Linux gateway settings (dnsmasq + nftables)
 ├── run.py                    # Gateway wiring: engine + maintenance + uvicorn
 ├── requirements-linux.txt    # Linux deps (fastapi, uvicorn, aiosqlite, PyYAML + test deps)
 ├── scripts/
 │   ├── setup_gateway_kali.sh # Linux: sysctl, client-subnet NAT, dnsmasq,
-│   │                         #   systemd unit, info (QUOTA_NO_APT skips apt)
+│   │                         #   dnslog fragment + logrotate, systemd unit,
+│   │                         #   info (QUOTA_NO_APT skips apt)
 │   ├── topology.sh           # runtime LAN/WAN applier (panel-invoked): NIC
 │   │                         #   (nmcli/ifupdown), dnsmasq, PPPoE dial; env-fed
 │   ├── test_pppoe.sh         # throwaway PPPoE dial (ppp200) — test creds with
 │   │                         #   NO config/topology/routing change (WAN tab)
-│   └── update_oui.py         # regenerate quota/oui.txt from the IEEE registry
+│   ├── update_oui.py         # regenerate quota/oui.txt from the IEEE registry
+│   └── replay_nft_startup.sh # reproduce the engine's startup nft command sequence (debug)
 ├── core/
 │   ├── config.py             # config.yaml -> typed Config dataclasses
 │   ├── logging_setup.py      # QueueHandler -> writer thread -> rotating file
@@ -243,7 +287,8 @@ QuotaManager/
 │   ├── db.py                 # SQLite schema + async access (aiosqlite); users
 │   │                         #   table + devices.user_id/bypass + idempotent
 │   │                         #   migration (legacy devices → own user);
-│   │                         #   speed caps: devices/users limit_down/up_mbps
+│   │                         #   speed caps: devices/users limit_down/up_mbps;
+│   │                         #   dns_history table + per-user history_days
 │   ├── engine.py             # shared snapshot types (Linux): EngineCounters,
 │   │                         #   RogueHost, EngineSnapshot, SnapshotHolder +
 │   │                         #   GATEWAY_MAC sentinel — the thread-safe handoff
@@ -265,6 +310,9 @@ QuotaManager/
 │   ├── arp_lock.py           # ARP gateway-lock responder: claims the router's
 │   │                         #   IP on the client subnet so bypassers' frames
 │   │                         #   arrive at the box (raw-socket thread)
+│   ├── dnslog.py             # DNS browsing history: dnsmasq query-log parser
+│   │                         #   + DnslogTailer thread (dedicated thread,
+│   │                         #   bounded queue, rotation-safe) -> dns_history
 │   ├── topology.py           # WAN-topology detection: detect_ppp() reports
 │   │                         #   whether ppp0 is up + its address pair (WAN tab)
 │   ├── netmgr.py             # TopologyManager (v19/19.1): the dashboard WAN
@@ -277,10 +325,13 @@ QuotaManager/
 │   ├── oui.txt               # bundled IEEE MA-L/MA-M/MA-S database (53.5k prefixes)
 │   └── version.py            # single source of truth for the release version
 ├── api/
-│   ├── app.py                # FastAPI factory: REST + /ws + static mount
+│   ├── app.py                # FastAPI factory: REST + /ws + static mount +
+│   │                         #   /milestone (public, own-user) + /report (IP-gated)
 │   └── schemas.py            # pydantic request models
 ├── web/
 │   ├── index.html            # login + dashboard + modals
+│   ├── milestone.html        # public milestone page (requester's OWN user only)
+│   ├── report.html           # source-IP-gated household usage report (no session)
 │   └── assets/
 │       ├── styles.css        # dark purple glassmorphism
 │       └── app.js            # WS client, dashboard render, user-grouped
@@ -297,6 +348,11 @@ QuotaManager/
     ├── test_vendor.py        # OUI -> vendor lookup (MA-L/MA-M/MA-S longest-prefix)
     ├── test_config.py        # typed config parsing (Linux settings)
     ├── test_nftables.py      # NftablesEngine vs a fake `nft` binary
+    ├── test_arp_scan.py      # rogue static-IP detection (fake raw sockets)
+    ├── test_arp_lock.py      # ARP gateway-lock responder (fake frames)
+    ├── test_dnslog.py        # dnsmasq query-log parser + tailer + dns_history DB
+    ├── test_netmgr.py        # TopologyManager WAN/LAN apply + rollback + PPPoE test
+    ├── test_topology.py      # detect_ppp / check_internet probes
     ├── test_users_migration.py # legacy device-only DB → users backfill
     │                         #   (idempotent, data-preserving)
     └── test_run_wiring.py    # run.py wiring + live boot + bundle reconcile +
@@ -310,6 +366,245 @@ kernel counts and drops.
 ## [ORPHANS & PENDING]
 _Pending work lives in TASKS.md; orphans + debt are tracked in
 [LEGACY_DEBT_AND_RISKS] below. Version history (newest first):_
+
+Checked 2026-08-11 (**v0.1.2 released** — the whole uncommitted bundle shipped):
+- [x] **version bumped `0.1.1` → `0.1.2`** (`quota/version.py`, the single source of
+      truth) and tagged **`v0.1.2`**; the release carries all the previously
+      uncommitted work: per-device browsing history + dnslog parser fix + the
+      `conf-dir` setup fix, the History-tab **All devices** household overview
+      (the "unversioned" [08-10] entry), the vivid purple obsidian-glass UI +
+      pitch-black retune (the "v0.1.3 UI" entries — they stayed unversioned, so
+      the theme ships here), and the History-tab scroll. **The earlier
+      "stays 0.1.1" / "no version.py bump, no tag" notes below are now
+      superseded history.**
+- [x] **release description = CHANGELOG.md** (`release.yml`): the Upload step now
+      uses `body_path` — a "Compose release notes" step writes the install note +
+      the released version's `CHANGELOG.md` section (awk from `## [<ver>]` to the
+      next top-level `## [` header; `###` sub-headings kept) into
+      `${RUNNER_TEMP}/release_body.md`. The changelog IS the release notes; no
+      drift. `test_packaging.py` pins it
+      (`test_release_workflow_embeds_changelog_in_release_body`). CHANGELOG's
+      `## [Unreleased]` section renamed → `## [0.1.2] — 2026-08-11` (+ a fresh
+      empty `## [Unreleased]` placeholder at top); README install example →
+      `quota-manager_0.1.2_all.deb`.
+- [x] **no changes to the .deb payload / setup contract** — only version, notes,
+      docs, workflow body. Full suite **333 passed** at the release baseline
+      (the Windows `dns_history` DB-test hang did not reproduce on the release
+      run).
+
+Checked 2026-08-10 (History tab empty on the live box — parser rejected every real log line):
+- [x] **root cause**: dnsmasq ``log-queries=extra`` on the box stamps the client ip/port after the
+      serial (``Aug 10 00:00:54 dnsmasq[862442]: 1 192.168.2.186/16773 query[A] icosa-sg.coloros.com
+      from 192.168.2.186``), but ``_QUERY_RE`` (quota/dnslog.py) expected ``query[`` immediately
+      after the serial — so ``parse_dnslog_line`` returned ``None`` for EVERY real line and
+      ``dns_history`` stayed empty even though the log filled (log OK, tailer OK, drain OK — the
+      parser silently dropped everything). Fix: the regex now accepts an optional
+      ``(?:[0-9A-Fa-f:.]+/\d+\s+)?`` chunk between the serial and ``query[`` (bare and serial-only
+      shapes unchanged; ``forwarded``/``reply`` lines with the same prefix still skipped). Verified
+      against the exact captured line (+ ``test_parse_dnslog_extra_ip_port_shape``, extended
+      ``test_parse_dnslog_ignores_non_query_lines``). **Same session, setup-script gap**: the box's
+      ``/etc/dnsmasq.conf`` had ``conf-dir=`` COMMENTED, so dnsmasq silently ignored every
+      ``/etc/dnsmasq.d/`` fragment (DHCP pool, DNS, the query-log fragment) — setup_gateway_kali.sh
+      now uncomments or appends ``conf-dir`` so the fragments actually load.
+Checked 2026-08-10 (History tab "All devices" household overview, unversioned):
+- [x] **the History tab opens on a household "All devices" aggregate** (the
+      v0.1.2 per-device viewer, now default-overview; no version.py bump —
+      stays 0.1.1): the device dropdown gains a default **All devices** option
+      (`web/index.html`, `syncHistoryDeviceSelect` preserves the selection /
+      normalizes to "all"); selecting it renders combined recent activity across
+      EVERY device in chronological order with each query badged by its owning
+      device/user (`[Yahya]` … — `histDeviceName` resolves user_name → name →
+      MAC → #id; `.hist-device-badge` purple-glass pill) plus a unified top
+      domains + household query-total summary (bandwidth summed over
+      `dashboard.users[].devices[]`). Picking a specific device filters to that
+      device only, unchanged. **Backend**: `quota/db.py` `get_dns_history` gains
+      a `device_id=None` aggregate branch (the `get_usage_series` None pattern —
+      drops the device filter, SUMs domains across devices, stamps
+      `recent[].device_id`); `api/app.py` `device_history` accepts
+      `device_id: int | str` with **`"all"` and `0` both meaning the aggregate**
+      (404 semantics for real ids untouched); the per-device wire shape is
+      byte-identical (`device_id` is only exposed on recent rows in the
+      aggregate). Cache-busts styles **?v=35 → 36** + app.js **?v=31 → 32**
+      (index L7/L601, milestone.html + report.html stylesheet links, test pins
+      test_web_ui.py L64-65/L264-265 + test_api.py L1322/L1374). Tests:
+      `test_get_dns_history_all_devices_aggregates` (test_dnslog.py),
+      `test_history_all_devices_aggregates` + `test_history_device_0_is_all`
+      (test_api.py), expanded test_web_ui pins. Full suite **332 passed**
+      (329-pass baseline + 2 API + 1 DB aggregate tests), pyflakes +
+      `node --check` clean. **No quota/version.py change, no tag.**
+
+Checked 2026-08-10 (v0.1.3 UI — vivid purple obsidian glass + stacked user cards):
+- [x] **theme flipped back to vivid purple, CSS-only** (`web/assets/styles.css`
+      + cache-bust links; zero JS/HTML-structure changes — the card layout is
+      `.device-grid`-driven): `:root` base → deep purple-tinted obsidian
+      gradient (`--bg` `#08070d` / `--bg-2` `#0f0b18`); dark translucent glass
+      cards (`--glass-bg` `rgba(20,15,30,0.6)` + `backdrop-filter` `blur(16px)`
+      + 1 px `rgba(255,255,255,0.08)` glossy edge, `--blur` 32 → **16 px**);
+      vivid purple accents (`--accent` `#8b5cf6`, `--accent-2` `#7c3aed`,
+      `--accent-3` `#c4b5fd`) for primary buttons, selected tabs, badges,
+      progress; `.nav-tab.active` gains a **neon glow** (`rgba(139,92,246,0.16)`
+      bg + `border-color rgba(139,92,246,0.45)` + `0 0 14px rgba(139,92,246,0.25)`
+      shadow). All hardcoded purple-family literals swept to the new palette
+      (btn border/primary shadows, focus rings, `select option` bg,
+      `.ring::before` disc, `.bypass-tag`, `.banner`/`.guide code`/
+      `.settings-card p code`, scrollbar). **Users & Devices cards restructured
+      to a single full-width stacked column**: `.device-grid` →
+      `grid-template-columns: 1fr` (+ `.user-card { width: 100% }`), the 2/3-col
+      media-query overrides REMOVED so the stack holds at every width.
+      `.btn.small` radius 8 → **10 px** (all buttons now 10–12 px). **Untouched**:
+      semantic status dots (green online), red "Blocked", pink Gateway pill,
+      `.device-live` ↑/↓. Cache-bust `?v=34 → ?v=35` (index.html L7 +
+      milestone.html + report.html + test pins in test_web_ui.py L65/L259 +
+      test_api.py L1322/L1374); `.ms-pill.done` border retuned to light
+      lavender (`rgba(196,181,253,0.35)`); new stacked-layout regression
+      assertion inside `test_assets_served` (CRLF-normalized). Screenshot-style
+      render verified via an out-of-repo Edge-headless preview (`%TEMP%\quota-ui-preview\`)
+      — obsidian gradient, purple neon ring, frosted cards, stacked full-width
+      cards. Full suite **329 passed** (+1 assertion inside an existing test),
+      pyflakes + `node --check` clean (no Python/JS edits).
+
+Checked 2026-08-10 (UI refinement — pitch-black base + desaturated cool periwinkle + stronger glass):
+- [x] **dashboard theme retuned, CSS-only** (`web/assets/styles.css`, single file touched):
+      base `--bg`/`--bg-2` `#0b0812`/`#130c1e` → **true `#000000`**; every purple accent
+      (`--accent` `#a78bfa` → **`#8FA0C9` cool periwinkle**, `--accent-2` `#7c3aed` → `#6B77A5`,
+      `--accent-3` `#c4b5fd` → `#AAB6DA`) + all 24 hardcoded purple literals → desaturated
+      periwinkle/lavender-gray (verified by grep: zero stray purple values remain). Glass upgraded:
+      `--glass-bg` → `rgba(255,255,255,.07)`, `--glass-bg-2` → `.12`, `--glass-border` → `rgba(255,255,255,.22)`,
+      `--blur` 22 → **32 px**, `--shadow` deeper; `.glass` gains an inset top highlight
+      (`inset 0 1px 0 rgba(255,255,255,.08)`) so cards read as cut frosted glass; `.btn` gets the
+      same 1px frosty-white frame (the quiet "Log out" ghost button included). Ambient flare radials
+      (body + `.bg-glow`) swapped violet → low-alpha cool periwinkle. Ring/bars/toggles/primary
+      buttons flip via `var(--accent)` automatically. **Untouched**: semantic status dots (green
+      online etc.), red "Blocked" tag, pink Gateway pill, `.device-live` ↑/↓ colors, all data/positions
+      legible. Cache-bust `?v=33 → ?v=34` (index.html L7 + test_web_ui.py L65/L259). The milestone +
+      report pages carry their OWN inline `<style>` blocks and stale `?v=32` links — both bumped to
+      `?v=34` and pinned in test_api.py; their lone purple literal (`.ms-pill.done` border) retuned
+      to periwinkle; `app.js` verified zero color literals (all class-driven). Screenshot-style
+      rendering verified via an out-of-repo Edge-headless preview (`%TEMP%\quota-ui-preview\`) —
+      pitch-black base, periwinkle accents, frosty translucent cards, crisp `79.06 GB`, flare behind
+      cards. Full suite **329 passed** (+2 cache-bust assertions inside existing milestone/report
+      tests), pyflakes + `node --check` clean (no Python/JS edits).
+Checked 2026-08-10 (per-device browsing history — the dnsmasq query-log pipeline):
+- [x] **Detailed Traffic & Browsing History per device** (v0.1.2, uncommitted): the dashboard
+      **History tab** shows what each device actually visited — top domains, hourly activity,
+      recent queries — with per-device bandwidth reusing the existing snapshot (nothing new
+      metered). Capture is the box's own dnsmasq: `log-queries=extra` puts the requestor IP on
+      every query line; the setup script installs an **app-owned fragment**
+      (`/etc/dnsmasq.d/quota-dnslog.conf`, survives setup re-runs + WAN/LAN toggles because both
+      scripts only rewrite `quota-gateway.conf`) + a logrotate snippet (`copytruncate`, size 5M,
+      rotate 3). A **dedicated tailer thread** (`quota/dnslog.py`, the `arp_lock.py` pattern —
+      poll 0.5 s, strip `\x00` sparse holes, 1 MB partial-line cap, bounded queue that drops on
+      overflow so DNS + the event loop are never blocked) feeds `_dns_history_tick` every ~15 s,
+      which batch-upserts per-(device, minute, domain) counts into a new `dns_history` table,
+      persists the read cursor (`dnslog_state` — restart-resume; first start seeks to EOF so
+      pre-feature lines never attribute) and — on a 1 h gate — prunes **per user** at their
+      `history_days` (NULL = global `history.retention_days`, default 7; scoped so a short
+      retention never wipes a longer one). `GET /api/history/{device_id}` (auth, window clamped
+      1-336 h). Full suite **329 passed** (+31: `test_dnslog.py` parser/tailer/DB, run-wiring
+      drain/persist/prune/disabled, API auth/top-domains/404/window, web-ui tab + cache-bust),
+      pyflakes + `node --check` + `bash -n` clean. Docs: CLAUDE.md SYSTEM_FLOW step 10 + tree +
+      this entry; config.yaml `history:` block; CHANGELOG/README/Structure_README synced. One
+      deliberate KNOWN LIMIT: the box's own gateway metering (`count_gateway`) and the new query
+      log are unrelated — the DNS-relay charge is a separate, already-fixed counter-order bug
+      ([08-10] entry above). **TODO (honest)**: the raw log is root-only + the dashboard is
+      auth-gated, but recording is ON by default once setup is re-run — a privacy note for the
+      household lives in README/Structure_README.
+Checked 2026-08-10 (blocked Gateway no longer consumed — the DNS-relay charge is gone):
+- [x] **a blocked Gateway consumed ~30 MB/day of pure DNS relay; fixed.** Root cause: in
+      `quota/nftables.py` `_program_gateway` the q_gw counter rules were programmed FIRST in the
+      input/output chains — before the DNS/DHCP exemption accepts and before the gw_blocked
+      drops — so (a) the household DNS that the block deliberately lets through (dnsmasq relays
+      to 8.8.8.8) was counted *and* passed, and (b) bytes a blocked box dropped were still
+      counted. ~130-250 B/query+response × 1-3 q/s across household devices → the observed
+      30 MB/day against the Gateway user's 1.0 GB (YouTube genuinely cut — the block worked; the
+      accounting was wrong). Fix: reordered `_program_gateway` so exemptions run FIRST (relayed
+      service traffic is never counted), the gw_blocked drops NEXT (a dropped packet terminates
+      the chain — a blocked box's attempted bytes never consume the bundle), and the counters
+      LAST (only non-local, non-exempted traffic that survives the block is metered). DHCP with
+      `saddr 0.0.0.0` / `daddr 255.255.255.255` (also not local) is no longer charged either.
+      `+ test_gateway_exempted_and_blocked_traffic_never_reach_counters` (pins the order);
+      `scripts/replay_nft_startup.sh` synced. Full suite **298 passed**; pyflakes clean.
+- [x] **docs note**: Structure_README "Known bottlenecks" never repeated the DNS-forward charge
+      claim, so no change needed there.
+
+Checked 2026-08-10 (DEEP ARCHITECTURAL AUDIT — 5 agents, read-only, Gatekeeper PASS):
+- [x] **the "v20 in-flight — UNCOMMITTED" note is STALE**: the entire v20 bundle AND the v21-era
+      pages are COMMITTED at **v0.1.1** (`quota/version.py` = "0.1.1"); the working tree is CLEAN
+      at HEAD a9a26ec. Agents: Reverse Engineer, Conflict & Regression Analyst, Refactoring
+      Architect, Performance & Log Auditor, Gatekeeper (certified **zero modifications**).
+- [x] **dependencies verified current** (Aug 2026): fastapi 0.141.1, uvicorn 0.52.1,
+      aiosqlite 0.22.1, PyYAML 6.0.3 all CURRENT-LATEST, no applicable CVE (the PyYAML
+      CVE-2026-24009 is a consumer-side `yaml.load` bug; this code only `safe_load`s);
+      starlette 1.4.1 is ABOVE all three 2026 advisories (CVE-2026-48710 "BadHost",
+      CVE-2026-54282, CVE-2026-48817) and the app's route-level `Depends(_require_auth)` auth is
+      structurally immune to BadHost regardless; dev-only pytest 8.3.5 / httpx 0.28.1 are
+      outdated (pytest 9.1.1 / httpx 0.29 current). Starlette's testclient now warns it will
+      deprecate httpx (future `httpx2`).
+- [x] **all 7 break-point claims re-verified against the committed tree** (6 CONFIRMED,
+      migrations CONFIRMED re-run-safe; line numbers shifted — `service.snapshot_state` now
+      :280-315, `nftables.update_state` :333-377). **The lease-less block defect is CONFIRMED
+      still open**: `snapshot_state` gives a lease-less device `ip=""` → dropped from
+      `ip_to_mac` (run.py:443-446) → never enters the kernel `blocked` set (nftables.py:363-364);
+      the ARP-lock `known_ips` deny is the only cover and defaults OFF / forced OFF in WAN. No
+      test drives a lease-less blocked device into `update_state` (the service-layer tests only
+      assert the `blocked` map, never the kernel set).
+- [x] **NEW defects (08-10, absent from the 08-08 inventory)**:
+      (a) **`/api/milestone/notify` is UNAUTHENTICATED + has no IP-ownership check** — any LAN
+      host can POST another user's `user_id` and clear/re-arm their 50/75/100% milestone pills
+      (api/app.py:386-395; display-integrity only, no quota effect; inconsistent with the GET
+      reader, which IS IP-resolved to the requester's own user);
+      (b) **`/report` is default-ON for the whole client subnet** (`report.allow_client_subnet:
+      true`, config.yaml:120-123) — a ROGUE static-IP device on 192.168.2.x passes the subnet
+      gate and reads full household usage + events + log tail with no session. The gate itself is
+      sound (`request.client.host`, no XFF handling, no off-path spoof) — the exposure is the
+      documented "trusted LAN" assumption, but it's a default-on data surface;
+      (c) **a deleted-but-still-connected guest is UNCCOUNTED + UNCONTROLLED** — the suppressed
+      MAC keeps its lease with no device row → no counter rule until it disconnects and
+      re-registers (documented in `_persist_lease`'s own comment, run.py:273-275; no dashboard
+      card surfaces it);
+      (d) ~~**the box's dnsmasq upstream DNS-forwarding is charged to the Gateway user** — client
+      DNS queries relayed to 8.8.8.8 traverse the output/input hooks and count against the 1.0 GB
+      (counter exclusions cover local subnets, not port 53; the DNS-accept exemption is
+      order-after-counter) — systematic, invisible, tiny~~ — **FIXED 08-10**: reordered
+      `_program_gateway` so the DNS/DHCP exemption accepts and the gw_blocked drops run before
+      the q_gw counters — relayed service traffic and blocked bytes are never metered
+      (+ `test_gateway_exempted_and_blocked_traffic_never_reach_counters`);
+      (e) **`evaluate_blocks` persists `block_state='quota'` onto the GATEWAY_MAC device row**
+      when the protected user goes over (cosmetic — the resolved state, not the row, drives
+      `set_gateway_blocked`).
+- [x] **PERFORMANCE audit — ZERO timing telemetry exists anywhere** (`time.monotonic` only gates
+      the rogue-scan cadence; no per-tick duration is measured) — drift/stall is unquantifiable.
+      CONFIRMED on-loop stalls (worst on a slow laptop): `shaper.update_state` rebuilds the tc
+      tree via **~70-115+ sequential `subprocess.run`** on the event loop (run.py:512;
+      shaping.py:299-306) ≈ 1.5-5 s, and an API cap-edit fires it IMMEDIATELY via
+      `_reshaping_now` (user-visible freeze); `engine.update_state`/`set_gateway_blocked` run
+      `nft` subprocesses on-loop (run.py:450/455, ~80 at first boot); `detect_ppp` runs `ip`
+      on-loop per WAN tick (run.py:559, LAN exempt); `_read_log_tail` reads the WHOLE 5 MB log
+      synchronously on-loop (api/app.py:46-64; both `/api/logs` and `/report`); `/report` also
+      does `list_leases()` PER DEVICE (api/app.py:447 — the dashboard payload hoists it once at
+      :231); OUI one-time ~100-500 ms on-loop parse. **REFUTED (08-08 claim wrong)**:
+      `check_internet`/`check_internet_dns` ARE `asyncio.to_thread`'d (run.py:577-579) — off-loop.
+      DB: ~30+ commits/tick (a floor, no batching), `get_period_usage_by_user` ×2/tick
+      (service.py:239,291), `get_bundle` actually ~×5/tick (not 3), `events` table UNBOUNDED (no
+      `DELETE FROM events` anywhere). WS: payload built **N+1 times per 5 s** (per-client loop
+      api/app.py:963-964 + `_push_loop` :975) and each client receives 2 snapshots/5 s;
+      app.js does a full `innerHTML` rebuild per push.
+- [x] **ARCHITECTURE verdict**: modular monolith, WEAKLY layered — api/app.py (999 lines) + run.py
+      (672) reach straight down through every layer; web/app.js 1297, quota/db.py 872,
+      quota/nftables.py 751. All 7 Simplicity-First violations re-confirmed; new detail: the
+      **Gateway user is a REAL DB row forcing ~6 special cases** (quota_blocked_for,
+      is_setup_complete, milestone_state, gw_view, run.py gateway drain, API/UI guards) AND
+      silently deducts 1.0 GB from every auto-share bundle (rule buried in seeding, not the quota
+      model); **`/milestone` + `/report` duplicate the dashboard payload math** — a 3rd copy of
+      the usage/allowance/percent loop (api/app.py:333-475); milestone flags live as DB columns
+      the period-roll must clear. DDD bounded-context map proposed (Gateway/Accounting,
+      Quota/Policy, Admin/Ops, Presentation) + refactor path ordered by blast radius
+      (1. decompose `_maintenance_tick` → 2. harden the nft cache-gates into one helper →
+      3. pure-function tc tree builder → 4. decision-table block precedence → 5. collapse the 3
+      payload builders into one `presentation/views.py` + payload `schema` version →
+      6. split db access methods by interface → 7. land the engine.py type change LAST).
+- [x] test suite re-run at the audit baseline: **297 passed** (1 StarletteDeprecationWarning — the
+      httpx→httpx2 testclient warning) — the committed tree is a green baseline
 
 Checked 2026-08-08 (v20 in-flight — UNCOMMITTED; working tree is the audit baseline):
 - [ ] **the working tree carries an uncommitted "v20" bundle** (~1,855 lines / 25 files,
@@ -787,9 +1082,12 @@ Checked 2026-08-05 (Linux pivot + bundle-source fix + per-user quota model):
       `ifb` (iproute2) (`?v=11`, FakeTc tests)
 - [x] full suite: **119 passed**, pyflakes clean (code)
 
-## [LEGACY_DEBT_AND_RISKS] (deep audit 2026-08-08 — pre-breaking-change baseline)
-_From the 5-agent audit; working-tree state in the v20 entry above. Not yet fixed — this is the
-inventory the refactor phase should address before TASKS.md's breaking changes land._
+## [LEGACY_DEBT_AND_RISKS] (deep audits 2026-08-08 + 2026-08-10 — pre-breaking-change baseline)
+_From the 5-agent audits (08-08 and 08-10, Gatekeeper PASS on both, working tree clean at HEAD
+a9a26ec = v0.1.1). Not yet fixed — this is the inventory the refactor phase should address before
+TASKS.md's breaking changes land. The 08-10 re-audit CONFIRMED every item below (line numbers
+shifted slightly) and added the findings marked [08-10] (full detail in the 2026-08-10 entry
+above)._**
 
 **Dead code (zero production callers — safe to remove in the refactor phase):**
 - `quota/db.py`: `add_topup` (:430), `has_bundle` (:665), `Device.is_admin_blocked` (:105),
@@ -809,28 +1107,67 @@ inventory the refactor phase should address before TASKS.md's breaking changes l
   (`service.py:272-307`, `nftables.py:333-406`; the regression test passes only because its
   fixture gives the device a lease row). **This matches TASKS.md's "per-device block not
   working".**
+- **[08-10] `/api/milestone/notify` is unauthenticated + has no IP-ownership check**
+  (`api/app.py:386-395`) — any LAN host can POST an arbitrary `user_id` and clear/re-arm their
+  50/75/100% milestone pills. Display-integrity only, but the GET reader IS IP-resolved to the
+  requester's own user, so the two endpoints disagree.
+- **[08-10] `/report` is default-ON for the whole client subnet** (`report.allow_client_subnet:
+  true`) — a rogue static-IP device on 192.168.2.x passes the subnet gate and reads full
+  household usage + events + log tail with no session. Gate is sound (`request.client.host`, no
+  XFF handling) — the exposure is the documented "trusted LAN" assumption.
+- **[08-10] a deleted-but-still-connected guest is UNCCOUNTED + UNCONTROLLED** — the suppressed
+  MAC keeps its lease with no device row → no counter rule until it disconnects and re-registers
+  (run.py:273-275 documents this; no dashboard card surfaces it).
+- **[08-10 → FIXED 08-10] the box's dnsmasq upstream DNS-forwarding was charged to the Gateway
+  user** — client DNS queries relayed to 8.8.8.8 traverse the output/input hooks and counted
+  against the 1.0 GB (the counter rules were programmed FIRST in each chain, before the
+  DNS/DHCP exemption accepts and the gw_blocked drops, so exempted relay + blocked drops were
+  metered). A blocked Gateway consumed ~30 MB/day of pure DNS relay. Fixed by reordering
+  `_program_gateway` (quota/nftables.py) so exemptions run first (relayed service traffic is
+  never counted), the gw_blocked drops next (a dropped packet terminates the chain — a blocked
+  box's attempted bytes never consume the bundle), and the q_gw counters LAST (only non-local,
+  non-exempted traffic that survives the block is metered) (+ regression test
+  `test_gateway_exempted_and_blocked_traffic_never_reach_counters`; replay script synced).
+- **[08-10] `evaluate_blocks` persists `block_state='quota'` onto the GATEWAY_MAC device row**
+  when the protected user goes over (cosmetic — the resolved state, not the row, drives
+  `set_gateway_blocked`).
 - **Network-tab preview staleness:** the WS payload carries NO shaping key, so
   `renderNetworkPreview` renders cached `networkConfig`; a second admin's cap change is invisible
   until that client opens the Network tab. `_reshaping_now` also no-ops before the first tick
   (`_last_ip_to_mac` is empty at boot).
 
-**Performance risks (static audit — live measurement still pending):**
+**Performance risks (static audits 08-08 + 08-10 — live measurement still pending; no telemetry
+exists to quantify any of this):**
 - `TcShaper.update_state` runs ~80 `tc` subprocesses synchronously ON the event loop on any tree
   change (~0.5–2 s stall); `detect_ppp` runs a subprocess on-loop per WAN tick; `GET /api/logs`
   blocks the loop reading the whole 5 MB log per call; the OUI 1.7 MB lazy-load parses on-loop
   once. **No per-tick timing telemetry exists anywhere** — drift/stall can't be quantified. WS
   payload is built twice per client every 5 s (per-client loop + `_push_loop`); the renderer does
   a full DOM rebuild each push.
-- **DB:** ~30 separate commits per tick (no batching); `get_period_usage_by_user` runs twice per
-  tick and `get_bundle` three times; the `events` table is UNBOUNDED (no prune — the only real
-  disk-growth risk); usage/lease writes are per-item serialized awaits.
+- **[08-10 re-verified, with numbers]** `shaper.update_state` is actually ~70-115+ sequential
+  `tc` subprocesses on the loop (run.py:512, shaping.py:299-306) ≈ 1.5-5 s on a slow laptop, and
+  an API cap-edit fires it IMMEDIATELY via `_reshaping_now` (run.py:518-527) — a Network-tab save
+  freezes the loop; `engine.update_state`/`set_gateway_blocked` run `nft` on-loop (run.py:450/455,
+  ~80 at first boot); `detect_ppp` runs `ip` on-loop WAN-only (run.py:559, LAN exempt);
+  `_read_log_tail` reads the WHOLE log on-loop (api/app.py:46-64; both `/api/logs` and `/report`);
+  `/report` also does `list_leases()` PER DEVICE (api/app.py:447 — the dashboard payload hoists
+  it once at :231). **REFUTED from the 08-08 list:** `check_internet`/`check_internet_dns` ARE
+  `asyncio.to_thread`'d (run.py:577-579) — off-loop, the old claim was wrong.
+- **DB:** ~30 separate commits per tick (no batching — a floor, actually more with N devices);
+  `get_period_usage_by_user` runs twice per tick and `get_bundle` ~5× (service.py:153/255/292 +
+  inside each usage call); the `events` table is UNBOUNDED (no prune — the only real disk-growth
+  risk); usage/lease writes are per-item serialized awaits. [08-10: all re-confirmed with
+  file:line; the "three times" figure was low — it's ~5×/tick.]
 
 **Security (low severity for a LAN admin box, but honest):**
 - PBKDF2-SHA256 at 200k iterations (OWASP 2023+ recommends 600k for SHA-256).
 - Session cookie `httponly` + `samesite=lax` but no `secure=True`; no login rate-limiting.
-- Deps: all pins current-latest (Aug 2026), no applicable CVEs. Starlette 1.4.1 is above both
-  the 2025 Range-header and 2026 HTTPEndpoint fixes, but `StaticFiles` is in the latter
-  advisory's blast radius — re-pin when a newer starlette ships.
+- Deps: all pins current-latest (Aug 2026), no applicable CVEs. Starlette 1.4.1 is above the
+  2025 Range-header, CVE-2026-48710 "BadHost", CVE-2026-54282, and CVE-2026-48817 fixes, but
+  `StaticFiles` is in the latter advisory's blast radius — re-pin when a newer starlette ships.
+  [08-10: route-level `Depends(_require_auth)` auth is structurally immune to BadHost regardless;
+  dev-only pytest 8.3.5 / httpx 0.28.1 are outdated; starlette's testclient now warns it will
+  deprecate httpx (future `httpx2`).]
 
 **Simplicity debt (advisory seams — see audit):**
 - 3 sources of truth for bundle & topology (config.yaml + DB + ownership flag); **two on/off

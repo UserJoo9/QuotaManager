@@ -74,21 +74,24 @@ step add chain $T input  "{ type filter hook input priority 0; policy accept; }"
 step add chain $T output "{ type filter hook output priority 0; policy accept; }"
 step add set $T gw_blocked "{ type ipv4_addr; flags interval; }"
 
-# count_gateway=on: named counters + counting rules
-step add counter $T q_gw_up
-step add counter $T q_gw_down
-step add rule $T output "ip daddr != $LOCAL1 ip daddr != $LOCAL2 counter name q_gw_up"
-step add rule $T input  "ip saddr != $LOCAL1 ip saddr != $LOCAL2 counter name q_gw_down"
-
-# DNS + DHCP exemptions BEFORE the gw_blocked drops
+# DNS + DHCP exemptions FIRST (never counted, never dropped: dnsmasq relay
+# and the lease handshake keep working while the box itself is cut)
 step add rule $T output "udp dport 53 accept"
 step add rule $T input  "udp sport 53 accept"
 step add rule $T output "udp sport 67 accept"
 step add rule $T input  "udp sport 68 udp dport 67 accept"
 
-# gw_blocked drops (reference the interval set @gw_blocked)
+# gw_blocked drops NEXT: a dropped packet terminates the chain before the
+# counters, so a blocked box's attempted bytes are never charged
 step add rule $T output "ip daddr @gw_blocked ip daddr != $LOCAL1 ip daddr != $LOCAL2 drop"
 step add rule $T input  "ip saddr @gw_blocked ip saddr != $LOCAL1 ip saddr != $LOCAL2 drop"
+
+# count_gateway=on: named counters + counting rules LAST — only non-local,
+# non-exempted traffic that survives the block is metered
+step add counter $T q_gw_up
+step add counter $T q_gw_down
+step add rule $T output "ip daddr != $LOCAL1 ip daddr != $LOCAL2 counter name q_gw_up"
+step add rule $T input  "ip saddr != $LOCAL1 ip saddr != $LOCAL2 counter name q_gw_down"
 
 # --- the admin toggle (what set_gateway_blocked(True) runs) ------------------
 step add element $T gw_blocked "{ 0.0.0.0/0 }"

@@ -577,8 +577,9 @@ def _gateway_set(fake: FakeNft) -> set[str]:
 
 def test_gateway_chains_and_counters_programmed():
     """start() adds hooked input/output chains, the gw_blocked set, and the
-    q_gw_up/q_gw_down counters with LAN exclusions. The counter rules come
-    FIRST (before the DNS accepts + drops) so bytes count before any drop."""
+    q_gw_up/q_gw_down counters with LAN exclusions. The counters come LAST —
+    after the DNS/DHCP accepts and the gw_blocked drops — so only non-local,
+    non-exempted traffic that survives the block is metered."""
     fake = FakeNft()
     eng = _engine(fake)
     eng.start()
@@ -609,6 +610,28 @@ def test_gateway_chains_and_counters_programmed():
     assert "udp sport 68 udp dport 67 accept" in joined
     assert joined.index("udp sport 67 accept") < drop_idx
     assert joined.index("udp sport 68 udp dport 67 accept") < drop_idx
+
+
+def test_gateway_exempted_and_blocked_traffic_never_reach_counters():
+    """The q_gw counters are the LAST rule in each chain: the DNS/DHCP
+    exemption accepts and the gw_blocked drops run before them. That is what
+    keeps a blocked Gateway's usage flat — relayed client DNS (udp 53, a
+    household's ~30 MB/day) is accepted before the counter, and bytes a blocked
+    box drops never reach the counter either. A reorder back to counters-first
+    would silently re-charge both."""
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    joined = " | ".join(fake.rules)
+    # output chain: DNS + DHCP accepts and the gw_blocked drop all precede q_gw_up
+    assert joined.index("udp dport 53 accept") < joined.index("counter name q_gw_up")
+    assert joined.index("udp sport 67 accept") < joined.index("counter name q_gw_up")
+    assert joined.index("ip daddr @gw_blocked") < joined.index("counter name q_gw_up")
+    # input chain: same for q_gw_down
+    assert joined.index("udp sport 53 accept") < joined.index("counter name q_gw_down")
+    assert (joined.index("udp sport 68 udp dport 67 accept")
+            < joined.index("counter name q_gw_down"))
+    assert joined.index("ip saddr @gw_blocked") < joined.index("counter name q_gw_down")
 
 
 def test_gateway_blocked_toggle_and_cache_gate():

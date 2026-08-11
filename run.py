@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime as _dt
+import json
 import logging
 import signal
 import time
@@ -42,6 +43,7 @@ from core import config as cfg_mod
 from core.logging_setup import setup_logging
 from quota import db as _db
 from quota.arp_scan import ArpScanner
+from quota.dnslog import DnslogTailer
 from quota.engine import GATEWAY_MAC, EngineSnapshot, SnapshotHolder
 from quota.netmgr import TopologyManager
 from quota.nftables import NftablesEngine
@@ -86,6 +88,9 @@ class Gateway:
     #: rogue LAN scan cadence — slower than the 15 s tick on purpose (a raw
     #: ARP probe of both /24s costs a few hundred frames; every 60 s is plenty).
     ROGUE_SCAN_INTERVAL = 60.0
+    #: DNS-history TTL prune cadence — once an hour is plenty (the buckets are
+    #: minute-granular; a whole day of rows is a few thousand, not millions).
+    DNS_PRUNE_INTERVAL = 3600.0
 
     def __init__(self, cfg: cfg_mod.Config,
                  config_path: str | Path | None = None,
@@ -115,6 +120,12 @@ class Gateway:
         self.arp_scanner: ArpScanner | None = None
         #: Runtime LAN/WAN switch (dashboard WAN tab); built in startup().
         self.topology_manager: TopologyManager | None = None
+        #: DNS-history log tailer (quota.dnslog); built in startup() when
+        #: cfg.history.enabled. A dedicated thread tails dnsmasq's query log
+        #: so file I/O never touches the event loop.
+        self.dnslog: DnslogTailer | None = None
+        #: last DNS-history TTL prune's clock, for the hourly gate
+        self._last_dns_prune = time.monotonic()
         #: last rogue scan's result, surfaced through the holder every tick
         self._rogues: list[object] = []
         #: start the scan clock NOW, not at boot: the first scan fires 60 s
@@ -195,6 +206,25 @@ class Gateway:
         # subnet (no uplink LAN). The None-guard lets a test inject a fake.
         if self.arp_scanner is None:
             self.arp_scanner = ArpScanner(self.cfg)
+
+        # -- DNS browsing history (quota.dnslog) ------------------------------
+        # Tail dnsmasq's query log on a dedicated thread and bucket queries
+        # into dns_history each tick. Disabled via cfg.history.enabled: false
+        # => the tailer is never started (recording ceases entirely).
+        if getattr(self.cfg, "history", None) is not None and self.cfg.history.enabled:
+            resume: dict[str, object] = {}
+            try:
+                resume = json.loads(
+                    await self.database.get_setting("dnslog_state", "{}") or "{}")
+            except ValueError:
+                log.warning("dnslog: ignoring unparseable dnslog_state setting")
+                resume = {}
+            self.dnslog = DnslogTailer(self.cfg.history.dnsmasq_log_file,
+                                       resume=resume)
+            self.dnslog.start()
+            log.info("DNS-history tailer started (%s, resume=%s)",
+                     self.cfg.history.dnsmasq_log_file,
+                     "yes" if resume else "no")
 
         # -- DHCP + DNS -----------------------------------------------------
         # dnsmasq owns these (served on the client subnet by the setup
@@ -369,6 +399,78 @@ class Gateway:
                     "warning", None)
         self._known_rogue_macs = seen
 
+    async def _dns_history_tick(self) -> None:
+        """Drain the DNS-history queue into per-device buckets, then prune.
+
+        The tailer thread (quota.dnslog) already did the file I/O; this only
+        drains its bounded queue (non-blocking), resolves each distinct IP to
+        a device once, and batch-upserts the per-minute/domain counts. Runs on
+        every tick while the tailer is alive. No ``asyncio.to_thread`` needed —
+        there is no blocking call left in this path.
+        """
+        events = self.dnslog.drain_events()
+        if not events:
+            return
+        # Resolve each distinct requestor IP to a device once per drain.
+        device_by_ip: dict[str, int | None] = {}
+        for ev in events:
+            if ev.ip not in device_by_ip:
+                dev = await self.database.get_device_by_ip(ev.ip)
+                device_by_ip[ev.ip] = dev.id if dev else None
+        # Aggregate into (device_id, minute, domain) -> count buckets; an IP
+        # with no device (rogue / lease gap at drain time) is skipped — the
+        # same attribution rule the byte counters use.
+        buckets: dict[tuple[int, str, str], int] = {}
+        for ev in events:
+            dev_id = device_by_ip.get(ev.ip)
+            if dev_id is None:
+                continue
+            key = (dev_id, ev.minute, ev.domain)
+            buckets[key] = buckets.get(key, 0) + 1
+        if buckets:
+            await self.database.batch_add_dns_history(
+                [(k[0], k[1], k[2], v) for k, v in buckets.items()])
+        # Persist the read cursor so a restart resumes without re-reading.
+        await self.database.set_setting(
+            "dnslog_state", json.dumps(self.dnslog.state_snapshot()))
+        # Hourly TTL gate: prune each user's history at THEIR retention.
+        now = time.monotonic()
+        if now - self._last_dns_prune >= self.DNS_PRUNE_INTERVAL:
+            self._last_dns_prune = now
+            await self._prune_dns_history()
+
+    async def _prune_dns_history(self) -> None:
+        """Delete DNS-history rows older than each user's retention cutoff.
+
+        Per-user ``history_days`` (NULL = the global ``cfg.history.
+        retention_days``) decides the cutoff minute. Each user is pruned with
+        their OWN cutoff (the DB method scopes the delete per user, so a short
+        retention never wipes a longer one). Runs on the hourly gate, so a
+        per-user retention edit reaches the DB within the hour.
+        """
+        try:
+            global_days = int(getattr(self.cfg.history, "retention_days", 7) or 7)
+        except (ValueError, TypeError):
+            global_days = 7
+        try:
+            users = await self.database.list_users()
+        except Exception:  # noqa: BLE001
+            log.exception("dns history prune: list_users failed")
+            return
+        now_minute = _dt.datetime.now().astimezone()
+        for u in users:
+            days = u.history_days if u.history_days is not None else global_days
+            cutoff = (now_minute - _dt.timedelta(days=days)
+                      ).strftime("%Y-%m-%d %H:%M")
+            try:
+                deleted = await self.database.prune_dns_history(u.id, cutoff)
+            except Exception:  # noqa: BLE001
+                log.exception("dns history prune failed for user %s", u.id)
+                continue
+            if deleted:
+                log.info("dns history prune: deleted %s rows older than "
+                         "%s (user %s)", deleted, cutoff, u.id)
+
     # ---------------------------------------------------------- maintenance
 
     async def _maintenance_loop(self) -> None:
@@ -400,6 +502,11 @@ class Gateway:
         if now - self._last_rogue_scan >= self.ROGUE_SCAN_INTERVAL:
             self._last_rogue_scan = now
             await self._scan_rogues()
+
+        # 1d. Drain dnsmasq's query log into per-device DNS history (the
+        #     tailer thread did the file I/O; this only drains its queue).
+        if self.dnslog is not None and self.dnslog.running:
+            await self._dns_history_tick()
 
         # 2. Drain the packet engine's counters into usage_daily.
         #    flush() shells out to `nft -j list counters` (a subprocess). Run
@@ -615,6 +722,16 @@ class Gateway:
             self.shaper.stop()  # leaves tc rules in place (conservative)
         if self.arp_lock is not None:
             self.arp_lock.stop()  # responder thread exits; deny rules stay
+        if self.dnslog is not None:
+            # Persist the read cursor so a restart resumes without re-reading
+            # (and never double-counts the pre-shutdown tail), then stop the
+            # thread. The tailer may be mid-poll; stop() joins it.
+            try:
+                await self.database.set_setting(
+                    "dnslog_state", json.dumps(self.dnslog.state_snapshot()))
+            except Exception:  # noqa: BLE001
+                log.exception("dnslog: failed to persist read cursor")
+            self.dnslog.stop()
         await self.database.close()
         log.info("shutdown complete")
 

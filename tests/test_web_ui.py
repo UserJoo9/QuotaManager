@@ -61,7 +61,8 @@ def test_index_served(client):
     assert "System logs" in r.text
     assert 'id="panel-logs"' in r.text
     assert 'class="glass card admin-card"' in r.text
-    assert "assets/app.js?v=30" in r.text
+    assert "assets/app.js?v=32" in r.text
+    assert "assets/styles.css?v=37" in r.text
     # the internet reachability pill lives in the top bar, not the WAN status
     # panel (probed every 15 s; dot color = reachability).
     assert 'id="net-status"' in r.text
@@ -194,6 +195,13 @@ def test_assets_served(client):
     r = client.get("/assets/styles.css")
     assert r.status_code == 200
     assert "backdrop-filter" in r.text
+    # v0.1.3: user cards stacked full-width (single column) — the 2/3-col
+    # media-query overrides were removed with the layout restructure.
+    # (normalize CRLF so the assertion is line-ending agnostic)
+    css = r.text.replace("\r\n", "\n")
+    assert ".device-grid {\n  display: grid;\n  grid-template-columns: 1fr;\n" in css
+    # v21: the per-device [user] badge pill on aggregate history recent rows
+    assert ".hist-device-badge" in css
 
     r = client.get("/assets/app.js")
     assert r.status_code == 200
@@ -222,3 +230,44 @@ def test_assets_served(client):
     assert "engine_available" in r.text
     assert "blocked_programmed" in r.text
     assert "gw-enforce" in r.text
+
+
+def test_history_tab_present(client):
+    """v20: the History tab + panel expose the per-device DNS history viewer
+    (device picker, look-back window, top-domains/activity/recent panels)."""
+    r = client.get("/")
+    assert 'data-panel="history"' in r.text
+    assert ">History<" in r.text
+    assert 'id="panel-history"' in r.text
+    assert 'id="hist-device"' in r.text
+    assert 'id="hist-window"' in r.text
+    assert 'id="hist-refresh"' in r.text
+    assert 'id="hist-summary"' in r.text
+    assert 'id="hist-top"' in r.text
+    assert 'id="hist-activity"' in r.text
+    assert 'id="hist-recent"' in r.text
+    # v21: household "All devices" aggregate is the default dropdown selection
+    assert 'value="all"' in r.text
+    assert "All devices" in r.text
+    # per-user retention override field in the user modal
+    assert 'id="u-history-days"' in r.text
+    assert "History retention" in r.text
+
+    rjs = client.get("/assets/app.js")
+    assert "refreshHistory" in rjs.text
+    assert "renderHistory" in rjs.text
+    assert "/api/history/" in rjs.text
+    assert "histDevices" in rjs.text
+    assert "syncHistoryDeviceSelect" in rjs.text
+    assert "bucket_minute" in rjs.text
+    # v21: per-device badge on aggregate recent rows + name resolver
+    assert "histDeviceName" in rjs.text
+    assert "hist-device-badge" in rjs.text
+
+
+def test_history_assets_bumped(client):
+    """The History "All devices" tab bumped the cache-busting tags (styles
+    34->36, app.js 31->32) so browsers drop the pre-All-devices assets."""
+    r = client.get("/")
+    assert "assets/styles.css?v=37" in r.text
+    assert "assets/app.js?v=32" in r.text

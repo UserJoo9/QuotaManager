@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -1315,6 +1316,10 @@ def test_milestone_page_is_public(tmp_path):
         assert r.status_code == 200
         assert "text/html" in r.headers["content-type"]
         assert b"Quota" in r.content
+        # shares the retuned stylesheet; pin the cache-bust so the theme
+        # actually reaches this page (browser-cached ?v=34 would show the
+        # pre-purple sheet).
+        assert "assets/styles.css?v=37" in r.text
     asyncio.get_event_loop().run_until_complete(database.close())
 
 
@@ -1366,6 +1371,7 @@ def test_report_page_respects_gate(tmp_path):
         assert r.status_code == 200
         assert "text/html" in r.headers["content-type"]
         assert b"Consumption report" in r.content
+        assert "assets/styles.css?v=37" in r.text
     with _client_from(app, "8.8.8.8") as c:
         assert c.get("/report").status_code == 403
     asyncio.get_event_loop().run_until_complete(database.close())
@@ -1387,3 +1393,154 @@ def test_report_disabled_denies_everyone(tmp_path):
         with _client_from(app, ip) as c:
             assert c.get("/api/report").status_code == 403
     asyncio.get_event_loop().run_until_complete(database.close())
+
+
+# ---------------------------------------------------------------------------
+# DNS browsing history (GET /api/history/{device_id})
+# ---------------------------------------------------------------------------
+
+def _now_str() -> str:
+    """Local "%Y-%m-%d %H:%M" bucket (matches MINUTE_FMT / the endpoint's
+    since_minute)."""
+    import time as _t
+    return _t.strftime("%Y-%m-%d %H:%M")
+
+
+def _prev_minute(minute: str) -> str:
+    """The previous minute bucket (a distinct bucket for multi-minute tests)."""
+    from datetime import datetime as _dt, timedelta as _td
+    prev = _dt.strptime(minute, "%Y-%m-%d %H:%M") - _td(minutes=1)
+    return prev.strftime("%Y-%m-%d %H:%M")
+
+
+def _hours_ago(minute: str, hours: int) -> str:
+    """A bucket ``hours`` before ``minute`` — e.g. old enough to fall OUTSIDE
+    a 1-hour look-back window (the endpoint uses ``now - hours(window)``)."""
+    from datetime import datetime as _dt, timedelta as _td
+    old = _dt.strptime(minute, "%Y-%m-%d %H:%M") - _td(hours=hours)
+    return old.strftime("%Y-%m-%d %H:%M")
+
+
+def _seed_history_device(d, svc, name, ip):
+    """A fixed user + one device with a DHCP lease at ``ip``."""
+    async def _inner():
+        u = await d.create_user(name, _db.QUOTA_FIXED, 10.0)
+        dev = await d.upsert_device(
+            f"de:ad:be:ef:{abs(hash(name)) % 0xffff:04x}",
+            name="Phone", user_id=u.id)
+        await d.set_lease(dev.mac, ip)
+        return dev.id
+    return asyncio.get_event_loop().run_until_complete(_inner())
+
+
+def test_history_endpoint_requires_auth(client):
+    c, _, _ = client
+    assert c.get("/api/history/1").status_code == 401
+
+
+def test_history_returns_top_domains_and_activity(client):
+    c, database, service = client
+    _login(c)
+    dev_id = _seed_history_device(database, service, "hist-dev", "192.168.2.77")
+    now_minute = _now_str()
+    run = asyncio.get_event_loop().run_until_complete
+    run(database.batch_add_dns_history([
+        (dev_id, now_minute, "example.com", 4),
+        (dev_id, now_minute, "other.net", 2),
+        (dev_id, _prev_minute(now_minute), "example.com", 3),
+    ]))
+    r = c.get(f"/api/history/{dev_id}")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["device_id"] == dev_id
+    assert data["total_queries"] == 9
+    assert data["top_domains"][0]["domain"] == "example.com"
+    assert data["top_domains"][0]["hits"] == 7
+    assert data["top_domains"][1]["domain"] == "other.net"
+    # activity + recent use the wire key the JS renders with
+    assert all("bucket_minute" in a for a in data["activity"])
+    assert all("bucket_minute" in r_ for r_ in data["recent"])
+    assert data["recent"][0]["domain"] == "example.com"
+
+
+def test_history_404_unknown_device(client):
+    c, _, _ = client
+    _login(c)
+    assert c.get("/api/history/999999").status_code == 404
+
+
+def test_history_window_and_limit_params(client):
+    c, database, service = client
+    _login(c)
+    dev_id = _seed_history_device(database, service, "hist-win", "192.168.2.78")
+    now_minute = _now_str()
+    old_bucket = _hours_ago(now_minute, 2)  # outside a 1 h look-back
+    run = asyncio.get_event_loop().run_until_complete
+    run(database.batch_add_dns_history([
+        (dev_id, old_bucket, "a.com", 1),
+        (dev_id, old_bucket, "b.com", 1),
+        (dev_id, old_bucket, "c.com", 1),
+    ]))
+    # a 1-hour window excludes the 2-hour-old bucket entirely
+    r = c.get(f"/api/history/{dev_id}?window=1&limit=2")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["window_hours"] == 1
+    assert data["total_queries"] == 0
+    # a wide window + small limit caps the top-domains list
+    r = c.get(f"/api/history/{dev_id}?window=336&limit=2")
+    data = r.json()
+    assert data["total_queries"] == 3
+    assert len(data["top_domains"]) == 2
+
+
+def test_history_all_devices_aggregates(client):
+    """device_id=\"all\" returns a household-wide aggregate: combined top
+    domains + total, and every recent row stamped with its owning device_id
+    (the frontend badges them with [name]). Per-device rows stay unattributed."""
+    c, database, service = client
+    _login(c)
+    dev1 = _seed_history_device(database, service, "hist-all-a", "192.168.2.80")
+    dev2 = _seed_history_device(database, service, "hist-all-b", "192.168.2.81")
+    now_minute = _now_str()
+    run = asyncio.get_event_loop().run_until_complete
+    run(database.batch_add_dns_history([
+        (dev1, now_minute, "example.com", 4),
+        (dev1, _prev_minute(now_minute), "example.com", 2),
+        (dev2, now_minute, "example.com", 3),
+        (dev2, now_minute, "other.net", 1),
+    ]))
+    r = c.get("/api/history/all")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["device_id"] == "all"
+    assert data["total_queries"] == 10
+    assert data["top_domains"][0]["domain"] == "example.com"
+    assert data["top_domains"][0]["hits"] == 9
+    assert data["top_domains"][1]["hits"] == 1
+    assert {x["device_id"] for x in data["recent"]} == {dev1, dev2}
+    assert all("device_id" in x for x in data["recent"])
+    # per-device contract is unchanged: no device_id key on individual rows
+    solo = c.get(f"/api/history/{dev1}")
+    assert solo.status_code == 200, solo.text
+    sdata = solo.json()
+    assert sdata["total_queries"] == 6
+    assert all("device_id" not in x for x in sdata["recent"])
+
+
+def test_history_device_0_is_all(client):
+    """device_id=0 is an alias for the household aggregate (the backend's
+    second documented sentinel next to \"all\")."""
+    c, database, service = client
+    _login(c)
+    dev_id = _seed_history_device(database, service, "hist-zero", "192.168.2.82")
+    now_minute = _now_str()
+    run = asyncio.get_event_loop().run_until_complete
+    run(database.batch_add_dns_history([
+        (dev_id, now_minute, "example.com", 3),
+    ]))
+    r = c.get("/api/history/0")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["device_id"] == "all"
+    assert data["total_queries"] == 3

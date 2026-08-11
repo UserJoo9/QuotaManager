@@ -314,6 +314,11 @@ class TopologyManager:
                 "client_subnet": shaping.client_subnet,
                 "ifb": shaping.ifb,
             },
+            "history": {
+                "enabled": cfg.history.enabled,
+                "dnsmasq_log_file": cfg.history.dnsmasq_log_file,
+                "retention_days": cfg.history.retention_days,
+            },
             "web": {"host": cfg.web.host, "port": cfg.web.port},
         }
         # default_flow_style=None keeps scalar lists inline (`[a, b]`) — the

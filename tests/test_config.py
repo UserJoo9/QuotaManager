@@ -116,3 +116,29 @@ def test_report_config_disable_via_yaml():
         p.write_text("report:\n  enabled: false\n", encoding="utf-8")
         loaded = cfg_mod.load_config(p)
     assert loaded.report.enabled is False
+
+
+def test_history_config_defaults():
+    """DNS browsing history defaults on, log path + 7-day global retention."""
+    cfg = cfg_mod.Config()
+    assert cfg.history.enabled is True
+    assert cfg.history.dnsmasq_log_file == "/var/log/quota-dnsmasq.log"
+    assert cfg.history.retention_days == 7
+
+
+def test_history_config_disable_via_yaml():
+    """``history.enabled: false`` stops the app reading the query log entirely
+    (DNS/DHCP are untouched — it only controls the tailer)."""
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "config.yaml"
+        p.write_text("history:\n  enabled: false\n", encoding="utf-8")
+        loaded = cfg_mod.load_config(p)
+    assert loaded.history.enabled is False
+    # an unknown section never breaks loading (auto-recurse + defaults)
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "config.yaml"
+        p.write_text("bogus_section:\n  x: 1\n", encoding="utf-8")
+        loaded = cfg_mod.load_config(p)
+    assert loaded.history.enabled is True

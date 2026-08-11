@@ -394,6 +394,21 @@ fi
 # --- 4. dnsmasq: DHCP + DNS forwarder ----------------------------------------
 log "[4/8] writing dnsmasq config (DHCP pool + DNS forwarder)"
 mkdir -p "$CONF_DIR"
+# dnsmasq only reads /etc/dnsmasq.d if the main config includes it
+# (conf-dir=...). Debian/Kali ship it uncommented, but a stripped or hand-edited
+# /etc/dnsmasq.conf may have it commented or missing — and then dnsmasq silently
+# ignores EVERY quota fragment below (DHCP pool, DNS settings, the query log)
+# while still starting cleanly. Uncomment an existing line or append one so the
+# fragments actually load. Idempotent: an already-active conf-dir is untouched.
+if ! grep -qE '^\s*conf-dir=' /etc/dnsmasq.conf; then
+    if grep -qE '^\s*#\s*conf-dir=' /etc/dnsmasq.conf; then
+        sed -i 's|^\s*#\s*conf-dir=|conf-dir=|' /etc/dnsmasq.conf
+        log "   enabled conf-dir in /etc/dnsmasq.conf (was commented)"
+    else
+        echo 'conf-dir=/etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new' >> /etc/dnsmasq.conf
+        log "   appended conf-dir=/etc/dnsmasq.d to /etc/dnsmasq.conf"
+    fi
+fi
 # dnsmasq DIES at startup if it cannot open/create its lease file, and it does
 # not mkdir the parent. The Debian package only chowns the file when the
 # directory already exists, so guarantee both here — a missing dir means NO
@@ -475,6 +490,44 @@ if dnsmasq --test -C /etc/dnsmasq.d/quota-gateway.conf >/dev/null 2>&1; then
     systemctl restart dnsmasq || warn "dnsmasq restart failed — run manually"
 else
     warn "dnsmasq config did not validate — fix it before starting the app"
+fi
+
+# --- 4.5. dnsmasq query log (per-device browsing history) ---------------------
+# App-owned fragment the setup/topology scripts never rewrite (they only touch
+# quota-gateway.conf), so a LAN/WAN toggle keeps history logging. log-queries=extra
+# puts the requestor IP on every line; log-async bounds DNS latency; the app's
+# DnslogTailer reads log-facility and logrotate bounds the raw file.
+mkdir -p "$CONF_DIR"
+cat > /etc/dnsmasq.d/quota-dnslog.conf <<EOF
+# Quota Manager — per-device browsing history (tailer: quota/dnslog.py)
+# Setup owns this file; quota-gateway.conf is the only one the scripts rewrite.
+log-queries=extra
+log-async=20
+log-facility=$CFG_HISTORY_LOG
+EOF
+# The tailer tolerates a missing file, but dnsmasq chowning it here means the
+# app can read it immediately (dnsmasq runs as dnsmasq, the app as root).
+mkdir -p "$(dirname "$CFG_HISTORY_LOG")"
+touch "$CFG_HISTORY_LOG" 2>/dev/null || true
+chown dnsmasq:dnsmasq "$CFG_HISTORY_LOG" 2>/dev/null \
+    || chown dnsmasq:nogroup "$CFG_HISTORY_LOG" 2>/dev/null || true
+# logrotate bounds the raw file even if the app is down (copytruncate keeps
+# dnsmasq's open fd valid; the tailer detects the truncation via size shrink).
+cat > /etc/logrotate.d/quota-dnsmasq <<EOF
+$CFG_HISTORY_LOG {
+    daily
+    size 5M
+    rotate 3
+    missingok
+    notifempty
+    compress
+    copytruncate
+}
+EOF
+if dnsmasq --test -C /etc/dnsmasq.d/quota-dnslog.conf >/dev/null 2>&1; then
+    systemctl restart dnsmasq || warn "dnsmasq restart failed — run manually"
+else
+    warn "dnsmasq query-log fragment did not validate — browsing history will be empty"
 fi
 
 # --- 5. nftables: NAT for the client subnet ----------------------------------
@@ -670,6 +723,9 @@ _ip_net_of() {
     echo "$((a & o1)).$((b & o2)).$((c & o3)).$((d & o4))/$cidr"
 }
 LAN_NET="$(_ip_net_of "$LAN_IP" "$LAN_CIDR")"
+# DNS-history capture: the dnsmasq query log the app's DnslogTailer reads
+# (log-facility in the quota-dnslog.conf fragment above must match this path).
+CFG_HISTORY_LOG="${CFG_HISTORY_LOG:-/var/log/quota-dnsmasq.log}"
 # WAN mode rewrites the engine/dhcp blocks: no router on the LAN, no uplink LAN
 # to exclude from accounting, no ARP gateway-lock target. `topology` tells the
 # engine to treat the box as the WAN terminator (client subnet only).
@@ -739,6 +795,12 @@ shaping:
   interface: $LAN_IF
   client_subnet: $CLIENT_NET
   ifb: ifb0
+# Per-device browsing history (dnsmasq query-log tailer, quota/dnslog.py).
+# enabled: false stops the app reading the log entirely (DNS/DHCP unaffected).
+history:
+  enabled: true
+  dnsmasq_log_file: $CFG_HISTORY_LOG
+  retention_days: 7
 web:
   host: 0.0.0.0
   port: 8080

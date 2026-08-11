@@ -90,7 +90,7 @@ Download the latest `quota-manager_<version>_all.deb` from the
 [Releases](https://github.com/UserJoo9/QuotaManager/releases) page, then:
 
 ```bash
-sudo apt install ./quota-manager_0.1.1_all.deb
+sudo apt install ./quota-manager_0.1.2_all.deb
 ```
 
 > **Fresh Kali/Debian box? Run `sudo apt-get update` first.** A brand-new
@@ -203,6 +203,7 @@ See [Structure_README.md](Structure_README.md) → *Running from source*.
 | **Bundle settings** | change `total_gb` / `reset_day`, **Bundle recharged** (add mid-month GB, e.g. an ISP top-up), **Guest mode** (auto-register new devices with a small allowance), **Reset month now** |
 | **Network** | speed shaping: the master switch, your **real line down/up rates**, low-latency toggle |
 | **WAN** | optional "strong" mode where the laptop dials the PPPoE line itself (see below) |
+| **History** | what each device is actually visiting: pick a device + a look-back window → its **top domains** (with share %), an **hourly activity** list, and the **most recent queries** (minute buckets) |
 | **Admin** | change password, see the installed version |
 | **System logs** | the app's log tail, with filters, search, refresh and export |
 
@@ -214,6 +215,17 @@ milestone page and the consumption report — nothing needs a desktop.
 **Speed limits per device/user** — set them in the Network tab first (switch ON
 and enter your real down/up Mbps), then open a user's or device's **edit** modal
 and set `limit down` / `limit up` (`0` = unlimited). Limits apply within seconds.
+
+**Browsing history per device** — the **History** tab shows the exact domains a
+device resolves (top domains, activity by the hour, recent queries). It's
+recorded from dnsmasq's own query log (`log-queries=extra`), so nothing on the
+box or your DNS is slowed: a background thread tails the log, and the raw file
+is bounded by logrotate while the database rows age out by retention
+(**7 days by default**; a user's **edit** modal has a "History retention" field
+to override per person, and `history.enabled: false` in `config.yaml` stops
+recording entirely). dnsmasq only loads the query-log fragment when `conf-dir`
+is enabled in `/etc/dnsmasq.conf` — the setup script uncomments or appends it
+automatically, so a plain re-run of the setup script is all a stock install needs.
 
 ---
 
@@ -336,6 +348,7 @@ stopped) — it holds every device, allowance and month of usage.
 | Devices use the internet but aren't counted | client IPv6 bypasses the gateway (router hands out RA) | Disable IPv6/RA/DHCPv6 on the router — Quota Manager is IPv4 only |
 | No internet after applying WAN mode | `ppp0` down — wrong credentials, or router not bridged/AP yet | WAN tab: check the ppp0 state + auto-diagnosis; press **Apply now** again; the router must be in bridge/modem (single NIC) or AP (two NIC) mode |
 | Device never appears in the dashboard | dnsmasq lease path wrong | Confirm `dhcp.lease_file` matches dnsmasq's actual lease file |
+| History tab shows "No browsing history recorded" | dnsmasq isn't logging queries (`conf-dir=` commented → every `/etc/dnsmasq.d/` fragment ignored), or the app predates the parser fix | Re-run the setup script (it enables `conf-dir`); `tail /var/log/quota-dnsmasq.log` to confirm queries are logged; make sure the app parses the `log-queries=extra` ip/port line shape |
 | Dashboard works but nothing is counted | engine disabled, or traffic isn't routed through the laptop | Check the log; verify devices' gateway = the laptop |
 | Dashboard only reachable from the laptop | `web.host` is `127.0.0.1` | Set `web.host: 0.0.0.0` |
 | Forgot the admin password | — | Stop the app, delete the `admin_password` setting from the DB, restart |
@@ -376,6 +389,10 @@ stopped) — it holds every device, allowance and month of usage.
   (clients are unaffected). The 1.0 GB is silently deducted from every
   auto-share bundle the first time the period opens after an upgrade; set
   `count_gateway: false` to skip the counters.
+- **Deleting a guest doesn't cut it mid-session.** A device you delete from the
+  dashboard stays online (it keeps its DHCP lease and its internet) until it
+  disconnects — while connected it is simply not counted, controlled, or shown.
+  It re-registers (or not, per guest mode) the next time it joins.
 - **The household milestone page (`/milestone`) is public** — no login, by
   design. It only ever shows the *requesting device's own user* (resolved by
   its source IP); it never reveals other users' data.

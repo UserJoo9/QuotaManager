@@ -255,6 +255,8 @@ def create_app(
                 # per-user aggregate speed caps (Mbps, 0 = unlimited)
                 "limit_down_mbps": float(u.limit_down_mbps or 0.0),
                 "limit_up_mbps": float(u.limit_up_mbps or 0.0),
+                # DNS-history retention override (days); None = global default
+                "history_days": u.history_days,
                 "allowance_gb": round(allowance, 3),
                 "used_gb": round(used_gb, 3),
                 "percent": round(used_gb / allowance * 100, 1) if allowance > 0 else 0.0,
@@ -508,6 +510,54 @@ def create_app(
         """
         return (await _dashboard_payload())["rogue"]
 
+    @app.get("/api/history/{device_id}", dependencies=[Depends(_require_auth)])
+    async def device_history(device_id: int | str, window: int = 24,
+                             limit: int = 100) -> dict[str, Any]:
+        """A device's DNS browsing history — top domains, activity, recent.
+
+        ``device_id`` is a device id, or the sentinels ``"all"`` / ``0`` for a
+        household-wide aggregate across every device (combined top domains,
+        activity and total, with each recent row carrying its ``device_id``
+        so the UI can badge it). ``window`` (hours, default 24, clamped 1-336)
+        is the look-back; rows are per-minute buckets from the ``dns_history``
+        table (fed from dnsmasq's query log). ``limit`` (default 100, clamped
+        1-500) caps the top/recent lists. Bandwidth is NOT duplicated here —
+        the History tab reads live/per-period bytes from the cached dashboard
+        payload.
+        """
+        window = max(1, min(int(window), 336))
+        limit = max(1, min(int(limit), 500))
+        if device_id == "all" or device_id == "0" or device_id == 0:
+            did = None
+        else:
+            try:
+                did = int(device_id)
+            except (TypeError, ValueError):
+                raise HTTPException(404, "device not found")
+            dev = await database.get_device(did)
+            if dev is None:
+                raise HTTPException(404, "device not found")
+        since_minute = (_now() - _dt.timedelta(hours=window)
+                        ).strftime("%Y-%m-%d %H:%M")
+        hist = await database.get_dns_history(did, since_minute, limit)
+        # "minute" -> "bucket_minute" on the wire so activity and recent use
+        # the same key the JS renders with. The aggregate view also carries
+        # each row's owning device_id for the [name] badges.
+        recent = [{"bucket_minute": r["minute"], "domain": r["domain"],
+                   "count": r["count"]} for r in hist["recent"]]
+        if did is None:
+            for item, r in zip(recent, hist["recent"]):
+                item["device_id"] = r["device_id"]
+        return {
+            "device_id": "all" if did is None else did,
+            "window_hours": window,
+            "total_queries": hist["total"],
+            "top_domains": hist["top_domains"],
+            "activity": [{"bucket_minute": a["minute"], "count": a["hits"]}
+                         for a in hist["activity"]],
+            "recent": recent,
+        }
+
     @app.get("/api/wan", dependencies=[Depends(_require_auth)])
     async def get_wan() -> dict[str, Any]:
         """Live WAN-mode status: effective topology, who owns it (config /
@@ -721,7 +771,7 @@ def create_app(
             raise HTTPException(404, "user not found")
         fields: dict[str, Any] = {}
         for key in ("name", "quota_mode", "fixed_gb",
-                    "limit_down_mbps", "limit_up_mbps"):
+                    "limit_down_mbps", "limit_up_mbps", "history_days"):
             value = getattr(body, key)
             if value is not None:
                 fields[key] = value

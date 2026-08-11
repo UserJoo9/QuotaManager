@@ -8,6 +8,7 @@ loop ticks and pushes enforcement state.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from pathlib import Path
 
@@ -26,6 +27,9 @@ def _cfg(tmp_path) -> cfg_mod.Config:
     cfg.log_file = str(tmp_path / "logs" / "smoke.log")
     cfg.dhcp.enable = False
     cfg.engine.enabled = False
+    # DNS-history tailer is off in hermetic tests unless a test opts in (its
+    # temp log file may not exist and the thread would just poll forever).
+    cfg.history.enabled = False
     return cfg
 
 
@@ -1240,5 +1244,148 @@ def test_immediate_reshaping_waits_for_shaping_lock(tmp_path):
         rate_map, enabled, total_down, total_up, aqm = calls[0]
         assert enabled is True and total_down == 100.0 and total_up == 20.0
         assert rate_map[0]["ip"] == "192.168.2.130"
+    finally:
+        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+
+
+# ---------------------------------------------------------------------------
+# DNS browsing history (quota/dnslog.py tailer drained by the maintenance tick)
+# ---------------------------------------------------------------------------
+
+def _history_cfg(tmp_path, dnslog: str) -> cfg_mod.Config:
+    cfg = _cfg(tmp_path)
+    cfg.history.enabled = True
+    cfg.history.dnsmasq_log_file = dnslog
+    cfg.history.retention_days = 7
+    return cfg
+
+
+def _wait_for_events(tailer, count: int, timeout: float = 3.0) -> None:
+    """Wait until the tailer has queued ``count`` events (peeks ``qsize()`` —
+    the tick under test must drain them itself, so this never consumes)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and tailer.q.qsize() < count:
+        time.sleep(0.1)
+    assert tailer.q.qsize() >= count, (
+        f"tailer queued only {tailer.q.qsize()}/{count} events in "
+        f"{timeout}s — is the log file being appended?")
+
+
+def test_dns_history_tick_drains_and_upserts(tmp_path):
+    """A dnsmasq query log line becomes a dns_history row for the device that
+    owns the requestor IP, bucketed by minute/domain."""
+    dnslog = str(tmp_path / "dnslog.log")
+    Path(dnslog).write_bytes(b"")
+    cfg = _history_cfg(tmp_path, dnslog)
+    gw = Gateway(cfg)
+    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _cancel_maintenance(gw)
+    try:
+        assert gw.dnslog is not None
+        mac = "aa:bb:cc:dd:ee:55"
+        asyncio.get_event_loop().run_until_complete(
+            gw._persist_lease(mac, "192.168.2.155"))
+        with open(dnslog, "a", encoding="utf-8") as fh:
+            fh.write("query[A] example.com from 192.168.2.155\n"
+                     "query[A] example.com from 192.168.2.155\n"
+                     "query[AAAA] example.com from 192.168.2.155\n"
+                     "query[A] other.net from 192.168.2.155\n")
+        _wait_for_events(gw.dnslog, 4)
+        asyncio.get_event_loop().run_until_complete(gw._dns_history_tick())
+        dev = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_device(mac=mac))
+        hist = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_dns_history(dev.id, "2020-01-01 00:00"))
+        assert hist["total"] == 4
+        top = {t["domain"]: t["hits"] for t in hist["top_domains"]}
+        assert top["example.com"] == 3
+        assert top["other.net"] == 1
+    finally:
+        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+
+
+def test_dns_history_tick_persists_offset_state(tmp_path):
+    """Each drain persists the tailer's read cursor so a restart resumes — the
+    pre-feature lines never re-attributed."""
+    dnslog = str(tmp_path / "dnslog.log")
+    Path(dnslog).write_bytes(b"")
+    cfg = _history_cfg(tmp_path, dnslog)
+    gw = Gateway(cfg)
+    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _cancel_maintenance(gw)
+    try:
+        with open(dnslog, "a", encoding="utf-8") as fh:
+            fh.write("query[A] one.com from 192.168.2.155\n")
+        _wait_for_events(gw.dnslog, 1)
+        asyncio.get_event_loop().run_until_complete(gw._dns_history_tick())
+        state = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_setting("dnslog_state", "{}"))
+        import json as _json
+        saved = _json.loads(state)
+        assert saved["inode"] == os.stat(dnslog).st_ino
+        assert saved["offset"] == os.stat(dnslog).st_size
+    finally:
+        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+
+
+def test_dns_history_prune_runs_on_hourly_gate(tmp_path):
+    """Past the hourly gate, each user's rows older than THEIR retention are
+    deleted (per-user cutoff, not a global one)."""
+    dnslog = str(tmp_path / "dnslog.log")
+    Path(dnslog).write_bytes(b"")
+    cfg = _history_cfg(tmp_path, dnslog)
+    gw = Gateway(cfg)
+    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _cancel_maintenance(gw)
+    try:
+        # a user with a shorter per-user retention (1 day) — set via
+        # update_user (create_user has no history_days kwarg)
+        uid = asyncio.get_event_loop().run_until_complete(
+            gw.database.create_user("short")).id
+        asyncio.get_event_loop().run_until_complete(
+            gw.database.update_user(uid, history_days=1))
+        mac = "aa:bb:cc:dd:ee:56"
+        asyncio.get_event_loop().run_until_complete(
+            gw._persist_lease(mac, "192.168.2.156"))
+        dev = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_device(mac=mac))
+        asyncio.get_event_loop().run_until_complete(
+            gw.database.update_device(dev.id, user_id=uid))
+        # a row far older than the 1-day retention + one at "now"
+        now_minute = time.strftime("%Y-%m-%d %H:%M")
+        asyncio.get_event_loop().run_until_complete(
+            gw.database.batch_add_dns_history(
+                [(dev.id, "2026-07-31 10:00", "old.com", 1),
+                 (dev.id, now_minute, "new.com", 1)]))
+        # feed one live event so the tick passes the empty-queue early-return
+        # and reaches the hourly prune gate (which we force open)
+        with open(dnslog, "a", encoding="utf-8") as fh:
+            fh.write("query[A] live.com from 192.168.2.156\n")
+        _wait_for_events(gw.dnslog, 1)
+        gw._last_dns_prune = time.monotonic() - 3601.0
+        asyncio.get_event_loop().run_until_complete(gw._dns_history_tick())
+        hist = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_dns_history(dev.id, "2026-01-01 00:00"))
+        domains = {t["domain"] for t in hist["top_domains"]}
+        assert "old.com" not in domains, "the stale row is pruned"
+        assert "new.com" in domains and "live.com" in domains
+    finally:
+        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+
+
+def test_dns_history_disabled_does_nothing(tmp_path):
+    """cfg.history.enabled: false => no tailer is built and the maintenance
+    tick's guard skips the history drain (no crash, no persisted cursor)."""
+    cfg = _cfg(tmp_path)
+    assert cfg.history.enabled is False
+    gw = Gateway(cfg)
+    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _cancel_maintenance(gw)
+    try:
+        assert gw.dnslog is None, "no tailer is built when history is disabled"
+        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        state = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_setting("dnslog_state", "{}"))
+        assert state == "{}", "no read cursor is persisted when disabled"
     finally:
         asyncio.get_event_loop().run_until_complete(gw.shutdown())

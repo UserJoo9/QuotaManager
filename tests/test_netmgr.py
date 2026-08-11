@@ -219,6 +219,30 @@ def test_render_config_preserves_other_values():
         assert data["shaping"]["interface"] == "eth0"
 
 
+def test_render_config_carries_history_block():
+    """A WAN/LAN apply is a selective rebuild — the ``history`` block must
+    survive it (the v19.1 data-loss bug class: render dropped unknown keys)."""
+    with tempfile.TemporaryDirectory() as td:
+        cfg = _cfg(Path(td))
+        cfg.history.enabled = True
+        cfg.history.dnsmasq_log_file = "/var/log/quota-dnsmasq.log"
+        cfg.history.retention_days = 7
+        manager = TopologyManager(cfg, _db.Database(cfg.db_path))
+        lan = manager.lan_values()
+        for topology in ("lan", "wan"):
+            data = yaml.safe_load(manager.render_config(topology, lan))
+            assert data["history"] == {
+                "enabled": True,
+                "dnsmasq_log_file": "/var/log/quota-dnsmasq.log",
+                "retention_days": 7,
+            }, topology
+        # and a disabled block survives too
+        cfg.history.enabled = False
+        manager = TopologyManager(cfg, _db.Database(cfg.db_path))
+        data = yaml.safe_load(manager.render_config("lan", lan))
+        assert data["history"]["enabled"] is False
+
+
 # -------------------------------------------------------------- applier_env
 
 

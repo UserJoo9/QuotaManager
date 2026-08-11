@@ -458,22 +458,55 @@ class NftablesEngine:
           traffic, drained by the maintenance loop into the protected "Gateway"
           user's device usage.
         * a ``gw_blocked`` interval set + two drop rules toggle the box's own
-          internet cut (see :meth:`set_gateway_blocked`). DNS-exemption accepts
-          (udp 53) keep dnsmasq's upstream queries flowing for CLIENTS while the
-          box itself is cut, and DHCP-exemption accepts (udp 67/68) keep NEW
-          clients able to complete the lease handshake — both added BEFORE the
-          drops ("0 GB Gateway allowance => clients keep their internet").
+          internet cut (see :meth:`set_gateway_blocked`).
 
-        The counter rules sit FIRST in each chain so they count before any drop;
-        LAN traffic is excluded from every rule (dashboard/SSH from the LAN stay
-        reachable). The rules are programmed once — only the set's membership
-        changes.
+        Rule order in each chain is: exemptions FIRST, drops NEXT, counters
+        LAST. The DNS-exemption accepts (udp 53) keep dnsmasq's upstream queries
+        flowing for CLIENTS while the box itself is cut, and the DHCP-exemption
+        accepts (udp 67/68) keep NEW clients able to complete the lease
+        handshake — because they run before any counter, this relayed service
+        traffic is never charged to the "Gateway" user (household DNS is not the
+        box's own usage). The ``gw_blocked`` drops come before the counters too:
+        a dropped packet terminates the chain, so a blocked box's attempted
+        bytes are never counted (they never leave the box, so they consume
+        nothing from the bundle). Only non-local, non-exempted traffic that
+        survives the block reaches the counters. LAN traffic is excluded from
+        every rule (dashboard/SSH from the LAN stay reachable). The rules are
+        programmed once — only the set's membership changes.
         """
         for hook in ("input", "output"):
             self._run(["add", "chain", f"{FAMILY} {self.table} {hook}",
                        f"{{ type filter hook {hook} priority 0; policy accept; }}"])
         self._run(["add", "set", f"{FAMILY} {self.table} gw_blocked",
                    "{ type ipv4_addr; flags interval; }"])
+        # DNS exemptions FIRST: dnsmasq keeps resolving for clients even while
+        # the box itself is cut. Accepted before any counter, so relayed client
+        # DNS (a household's ~30 MB/day) is never charged to the "Gateway" user.
+        self._run(["add", "rule", f"{FAMILY} {self.table} output",
+                   "udp dport 53 accept"])
+        self._run(["add", "rule", f"{FAMILY} {self.table} input",
+                   "udp sport 53 accept"])
+        # DHCP exemptions: a NEW client's DISCOVER/REQUEST has no IP yet
+        # (saddr 0.0.0.0, not a local subnet) and the OFFER/ACK reply goes to
+        # the broadcast 255.255.255.255 — both would match the gw_blocked drop
+        # rules below and leave the device stuck on "Obtaining IP address"
+        # while the box's own internet is cut. Input accepts client requests
+        # (sport 68 -> dport 67); output accepts the server's replies (sport 67).
+        self._run(["add", "rule", f"{FAMILY} {self.table} output",
+                   "udp sport 67 accept"])
+        self._run(["add", "rule", f"{FAMILY} {self.table} input",
+                   "udp sport 68 udp dport 67 accept"])
+        # gw_blocked drops BEFORE the counters: a dropped packet terminates the
+        # chain, so a blocked box's attempted bytes are never counted (they
+        # never leave the box — nothing is consumed from the bundle).
+        out_drop = _match("ip daddr @gw_blocked", "ip daddr",
+                          self._local_networks) + " drop"
+        in_drop = _match("ip saddr @gw_blocked", "ip saddr",
+                         self._local_networks) + " drop"
+        self._run(["add", "rule", f"{FAMILY} {self.table} output", out_drop])
+        self._run(["add", "rule", f"{FAMILY} {self.table} input", in_drop])
+        # Counters LAST: only non-local, non-exempted traffic that survives the
+        # block reaches them.
         if self._count_gateway:
             out_count = _gateway_exclusions("ip daddr", self._local_networks)
             in_count = _gateway_exclusions("ip saddr", self._local_networks)
@@ -488,28 +521,6 @@ class NftablesEngine:
                        f"{out_count} counter name q_gw_up".strip()])
             self._run(["add", "rule", f"{FAMILY} {self.table} input",
                        f"{in_count} counter name q_gw_down".strip()])
-        # DNS exemptions BEFORE the drops: dnsmasq keeps resolving for clients
-        # even while the box itself is cut.
-        self._run(["add", "rule", f"{FAMILY} {self.table} output",
-                   "udp dport 53 accept"])
-        self._run(["add", "rule", f"{FAMILY} {self.table} input",
-                   "udp sport 53 accept"])
-        # DHCP exemptions BEFORE the drops: a NEW client's DISCOVER/REQUEST has
-        # no IP yet (saddr 0.0.0.0, not a local subnet) and the OFFER/ACK reply
-        # goes to the broadcast 255.255.255.255 — both would match the gw_blocked
-        # drop rules below and leave the device stuck on "Obtaining IP address"
-        # while the box's own internet is cut. Input accepts client requests
-        # (sport 68 -> dport 67); output accepts the server's replies (sport 67).
-        self._run(["add", "rule", f"{FAMILY} {self.table} output",
-                   "udp sport 67 accept"])
-        self._run(["add", "rule", f"{FAMILY} {self.table} input",
-                   "udp sport 68 udp dport 67 accept"])
-        out_drop = _match("ip daddr @gw_blocked", "ip daddr",
-                          self._local_networks) + " drop"
-        in_drop = _match("ip saddr @gw_blocked", "ip saddr",
-                         self._local_networks) + " drop"
-        self._run(["add", "rule", f"{FAMILY} {self.table} output", out_drop])
-        self._run(["add", "rule", f"{FAMILY} {self.table} input", in_drop])
         log.info("nftables: gateway box accounting + block programmed "
                  "(count_gateway=%s)", self._count_gateway)
 

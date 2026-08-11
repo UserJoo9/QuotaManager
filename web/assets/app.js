@@ -367,6 +367,7 @@ function switchPanel(name) {
   if (name === "logs") refreshLogs();
   if (name === "network") refreshNetwork();
   if (name === "wan") refreshWan();
+  if (name === "history") refreshHistory();
 }
 
 async function refreshLogs() {
@@ -376,6 +377,129 @@ async function refreshLogs() {
     logMeta = data;
     renderLogs();
   } catch (_) { /* not critical — activity still works */ }
+}
+
+/* ---------------- browsing history ---------------- */
+
+let historyCache = null;   // last /api/history response (refetched on demand)
+
+function histDevices() {
+  const out = [];
+  (dashboard.users || []).forEach((u) =>
+    (u.devices || []).forEach((d) => out.push({ id: d.id, label: `${d.name || d.vendor || d.mac} (${u.name})` })));
+  return out;
+}
+
+// Keep the device picker in sync with the live payload (devices appear/disappear
+// as leases change), preserving the admin's selection when it still exists.
+// "all" is the default household overview.
+function syncHistoryDeviceSelect() {
+  const sel = $("hist-device");
+  const prev = sel.value;
+  const devices = histDevices();
+  const had = prev === "all" || devices.some((d) => String(d.id) === prev);
+  sel.innerHTML = `<option value="all">All devices</option>` +
+    devices.map((d) => `<option value="${d.id}">${esc(d.label)}</option>`).join("");
+  sel.value = had ? prev : "all";
+}
+
+// Resolve a device_id to a [name] badge for aggregate rows (user -> device -> mac).
+function histDeviceName(deviceId) {
+  const dev = (dashboard.users || [])
+    .flatMap((u) => u.devices || [])
+    .find((x) => x.id === deviceId);
+  if (!dev) return "#" + deviceId;
+  return dev.user_name || dev.name || dev.mac;
+}
+
+async function refreshHistory() {
+  const sel = $("hist-device");
+  syncHistoryDeviceSelect();
+  const id = sel.value;   // "all" (household) or a device id string
+  if (id === "") {
+    historyCache = null;
+    renderHistory(null);
+    return;
+  }
+  try {
+    const windowHours = Number($("hist-window").value) || 24;
+    historyCache = await API.get(`/api/history/${id}?window=${windowHours}&limit=200`);
+  } catch (_) { historyCache = null; }
+  renderHistory(historyCache);
+}
+
+function renderHistory(d) {
+  const empty = $("hist-empty"), body = $("hist-body"), summary = $("hist-summary");
+  if (!d || !d.top_domains || !d.top_domains.length) {
+    empty.classList.remove("hidden");
+    body.classList.add("hidden");
+    summary.classList.add("hidden");
+    empty.textContent = d && d.device_id === "all"
+      ? "No browsing history recorded for the household in this window yet."
+      : "No browsing history recorded for this device in this window yet.";
+    return;
+  }
+  empty.classList.add("hidden");
+  body.classList.remove("hidden");
+
+  const total = d.total_queries || 0;
+  summary.classList.remove("hidden");
+  if (d.device_id === "all") {
+    // household aggregate: sum the bandwidth across every managed device
+    const devs = (dashboard.users || []).flatMap((u) => u.devices || []);
+    const pDown = devs.reduce((s, x) => s + (x.device_down_gb || 0), 0);
+    const pUp = devs.reduce((s, x) => s + (x.device_up_gb || 0), 0);
+    const lDown = devs.reduce((s, x) => s + (x.live_down || 0), 0);
+    const lUp = devs.reduce((s, x) => s + (x.live_up || 0), 0);
+    summary.textContent =
+      `All devices — ${total.toLocaleString()} queries in the last ${d.window_hours} h · ↓ ${fmt(pDown)} ↑ ${fmt(pUp)} this period · live ${fmtBytes(lDown)}/s ↓ ${fmtBytes(lUp)}/s ↑.`;
+  } else {
+    // bandwidth from the cached dashboard payload — no extra call (same format
+    // as the device card: live down/up + period down/up)
+    const device = histDevices().find((x) => String(x.id) === String(d.device_id));
+    const dev = (dashboard.users || [])
+      .flatMap((u) => u.devices || [])
+      .find((x) => x.id === d.device_id);
+    const bw = dev
+      ? ` · ↓ ${fmt(dev.device_down_gb)} ↑ ${fmt(dev.device_up_gb)} this period · live ${fmtBytes(dev.live_down)}/s ↓ ${fmtBytes(dev.live_up)}/s ↑`
+      : "";
+    summary.textContent =
+      `Device: ${device ? device.label : "#" + d.device_id} — ${total.toLocaleString()} queries in the last ${d.window_hours} h${bw}.`;
+  }
+
+  // top domains
+  $("hist-top").innerHTML = d.top_domains.map((t) => `
+    <tr>
+      <td class="domain">${esc(t.domain)}</td>
+      <td class="num">${t.hits.toLocaleString()}</td>
+      <td class="num">${total ? ((t.hits / total) * 100).toFixed(1) : "0.0"}%</td>
+    </tr>`).join("");
+
+  // activity: group the per-minute buckets into hourly bars (no chart.js)
+  const hours = new Map();
+  (d.activity || []).forEach((a) => {
+    const h = a.bucket_minute.slice(0, 13) + "00"; // "YYYY-MM-DD HH:MM" -> "YYYY-MM-DD HH:00"
+    hours.set(h, (hours.get(h) || 0) + a.count);
+  });
+  const maxHits = Math.max(1, ...hours.values());
+  $("hist-activity").innerHTML = [...hours.entries()].map(([h, c]) => `
+    <li>
+      <span>${esc(h)}</span>
+      <span class="num">${c.toLocaleString()} <b style="opacity:.35">${"█".repeat(Math.round((c / maxHits) * 20))}</b></span>
+    </li>`).join("");
+
+  // recent queries: minute-bucket lines, newest first; aggregate rows carry the
+  // owning device_id and get a [name] badge before the domain.
+  $("hist-recent").innerHTML = (d.recent || []).map((r) => {
+    const badge = r.device_id
+      ? `<b class="hist-device-badge">[${esc(histDeviceName(r.device_id))}]</b> `
+      : "";
+    return `
+    <li>
+      <span class="domain">${badge}${esc(r.domain)}</span>
+      <span class="num">${esc(r.bucket_minute)} × ${r.count}</span>
+    </li>`;
+  }).join("");
 }
 
 /* level filter + search are applied client-side to the raw /api/logs lines;
@@ -658,6 +782,8 @@ function openUserModal(id) {
   $("u-limit-down").value = u ? (u.limit_down_mbps || 0) : 0;
   $("u-limit-up").value = u ? (u.limit_up_mbps || 0) : 0;
   $("u-speed-wrap").classList.remove("hidden");  // shown for new + existing users
+  // per-user DNS-history retention (days); blank = global default
+  $("u-history-days").value = u ? (u.history_days ?? "") : "";
   $("u-fixed-wrap").classList.toggle("hidden", $("u-mode").value !== "fixed");
   $("user-modal-submit").textContent = u ? "Save" : "Add";
   $("user-modal").classList.remove("hidden");
@@ -677,12 +803,16 @@ async function submitUser(ev) {
   // per-user aggregate speed caps (Mbps, 0 = unlimited)
   const limitDown = Math.max(0, parseFloat($("u-limit-down").value) || 0);
   const limitUp = Math.max(0, parseFloat($("u-limit-up").value) || 0);
+  // per-user DNS-history retention (days); blank/null = global default, 0 = off
+  const historyDaysField = $("u-history-days").value;
+  const historyDays = historyDaysField === "" ? null
+    : Math.max(0, Math.min(365, parseInt(historyDaysField, 10) || 0));
   if (editUserId == null) {
     await API.post("/api/users", { name, quota_mode: mode, fixed_gb: fixed,
       limit_down_mbps: limitDown, limit_up_mbps: limitUp });
   } else {
     await API.patch(`/api/users/${editUserId}`, { name, quota_mode: mode, fixed_gb: fixed,
-      limit_down_mbps: limitDown, limit_up_mbps: limitUp });
+      limit_down_mbps: limitDown, limit_up_mbps: limitUp, history_days: historyDays });
   }
   closeUserModal();
   await refreshAll();
@@ -1217,6 +1347,10 @@ async function init() {
   $("wan-test-btn").addEventListener("click", testPppoe);
   $("wan-apply-btn").addEventListener("click", submitWan);
   $("wan-revert-btn").addEventListener("click", revertWan);
+  // browsing history: refetch on device/window change or manual refresh
+  $("hist-device").addEventListener("change", refreshHistory);
+  $("hist-window").addEventListener("change", refreshHistory);
+  $("hist-refresh").addEventListener("click", refreshHistory);
   $("password-link").addEventListener("click", () => $("pwd-modal").classList.remove("hidden"));
   $("pwd-cancel").addEventListener("click", () => $("pwd-modal").classList.add("hidden"));
   $("pwd-form").addEventListener("submit", submitPassword);

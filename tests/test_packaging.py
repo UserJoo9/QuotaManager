@@ -125,6 +125,16 @@ def test_release_workflow_ships_runtime_payload_only():
         ".git must not be staged into the package"
 
 
+def test_release_workflow_embeds_changelog_in_release_body():
+    """The release description must be auto-composed from CHANGELOG.md (the
+    single source of truth for release notes), not a hand-edited body."""
+    text = _read(WORKFLOW)
+    assert "body_path" in text, \
+        "the release body must be a generated file (softprops body_path)"
+    assert "CHANGELOG.md" in text, \
+        "the release notes must be extracted from CHANGELOG.md"
+
+
 # --------------------------------------------------------------------------- #
 # Debian control metadata
 # --------------------------------------------------------------------------- #

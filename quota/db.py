@@ -106,6 +106,9 @@ class User:
     notified_50: bool = False
     notified_75: bool = False
     notified_100: bool = False
+    #: Per-user DNS-history retention in days; None = the global
+    #: ``history.retention_days`` default applies.
+    history_days: Optional[int] = None
 
     @property
     def is_admin_blocked(self) -> bool:
@@ -168,6 +171,20 @@ CREATE TABLE IF NOT EXISTS usage_daily (
     PRIMARY KEY (device_id, date)
 );
 
+-- Per-device DNS browsing history (what each device queries, per minute
+-- bucket). Fed from dnsmasq's query log by quota/dnslog.py; pruned hourly
+-- per-user by their history_days retention (NULL = the global default).
+-- No FK (app-layer delete in delete_device, matching the codebase style);
+-- device_id is NOT in the bucket index because it leads the PK.
+CREATE TABLE IF NOT EXISTS dns_history (
+    device_id     INTEGER NOT NULL,
+    bucket_minute TEXT    NOT NULL,   -- local "%Y-%m-%d %H:%M" (lexicographic == chronological)
+    domain        TEXT    NOT NULL,
+    count         INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (device_id, bucket_minute, domain)
+);
+CREATE INDEX IF NOT EXISTS idx_dns_history_bucket ON dns_history(bucket_minute);
+
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -196,7 +213,8 @@ CREATE TABLE IF NOT EXISTS users (
     limit_up_mbps    REAL NOT NULL DEFAULT 0,
     notified_50      INTEGER NOT NULL DEFAULT 0,
     notified_75      INTEGER NOT NULL DEFAULT 0,
-    notified_100     INTEGER NOT NULL DEFAULT 0
+    notified_100     INTEGER NOT NULL DEFAULT 0,
+    history_days     INTEGER              -- NULL = global history.retention_days
 );
 
 CREATE TABLE IF NOT EXISTS suppressed_macs (
@@ -295,6 +313,14 @@ class Database:
                 await self._conn.commit()
             except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
                 pass
+        # dns-history retention override per user (NULL = the global
+        # history.retention_days default). ALTER no-ops on existing DBs.
+        try:
+            await self._conn.execute(
+                "ALTER TABLE users ADD COLUMN history_days INTEGER")
+            await self._conn.commit()
+        except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
+            pass
         await self._backfill_users()
         await self._seed_gateway()
         await self._conn.commit()
@@ -442,6 +468,10 @@ class Database:
                 if user is not None and user["guest"]:
                     await self.add_suppressed_mac(row["mac"])
         await self.conn.execute("DELETE FROM devices WHERE id=?", (device_id,))
+        # app-layer FK cleanup: the device's DNS history dies with it (usage
+        # rows are TTL-bounded by the quota period instead).
+        await self.conn.execute(
+            "DELETE FROM dns_history WHERE device_id=?", (device_id,))
         await self.conn.commit()
 
     async def set_device_state(self, device_id: int, state: str) -> None:
@@ -520,7 +550,8 @@ class Database:
     async def update_user(self, user_id: int, **fields: Any) -> User | None:
         allowed = {"name", "quota_mode", "fixed_gb", "block_state",
                    "limit_down_mbps", "limit_up_mbps",
-                   "notified_50", "notified_75", "notified_100"}
+                   "notified_50", "notified_75", "notified_100",
+                   "history_days"}
         sets, args = [], []
         for key, value in fields.items():
             if key in allowed:
@@ -802,6 +833,90 @@ class Database:
             out[r["user_id"]] = {"up": r["up"], "down": r["down"]}
         return out
 
+    # -- DNS browsing history ----------------------------------------------
+
+    async def batch_add_dns_history(
+            self, rows: list[tuple[int, str, str, int]]) -> None:
+        """Accumulate (device_id, minute, domain, count) buckets in one commit.
+
+        Rows with the same (device_id, minute, domain) merge their counts — the
+        tailer drains per-tick events into per-minute buckets, and two drains
+        can land in the same bucket before the minute rolls. One commit for the
+        whole batch (the tick fires at most ~once per 15 s, so a commit per
+        drain is fine).
+        """
+        await self.conn.executemany(
+            """INSERT INTO dns_history (device_id, bucket_minute, domain, count)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(device_id, bucket_minute, domain) DO UPDATE SET
+                 count = count + excluded.count""",
+            rows)
+        await self.conn.commit()
+
+    async def get_dns_history(self, device_id: int | None, since_minute: str,
+                              limit: int = 100) -> dict[str, Any]:
+        """DNS history since ``since_minute`` for one device (or all devices).
+
+        ``device_id=None`` aggregates across every device (the household
+        view); a device id scopes to that device. Returns ``top_domains``
+        (domain -> total hits, most-hit first), ``activity`` (minute bucket ->
+        hits, oldest first, hourly-rolled client-side), ``recent`` (the latest
+        bucket lines, newest first, carrying the owning ``device_id`` so the
+        UI can badge each row) and ``total`` (all hits in the window, for the
+        header and share percentages).
+        """
+        if device_id is None:
+            scope, params = "", (since_minute,)
+        else:
+            scope, params = "device_id=? AND ", (device_id, since_minute)
+        top = await self.conn.execute_fetchall(
+            "SELECT domain, SUM(count) hits FROM dns_history "
+            f"WHERE {scope}bucket_minute>=? "
+            "GROUP BY domain ORDER BY hits DESC, domain LIMIT ?",
+            params + (limit,))
+        activity = await self.conn.execute_fetchall(
+            "SELECT bucket_minute minute, SUM(count) hits FROM dns_history "
+            f"WHERE {scope}bucket_minute>=? "
+            "GROUP BY bucket_minute ORDER BY bucket_minute",
+            params)
+        recent = await self.conn.execute_fetchall(
+            "SELECT bucket_minute minute, domain, count, device_id FROM dns_history "
+            f"WHERE {scope}bucket_minute>=? "
+            "ORDER BY bucket_minute DESC, count DESC, domain LIMIT ?",
+            params + (limit,))
+        total = await self._fetch_one(
+            "SELECT COALESCE(SUM(count), 0) hits FROM dns_history "
+            f"WHERE {scope}bucket_minute>=?",
+            params)
+        return {
+            "top_domains": [{"domain": r["domain"], "hits": r["hits"]}
+                            for r in top],
+            "activity": [{"minute": r["minute"], "hits": r["hits"]}
+                         for r in activity],
+            "recent": [{"minute": r["minute"], "domain": r["domain"],
+                        "count": r["count"], "device_id": r["device_id"]}
+                       for r in recent],
+            "total": int(total[0]) if total else 0,
+        }
+
+    async def prune_dns_history(self, user_id: int, before_minute: str) -> int:
+        """Delete ONE user's history rows older than ``before_minute``.
+
+        Scoped per user because cutoffs differ (each user's ``history_days``,
+        NULL = the global default): an unscoped ``bucket_minute < ?`` delete
+        called once per user would let the shortest cutoff wipe rows belonging
+        to a user with a longer retention. ``bucket_minute`` is a local
+        ``"%Y-%m-%d %H:%M"`` string, so the comparison is chronological.
+        Returns the rowcount. Called once per user on the hourly prune gate —
+        a handful of DELETEs, one commit each.
+        """
+        cur = await self.conn.execute(
+            "DELETE FROM dns_history WHERE bucket_minute < ? AND device_id IN "
+            "(SELECT id FROM devices WHERE user_id=?)",
+            (before_minute, user_id))
+        await self.conn.commit()
+        return cur.rowcount
+
     # -- settings -----------------------------------------------------------
 
     async def get_setting(self, key: str, default: str = "") -> str:
@@ -869,4 +984,5 @@ def _row_to_user(row: Any) -> User:
         notified_50=bool(row["notified_50"]),
         notified_75=bool(row["notified_75"]),
         notified_100=bool(row["notified_100"]),
+        history_days=row["history_days"],
     )

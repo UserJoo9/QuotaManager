@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quota Manager</title>
-<link rel="stylesheet" href="/assets/styles.css?v=32">
+<link rel="stylesheet" href="/assets/styles.css?v=37">
 </head>
 <body>
   <div class="bg-glow"></div>
@@ -36,6 +36,7 @@
         <button class="nav-tab" data-panel="wan">WAN</button>
         <button class="nav-tab" data-panel="admin">Admin</button>
         <button class="nav-tab" data-panel="logs">Logs</button>
+        <button class="nav-tab" data-panel="history">History</button>
       </nav>
       <div class="topbar-right">
         <span id="net-status" class="net-status" title="Checking internet connection…">
@@ -406,6 +407,49 @@
           <pre id="logs-view" class="logs"></pre>
         </div>
       </section>
+
+      <!-- BROWSING HISTORY -->
+      <section id="panel-history" class="nav-panel hidden">
+        <div class="glass card logs-card">
+          <div class="logs-head">
+            <h3>Browsing history</h3>
+            <div class="logs-toolbar">
+              <select id="hist-device" title="Device to inspect" aria-label="Device">
+                <option value="all" selected>All devices</option>
+              </select>
+              <select id="hist-window" title="Lookback window" aria-label="Window">
+                <option value="24" selected>24 hours</option>
+                <option value="72">3 days</option>
+                <option value="168">7 days</option>
+                <option value="336">14 days</option>
+              </select>
+              <button type="button" id="hist-refresh" class="btn ghost small" title="Reload history">⟳ Refresh</button>
+            </div>
+          </div>
+          <p id="hist-summary" class="muted small hidden"></p>
+          <div id="hist-empty" class="muted small hidden"></div>
+          <div id="hist-body" class="hidden">
+            <div class="table-wrap">
+              <table class="history-table">
+                <thead>
+                  <tr><th>Top domains</th><th class="num">Queries</th><th class="num">Share</th></tr>
+                </thead>
+                <tbody id="hist-top"></tbody>
+              </table>
+            </div>
+            <div class="hist-cols">
+              <div>
+                <h4>Activity</h4>
+                <ul id="hist-activity" class="activity-list"></ul>
+              </div>
+              <div>
+                <h4>Recent queries</h4>
+                <ul id="hist-recent" class="recent-list"></ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
     </main>
   </div>
 
@@ -502,6 +546,8 @@
             </div>
           </div>
         </div>
+        <label for="u-history-days">History retention (days, blank = default)</label>
+        <input type="number" id="u-history-days" min="0" max="365" step="1" placeholder="7">
         <div class="modal-actions">
           <button type="button" id="user-modal-cancel" class="btn ghost">Cancel</button>
           <button type="submit" id="user-modal-submit" class="btn primary">Add</button>
@@ -552,6 +598,6 @@
     </div>
   </div>
 
-  <script src="/assets/app.js?v=30"></script>
+  <script src="/assets/app.js?v=32"></script>
 </body>
 </html>

@@ -167,6 +167,28 @@ class ReportConfig:
 
 
 @dataclass
+class HistoryConfig:
+    """Per-device DNS browsing history (what each device queries).
+
+    Captured from dnsmasq's query log: ``log-queries=extra`` makes dnsmasq log
+    one line per query with the requestor IP, and the app tails that file and
+    buckets queries per device/minute/domain into the ``dns_history`` table.
+    ``enabled: false`` stops the app from reading the log — recording ceases
+    entirely (the raw log, if the fragment is installed, keeps filling until
+    logrotate bounds it, but nothing is attributed to devices).
+    """
+
+    enabled: bool = True
+    #: Where dnsmasq writes the query log (``log-facility=``). Written by the
+    #: setup script's app-owned fragment /etc/dnsmasq.d/quota-dnslog.conf.
+    dnsmasq_log_file: str = "/var/log/quota-dnsmasq.log"
+    #: Global default retention in days (per-user ``users.history_days``
+    #: overrides; NULL = this value). History older than the cutoff is pruned
+    #: hourly, so the DB stays bounded.
+    retention_days: int = 7
+
+
+@dataclass
 class Config:
     db_path: str = "data/quota.db"
     log_file: str = "logs/quota.log"
@@ -177,6 +199,7 @@ class Config:
     web: WebConfig = field(default_factory=WebConfig)
     shaping: ShapingConfig = field(default_factory=ShapingConfig)
     report: ReportConfig = field(default_factory=ReportConfig)
+    history: HistoryConfig = field(default_factory=HistoryConfig)
     timezone: str = ""  # empty => system local timezone
 
 
