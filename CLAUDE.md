@@ -396,7 +396,8 @@ kernel counts and drops.
 _Pending work lives in TASKS.md; orphans + debt are tracked in
 [LEGACY_DEBT_AND_RISKS] below. Version history (newest first):_
 
-Checked 2026-08-12 (**v0.1.4 hotfix** — `.deb` installs died at the dnslog step):
+Checked 2026-08-12 (**v0.1.3 hotfix-reshipped** — the v0.1.4 tag was never
+      released; the fix folded into v0.1.3 itself):
 - [x] **`setup_gateway_kali.sh: CFG_HISTORY_LOG: unbound variable` (FIXED,
       release-blocking)**: the script runs `set -euo pipefail` but assigned
       `CFG_HISTORY_LOG` only in step 6 (config.yaml, :740 old), while step 4.5
@@ -408,10 +409,16 @@ Checked 2026-08-12 (**v0.1.4 hotfix** — `.deb` installs died at the dnslog ste
       assignment-before-first-use (`test_setup_script_defines_cfg_history_log_before_use`,
       21 packaging tests green). The venv pip retries in the same install log
       were the box's own DNS being down — environmental, pip succeeded.
-- [x] version **0.1.3 → 0.1.4** + CHANGELOG `[0.1.4]` (Fixed) + tagged
-      **`v0.1.4`**; the release body composes from the changelog section as
-      usual. Box recovery = re-run the 0.1.4 install (postinst re-runs the
-      idempotent setup).
+- [x] **released AS 0.1.3, not 0.1.4** (user decision: the tag was only hours
+      old, no new version number for a same-day fix). The v0.1.4 tag + release
+      + `.deb` were deleted, the fix's `### Fixed` section landed under
+      `[0.1.3]` in CHANGELOG.md, `quota/version.py` stayed `0.1.3`, the v0.1.3
+      release was recreated from the fixed tree (release body composes from the
+      changelog section as usual), and the stale `quota-manager_0.1.4_all.deb`
+      was removed from the apt repo's pool before the apt-repo workflow
+      re-published the fixed 0.1.3 `.deb`. Box recovery = re-run the install
+      (`apt install ./quota-manager_0.1.3_all.deb` — postinst re-runs the
+      idempotent setup; the apt repo now serves the fixed .deb too).
 
 Checked 2026-08-12 (**v0.1.3 released** — VPN share + DNS filtering + the apt repo shipped):
 - [x] **version bumped `0.1.2` → `0.1.3`** (`quota/version.py`, the single source
