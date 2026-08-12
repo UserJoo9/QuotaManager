@@ -894,6 +894,9 @@ select option { background: #0f0b18; }
 .stat-value.ok { color: var(--ok); }
 .stat-value.off { color: var(--text-dim); }
 
+/* VPN share (Network tab): the status line under the switch */
+.vpn-status.ok { color: var(--ok); }
+
 .events { list-style: none; max-height: 300px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
 .events li {
   font-size: 0.82rem;

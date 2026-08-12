@@ -61,8 +61,8 @@ def test_index_served(client):
     assert "System logs" in r.text
     assert 'id="panel-logs"' in r.text
     assert 'class="glass card admin-card"' in r.text
-    assert "assets/app.js?v=33" in r.text
-    assert "assets/styles.css?v=38" in r.text
+    assert "assets/app.js?v=34" in r.text
+    assert "assets/styles.css?v=39" in r.text
     # the internet reachability pill lives in the top bar, not the WAN status
     # panel (probed every 15 s; dot color = reachability).
     assert 'id="net-status"' in r.text
@@ -271,5 +271,5 @@ def test_history_assets_bumped(client):
     presets, import, history status badges/quick-actions) took them to
     38/33 — this always checks the CURRENT baseline, not the original bump."""
     r = client.get("/")
-    assert "assets/styles.css?v=38" in r.text
-    assert "assets/app.js?v=33" in r.text
+    assert "assets/styles.css?v=39" in r.text
+    assert "assets/app.js?v=34" in r.text

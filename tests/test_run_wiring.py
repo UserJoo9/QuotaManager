@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from core import config as cfg_mod
 from quota.arp_scan import ArpScanner
 from quota.engine import GATEWAY_MAC, EngineCounters, EngineSnapshot
+from quota.vpnshare import VpnShareStatus
 from run import Gateway
 
 
@@ -664,6 +665,82 @@ def test_arp_lock_not_started_under_wan(tmp_path):
         loop.run_until_complete(gw.startup())
         assert gw.arp_lock is None, \
             "WAN mode must not start the ARP gateway-lock responder"
+    finally:
+        loop.run_until_complete(gw.shutdown())
+        loop.close()
+
+
+class _FakeVpnManager:
+    """Stands in for VpnShareManager in the wiring test: records the
+    reconcile args, returns a scripted VpnShareStatus."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[bool, str]] = []
+        self.status = VpnShareStatus()
+
+    def reconcile(self, enabled: bool, pin: str) -> VpnShareStatus:
+        self.calls.append((enabled, pin))
+        return self.status
+
+
+class _FakeEngineRelay:
+    """Records engine.set_vpn_relay calls (the real NftablesEngine is
+    disabled in hermetic configs; quota/nftables.py's own tests cover the
+    insert/delete rule program). ``stop`` satisfies shutdown()."""
+
+    def __init__(self) -> None:
+        self.calls: list[bool] = []
+
+    def set_vpn_relay(self, active: bool) -> None:
+        self.calls.append(active)
+
+    def stop(self) -> None:
+        pass
+
+
+def test_sync_vpn_share_pins_tunnel_and_suspends_gateway_metering(tmp_path):
+    """The maintenance loop's VPN sync must: reconcile the manager toward the
+    DB switch, PIN a detected tunnel so a multi-VPN box stays on the same
+    interface, and keep the box's own gateway metering suspended while the
+    relay is actually applied (not when the switch merely says on)."""
+    cfg = _cfg(tmp_path)
+    gw = Gateway(cfg)
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(gw.startup())
+        if gw._maintenance_task is not None:
+            gw._maintenance_task.cancel()  # the background loop must not race
+            try:
+                loop.run_until_complete(gw._maintenance_task)
+            except asyncio.CancelledError:
+                pass
+        fake_mgr = _FakeVpnManager()
+        fake_engine = _FakeEngineRelay()
+        gw.vpn_manager = fake_mgr
+        gw.engine = fake_engine  # type: ignore[assignment]
+        # switch on, no pin yet -> reconcile(enabled=True, pin=""), manager
+        # reports utun4 -> the pin is persisted for the NEXT tick
+        loop.run_until_complete(gw.database.set_setting(
+            "vpn_share_enabled", "1"))
+        fake_mgr.status = VpnShareStatus(
+            state="on", interface="utun4", candidates=["utun4"])
+        loop.run_until_complete(gw._sync_vpn_share())
+        assert fake_mgr.calls == [(True, "")]
+        pin = loop.run_until_complete(
+            gw.database.get_setting("vpn_share_interface", ""))
+        assert pin == "utun4"
+        # the relay IS applied -> the box's own metering must be suspended
+        assert fake_engine.calls == [True]
+        assert gw._last_vpn_status["state"] == "on"
+        # switch off -> reconcile(enabled=False, pinned utun4) and the
+        # engine restore fires (relay no longer applied)
+        loop.run_until_complete(gw.database.set_setting(
+            "vpn_share_enabled", "0"))
+        fake_mgr.status = VpnShareStatus(state="off")
+        loop.run_until_complete(gw._sync_vpn_share())
+        assert fake_mgr.calls[1] == (False, "utun4")
+        assert fake_engine.calls == [True, False]
+        assert gw._last_vpn_status["state"] == "off"
     finally:
         loop.run_until_complete(gw.shutdown())
         loop.close()

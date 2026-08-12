@@ -192,6 +192,16 @@ or `/api/{users,devices}/{id}/dns` edit, so a rule change does not wait for
 the next tick. See [DNS filtering](#dns-filtering-domain-rules-presets-per-client-dns-servers)
 below for the full design.
 
+**VPN share** (when `cfg.vpn_share.enabled`, default off): `_sync_vpn_share`
+(boot + every maintenance tick + the Network-tab toggle via `_apply_vpn_now`)
+reads the DB switch (`vpn_share_enabled`, set from the Network tab), reconciles
+`VpnShareManager` off the event loop, persists the detected tunnel as the pin,
+feeds `engine.set_vpn_relay(state == "on")` — suspending the box's OWN gateway
+metering while the relay doubles the volume through its input/output hooks —
+and caches `_last_vpn_status` for the API. The `_vpn_lock` keeps the toggle and
+the tick from reconciling concurrently. See
+[VPN share](#vpn-share) below for the full design.
+
 ---
 
 ## Quota model
@@ -502,6 +512,64 @@ always-hands-on step is the physical router rewiring.
 
 ---
 
+## VPN share
+
+Sends the whole client subnet through a VPN the box itself runs — sing-box,
+xray, WireGuard or tun2socks in **TUN mode** — so every device's internet
+exits at the VPN provider's IP while quota accounting/blocking (nftables) and
+speed shaping (tc) keep working. Pure subprocess + sysfs plumbing, no threads.
+
+**The mechanism is one policy rule, not a NAT rewrite.** With the Network-tab
+switch ON, `VpnShareManager.reconcile(enabled, pin)` (`quota/vpnshare.py`)
+programs:
+
+- an `ip rule add pref <vpn_share.rule_pref, 1000> from <client_subnet> lookup
+  <vpn_share.route_table, 200>` — below `local`/`main`, so it only wins for IPs
+  the main table has no better match for (LAN routes stay direct);
+- the route-table content: `default via <tunnel-peer>` (the point-to-point
+  peer `ip -o -4 addr` reports for the TUN, cached), plus direct routes for the
+  client + uplink subnets via `lan_interface()` so LAN traffic never tunnels,
+  mirroring the nftables local-net exclusions.
+
+Rules only ever land when sysfs confirms the tunnel device exists (`/sys/class/
+net/<iface>`), and a missing tunnel is never routed into — that would
+blackhole the subnet. `peer_ip()` handles both `ip -o` shapes (bare local
+address vs `local ... peer ...`); the dev-only route falls back to `scope link`
+(no peer/HUTI interfaces like WireGuard's). The detected device is **pinned in
+the DB** (`vpn_share_interface` set by run.py; the `vpn_share.interface`
+config value is the initial pin), so a multi-VPN box or a reboot re-applies the
+same interface. `remove()` tears the rule + table down deterministically and
+`is_rule_installed()` makes every call idempotent — `reconcile` self-heals any
+crash/reboot/tunnel-restart leftover on the next 15 s tick.
+
+**Gateway-meter suspension (`NftablesEngine.set_vpn_relay`, vpn share only).**
+Relayed volume traverses the box's own input/output hooks a second time
+(client → forward → tunnel → uplink), which would be charged AGAIN to the
+protected Gateway user — and a quota-cut Gateway's `gw_blocked` drop would kill
+the household's VPN. Suspension inserts an unconditional
+`comment "quota-vpn-relay" accept` **first** in the input/output chains (above
+the DNS/DHCP exemptions, `gw_blocked` drops and `q_gw` counters) and restores
+by deleting exactly that rule **by handle** (`nft -a list chain` lookup,
+cache-gated like the blocked set). A failed insert is never claimed (retry next
+tick); forward-chain per-device quota + the ARP lock stay untouched. The state
+is enforced from the APPLIED relay state, not the switch.
+
+**Wiring.** run.py `_sync_vpn_share` runs at boot + every maintenance tick (+
+immediately on the Network-tab toggle) under `_vpn_lock`, reconciles off the
+event loop, persists the pin, feeds `engine.set_vpn_relay` and caches
+`_last_vpn_status` (never the switch — always the applied state) for
+`GET /api/network`. `vpn_share.enabled: false` in config.yaml means the manager
+is never built and the API's `status` key is absent (degraded boot no-op).
+
+**Limits, honestly:** IPv4 only (a provider's IPv6 TUN is not routed); DoH/DoT
+is untouched (DNS stays on dnsmasq, and DNS-layer filtering still applies); if
+the tunnel drops, the subnet is blackholed on purpose — never silently
+re-routed around the quota; the box's own internet still flows (and stays
+metered into the Gateway user) while relaying — the suspension only covers the
+relay volume that would otherwise be double-counted.
+
+---
+
 ## Key design decisions
 
 These are the non-obvious choices that keep the system correct and cheap:
@@ -785,6 +853,18 @@ dns_filter:
   rules_file: quota-domains.conf # domain rules + DNS-server overrides (generated)
   reload_dnsmasq: true        # restart dnsmasq when the generated files change
   preset_cache_dir: data/dns_presets
+
+vpn_share:
+  enabled: false              # "VPN share": route the whole client subnet
+                              #   through a VPN tunnel the box runs (TUN mode
+                              #   sing-box/xray/WireGuard/tun2socks). The real
+                              #   switch lives in the Network tab (DB setting);
+                              #   false here = the manager is never built.
+  interface: ""               # initial tunnel-device pin; empty => auto-detect
+                              #   the first non-LAN, network-up interface and
+                              #   pin it in the DB (vpn_share_interface)
+  route_table: 200            # iproute2 table the policy rule points at
+  rule_pref: 1000             # ip rule preference (below local/main)
 ```
 
 > **Speed shaping is switched on in the dashboard, not in this YAML.**
@@ -820,7 +900,7 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | GET/POST | `/api/bundle` | read / update bundle (`total_gb`, `reset_day`, or `add_gb` to recharge mid-month). A POST makes the dashboard the bundle owner (`bundle_source=dashboard`) |
 | POST | `/api/reset-month` | force an early period roll-over |
 | GET/POST | `/api/guest` | guest mode: auto-register new devices with their own small allowance |
-| GET/POST | `/api/network` | speed-shaping settings: `enabled`, `total_down_mbps`, `total_up_mbps`, `aqm` |
+| GET/POST | `/api/network` | speed-shaping settings: `enabled`, `total_down_mbps`, `total_up_mbps`, `aqm` — plus `vpn_share: {enabled, interface, status?}` from the DB (status = the cached applied state, present only when a manager is wired — `vpn_share.enabled: false` in config.yaml means boot without one) |
 | GET/POST | `/api/wan` | strong-mode topology: `GET` live status (topology/source/pending/ppp0), `POST {"topology": "lan"\|"wan", "pppoe_user", "pppoe_password", "wan_if"}` APPLIES the topology live — rewrites config.yaml + the DB together, runs `scripts/topology.sh` (NIC + dnsmasq + PPPoE dial) and schedules a restart (`restart_scheduled`, `script_output`). Creds travel to the applier via the environment, never argv. On an applier failure config.yaml + the DB are ROLLED BACK to the previous state (no restart) |
 | POST | `/api/wan/test` | test the PPPoE credentials WITHOUT changing anything: dials a throwaway `ppp200` link via `scripts/test_pppoe.sh` with `{"pppoe_user", "pppoe_password", "wan_if"}` and reports `status` (success/auth-failed/no-pppoe-server/link-down/error), the negotiated local/peer IPs, `internet` (ping check), and `detail` — never touches config.yaml, the DB, `ppp0`, routing or DNS |
 | GET | `/api/milestone` | **public** — the requesting device's user's consumption + per-device breakdown (resolved by source IP via its DHCP lease; `recognized: false` for a lease-less IP). Pairs with the `/milestone` page |
@@ -874,7 +954,13 @@ QuotaManager/
 │   │                         #   top-ups, bundle recharge, reset_day=0, period roll,
 │   │                         #   shaping settings (get/set)
 │   ├── nftables.py           # NftablesEngine (Linux): kernel counters + block set
-│   │                         #   + ARP gateway-lock deny rules (known_ips set)
+│   │                         #   + ARP gateway-lock deny rules (known_ips set);
+│   │                         #   set_vpn_relay: suspends the box's OWN gateway
+│   │                         #   metering while VPN share relays the household
+│   ├── vpnshare.py           # VpnShareManager: "VPN share" policy routing —
+│   │                         #   client subnet -> dedicated route table whose
+│   │                         #   default points at the box's TUN, LAN routes
+│   │                         #   kept local, idempotent reconcile + self-heal
 │   ├── shaping.py            # TcShaper (Linux): per-device + per-user speed caps,
 │   │                         #   low-latency fq_codel queues (HTB), two-tree design
 │   ├── arp_scan.py           # rogue static-IP detection: raw-socket ARP probe of
@@ -923,6 +1009,9 @@ QuotaManager/
     ├── test_config.py        # typed config parsing (Linux settings)
     ├── test_netmgr.py        # TopologyManager WAN/LAN apply + rollback + PPPoE test
     ├── test_topology.py      # detect_ppp / check_internet probes (fake `ip`)
+    ├── test_vpnshare.py      # VpnShareManager vs a fake `ip`: rule/route program,
+    │                         #   peer.parse, pin, reconcile, teardown
+    ├── test_dns_rules.py     # hosts/ABP parsing, wildcard scopes, rendering
     └── test_run_wiring.py    # run.py wiring + live boot + bundle reconcile +
                               #   dnsmasq lease sync + live-counter regression
 ```
@@ -970,12 +1059,18 @@ The suite covers:
 - **MAC vendor lookup** — vs the bundled IEEE registry.
 - **`run.py` wiring** — config → DB bundle reconcile, dnsmasq lease sync,
   live-counter regression, the topology override, the DNS-history drain /
-  persist / prune / disabled paths.
+  persist / prune / disabled paths, the VPN-share pin + relay-suspension path.
 - **The DNS-history pipeline** — `quota/dnslog.py` parser (extra-mode shapes
   including the client ip/port between serial and `query[` — the live-box shape
   — and the bare shape, PTR filtering, non-query lines rejected), the tailer
   (EOF seek, rotation/truncation, partial lines, NUL holes, missing file), and
   the `dns_history` DB (upserts, aggregation, per-user prune).
+- **The VPN-share manager** — `quota/vpnshare.py` vs a fake `ip` binary: the
+  rule/route program order, `peer_ip` both output shapes, LAN-route exclusions,
+  dev-only `scope link` fallback, error propagation, the pin, reconcile
+  idempotence + self-heal, teardown.
+- **Domain filtering** — `quota/dns_rules.py`: hosts/ABP parsing, wildcard
+  scopes, resolution order, the tag-scoped dnsmasq render + reload gate.
 
 Everything that needs hardware/root (nftables, tc, DHCP, raw sockets, PPPoE) is
 simulated or disabled in tests, so the suite runs anywhere.

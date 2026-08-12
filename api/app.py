@@ -130,6 +130,8 @@ def create_app(
     shaping_sync: Optional[Callable[[], object]] = None,
     report_config: object | None = None,
     dns_apply: Optional[Callable[[], object]] = None,
+    vpn_apply: Optional[Callable[[], object]] = None,
+    vpn_status_getter: Optional[Callable[[], dict]] = None,
 ) -> FastAPI:
     app = FastAPI(title="Quota Manager", version=__version__,
                   docs_url="/api/docs", openapi_url="/api/openapi.json")
@@ -158,6 +160,19 @@ def create_app(
             return
         try:
             asyncio.create_task(dns_apply())
+        except RuntimeError:  # no running event loop (should not happen in a route)
+            pass
+
+    def _schedule_vpn_apply() -> None:
+        """Apply a VPN-share toggle in the kernel right away (no 15 s tick
+        wait): policy routing into/out of the tunnel + the gateway-meter
+        suspension. Fire-and-forget, same pattern as
+        ``_schedule_shaping_sync``; ``vpn_apply`` is run.py's callback and is
+        a no-op when unset (tests / degraded boot)."""
+        if vpn_apply is None:
+            return
+        try:
+            asyncio.create_task(vpn_apply())
         except RuntimeError:  # no running event loop (should not happen in a route)
             pass
 
@@ -1226,7 +1241,19 @@ def create_app(
 
     @app.get("/api/network", dependencies=[Depends(_require_auth)])
     async def get_network() -> dict[str, Any]:
-        return await service.get_shaping_config()
+        result = await service.get_shaping_config()
+        # VPN share rides the same Network-tab payload: the switch (persisted),
+        # the pinned tunnel interface, and the LIVE status from the kernel-side
+        # manager (None in tests / degraded boot — the UI shows just the
+        # persisted switch).
+        result["vpn_share"] = await service.get_vpn_config()
+        if vpn_status_getter is not None:
+            try:
+                result["vpn_share"]["status"] = vpn_status_getter()
+            except Exception:  # noqa: BLE001 — a status probe must never 500 the panel
+                result["vpn_share"]["status"] = {"state": "error",
+                                                 "message": "status probe failed"}
+        return result
 
     @app.post("/api/network", dependencies=[Depends(_require_auth)])
     async def set_network(body: NetworkUpdate) -> dict[str, Any]:
@@ -1238,6 +1265,19 @@ def create_app(
         # Apply to the kernel NOW — no 15 s wait for the maintenance tick, so a
         # saved Network-tab change is enforced immediately (no page refresh).
         _schedule_shaping_sync()
+        # VPN-share toggle: persist the switch, then fire the immediate kernel
+        # reconcile (policy routing + the gateway-meter suspension) the same
+        # way shaping is applied right away.
+        if body.vpn_share is not None:
+            await service.set_vpn_share(body.vpn_share)
+            _schedule_vpn_apply()
+        result["vpn_share"] = await service.get_vpn_config()
+        if vpn_status_getter is not None:
+            try:
+                result["vpn_share"]["status"] = vpn_status_getter()
+            except Exception:  # noqa: BLE001
+                result["vpn_share"]["status"] = {"state": "error",
+                                                 "message": "status probe failed"}
         return result
 
     # -- auth -----------------------------------------------------------------

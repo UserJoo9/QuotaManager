@@ -1,4 +1,4 @@
-"""API integration tests (FastAPI TestClient + real temp SQLite DB)."""
+﻿"""API integration tests (FastAPI TestClient + real temp SQLite DB)."""
 
 from __future__ import annotations
 
@@ -119,10 +119,11 @@ def test_device_crud_and_dashboard(client):
 def test_network_and_user_speed_caps(client):
     c, _, _ = client
     _login(c)
-    # defaults: shaping off, no totals, AQM on
+    # defaults: shaping off, no totals, AQM on, VPN share off
     n = c.get("/api/network").json()
     assert n == {"enabled": False, "total_down_mbps": 0.0,
-                 "total_up_mbps": 0.0, "aqm": True}
+                 "total_up_mbps": 0.0, "aqm": True,
+                 "vpn_share": {"enabled": False, "interface": ""}}
 
     # partial POST — only the given fields change
     r = c.post("/api/network", json={"enabled": True, "total_down_mbps": 100})
@@ -1303,6 +1304,27 @@ def test_milestone_notify_marks_once(tmp_path):
     asyncio.get_event_loop().run_until_complete(database.close())
 
 
+def test_vpn_share_toggle_via_network(client):
+    """The Network-tab VPN-share switch persists through /api/network and
+    surfaces the applied relay status (None status when no gateway is wired —
+    the degraded boot path)."""
+    c, _, _ = client
+    _login(c)
+    n = c.get("/api/network").json()
+    assert n["vpn_share"] == {"enabled": False, "interface": ""}
+
+    r = c.post("/api/network", json={"vpn_share": True})
+    assert r.status_code == 200
+    vs = r.json()["vpn_share"]
+    assert vs["enabled"] is True
+    # switch persists across requests (the DB setting, not a memory toggle)
+    assert c.get("/api/network").json()["vpn_share"]["enabled"] is True
+
+    r = c.post("/api/network", json={"vpn_share": False})
+    assert r.json()["vpn_share"]["enabled"] is False
+    assert r.json()["vpn_share"]["interface"] == ""
+
+
 def test_milestone_page_is_public(tmp_path):
     """GET /milestone serves the HTML page with no session cookie."""
     import asyncio
@@ -1319,7 +1341,7 @@ def test_milestone_page_is_public(tmp_path):
         # shares the retuned stylesheet; pin the cache-bust so the theme
         # actually reaches this page (browser-cached ?v=34 would show the
         # pre-purple sheet).
-        assert "assets/styles.css?v=37" in r.text
+        assert "assets/styles.css?v=38" in r.text
     asyncio.get_event_loop().run_until_complete(database.close())
 
 
@@ -1371,7 +1393,7 @@ def test_report_page_respects_gate(tmp_path):
         assert r.status_code == 200
         assert "text/html" in r.headers["content-type"]
         assert b"Consumption report" in r.content
-        assert "assets/styles.css?v=37" in r.text
+        assert "assets/styles.css?v=38" in r.text
     with _client_from(app, "8.8.8.8") as c:
         assert c.get("/report").status_code == 403
     asyncio.get_event_loop().run_until_complete(database.close())

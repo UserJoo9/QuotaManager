@@ -6,8 +6,38 @@ The version is the single source of truth in `quota/version.py`; a release tag
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-08-12
+
 ### Added
 
+- **VPN share** — the whole client subnet through the VPN the box runs. Run a
+  VPN client on the gateway laptop in TUN mode (sing-box / xray / WireGuard /
+  tun2socks) and flip the **VPN share** switch in the Network tab: every
+  device's internet exits at the VPN provider's IP while per-device quota
+  counting/blocking (nftables forward chain) and speed shaping (tc) keep
+  working. One `ip rule` diverts the client subnet into a dedicated route table
+  whose default points at the tunnel; direct LAN routes (client + uplink
+  subnets) stay local. The tunnel is auto-detected and **pinned** in the DB
+  (`vpn_share_interface`) so a multi-VPN / rebooted box re-applies the same
+  interface; the idempotent reconcile self-heals any leftover rule on the next
+  15 s tick. The box's OWN gateway metering is auto-suspended while relaying
+  (`nftables.set_vpn_relay`) — the relay volume would otherwise be counted a
+  second time against the protected Gateway user (and a quota-cut Gateway would
+  kill the household's VPN). Config: `vpn_share:` block; `vpn_share.enabled:
+  false` = manager never built.
+- **Domain filtering** (dashboard **DNS** tab) — host-based filtering at the
+  box's DNS: **block / allow / redirect** any domain for a **user, device, or
+  globally** (wildcards supported, e.g. `*.youtube.com`), turn on **blocklist
+  presets** (ads-tracking, social-media, streaming, gambling — hosts or
+  AdBlock-Plus source lists), and set a **per-user / per-device upstream DNS
+  server** (e.g. a family-friendly resolver). Rules render into dnsmasq's
+  `conf-dir` (`quota-tags.conf` per-MAC DHCP tags + `quota-domains.conf`
+  tag-restricted `address=`/`server=` lines), so no new service runs and an
+  unchanged render never touches dnsmasq. The History tab's per-domain rows
+  carry a live blocked/allowed/redirected badge with one-click
+  Block-everyone / Block-this-device / Allow buttons (`/api/dns/rules/quick`).
+  Config: `dns_filter:` block (`enabled: true` by default; `false` = entirely
+  inert).
 - **Signed apt repository** so Linux boxes install/upgrade Quota Manager the
   native way (`apt-get update && apt-get install quota-manager`). `.github/
   workflows/apt-repo.yml` fires after every successful `release` run, downloads

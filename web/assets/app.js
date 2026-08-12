@@ -1144,8 +1144,37 @@ async function refreshNetwork() {
     $("set-total-down").value = n.total_down_mbps || "";
     $("set-total-up").value = n.total_up_mbps || "";
     $("aqm-toggle").checked = n.aqm;
+    renderVpnShare(n);
     renderNetworkPreview(n);
   } catch (_) { /* network panel is not critical */ }
+}
+
+/* VPN share: the Network-tab switch routes the whole client subnet through
+   the box's VPN tunnel (policy routing, quota/vpnshare.py). The persisted
+   switch rides /api/network; the `status` sub-key is the kernel-side state
+   the maintenance tick cached. */
+function renderVpnShare(n) {
+  const toggle = $("vpn-toggle"), statusEl = $("vpn-status");
+  if (!n || !toggle || !statusEl) return;
+  const vs = n.vpn_share || {};
+  const st = vs.status || {};
+  toggle.checked = !!vs.enabled;
+  const iface = st.interface || vs.interface || "";
+  let text, cls = "";
+  if (st.state === "on") {
+    text = `Sharing through ${iface || "the VPN tunnel"} — every device's internet exits via the VPN.`;
+    cls = "ok";
+  } else if (st.state === "no-interface") {
+    text = "No VPN tunnel detected — start the VPN client in TUN mode first.";
+  } else if (st.state === "error") {
+    text = `Error: ${st.message || "could not program the routing."}`;
+  } else if (vs.enabled) {
+    text = "Waiting for the gateway to apply…";
+  } else {
+    text = "Off — devices use the direct uplink.";
+  }
+  statusEl.textContent = text;
+  statusEl.className = `vpn-status muted small ${cls}`.trim();
 }
 
 function renderNetworkPreview(n) {
@@ -1163,6 +1192,15 @@ function renderNetworkPreview(n) {
         `<li><span>${esc(d.name || d.mac)}</span>` +
         `<span class="muted">↓${d.limit_down_mbps || "∞"} ↑${d.limit_up_mbps || "∞"}</span></li>`).join("")
     : `<li class="muted">No device caps set.</li>`;
+  const vpn = $("np-vpn");
+  if (vpn) {
+    const vs = (n.vpn_share || {}).status || {};
+    const on = vs.state === "on";
+    vpn.textContent = on
+      ? `On · ${vs.interface || (n.vpn_share || {}).interface || "tunnel"}`
+      : "Off";
+    vpn.className = `stat-value ${on ? "ok" : "off"}`;
+  }
 }
 
 async function submitNetwork() {
@@ -1171,6 +1209,7 @@ async function submitNetwork() {
     total_down_mbps: parseFloat($("set-total-down").value) || 0,
     total_up_mbps: parseFloat($("set-total-up").value) || 0,
     aqm: $("aqm-toggle").checked,
+    vpn_share: $("vpn-toggle").checked,
   };
   await API.post("/api/network", body);
   await refreshAll();

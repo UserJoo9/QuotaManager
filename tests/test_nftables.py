@@ -33,6 +33,12 @@ class FakeNft:
         self.counters: dict[str, int] = {}
         #: (table, rule-expr) in insertion order; ``rules`` exposes the exprs.
         self._rules: list[tuple[str, str]] = []
+        #: (table, hook) -> [(handle, expr)] — what ``nft -a list chain``
+        #: reports back for that chain (the VPN-relay handle lookup reads it).
+        self.chain_rules: dict[tuple[str, str], list[tuple[int, str]]] = {}
+        #: When True, ``nft insert rule`` fails (simulates no-root / nft
+        #: error) — the relay suspension must not be claimed.
+        self.reject_inserts: bool = False
         #: table -> setname -> member IPs
         self._sets: dict[str, dict[str, set[str]]] = {
             "inet quota_gateway": {"blocked": set(), "known_ips": set()},
@@ -67,6 +73,16 @@ class FakeNft:
         if cmd == "-j":  # nft -j list counters
             return self._list_counters()
 
+        if cmd == "-a" and args[1] == "list" and args[2] == "chain":
+            # nft -a list chain inet quota_gateway output  ->  rule lines
+            # with their handles ("... # handle 3"), the shape the engine's
+            # VPN-relay restore path parses.
+            table, hook = args[3], args[4]
+            lines = ""
+            for handle, expr in self.chain_rules.get((table, hook), []):
+                lines += f"\t{expr} # handle {handle}\n"
+            return 0, lines
+
         if cmd == "add" and args[1] == "table":
             if args[2] in self.tables:
                 return 1, "File exists"
@@ -79,11 +95,35 @@ class FakeNft:
             # must preserve counters here too. Only the named table is flushed.
             table = args[2]
             self._rules = [(t, e) for t, e in self._rules if t != table]
+            self.chain_rules = {
+                (t, h): v for (t, h), v in self.chain_rules.items()
+                if t != table
+            }
             for s in self._sets.setdefault(table, {}):
                 self._sets[table][s].clear()
             return 0, ""
         if cmd == "add" and args[1] in ("chain", "set", "rule"):
             self._rules.append((self._table(args), args[-1]))
+            return 0, ""
+        if cmd == "insert" and args[1] == "rule":
+            if self.reject_inserts:
+                return 1, "fake: no permission"
+            # nft insert rule inet quota_gateway output <expr> — the
+            # VPN-relay suspension. Recorded in the chain listing so the
+            # engine's handle lookup finds it (handle grows per chain).
+            table, hook = args[2].rsplit(" ", 1)
+            handle = len(self.chain_rules.get((table, hook), [])) + 1
+            self.chain_rules.setdefault((table, hook), []).append(
+                (handle, args[3]))
+            return 0, ""
+        if cmd == "delete" and args[1] == "rule":
+            # nft delete rule inet quota_gateway output handle 3 — drops the
+            # exact relay accept, leaving every other rule untouched.
+            table, hook = args[2].rsplit(" ", 1)
+            handle_s = args[3].removeprefix("handle ").strip()
+            deleted = [(h, e) for h, e in self.chain_rules.get((table, hook), [])
+                       if str(h) != handle_s]
+            self.chain_rules[(table, hook)] = deleted
             return 0, ""
         if cmd == "add" and args[1] == "counter":
             name = args[-1]
@@ -718,6 +758,86 @@ def test_count_gateway_false_skips_counters_but_blocks():
     # and the toggle still programs membership
     eng.set_gateway_blocked(True)
     assert _gateway_set(fake) == {"0.0.0.0/0"}
+
+
+def test_vpn_relay_suspends_gateway_metering_when_active():
+    """VPN share on -> unconditional accepts land FIRST in the box's own
+    input/output chains (above gw_blocked + q_gw counters), so relayed client
+    traffic passes and is never double-charged to the Gateway user."""
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    eng.set_vpn_relay(True)
+    inserted = [c for c in fake.calls
+                if c[1] == "insert" and c[2] == "rule"]
+    assert len(inserted) == 2
+    assert [c[3] for c in inserted] == [
+        "inet quota_gateway output", "inet quota_gateway input"]
+    for c in inserted:
+        assert c[4] == 'comment "quota-vpn-relay" accept'
+    # the handles were actually verified by re-reading the chains
+    listing = [c for c in fake.calls
+               if c[1] == "-a" and c[2] == "list" and c[3] == "chain"]
+    assert len(listing) == 2
+
+
+def test_vpn_relay_active_is_claimed_only_when_rules_hold():
+    """A failed insert (no root / nft error) must NOT claim the suspension —
+    _vpn_relay_active stays None so the maintenance tick retries."""
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    fake.reject_inserts = True  # nft errors mean no rule landed
+    eng.set_vpn_relay(True)
+    assert eng._vpn_relay_active is None
+
+
+def test_vpn_relay_restore_deletes_exactly_the_accept_rules():
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    eng.set_vpn_relay(True)
+    assert eng._vpn_relay_active is True
+    eng.set_vpn_relay(False)
+    deletes = [c for c in fake.calls
+               if c[1] == "delete" and c[2] == "rule"]
+    assert len(deletes) == 2
+    for c in deletes:
+        assert c[3].startswith("inet quota_gateway ")
+    assert not any(fake.chain_rules.values())  # both rules removed
+    assert eng._vpn_relay_active is False
+
+
+def test_vpn_relay_restore_keeps_untouched_rules():
+    """Only the quota-vpn-relay accept is deleted — the exemptions, gw_blocked
+    drops and q_gw counters under it stay (the fake keeps unrelated rules)."""
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    fake.chain_rules.setdefault(("inet quota_gateway", "output"), []).append(
+        (9, 'comment "dns-exempt" accept'))
+    eng.set_vpn_relay(True)
+    eng.set_vpn_relay(False)
+    remaining = {h for h, _ in
+                 fake.chain_rules.get(("inet quota_gateway", "output"), [])}
+    assert 9 in remaining
+    assert eng._vpn_relay_active is False
+
+
+def test_vpn_relay_restore_with_missing_rule_stays_uncommitted():
+    """If the listing can't see the accept (e.g. the engine restarted and
+    nft lost the table), restore must not delete blind — and it settles on
+    the accurate False state (no relay accept in the kernel)."""
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    eng.set_vpn_relay(True)
+    fake.chain_rules = {}  # rules vanish behind the engine's back
+    eng.set_vpn_relay(False)
+    deletes = [c for c in fake.calls
+               if c[1] == "delete" and c[2] == "rule"]
+    assert deletes == []  # nothing to delete by handle
+    assert eng._vpn_relay_active is False  # honest: relay is off in the kernel
 
 
 def test_gateway_dhcp_exemption_rules_are_valid_nft_grammar():

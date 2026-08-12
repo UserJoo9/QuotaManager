@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from ipaddress import ip_address, ip_network
 from typing import Any, Callable
@@ -270,6 +271,11 @@ class NftablesEngine:
         self._last_gateway = EngineCounters()
         #: last-programmed ``gw_blocked`` membership (None = never programmed).
         self._gateway_blocked: bool | None = None
+        #: VPN-share relay suspension state (None = never programmed). While
+        #: True the input/output gateway chains carry a first-position accept
+        #: (``set_vpn_relay``) so the box's own metering is inert — the box is
+        #: relaying the household's VPN, not consuming the bundle itself.
+        self._vpn_relay_active: bool | None = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -556,6 +562,77 @@ class NftablesEngine:
         the kernel — not just what the UI toggle says.
         """
         return self._gateway_blocked
+
+    def set_vpn_relay(self, active: bool) -> None:
+        """Suspend (True) or restore the box's own gateway metering.
+
+        With "VPN share" on, the box relays the whole household through its
+        tunnel — every client byte crosses the box's input/output hooks a
+        second time (client -> forward -> tunnel -> uplink). Without this,
+        the relay volume would be charged AGAIN to the protected "Gateway"
+        user (the forward-chain per-device counters already counted it once)
+        and, worse, a quota-cut Gateway user's ``gw_blocked`` drop would kill
+        the VPN relay and with it every client's internet.
+
+        Suspension = an unconditional ``accept`` rule inserted FIRST in the
+        input/output chains (above the DNS/DHCP exemptions, the gw_blocked
+        drops and the q_gw counters); restoring = deleting exactly that rule
+        by handle. Forward-chain accounting/blocking and the ARP lock are
+        untouched — per-device quota enforcement keeps working through the
+        tunnel. Cache-gated like ``set_gateway_blocked``; a failure leaves
+        the desired state uncommitted so the maintenance tick retries.
+        """
+        if not self.available:
+            return
+        if active == self._vpn_relay_active:
+            return
+        if active:
+            self._vpn_relay_active = None  # not yet committed; retry on failure
+            self._run(["insert", "rule", f"{FAMILY} {self.table} output",
+                       'comment "quota-vpn-relay" accept'])
+            self._run(["insert", "rule", f"{FAMILY} {self.table} input",
+                       'comment "quota-vpn-relay" accept'])
+            # Only claim committed when BOTH hooks accepted the insert.
+            if self._vpn_relay_rule_holds("output") and \
+                    self._vpn_relay_rule_holds("input"):
+                self._vpn_relay_active = True
+                log.info("nftables: gateway metering suspended for VPN "
+                         "share (relay egress is household traffic)")
+            return
+        # Restoring: remove exactly the accept rule(s), leaving the original
+        # exemptions/drops/counters underneath untouched.
+        removed = True
+        for hook in ("output", "input"):
+            handle = self._find_vpn_relay_handle(hook)
+            if handle is not None:
+                removed &= self._run(["delete", "rule",
+                                      f"{FAMILY} {self.table} {hook}",
+                                      f"handle {handle}"])
+        self._vpn_relay_active = False if removed else None
+        if removed:
+            log.info("nftables: gateway metering restored (VPN share off)")
+
+    def _vpn_relay_rule_holds(self, hook: str) -> bool:
+        """Did the insert survive? A failed insert (no root / nft error)
+        means no rule — and the relay suspension must not be claimed."""
+        return self._find_vpn_relay_handle(hook) is not None
+
+    def _find_vpn_relay_handle(self, hook: str) -> str | None:
+        """Handle of our ``quota-vpn-relay`` accept in a hook chain, via
+        ``nft -a list chain`` (the ``-a`` flag prints ``# handle N``). None
+        when absent or the listing failed (a plain read — never disables
+        the engine)."""
+        code, out = self._run_command(
+            ["nft", "-a", "list", "chain", f"{FAMILY} {self.table}", hook])
+        if code != 0:
+            return None
+        for line in (out or "").splitlines():
+            if "quota-vpn-relay" not in line:
+                continue
+            m = re.search(r"#\s*handle\s+(\d+)", line)
+            if m:
+                return m.group(1)
+        return None
 
     def flush(self) -> EngineSnapshot:
         """Return byte deltas since the last flush, as an EngineSnapshot."""

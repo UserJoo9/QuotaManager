@@ -314,7 +314,15 @@ QuotaManager/
 │   │                         #   precedence, top-up, recharge, reset_day=0,
 │   │                         #   period roll; shaping settings (get/set)
 │   ├── nftables.py           # NftablesEngine (Linux): kernel counters + block
-│   │                         #   + ARP gateway-lock deny rules (known_ips set)
+│   │                         #   + ARP gateway-lock deny rules (known_ips set);
+│   │                         #   set_vpn_relay: suspends the box's OWN gateway
+│   │                         #   metering while VPN share relays the household
+│   │                         #   (accept FIRST in input/output, by handle)
+│   ├── vpnshare.py           # VpnShareManager: "VPN share" policy routing —
+│   │                         #   client subnet -> dedicated route table whose
+│   │                         #   default points at the box's TUN (sing-box/
+│   │                         #   xray/WireGuard), local LAN routes kept,
+│   │                         #   idempotent reconcile self-heals leftovers
 │   ├── shaping.py            # TcShaper (Linux): per-device + per-user speed
 │   │                         #   caps + low-latency queues (HTB + fq_codel),
 │   │                         #   single-NIC two-tree design (see SYSTEM_FLOW)
@@ -327,6 +335,10 @@ QuotaManager/
 │   ├── dnslog.py             # DNS browsing history: dnsmasq query-log parser
 │   │                         #   + DnslogTailer thread (dedicated thread,
 │   │                         #   bounded queue, rotation-safe) -> dns_history
+│   ├── dns_rules.py          # DnsRuleManager: host-based domain filtering —
+│   │                         #   block/allow/redirect per user or device, ABP
+│   │                         #   blocklist presets, rendered into dnsmasq
+│   │                         #   config (conf-file -> rules/*.conf)
 │   ├── topology.py           # WAN-topology detection: detect_ppp() reports
 │   │                         #   whether ppp0 is up + its address pair (WAN tab)
 │   ├── netmgr.py             # TopologyManager (v19/19.1): the dashboard WAN
@@ -351,6 +363,9 @@ QuotaManager/
 │       └── app.js            # WS client, dashboard render, user-grouped
 │                             #   device cards, user + device controls
 └── tests/
+    ├── test_vpnshare.py       # VpnShareManager vs a fake `ip` binary: rule/route
+    │                           #   program, peer parsing, pin, reconcile, teardown
+    ├── test_dns_rules.py      # hosts/ABP parsing, wildcard scopes, rendering
     ├── test_quota_service.py # period math, per-user allowance math, block
     │                         #   fan-out + bypass, recharge
     ├── test_api.py           # REST API integration (incl. user CRUD, recharge,
@@ -380,6 +395,104 @@ kernel counts and drops.
 ## [ORPHANS & PENDING]
 _Pending work lives in TASKS.md; orphans + debt are tracked in
 [LEGACY_DEBT_AND_RISKS] below. Version history (newest first):_
+
+Checked 2026-08-12 (**v0.1.3 released** — VPN share + DNS filtering + the apt repo shipped):
+- [x] **version bumped `0.1.2` → `0.1.3`** (`quota/version.py`, the single source
+      of truth) and tagged **`v0.1.3`**. The release ships everything that was
+      uncommitted/unreleased: the **VPN share** bundle (the entry below), the
+      **DNS filtering** feature (merged at `3eb999d` — domain rules, blocklist
+      presets, per-client DNS servers — its first release), and the **signed
+      apt repository** (the entry below — its first auto-published tag; the
+      `workflow_run` publishes this Release's `.deb` to gh-pages, so
+      `apt-get update && apt-get install quota-manager` now upgrades to v0.1.3;
+      the earlier "no version bump, no tag / stays 0.1.2" notes below are
+      superseded history).
+- [x] **release description = CHANGELOG** (existing behaviour, worked as
+      designed): the `[0.1.3] — 2026-08-12` section (VPN share + DNS filtering +
+      apt repo bullets, one per feature) was composed into the Release body with
+      the install note — no drift, nothing hand-written.
+- [x] **docs synced for the release**: README (Network tab row + DNS tab row,
+      a **VPN share** section with tunnel-up-first + "no silent fallback" notes,
+      a DNS filtering paragraph + troubleshooting + Known-limits bullets, ToC +
+      `.deb` example → 0.1.3); Structure_README (a full **VPN share** design
+      section, the `vpn_share:` config block, the `/api/network` vpn_share
+      payload, the maintenance-loop `_sync_vpn_share` paragraph, test-tree +
+      suite entries for vpnshare/dns_rules); CLAUDE.md this entry + the
+      vpnshare entry's release marker.
+- [x] full suite green per-file at the release baseline (~399 total; 69 API,
+      41 nftables, 24 vpnshare, 39 run-wiring, 28 dns-rules, 7 web-ui, 20
+      dnslog, 21 netmgr, 19 packaging, 18 vendor, 15 shaping, 15 topology, 14
+      arp_scan, 10 config, 8 arp_lock, 6 users_migration, 45 quota_service …) —
+      the known Windows `test_dnslog` exit hang is unchanged; pyflakes +
+      `node --check` clean.
+
+Checked 2026-08-12 (**VPN share** — the whole client subnet through the box's tunnel, uncommitted bundle):
+- [x] **`quota/vpnshare.py` (NEW)**: `VpnShareManager` — "VPN share" policy
+      routing. The box runs a VPN client in TUN mode (sing-box/xray, WireGuard,
+      or tun2socks); with the Network-tab switch on, ONE `ip rule` diverts the
+      client subnet into a dedicated route table (`vpn_share.route_table`,
+      default 200, below `local`/`main`) whose default route points at the
+      tunnel — every device's internet exits at the VPN provider's IP while
+      nftables forward-chain counting/blocking + tc shaping keep working.
+      Pure subprocess/sysfs, no threads: `reconcile(enabled, pin)` applies/
+      removes idempotently (self-heals a crash/reboot/tunnel-restart leftover
+      on the next 15 s tick), `peer_ip()` caches the tunnel's point-to-point
+      peer (`ip -o -4 addr`), LAN direct routes (client + uplink subnets) are
+      kept OUT of the tunnel via `lan_interface()` (mirrors the nftables
+      local-net exclusions), a missing tunnel device is NEVER routed into
+      (that would blackhole the subnet — the rule only lands after sysfs
+      confirms the interface), and `remove()`/`is_rule_installed()` tear down
+      deterministically. The auto-detected tunnel is PINNED in the DB
+      (`vpn_share_interface`) so a multi-VPN / restarted box re-applies the
+      same interface (`vpn_share.interface` config = the initial pin).
+- [x] **gateway-meter suspension** (`NftablesEngine.set_vpn_relay`, vpn share
+      only): the relay volume traverses the box's OWN input/output hooks a
+      second time (client → forward → tunnel → uplink), which would be charged
+      AGAIN to the protected "Gateway" user — and a quota-cut Gateway's
+      `gw_blocked` drop would kill the household's VPN. Suspension = an
+      unconditional `comment "quota-vpn-relay" accept` **inserted FIRST** in
+      the input/output chains (above DNS/DHCP exemptions, gw_blocked drops and
+      q_gw counters), restored by deleting exactly that rule **by handle**
+      (`nft -a list chain` lookup, cache-gated like `set_gateway_blocked`);
+      a failed insert is never claimed (retry next tick), forward-chain
+      per-device quota + ARP lock stay untouched. Enforced from the APPLIED
+      relay state, not the switch.
+- [x] **wiring** (`run.py`): `_sync_vpn_share` (boot + every maintenance tick
+      + Network-tab toggle via `_apply_vpn_now`) reads the DB switch under
+      `_vpn_lock`, reconciles off the event loop, persists the pin, feeds
+      `engine.set_vpn_relay(status.state == "on")`, and caches
+      `_last_vpn_status` for the API. `vpn_share.enabled: false` in config =
+      manager never built (degraded boot no-op).
+- [x] **settings + API + UI**: `service.get/set_vpn_share` (settings keys
+      `vpn_share_enabled`/`vpn_share_interface`, warn event on enable);
+      `NetworkUpdate.vpn_share` (optional bool — partial POST); `GET/POST
+      /api/network` carry `vpn_share: {enabled, interface, status?}` (status
+      from run.py's cached probe, absent when no manager is wired); Network
+      tab gains the VPN-share switch + applied-state line (`renderVpnShare`,
+      `?v=39`/`?v=34` cache busts); config.yaml `vpn_share:` block documented.
+- [x] **tests**: `tests/test_vpnshare.py` (24 — fake `ip` binary: rule/route
+      program order, `peer_ip` both shapes, LAN routes via lan_interface,
+      dev-only + scope-link fallback, via-peer, error propagation, pin
+      honoring, reconcile on/off idempotence + self-heal, teardown);
+      `test_nftables.py` +6 relay tests (accepts-first inserts, handle
+      verification, claimed-only-when-held, exact-handle restore keeping
+      unrelated rules, missing-rule honesty; FakeNft now answers
+      `nft -a list chain` + simulates insert/delete); one run-wiring test
+      (switch → reconcile → pin persist → relay suspension/restore);
+      one API test (`/api/network` vpn_share toggle round-trip); web_ui
+      cache-bust pins updated. **Session bugs fixed while landing these**:
+      the `peer_ip` regex demanded `inet <local>/<prefix> peer` but `ip -o`
+      prints a bare local address (real boxes never matched — returned "");
+      the dev-only fallback's first `ok()` failure left `state=ERROR` even
+      when the `scope link` retry succeeded (reworked to explicit
+      code-based retry, success resets to ON); `test_api.py`'s milestone/
+      report pins were stale (?v=37 vs the served ?v=38) + test_web_ui pins
+      (?v=33/v38 vs served ?v=34/v39) — cache-busts had advanced but their
+      tests hadn't. Full suite green per-file (69 API, 41 nftables, 24
+      vpnshare, 39 run-wiring, 7 web-ui, 28 dns-rules …) — the known Windows
+      `test_dnslog` exit hang (20/20 pass, process lingers) is unchanged;
+      pyflakes + `node --check` clean. **Now SHIPPED in v0.1.3** — released
+      2026-08-12 (see the entry above).
 
 Checked 2026-08-12 (signed apt repository — `apt install quota-manager` works):
 - [x] **infrastructure, NOT a release — no version bump, no tag** (`quota/version.py`

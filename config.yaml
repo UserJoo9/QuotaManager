@@ -106,6 +106,24 @@ shaping:
   client_subnet: ""
   ifb: ifb0
 
+# "VPN share" — route the whole client subnet through the box's VPN. The box
+# runs a VPN client in TUN mode (sing-box/xray `tun`, WireGuard, or tun2socks
+# bridging any v2rayN-style SOCKS/HTTP proxy); with the Network-tab switch ON,
+# every device's internet exits at the VPN provider's IP (policy routing into
+# the tunnel). Kernel quota counting, per-device blocks, and speed shaping keep
+# working (forward chain). DNS queries keep using dnsmasq's normal upstream.
+#   enabled: true          # lets the manager exist; the dashboard switch (DB)
+#                          # is the real master, same as shaping
+#   interface: ""          # tunnel pin (e.g. utun4/wg0); empty = auto-detect
+#                          # (first ARPHRD_NONE tun/utun/wg, stored in the DB)
+#   route_table: 200       # route table used by the client-subnet policy rule
+#   rule_pref: 1000        # rule priority (must beat the main table, 32766)
+vpn_share:
+  enabled: true
+  interface: ""
+  route_table: 200
+  rule_pref: 1000
+
 web:
   host: 0.0.0.0
   port: 8080

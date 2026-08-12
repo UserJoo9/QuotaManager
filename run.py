@@ -89,6 +89,18 @@ def _make_dns_manager(cfg: cfg_mod.Config) -> _dns_rules.DnsRuleManager | None:
         rules_file=dns_cfg.rules_file, reload_dnsmasq=dns_cfg.reload_dnsmasq)
 
 
+def _make_vpn_manager(cfg: cfg_mod.Config):
+    """Build the VPN-share policy-routing manager, or None when disabled."""
+    from quota.vpnshare import VpnShareManager  # lazy: sysfs + `ip`
+
+    vs_cfg = getattr(cfg, "vpn_share", None)
+    if vs_cfg is not None and not vs_cfg.enabled:
+        log.warning("VPN share disabled in config — client subnet is never "
+                    "routed into the box's tunnel")
+        return None
+    return VpnShareManager(cfg)
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Quota Manager gateway")
     p.add_argument("--config", default=None, help="path to config.yaml")
@@ -128,6 +140,15 @@ class Gateway:
         self.engine: NftablesEngine | None = None
         self.shaper: object | None = None  # quota.shaping.TcShaper (tc/ifb)
         self.dns_manager: _dns_rules.DnsRuleManager | None = None  # domain filtering
+        #: VPN-share policy routing (quota.vpnshare.VpnShareManager); None
+        #: when cfg.vpn_share.enabled is false. Reconciles the client-subnet
+        #: routing into the box's tunnel + the engine's gateway-meter
+        #: suspension on every tick (and right after a Network-tab toggle).
+        self.vpn_manager: object | None = None
+        #: last VPN-share kernel status, surfaced through /api/network's
+        #: ``vpn_share.status`` key (no DB/subprocess reads on the request
+        #: path — the tick owns the probing).
+        self._last_vpn_status: dict[str, object] = {"state": "off"}
         self.arp_lock: object | None = None  # quota.arp_lock.ArpLock (opt-in)
         # Built in startup(), AFTER the DB topology override: the scanner
         # resolves its probe networks from cfg at construction, so building it
@@ -164,6 +185,9 @@ class Gateway:
         #: does for the tc tree (a maintenance tick and an API-triggered
         #: immediate apply must not race each other's DB read + file write).
         self._dns_lock = asyncio.Lock()
+        #: serializes VPN-share reconciliation (tick + API immediate apply)
+        #: the same way ``_shaping_lock`` serializes the tc tree.
+        self._vpn_lock = asyncio.Lock()
         self._maintenance_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
 
@@ -211,6 +235,14 @@ class Gateway:
         # initial apply happens after the maintenance loop's first tick
         # (device tags need a device list), not here — see _maintenance_tick.
         self.dns_manager = _make_dns_manager(self.cfg)
+
+        # -- VPN share (policy routing into the box's tunnel) ----------------
+        # Reconcile once at boot (the DB switch may say on — the rules must
+        # land before any client traffic; a crashed previous run's leftovers
+        # are removed when the switch is off — see VpnShareManager.reconcile),
+        # then every maintenance tick + right after a Network-tab toggle.
+        self.vpn_manager = _make_vpn_manager(self.cfg)
+        await self._sync_vpn_share()
 
         # -- ARP gateway-lock (opt-in) ---------------------------------------
         # Deny internet to devices that bypass the box by using the ROUTER as
@@ -617,6 +649,12 @@ class Gateway:
         #    apply — e.g. a test or a future non-HTTP caller).
         await self._sync_dns_rules()
 
+        # 7. Reconcile the VPN-share policy routing (cheap when nothing
+        #    changed; re-applies when the VPN client restarts/re-creates
+        #    its tunnel, and removes the rule if the tunnel vanished so
+        #    clients never ride a dead VPN into a blackhole).
+        await self._sync_vpn_share()
+
     async def _sync_shaping(self, ip_to_mac: dict[str, str]) -> None:
         """Push the latest shaping settings + device caps into the tc shaper.
 
@@ -711,6 +749,62 @@ class Gateway:
         of waiting for the next maintenance tick. The API schedules this
         after every /api/dns/* and /api/{users,devices}/{id}/dns edit."""
         await self._sync_dns_rules()
+
+    async def _sync_vpn_share(self) -> None:
+        """Reconcile the VPN-share policy routing with the dashboard switch.
+
+        Reads the DB setting + pinned tunnel, asks the kernel-side manager
+        to reconcile (idempotent: apply when on, remove when off, self-heal
+        leftovers), persists the detected tunnel as the pin (so a multi-VPN
+        / restarted-tunnel box re-applies the SAME interface), and keeps the
+        engine's gateway-meter suspension in step (the box's input/output
+        metering must be inert while it relays the household's VPN — see
+        NftablesEngine.set_vpn_relay). All subprocesses run off the event
+        loop; a manager-less boot (vpn_share disabled in config) is a no-op.
+        """
+        manager = self.vpn_manager
+        if manager is None:
+            return
+        try:
+            async with self._vpn_lock:
+                enabled = (await self.database.get_setting(
+                    "vpn_share_enabled", "0")) == "1"
+                pin = (await self.database.get_setting(
+                    "vpn_share_interface", "") or "").strip()
+                status = await asyncio.to_thread(
+                    manager.reconcile, enabled, pin)
+                if status.state == "on" and pin != status.interface:
+                    await self.database.set_setting(
+                        "vpn_share_interface", status.interface)
+                    log.info("vpn share: pinned tunnel interface %s",
+                             status.interface)
+                # Suspend/restore the box's own gateway metering to follow
+                # the APPLIED relay state (engine cache-gates a no-op).
+                if self.engine is not None:
+                    self.engine.set_vpn_relay(status.state == "on")
+                self._last_vpn_status = {
+                    "state": status.state,
+                    "interface": status.interface or "",
+                    "peer": status.peer or "",
+                    "candidates": status.candidates or [],
+                    "message": status.message or "",
+                }
+        except Exception:  # noqa: BLE001
+            log.exception("failed to reconcile VPN share")
+            self._last_vpn_status = {"state": "error",
+                                     "message": "reconcile failed"}
+
+    async def _apply_vpn_now(self) -> None:
+        """Apply a VPN-share toggle immediately instead of waiting for the
+        next maintenance tick. The API schedules this after a Network-tab
+        save that includes the switch."""
+        await self._sync_vpn_share()
+
+    def _vpn_status(self) -> dict[str, object]:
+        """Live VPN-share state for /api/network's ``vpn_share.status``.
+        No probing here — the maintenance tick owns the subprocesses and
+        caches the result."""
+        return dict(self._last_vpn_status)
 
     async def _wan_status(self) -> dict[str, object]:
         """Live WAN-mode status for the dashboard/API (cheap, every 15 s tick).
@@ -846,7 +940,9 @@ def main() -> None:
                          topology_manager=gateway.topology_manager,
                          shaping_sync=gateway._reshaping_now,
                          report_config=report_cfg,
-                         dns_apply=gateway._apply_dns_now)
+                         dns_apply=gateway._apply_dns_now,
+                         vpn_apply=gateway._apply_vpn_now,
+                         vpn_status_getter=gateway._vpn_status)
         server_config = uvicorn.Config(
             app,
             host=cfg.web.host,

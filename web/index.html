@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quota Manager</title>
-<link rel="stylesheet" href="/assets/styles.css?v=38">
+<link rel="stylesheet" href="/assets/styles.css?v=39">
 </head>
 <body>
   <div class="bg-glow"></div>
@@ -246,7 +246,36 @@
             <span id="np-capped" class="stat-value">0</span>
           </div>
           <ul id="np-devices" class="preview-list"></ul>
+          <hr class="sep">
+          <div class="stat">
+            <span class="stat-label">VPN share</span>
+            <span id="np-vpn" class="stat-value off">Off</span>
+          </div>
         </div>
+        </div>
+
+        <!-- VPN SHARE: route the whole client subnet through the box's tunnel -->
+        <div class="glass card settings-card" style="margin-top:18px">
+          <h3>VPN share</h3>
+          <p class="muted small">Routes <strong>every device's</strong> internet
+            through the box's VPN connection — one VPN for the whole household.
+            Start the VPN client on the gateway in <strong>TUN mode</strong>
+            (sing-box / xray / WireGuard / tun2socks over any SOCKS/HTTP proxy)
+            and flip this on: the box auto-detects the tunnel and policy-routes
+            the client subnet into it. Quota counting, blocks, and speed caps
+            keep applying — the bytes just exit at the VPN provider's IP.</p>
+          <div class="guest-head">
+            <span class="muted small">While ON, the box's own metering is
+              suspended (it is relaying the household's traffic — charging it
+              again to the Gateway user would double-count and a quota-cut
+              would kill everyone's VPN). DNS queries still use dnsmasq's
+              normal upstream.</span>
+            <label class="switch" title="Share the box's VPN across all devices">
+              <input type="checkbox" id="vpn-toggle">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <p id="vpn-status" class="vpn-status muted small">Checking…</p>
         </div>
       </section>
 
@@ -679,6 +708,6 @@
     </div>
   </div>
 
-  <script src="/assets/app.js?v=33"></script>
+  <script src="/assets/app.js?v=34"></script>
 </body>
 </html>

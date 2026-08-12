@@ -472,6 +472,40 @@ class QuotaService:
         return {"enabled": enabled, "total_down_mbps": total_down,
                 "total_up_mbps": total_up, "aqm": aqm}
 
+    # -- VPN share (policy-routing the client subnet into the box's tunnel) ------
+
+    #: Settings keys for the "VPN share" switch (Network tab). The dashboard
+    #: toggle drives quota/vpnshare.py's policy routing; ``vpn_share_interface``
+    #: pins the auto-detected tunnel so a multi-VPN box does not re-guess on
+    #: every restart/reconcile.
+    VPN_SHARE_KEY = "vpn_share_enabled"
+    VPN_INTERFACE_KEY = "vpn_share_interface"
+
+    async def get_vpn_config(self) -> dict[str, Any]:
+        """Current VPN-share settings (the switch + the pinned tunnel)."""
+        enabled = (await self.db.get_setting(self.VPN_SHARE_KEY, "0")) == "1"
+        iface = (await self.db.get_setting(self.VPN_INTERFACE_KEY, "") or "").strip()
+        return {"enabled": enabled, "interface": iface}
+
+    async def set_vpn_share(self, enabled: bool) -> dict[str, Any]:
+        """Persist the VPN-share master switch. The kernel routing itself is
+        applied by run.py's maintenance loop / immediate callback (same
+        pattern as shaping) — this only owns the setting + the event."""
+        await self.db.set_setting(self.VPN_SHARE_KEY, "1" if enabled else "0")
+        await self.db.add_event(
+            "VPN share " + ("enabled — all devices share the box's VPN "
+                            "connection (policy routing into the tunnel)"
+                            if enabled else
+                            "disabled — devices use the direct uplink"),
+            "warn" if enabled else "info")
+        return await self.get_vpn_config()
+
+    async def set_vpn_interface(self, iface: str) -> None:
+        """Pin the auto-detected tunnel interface (called after a successful
+        apply so a restart re-applies the same tunnel)."""
+        iface = (iface or "").strip()
+        await self.db.set_setting(self.VPN_INTERFACE_KEY, iface)
+
     async def set_shaping(self, enabled: bool | None = None,
                           total_down_mbps: float | None = None,
                           total_up_mbps: float | None = None,

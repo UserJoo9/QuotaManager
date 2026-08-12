@@ -189,6 +189,36 @@ class HistoryConfig:
 
 
 @dataclass
+class VpnShareConfig:
+    """"VPN share" — route the whole client subnet through the box's VPN.
+
+    The box runs a VPN client in TUN mode (sing-box / xray / WireGuard /
+    tun2socks bridging any local SOCKS/HTTP proxy). With the dashboard's
+    "VPN share" switch on, every managed client's internet traffic is
+    routed into that tunnel via policy routing (an ``ip rule`` from the
+    client subnet into a dedicated route table whose default route points
+    at the tunnel device). The kernel continues to count + block per
+    device in the nftables ``forward`` chain, so quota enforcement and
+    speed shaping keep working — the bytes just exit at the VPN provider's
+    IP. ``enabled: true`` here only lets the manager exist; the actual
+    master switch lives in the dashboard (Network tab) / DB settings, the
+    same shape as ``shaping``.
+    """
+
+    enabled: bool = True
+    #: Optional interface pin (e.g. "utun4", "wg0"). Empty => auto-detect:
+    #: the first TUN-ish interface (``/sys/class/net/*/type`` == 65534 —
+    #: ARPHRD_NONE: tun/utun/wireguard), preferring one with an IPv4
+    #: address. The detected name is stored in the DB at apply time so a
+    #: multi-VPN box stays pinned to the same tunnel.
+    interface: str = ""
+    #: Route table + rule priority for the client-subnet policy routing.
+    #: Must not collide with the main (32766) or local (0) tables.
+    route_table: int = 200
+    rule_pref: int = 1000
+
+
+@dataclass
 class DnsFilterConfig:
     """Domain-level filtering: per-user/per-device blacklists, allow-list
     exceptions, custom host redirects, curated blocklist presets, and
@@ -237,6 +267,7 @@ class Config:
     engine: EngineConfig = field(default_factory=EngineConfig)
     web: WebConfig = field(default_factory=WebConfig)
     shaping: ShapingConfig = field(default_factory=ShapingConfig)
+    vpn_share: VpnShareConfig = field(default_factory=VpnShareConfig)
     report: ReportConfig = field(default_factory=ReportConfig)
     history: HistoryConfig = field(default_factory=HistoryConfig)
     dns_filter: DnsFilterConfig = field(default_factory=DnsFilterConfig)

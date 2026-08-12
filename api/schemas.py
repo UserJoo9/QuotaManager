@@ -74,6 +74,10 @@ class NetworkUpdate(BaseModel):
     total_up_mbps: Optional[float] = _cap_field()
     #: Bufferbloat avoidance (fq_codel on every queue). Default on.
     aqm: Optional[bool] = None
+    #: "VPN share" master switch: route the whole client subnet through the
+    #: box's VPN tunnel (quota/vpnshare.py policy routing). None = leave the
+    #: current switch untouched (only the shaping fields changed).
+    vpn_share: Optional[bool] = None
 
 
 class TopUpRequest(BaseModel):

@@ -46,6 +46,7 @@ tests, release process): [Structure_README.md](Structure_README.md).
 - [After install — the router](#after-install--the-router)
 - [Using the dashboard](#using-the-dashboard)
 - [Strong (WAN) mode](#strong-wan-mode)
+- [VPN share (route the household through a VPN)](#vpn-share-route-the-household-through-a-vpn)
 - [Day to day](#day-to-day)
 - [Upgrading / removing](#upgrading--removing)
 - [Troubleshooting](#troubleshooting)
@@ -108,7 +109,7 @@ upgrade`.
 [Releases](https://github.com/UserJoo9/QuotaManager/releases) page, then:
 
 ```bash
-sudo apt install ./quota-manager_0.1.2_all.deb
+sudo apt install ./quota-manager_0.1.3_all.deb
 ```
 
 > **Fresh Kali/Debian box? Run `sudo apt-get update` first.** A brand-new
@@ -232,8 +233,9 @@ See [Structure_README.md](Structure_README.md) → *Running from source*.
 |---|---|
 | **Management** | the bundle ring (used / remaining / days left) and a card per **user** — allowance, usage bar, block toggle, top-up, edit, delete — with their devices listed underneath (name, MAC, manufacturer, its own quota bar + up/down split) |
 | **Bundle settings** | change `total_gb` / `reset_day`, **Bundle recharged** (add mid-month GB, e.g. an ISP top-up), **Guest mode** (auto-register new devices with a small allowance), **Reset month now** |
-| **Network** | speed shaping: the master switch, your **real line down/up rates**, low-latency toggle |
+| **Network** | speed shaping: the master switch, your **real line down/up rates**, low-latency toggle — plus **VPN share** (route every device's internet through the VPN the laptop runs, see below) |
 | **WAN** | optional "strong" mode where the laptop dials the PPPoE line itself (see below) |
+| **DNS** | domain filtering (block / allow / redirect a domain for a user, a device, or everyone; blocklist presets; per-client DNS servers) |
 | **History** | what each device is actually visiting: pick a device + a look-back window → its **top domains** (with share %), an **hourly activity** list, and the **most recent queries** (minute buckets) |
 | **Admin** | change password, see the installed version |
 | **System logs** | the app's log tail, with filters, search, refresh and export |
@@ -257,6 +259,22 @@ to override per person, and `history.enabled: false` in `config.yaml` stops
 recording entirely). dnsmasq only loads the query-log fragment when `conf-dir`
 is enabled in `/etc/dnsmasq.conf` — the setup script uncomments or appends it
 automatically, so a plain re-run of the setup script is all a stock install needs.
+
+**Domain filtering per device / user / household** — the **DNS** tab blocks,
+allows or redirects domains straight from the box's DNS (no new service):
+pick a user or device (or *Global*), enter a domain — wildcards work
+(`*.youtube.com`) — and an action (**Block**, **Allow**, or **Redirect** to
+another IP). Turn on a **blocklist preset** (ads-tracking, social-media,
+streaming, gambling) instead and the box fetches + compiles the curated lists
+itself. The History tab doubles as a shortcut: every domain row shows its
+current status (blocked / allowed / redirected) with one-click "Block this
+device" / "Block everyone" / "Allow" buttons. You can also give a user or
+device its own **upstream DNS server** (edit modal → DNS server) — e.g. one
+with family filtering. Rules apply within seconds (dnsmasq reloads itself,
+~1 s blip). Everything is on by default; `dns_filter.enabled: false` in
+`config.yaml` turns the whole feature off. One honest limit: a client using
+DNS-over-HTTPS/TLS to an outside resolver bypasses it, just as it already
+bypasses the box's normal DNS.
 
 ---
 
@@ -324,6 +342,47 @@ The architecture behind this is in
 
 ---
 
+## VPN share (route the household through a VPN)
+
+If you run a VPN client on the gateway laptop (sing-box, xray, WireGuard or
+tun2socks, in **TUN mode**), the Network tab's **VPN share** switch sends every
+device's internet through that tunnel — the whole household appears at the VPN
+provider's IP.
+
+**What stays working:** per-device quota counting + hard blocks (the kernel
+`forward` chain) and per-device/per-user speed shaping are untouched; the box's
+own DNS/DHCP still serve the LAN, and direct LAN traffic (routers, NAS) never
+enters the tunnel. The correct tunnel device is detected automatically and
+remembered, so a reboot or a restart of the VPN client re-applies the same one;
+anything left over from a crash or tunnel restart is cleaned up by the next
+15 s tick.
+
+**How it works under the hood:** one `ip rule` diverts the client subnet into a
+dedicated route table whose default route points at the tunnel — cheaper and
+more robust than rewriting the masquerade. The traffic rides the box's own
+network stack twice (client → tunnel → line), so while VPN share is ON the
+box's OWN gateway metering is suspended (the relay volume would otherwise be
+counted twice against the protected Gateway user — and a quota-cut Gateway
+would kill the household's VPN). The feature is off by default
+(`vpn_share.enabled: false` means the manager isn't even built).
+
+**What to know:**
+
+- **The tunnel must be up first.** Flip the switch, then start the VPN client
+  (or start the client, then flip). The rule only lands when the tunnel device
+  actually exists — a missing tunnel is never routed into (that would blackhole
+  the subnet).
+- **IPv4 only, like everything else here.** VPN providers' IPv4 TUNs are
+  what's routed; there's no IPv6 relay.
+- **All devices share the tunnel's bandwidth and fate.** If the VPN drops,
+  traffic stays blackholed until the tunnel returns (no silent fallback to the
+  direct line — that would silently uncount every byte). 
+
+The design is in
+[Structure_README.md](Structure_README.md) → *VPN share*.
+
+---
+
 ## Day to day
 
 Open the dashboard and check the **bundle ring** — are you on pace for the
@@ -381,6 +440,8 @@ stopped) — it holds every device, allowance and month of usage.
 | "nftables engine unavailable" in the log | `nft` missing or not run as root | Install nftables; the service runs as root |
 | Devices get DHCP but aren't counted | their gateway isn't the laptop, or the NAT is missing | Check a device's gateway is `192.168.2.1`; verify `nft list table inet quota_nat` |
 | Devices use the internet but aren't counted | client IPv6 bypasses the gateway (router hands out RA) | Disable IPv6/RA/DHCPv6 on the router — Quota Manager is IPv4 only |
+| No internet with VPN share ON | the VPN client / tunnel isn't running | Start the VPN client first (TUN mode) — the rule only lands once the tunnel exists; check it's the interface shown in the Network tab |
+| A domain isn't blocked/redirected | dnsmasq never got the rule, or the client bypasses the box's DNS | DNS tab → the rule's scope matches the device; `tail /var/log/quota-dnsmasq.log`; DoH/DoT clients bypass DNS-layer filtering by design |
 | No internet after applying WAN mode | `ppp0` down — wrong credentials, or router not bridged/AP yet | WAN tab: check the ppp0 state + auto-diagnosis; press **Apply now** again; the router must be in bridge/modem (single NIC) or AP (two NIC) mode |
 | Device never appears in the dashboard | dnsmasq lease path wrong | Confirm `dhcp.lease_file` matches dnsmasq's actual lease file |
 | History tab shows "No browsing history recorded" | dnsmasq isn't logging queries (`conf-dir=` commented → every `/etc/dnsmasq.d/` fragment ignored), or the app predates the parser fix | Re-run the setup script (it enables `conf-dir`); `tail /var/log/quota-dnsmasq.log` to confirm queries are logged; make sure the app parses the `log-queries=extra` ip/port line shape |
@@ -417,6 +478,12 @@ stopped) — it holds every device, allowance and month of usage.
   (bridge/AP mode) is always manual — no panel can move the cable. A PPPoE
   outage means no internet until the line redials (the service does that
   automatically).
+- **VPN share relies on the laptop's VPN client.** It must run in TUN mode and
+  the tunnel must be up — the household's internet is blackholed (deliberately,
+  never silently re-routed around the quota) if the tunnel drops. The relay
+  doubles the volume crossing the box's own network stack, so buying the VPN
+  typically costs you your ISP bundle's data cap spend plus the VPN provider's
+  quota. DNS filtering still applies (dnsmasq is untouched by the tunnel).
 - **The gateway's own internet is metered** (`engine.count_gateway`, on by
   default). The box's traffic is charged to a protected **Gateway** user with a
   fixed 1.0 GB allowance — a heavy download *on the laptop itself* can cut the
