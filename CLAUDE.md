@@ -248,8 +248,19 @@ runs `setup_gateway_kali.sh` with `QUOTA_NO_APT=1` (the package `Depends`
 already pulls dnsmasq/nftables/iproute2/kmod/python3-venv), and enables +
 starts `quota-gateway`. `prerm` stops/disables the service on remove/upgrade.
 Postinst/pg upgrade paths are idempotent and preserve `/etc/quota-gateway/
-config.yaml` + `/var/lib/quota-gateway/quota.db`. Tests: `tests/test_packaging.py`
-pins the workflow + control + lifecycle-script contract (no dpkg needed).
+config.yaml` + `/var/lib/quota-gateway/quota.db`. **A second workflow,
+`apt-repo.yml`, turns the Release into a signed apt repo** (`workflow_run` on
+`release` + a `workflow_dispatch` `version` backfill input): it imports the
+armored private key from the `APT_REPO_GPG_KEY` secret, downloads the released
+`.deb`, regenerates `Packages`/`Release` with `apt-ftparchive`, signs
+(`Release.gpg` + clearsigned `InRelease`), and pushes the whole repo to the
+`gh-pages` branch (with `.nojekyll`, so Jekyll never strips `pool/`/`dists/`)
+hosted at https://UserJoo9.github.io/QuotaManager/ — a one-time
+`deb [signed-by=…] …` source line then makes `apt-get install quota-manager`
+work and every future tag land via `apt update && apt upgrade`. The PUBLIC key
+is committed at `quota-manager.gpg`; old versions stay installable. Tests:
+`tests/test_packaging.py` pins the workflow + control + lifecycle-script
+contract (no dpkg needed), incl. the apt-repo workflow + public key.
 
 ## [ARCHITECTURE]
 ```
@@ -260,8 +271,11 @@ QuotaManager/
 │                             #   tests, release process)
 ├── LICENSE                   # MIT license
 ├── CHANGELOG.md              # release changelog
+├── quota-manager.gpg         # armored PUBLIC key for the signed apt repo
 ├── .github/workflows/
-│   └── release.yml           # on a v* tag: build .deb -> GitHub Releases
+│   ├── release.yml           # on a v* tag: build .deb -> GitHub Releases
+│   └── apt-repo.yml          # workflow_run on release + dispatch backfill:
+│                             #   sign + publish the .deb to gh-pages (apt repo)
 ├── packaging/DEBIAN/
 │   ├── control.template      # Debian control (Version rendered from version.py)
 │   ├── postinst              # venv + setup_gateway_kali.sh (QUOTA_NO_APT=1) + start
@@ -366,6 +380,61 @@ kernel counts and drops.
 ## [ORPHANS & PENDING]
 _Pending work lives in TASKS.md; orphans + debt are tracked in
 [LEGACY_DEBT_AND_RISKS] below. Version history (newest first):_
+
+Checked 2026-08-12 (signed apt repository — `apt install quota-manager` works):
+- [x] **infrastructure, NOT a release — no version bump, no tag** (`quota/version.py`
+      stays `0.1.2`; everything lands under CHANGELOG `[Unreleased]`). The GitHub
+      Release is now also a **signed apt repo** on the `gh-pages` branch (hosted
+      at https://UserJoo9.github.io/QuotaManager/), so a one-time
+      `deb [signed-by=…] …` source line gives `apt-get install quota-manager`
+      and `apt update && apt upgrade` for every future tag; old versions stay
+      installable.
+- [x] **`.github/workflows/apt-repo.yml` (NEW)** — a `workflow_run` on the
+      `release` workflow completing `success` (no race with the .deb asset) plus
+      a `workflow_dispatch` `version` input for backfills. Permissions:
+      `contents`/`pages`/`actions`; `concurrency: group: apt-repo-publish`
+      serializes gh-pages pushes. Steps: save the committed public key → resolve
+      the version (workflow_run has no ref; reads the triggering run's
+      `headBranch` tag via `gh run view`, falls back to the latest release) →
+      `gh release download` the `quota-manager_<ver>_all.deb` → import the
+      armored private key from the `APT_REPO_GPG_KEY` secret (isolated
+      `GNUPGHOME`, empty-passphrase key, `--local-user $FPR`) → orphan/fetch the
+      `gh-pages` working tree → stage `quota-manager.gpg` + `.nojekyll` +
+      `pool/main/q/quota-manager/*.deb` → `apt-ftparchive packages` +
+      `gzip -9n` + `apt-ftparchive release` (`Suite: stable`, `Architectures:
+      all`, `Components: main`) → `--detach-sign` (`Release.gpg`) +
+      `--clear-sign` (`InRelease`) + `gpg --verify` → commit (idempotent
+      `git diff --cached --quiet` guard; `git add -f` so no stray `.gitignore`
+      blocks the pool) + push → **Ensure GitHub Pages** via the API (POST on
+      first run / PUT thereafter; `continue-on-error`, manual Settings fallback).
+- [x] **signing key**: generated locally this session (RSA-4096, empty
+      passphrase, `Quota Manager` / youssef.alkhodary@users.noreply.github.com).
+      Public key committed at the repo root as **`quota-manager.gpg`** (copied
+      into the gh-pages tree every run so clients fetch it from the same host);
+      the private key went to the user's Desktop (`quota-manager-secret.asc`,
+      outside the repo) for pasting into the `APT_REPO_GPG_KEY` Actions secret.
+- [x] **`release.yml`**: the release-body install note gained an
+      "Or, with the apt repository configured (see README)" `apt-get update &&
+      apt-get install quota-manager` line (future tags only; v0.1.2's published
+      note unchanged).
+- [x] **tests**: `tests/test_packaging.py` +6 — `apt-repo.yml` exists/parses,
+      triggers on `release` completion, manual `version` backfill input,
+      downloads the .deb from Releases (`gh release download` +
+      `GH_TOKEN`), signs+publishes (every needle: `apt-ftparchive`, `gnupg`,
+      `--detach-sign`, `--clear-sign`, `Release.gpg`, `InRelease`, `.nojekyll`,
+      `pool/`, `gh-pages`, `quota-manager.gpg`), and the committed public key
+      exists / starts `-----BEGIN PGP PUBLIC KEY BLOCK-----` / is not gitignored.
+      **19 passed** at the packaging level; docs: README (apt repo = primary
+      install + upgrade path, direct-.deb = "Alternative"), Structure_README
+      (Releasing note + "Setting up the apt repository (one-time)" with
+      keygen/secret/Pages/backfill), CHANGELOG `[Unreleased]` `### Added`.
+- [x] **one-time user steps remain** (docs + handoff): paste
+      `quota-manager-secret.asc` into the `APT_REPO_GPG_KEY` secret (then delete
+      the file), ensure Pages serves `gh-pages` (the workflow's API step tries
+      it; fallback Settings → Pages → "Deploy from a branch" → `gh-pages`),
+      then `gh workflow run apt-repo.yml --ref main -f version=0.1.2` to backfill
+      v0.1.2. Keys can be rotated by replacing the committed public key + the
+      secret (the workflow copies the committed key each run).
 
 Checked 2026-08-11 (**v0.1.2 released** — the whole uncommitted bundle shipped):
 - [x] **version bumped `0.1.1` → `0.1.2`** (`quota/version.py`, the single source of

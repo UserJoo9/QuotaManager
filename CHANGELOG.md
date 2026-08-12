@@ -6,6 +6,20 @@ The version is the single source of truth in `quota/version.py`; a release tag
 
 ## [Unreleased]
 
+### Added
+
+- **Signed apt repository** so Linux boxes install/upgrade Quota Manager the
+  native way (`apt-get update && apt-get install quota-manager`). `.github/
+  workflows/apt-repo.yml` fires after every successful `release` run, downloads
+  the `.deb` from the GitHub Release, and publishes it to a GPG-signed apt repo
+  on the `gh-pages` branch (hosted at
+  https://UserJoo9.github.io/QuotaManager/). A one-time `deb [signed-by=…] …`
+  source line makes installs and future upgrades come straight from apt; old
+  versions stay installable. The signing public key is committed at
+  `quota-manager.gpg` (private key lives in the `APT_REPO_GPG_KEY` Actions
+  secret); a `workflow_dispatch` `version` input backfills already-released
+  versions. See README → *Install the package*.
+
 ## [0.1.2] — 2026-08-11
 
 ### Added

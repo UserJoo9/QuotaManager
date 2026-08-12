@@ -104,6 +104,8 @@ jobs:
           { printf 'Quota Manager **v%s**.\n\n' "${VER}"
             printf 'Install on the gateway laptop:\n\n'
             printf '```bash\nsudo apt install ./quota-manager_%s_all.deb\n```\n\n' "${VER}"
+            printf 'Or, with the apt repository configured (see README):\n'
+            printf '```bash\nsudo apt-get update && sudo apt-get install quota-manager\n```\n\n'
             printf 'The package configures the network stack, installs the Python\n'
             printf 'dependencies into `/opt/quota-manager/.venv`, wires the\n'
             printf '`quota-gateway` systemd service and starts it. See the README for\n'

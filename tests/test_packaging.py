@@ -20,6 +20,8 @@ import yaml
 REPO = Path(__file__).resolve().parent.parent
 PACKAGING = REPO / "packaging"
 WORKFLOW = REPO / ".github" / "workflows" / "release.yml"
+APT_WORKFLOW = REPO / ".github" / "workflows" / "apt-repo.yml"
+PUBLIC_KEY = REPO / "quota-manager.gpg"
 
 
 def _read(p: Path) -> str:
@@ -133,6 +135,87 @@ def test_release_workflow_embeds_changelog_in_release_body():
         "the release body must be a generated file (softprops body_path)"
     assert "CHANGELOG.md" in text, \
         "the release notes must be extracted from CHANGELOG.md"
+
+
+# --------------------------------------------------------------------------- #
+# The apt-repository workflow (signed apt repo on GitHub Pages)
+# --------------------------------------------------------------------------- #
+
+def test_apt_repo_workflow_exists_and_parses_as_yaml():
+    """apt-repo.yml publishes a signed apt repo to gh-pages. It must exist and
+    declare BOTH triggers: a workflow_run on `release` (auto-publish every new
+    tag) and a workflow_dispatch `version` input (manual backfill)."""
+    assert APT_WORKFLOW.is_file(), ".github/workflows/apt-repo.yml must exist"
+    data = yaml.safe_load(_read(APT_WORKFLOW))
+    assert isinstance(data, dict), "apt-repo.yml must parse as a dict"
+    triggers = data.get("on", data.get(True, {}))  # YAML 1.1 parses 'on' as True
+    assert isinstance(triggers, dict)
+    assert "workflow_run" in triggers, "apt-repo must trigger on workflow_run"
+    assert "workflow_dispatch" in triggers, "apt-repo must be manually dispatchable"
+
+
+def test_apt_repo_workflow_triggers_on_release_completion():
+    text = _read(APT_WORKFLOW)
+    assert "workflow_run" in text
+    assert "types: [completed]" in text or "completed" in text
+    assert "workflow_run.conclusion" in text, \
+        "the job must gate on the release run's conclusion"
+    assert "success" in text, "the workflow must only publish on a successful release"
+    assert '"release"' in text or "release" in text, \
+        "apt-repo must be chained to the release workflow"
+
+
+def test_apt_repo_workflow_has_manual_backfill_input():
+    text = _read(APT_WORKFLOW)
+    assert "workflow_dispatch" in text
+    assert "version" in text and "inputs:" in text, \
+        "the workflow_dispatch must accept a version input"
+    assert "No version supplied" in text, \
+        "an empty backfill version must fail loudly with a usage message"
+
+
+def test_apt_repo_workflow_downloads_the_deb_from_releases():
+    text = _read(APT_WORKFLOW)
+    assert "gh release download" in text, \
+        "the .deb must come from the GitHub Release asset (not a local build)"
+    assert "quota-manager_" in text and "_all.deb" in text, \
+        "the download must target quota-manager_<ver>_all.deb"
+    assert "GH_TOKEN" in text or "GITHUB_TOKEN" in text, \
+        "gh must be authenticated with the Actions token"
+
+
+def test_apt_repo_workflow_signs_and_publishes():
+    text = _read(APT_WORKFLOW)
+    for needle in (
+        "APT_REPO_GPG_KEY",      # the armored private signing key secret
+        "apt-ftparchive",        # Packages / Release index generator
+        "apt-utils",             # ships apt-ftparchive
+        "gnupg",
+        "--detach-sign",         # Release.gpg
+        "--clear-sign",          # InRelease
+        "Release.gpg",
+        "InRelease",
+        ".nojekyll",             # REQUIRED or Jekyll strips pool/ + dists/
+        "pool/",
+        "dists/stable/main/binary-all",
+        "gh-pages",
+        "quota-manager.gpg",     # the committed public key copied into the repo
+    ):
+        assert needle in text, f"apt-repo.yml must reference {needle!r}"
+
+
+def test_public_key_file_exists_and_is_not_ignored():
+    """The repo must carry the armored PUBLIC signing key, and .gitignore must
+    not exclude it (it is committed, and the workflow copies it to gh-pages)."""
+    assert PUBLIC_KEY.is_file(), "quota-manager.gpg must be committed at the repo root"
+    text = _read(PUBLIC_KEY).lstrip()
+    assert text.startswith("-----BEGIN PGP PUBLIC KEY BLOCK-----"), \
+        "quota-manager.gpg must be an armored PGP PUBLIC key (never the secret key)"
+    gi = _read(REPO / ".gitignore")
+    assert not re.search(r"(?m)^\*\.(gpg|asc|key)$", gi), \
+        "a broad *.gpg/*.asc ignore rule would hide the committed public key"
+    assert "quota-manager.gpg" not in gi, \
+        ".gitignore must not name quota-manager.gpg"
 
 
 # --------------------------------------------------------------------------- #

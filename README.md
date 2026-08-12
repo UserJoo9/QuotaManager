@@ -86,7 +86,25 @@ is also a great way to try Quota Manager before committing any hardware.
 
 ### 1. Install the package
 
-Download the latest `quota-manager_<version>_all.deb` from the
+**Easiest — install from the apt repository** (one-time key + repo setup, then
+upgrades via `apt update && apt upgrade`):
+
+```bash
+sudo install -d /etc/apt/keyrings
+curl -fsSL https://UserJoo9.github.io/QuotaManager/quota-manager.gpg | \
+  sudo gpg --dearmor -o /etc/apt/keyrings/quota-manager.gpg
+echo "deb [signed-by=/etc/apt/keyrings/quota-manager.gpg] https://UserJoo9.github.io/QuotaManager stable main" | \
+  sudo tee /etc/apt/sources.list.d/quota-manager.list
+sudo apt-get update
+sudo apt-get install quota-manager
+```
+
+The repository is signed with the key above and re-published automatically on
+every release, so upgrades are just `sudo apt-get update && sudo apt-get
+upgrade`.
+
+**Alternative — install a downloaded `.deb`.** Download the latest
+`quota-manager_<version>_all.deb` from the
 [Releases](https://github.com/UserJoo9/QuotaManager/releases) page, then:
 
 ```bash
@@ -323,8 +341,12 @@ it automatically — it's there when you want it, and every other source gets a
 ## Upgrading / removing
 
 ```bash
-# Upgrade: download the new .deb and install it — your config + database survive
-sudo apt install ./quota-manager_<new-version>_all.deb
+# Upgrade (apt repository): your config + database survive
+sudo apt-get update
+sudo apt-get install --only-upgrade quota-manager
+
+# ...or download the new .deb and install it (no repository)
+# sudo apt install ./quota-manager_<new-version>_all.deb
 
 # Remove (keeps config + database)
 sudo apt remove quota-manager

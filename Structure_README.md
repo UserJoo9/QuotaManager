@@ -878,6 +878,41 @@ The release description is auto-composed from the `CHANGELOG.md` section for
 the released version (plus the install note), so keep the CHANGELOG current —
 it IS the release notes.
 
+Tagging also **auto-publishes the `.deb` to a signed apt repository**
+(`.github/workflows/apt-repo.yml`, a `workflow_run` on the `release` workflow)
+hosted on GitHub Pages. Once a box has the repo configured, `apt-get update &&
+apt-get install quota-manager` installs/upgrades to the newest published
+version; old versions stay installable.
+
 > Version tags are what trigger the release — pushing a commit to `main` alone
 > (even a version bump) does **not** release. Tag and push when you're ready to
 > ship.
+
+### Setting up the apt repository (one-time)
+
+Users install the repo with the key + `deb`-line commands in the README
+(https://UserJoo9.github.io/QuotaManager/). That host is the `gh-pages` branch,
+populated and signed by `apt-repo.yml`. Setting it up the first time:
+
+1. **Generate a signing key** (empty passphrase) and add the armored
+   **private** key as the GitHub secret `APT_REPO_GPG_KEY` (Settings → Secrets
+   and variables → Actions):
+   ```bash
+   gpg --full-generate-key     # RSA and RSA, 4096 bits, no expiry
+   # Real name: Quota Manager   Email: youssef.alkhodary@users.noreply.github.com
+   # Passphrase: LEAVE EMPTY
+   gpg --armor --export  youssef.alkhodary@users.noreply.github.com > quota-manager.gpg
+   gpg --armor --export-secret-key youssef.alkhodary@users.noreply.github.com > quota-manager-secret.asc
+   ```
+   Commit `quota-manager.gpg` (the PUBLIC key) at the repo root; keep
+   `quota-manager-secret.asc` **outside the repo** and paste its entire contents
+   into the `APT_REPO_GPG_KEY` secret.
+2. **Enable GitHub Pages** — the workflow's "Ensure GitHub Pages" step calls the
+   API after the first `gh-pages` push (`pages: write`). Fallback: Settings →
+   Pages → Source = *Deploy from a branch* → Branch = `gh-pages` / `(root)`
+   (must happen after the branch exists).
+3. **Backfill the current release** so the repo isn't empty (the release + its
+   `.deb` already exist in GitHub Releases):
+   ```bash
+   gh workflow run apt-repo.yml --ref main -f version=0.1.2
+   ```

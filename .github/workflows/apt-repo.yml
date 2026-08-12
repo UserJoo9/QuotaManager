@@ -1,0 +1,199 @@
+# Publish a signed apt repository to the gh-pages branch.
+#
+# Consumes the .deb produced by the `release` workflow and publishes it to a
+# signed apt repo hosted on GitHub Pages (https://UserJoo9.github.io/QuotaManager/)
+# so Linux users can `apt-get install quota-manager` and upgrade via
+# `apt-get update && apt-get upgrade`.
+#
+# Triggered:
+#   * workflow_run on `release` completing successfully — every new version tag
+#     auto-publishes (old versions stay installable).
+#   * workflow_dispatch with a `version` input — used once to backfill the
+#     already-released v0.1.2 .deb.
+#
+# The signing key is the armored PRIVATE key in the APT_REPO_GPG_KEY secret
+# (user-generated, empty passphrase). The matching PUBLIC key is committed at
+# the repo root as quota-manager.gpg and copied into the published repo so
+# clients can add it with [signed-by=...].
+
+name: apt-repo
+
+on:
+  workflow_run:
+    workflows: ["release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version to publish (e.g. 0.1.2). Leave empty for the latest release."
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write   # push gh-pages + download release assets
+  actions: read     # read the triggering workflow_run (gh run view)
+  pages: write      # create/update the GitHub Pages site via the API
+
+concurrency:
+  group: apt-repo-publish
+  cancel-in-progress: false   # serialize pushes to gh-pages; never cancel
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    env:
+      APT_REPO_GPG_KEY: ${{ secrets.APT_REPO_GPG_KEY }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The public key lives on the default branch (main); save it before we
+      # switch to the gh-pages working tree.
+      - name: Save the public key
+        run: cp quota-manager.gpg "$RUNNER_TEMP/quota-manager.gpg"
+
+      - name: Resolve version (tag + .deb name)
+        id: version
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="$VERSION_INPUT"
+            if [ -z "$VERSION" ]; then
+              echo "::error::No version supplied. Usage: gh workflow run apt-repo.yml --ref main -f version=0.1.2"
+              exit 1
+            fi
+            TAG="v${VERSION}"
+          else
+            # workflow_run carries no ref/inputs: the triggering release.yml run
+            # pushed a v* tag, whose name IS its head_branch; fall back to the
+            # latest published release if that tag is not a real release.
+            TAG="$(gh run view "${{ github.event.workflow_run.id }}" --json headBranch --jq .headBranch)"
+            if ! gh release view "$TAG" --json tagName --jq .tagName >/dev/null 2>&1; then
+              TAG="$(gh release view --json tagName --jq .tagName)"
+            fi
+            VERSION="${TAG#v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download the .deb from GitHub Releases
+        run: |
+          set -euo pipefail
+          VER="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          mkdir -p "$RUNNER_TEMP/deb"
+          gh release download "$TAG" --pattern "quota-manager_${VER}_all.deb" \
+            --dir "$RUNNER_TEMP/deb" --clobber
+          test -f "$RUNNER_TEMP/deb/quota-manager_${VER}_all.deb"   # fail loudly if absent
+
+      - name: Install repo tooling (apt-ftparchive + gpg)
+        run: |
+          set -euo pipefail
+          apt-get update -qq
+          apt-get install -y --no-install-recommends -qq apt-utils gnupg
+
+      - name: Import the signing key
+        env:
+          GNUPGHOME: "${{ runner.temp }}/gnupg"
+        run: |
+          set -euo pipefail
+          mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"
+          if [ -z "$APT_REPO_GPG_KEY" ]; then
+            echo "::error::APT_REPO_GPG_KEY secret is not set — add the armored PRIVATE signing key (see README 'Setting up the apt repository')."
+            exit 1
+          fi
+          printf '%s\n' "$APT_REPO_GPG_KEY" | gpg --batch --import
+          # Fingerprint -> used as --local-user so signing never picks the wrong key.
+          echo "FPR=$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1==\"fpr\"{print $10; exit}')" >> "$GITHUB_ENV"
+
+      - name: Check out the gh-pages working tree
+        run: |
+          set -euo pipefail
+          git fetch origin gh-pages:refs/remotes/origin/gh-pages 2>/dev/null || true
+          if git rev-parse --verify --quiet refs/remotes/origin/gh-pages >/dev/null; then
+            echo "gh-pages exists — switching to it"
+            git switch --force --create gh-pages origin/gh-pages
+          else
+            echo "gh-pages does not exist — creating orphan branch"
+            git switch --orphan gh-pages
+            git rm -rf . >/dev/null 2>&1 || true
+            rm -f .gitignore      # never let the main-branch *.deb rule block the pool
+          fi
+
+      - name: Stage repo content (deb + key + .nojekyll)
+        run: |
+          set -euo pipefail
+          VER="${{ steps.version.outputs.version }}"
+          cp "$RUNNER_TEMP/quota-manager.gpg" ./quota-manager.gpg
+          test -s quota-manager.gpg
+          touch .nojekyll                          # REQUIRED: else Jekyll strips pool/ and dists/
+          mkdir -p "pool/main/q/quota-manager" "dists/stable/main/binary-all"
+          cp "$RUNNER_TEMP/deb/quota-manager_${VER}_all.deb" "pool/main/q/quota-manager/"
+
+      - name: Generate Packages + Release
+        run: |
+          set -euo pipefail
+          # From the repo root so Filename: is pool/main/q/quota-manager/...
+          apt-ftparchive packages pool > "dists/stable/main/binary-all/Packages"
+          gzip -9n -c "dists/stable/main/binary-all/Packages" > "dists/stable/main/binary-all/Packages.gz"
+          apt-ftparchive release \
+            -o "APT::FTPArchive::Release::Origin=Quota Manager" \
+            -o "APT::FTPArchive::Release::Label=Quota Manager" \
+            -o "APT::FTPArchive::Release::Suite=stable" \
+            -o "APT::FTPArchive::Release::Codename=stable" \
+            -o "APT::FTPArchive::Release::Architectures=all" \
+            -o "APT::FTPArchive::Release::Components=main" \
+            dists/stable > "dists/stable/Release"
+
+      - name: Sign Release (Release.gpg + InRelease)
+        env:
+          GNUPGHOME: "${{ runner.temp }}/gnupg"
+        run: |
+          set -euo pipefail
+          gpg --batch --yes --armor --pinentry-mode loopback --local-user "$FPR" \
+            --detach-sign -o "dists/stable/Release.gpg" "dists/stable/Release"
+          gpg --batch --yes --clear-sign --pinentry-mode loopback --local-user "$FPR" \
+            -o "dists/stable/InRelease" "dists/stable/Release"
+          gpg --batch --verify "dists/stable/InRelease"     # sanity
+
+      - name: Commit + push gh-pages
+        run: |
+          set -euo pipefail
+          VER="${{ steps.version.outputs.version }}"
+          git add -f .nojekyll quota-manager.gpg pool dists   # -f: a stray .gitignore must not block *.deb
+          if git diff --cached --quiet; then
+            echo "Nothing new to publish — repo already up to date."
+          else
+            git -c user.name="github-actions[bot]" \
+                -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                commit -m "apt repo: publish quota-manager ${VER}"
+            git push origin gh-pages
+          fi
+
+      - name: Ensure GitHub Pages serves gh-pages (idempotent)
+        continue-on-error: true   # token may lack pages:write; manual Settings is the fallback
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          if curl -fsS -o /dev/null -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/${REPO}/pages"; then
+            # already exists -> update the source
+            curl -fsS -X PUT -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/pages" \
+              -d '{"source":{"branch":"gh-pages","path":"/"}}'
+          else
+            # first run -> create the site (requires gh-pages to exist: just pushed)
+            curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/pages" \
+              -d '{"source":{"branch":"gh-pages","path":"/"}}'
+          fi
