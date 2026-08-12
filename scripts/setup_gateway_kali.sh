@@ -497,6 +497,10 @@ fi
 # quota-gateway.conf), so a LAN/WAN toggle keeps history logging. log-queries=extra
 # puts the requestor IP on every line; log-async bounds DNS latency; the app's
 # DnslogTailer reads log-facility and logrotate bounds the raw file.
+# (Defined HERE, before the fragment is rendered — the config.yaml heredoc in
+# step 6 re-uses the same value, but with `set -u` a late assignment crashed
+# installs with "CFG_HISTORY_LOG: unbound variable" at this heredoc.)
+CFG_HISTORY_LOG="${CFG_HISTORY_LOG:-/var/log/quota-dnsmasq.log}"
 mkdir -p "$CONF_DIR"
 cat > /etc/dnsmasq.d/quota-dnslog.conf <<EOF
 # Quota Manager — per-device browsing history (tailer: quota/dnslog.py)
@@ -735,9 +739,6 @@ _ip_net_of() {
     echo "$((a & o1)).$((b & o2)).$((c & o3)).$((d & o4))/$cidr"
 }
 LAN_NET="$(_ip_net_of "$LAN_IP" "$LAN_CIDR")"
-# DNS-history capture: the dnsmasq query log the app's DnslogTailer reads
-# (log-facility in the quota-dnslog.conf fragment above must match this path).
-CFG_HISTORY_LOG="${CFG_HISTORY_LOG:-/var/log/quota-dnsmasq.log}"
 # WAN mode rewrites the engine/dhcp blocks: no router on the LAN, no uplink LAN
 # to exclude from accounting, no ARP gateway-lock target. `topology` tells the
 # engine to treat the box as the WAN terminator (client subnet only).

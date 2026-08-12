@@ -6,6 +6,21 @@ The version is the single source of truth in `quota/version.py`; a release tag
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-08-12
+
+### Fixed
+
+- **`.deb` installs aborted at the dnslog step** (`setup_gateway_kali.sh:
+  CFG_HISTORY_LOG: unbound variable`). The script runs `set -u` but assigned
+  `CFG_HISTORY_LOG` only in step 6 (config.yaml), while step 4.5 renders it
+  into `/etc/dnsmasq.d/quota-dnslog.conf` — every package install died at the
+  4.5 heredoc and left the package half-configured (`dpkg: error processing
+  package quota-manager`). The default (`/var/log/quota-dnsmasq.log`) is now
+  defined before the fragment is written and reused by config.yaml;
+  `test_packaging.py` pins assignment-before-first-use so the ordering can't
+  regress. Re-run the install (`apt install ./quota-manager_0.1.4_all.deb`)
+  to fix an affected box — the script is idempotent.
+
 ## [0.1.3] — 2026-08-12
 
 ### Added

@@ -396,6 +396,23 @@ kernel counts and drops.
 _Pending work lives in TASKS.md; orphans + debt are tracked in
 [LEGACY_DEBT_AND_RISKS] below. Version history (newest first):_
 
+Checked 2026-08-12 (**v0.1.4 hotfix** — `.deb` installs died at the dnslog step):
+- [x] **`setup_gateway_kali.sh: CFG_HISTORY_LOG: unbound variable` (FIXED,
+      release-blocking)**: the script runs `set -euo pipefail` but assigned
+      `CFG_HISTORY_LOG` only in step 6 (config.yaml, :740 old), while step 4.5
+      renders it into `/etc/dnsmasq.d/quota-dnslog.conf` (`log-facility=…`,
+      logrotate heredoc) — every .deb postinst aborted at the 4.5 heredoc
+      (`dpkg: error processing package quota-manager`, "1 not fully installed
+      or removed"). The default is now defined BEFORE the fragment is written
+      (4.5 start) and reused by config.yaml; `test_packaging.py` pins
+      assignment-before-first-use (`test_setup_script_defines_cfg_history_log_before_use`,
+      21 packaging tests green). The venv pip retries in the same install log
+      were the box's own DNS being down — environmental, pip succeeded.
+- [x] version **0.1.3 → 0.1.4** + CHANGELOG `[0.1.4]` (Fixed) + tagged
+      **`v0.1.4`**; the release body composes from the changelog section as
+      usual. Box recovery = re-run the 0.1.4 install (postinst re-runs the
+      idempotent setup).
+
 Checked 2026-08-12 (**v0.1.3 released** — VPN share + DNS filtering + the apt repo shipped):
 - [x] **version bumped `0.1.2` → `0.1.3`** (`quota/version.py`, the single source
       of truth) and tagged **`v0.1.3`**. The release ships everything that was

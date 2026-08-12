@@ -298,6 +298,23 @@ def test_setup_script_has_quota_no_apt_guard():
         "setup_gateway_kali.sh must honor QUOTA_NO_APT (postinst sets it)"
 
 
+def test_setup_script_defines_cfg_history_log_before_use():
+    """CFG_HISTORY_LOG is rendered into the quota-dnslog.conf fragment (step
+    4.5) AND into config.yaml (step 6). The script runs `set -u`, so a late
+    definition crashed every .deb install at the 4.5 heredoc with
+    'CFG_HISTORY_LOG: unbound variable' — the assignment must come before the
+    first use (0.1.4 hotfix)."""
+    lines = _read(REPO / "scripts" / "setup_gateway_kali.sh").splitlines()
+    assign = next(i for i, l in enumerate(lines)
+                  if "CFG_HISTORY_LOG=" in l and "${CFG_HISTORY_LOG:-" in l)
+    first_use = next(i for i, l in enumerate(lines)
+                     if "log-facility=$CFG_HISTORY_LOG" in l)
+    assert assign < first_use, (
+        f"CFG_HISTORY_LOG is assigned at line {assign + 1} but first used at "
+        f"line {first_use + 1} — with `set -u` the heredoc expansion aborts "
+        "the install")
+
+
 # --------------------------------------------------------------------------- #
 # dnsmasq config: sequential IP allocation (no gapped leases)
 # --------------------------------------------------------------------------- #
