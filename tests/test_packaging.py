@@ -206,6 +206,20 @@ def test_apt_repo_workflow_signs_and_publishes():
         assert needle in text, f"apt-repo.yml must reference {needle!r}"
 
 
+def test_apt_repo_workflow_fpr_extraction_is_quote_safe():
+    """The FPR extraction runs awk inside a double-quoted command substitution.
+    The awk program must not carry literal backslash-quotes: mawk rejects
+    `$1==\\"fpr\\"` with 'backslash not last character on line', which made
+    FPR empty and killed signing (`--local-user ""`). The pinned form uses a
+    regex match so the program needs no embedded double quotes at all."""
+    text = _read(APT_WORKFLOW)
+    m = re.search(r"list-secret-keys \| awk -F: ([^\n]+)", text)
+    assert m, "the FPR extraction must be present"
+    program = m.group(1)
+    assert "/^fpr:/" in program, f"awk program must match by /^fpr:/, got: {program!r}"
+    assert "\\\"" not in program, f"no escaped quotes inside the awk program: {program!r}"
+
+
 def test_public_key_file_exists_and_is_not_ignored():
     """The repo must carry the armored PUBLIC signing key, and .gitignore must
     not exclude it (it is committed, and the workflow copies it to gh-pages)."""

@@ -112,7 +112,7 @@ jobs:
           fi
           printf '%s\n' "$APT_REPO_GPG_KEY" | gpg --batch --import
           # Fingerprint -> used as --local-user so signing never picks the wrong key.
-          echo "FPR=$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1==\"fpr\"{print $10; exit}')" >> "$GITHUB_ENV"
+          echo "FPR=$(gpg --batch --with-colons --list-secret-keys | awk -F: '/^fpr:/ {print $10; exit}')" >> "$GITHUB_ENV"
 
       - name: Check out the gh-pages working tree
         run: |
