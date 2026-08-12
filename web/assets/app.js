@@ -368,6 +368,7 @@ function switchPanel(name) {
   if (name === "network") refreshNetwork();
   if (name === "wan") refreshWan();
   if (name === "history") refreshHistory();
+  if (name === "dns") refreshDns();
 }
 
 async function refreshLogs() {
@@ -410,6 +411,45 @@ function histDeviceName(deviceId) {
     .find((x) => x.id === deviceId);
   if (!dev) return "#" + deviceId;
   return dev.user_name || dev.name || dev.mac;
+}
+
+// DNS-filter status badge (colored dot + label), and — for the "top
+// domains" table only — quick block/allow buttons that call
+// POST /api/dns/rules/quick. Buttons offer "this device" only when viewing
+// a specific device (aggregate/"all" has no single device to scope to).
+function dnsStatusBadge(status) {
+  const map = {
+    blocked: ["dns-badge blocked", "● Blocked"],
+    allowed: ["dns-badge allowed", "● Allowed"],
+    redirected: ["dns-badge redirected", "● Redirected"],
+    none: ["dns-badge none", "○ No rule"],
+  };
+  const [cls, label] = map[status] || map.none;
+  return `<span class="${cls}">${label}</span>`;
+}
+
+async function quickDnsRule(domain, action, scope, deviceId) {
+  try {
+    await API.post("/api/dns/rules/quick", {
+      domain, action, scope, device_id: deviceId ?? null,
+    });
+    await refreshHistory();
+  } catch (e) {
+    alert("Could not update the DNS rule: " + e.message);
+  }
+}
+
+function dnsQuickActions(domain, deviceId) {
+  const d = JSON.stringify(domain);
+  const devBtns = deviceId
+    ? `<button type="button" class="btn ghost tiny" onclick='quickDnsRule(${d},"block","device",${deviceId})'>Block device</button>`
+    : "";
+  return `
+    <div class="dns-quick-actions">
+      ${devBtns}
+      <button type="button" class="btn ghost tiny" onclick='quickDnsRule(${d},"block","global",null)'>Block everyone</button>
+      <button type="button" class="btn ghost tiny" onclick='quickDnsRule(${d},"allow","global",null)'>Allow</button>
+    </div>`;
 }
 
 async function refreshHistory() {
@@ -468,11 +508,13 @@ function renderHistory(d) {
   }
 
   // top domains
+  const curDeviceId = d.device_id === "all" ? null : d.device_id;
   $("hist-top").innerHTML = d.top_domains.map((t) => `
     <tr>
       <td class="domain">${esc(t.domain)}</td>
       <td class="num">${t.hits.toLocaleString()}</td>
       <td class="num">${total ? ((t.hits / total) * 100).toFixed(1) : "0.0"}%</td>
+      <td>${dnsStatusBadge(t.status)} ${dnsQuickActions(t.domain, curDeviceId)}</td>
     </tr>`).join("");
 
   // activity: group the per-minute buckets into hourly bars (no chart.js)
@@ -496,7 +538,7 @@ function renderHistory(d) {
       : "";
     return `
     <li>
-      <span class="domain">${badge}${esc(r.domain)}</span>
+      <span class="domain">${badge}${esc(r.domain)} ${dnsStatusBadge(r.status)}</span>
       <span class="num">${esc(r.bucket_minute)} × ${r.count}</span>
     </li>`;
   }).join("");
@@ -504,6 +546,146 @@ function renderHistory(d) {
 
 /* level filter + search are applied client-side to the raw /api/logs lines;
    the level is the 3rd whitespace token ("2026-08-06 12:00:00,123 INFO name: …") */
+/* ---------------- DNS tab: rules, presets, import ---------------- */
+
+let dnsPresetsCache = [];
+let dnsRulesCache = [];
+
+// scope-target selects (rule form + import form) share the same options:
+// every user, then every device, each tagged so submit knows which id/scope.
+function populateDnsTargetSelect(sel, scopeSel) {
+  const scope = scopeSel.value;
+  sel.classList.toggle("hidden", scope === "global");
+  if (scope === "global") return;
+  if (scope === "user") {
+    sel.innerHTML = (dashboard.users || [])
+      .map((u) => `<option value="${u.id}">${esc(u.name || `User #${u.id}`)}</option>`).join("");
+  } else {
+    sel.innerHTML = (dashboard.devices || [])
+      .map((d) => `<option value="${d.id}">${esc(d.name || d.mac)}</option>`).join("");
+  }
+}
+
+function scopeLabel(rule) {
+  if (rule.scope === "global") return "Global";
+  if (rule.scope === "user") {
+    const u = (dashboard.users || []).find((x) => x.id === rule.scope_id);
+    return `User: ${esc(u ? (u.name || `#${rule.scope_id}`) : `#${rule.scope_id}`)}`;
+  }
+  const dev = (dashboard.devices || []).find((x) => x.id === rule.scope_id);
+  return `Device: ${esc(dev ? (dev.name || dev.mac) : `#${rule.scope_id}`)}`;
+}
+
+function renderDnsRules() {
+  const list = $("dns-rules-list"), empty = $("dns-rules-empty");
+  if (!dnsRulesCache.length) {
+    list.innerHTML = "";
+    empty.classList.remove("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+  list.innerHTML = dnsRulesCache.map((r) => {
+    const actionLabel = r.action === "redirect" ? `Redirect → ${esc(r.target_ip || "")}` :
+      r.action === "allow" ? "Allow" : "Block";
+    return `
+    <tr>
+      <td>${scopeLabel(r)}</td>
+      <td class="domain">${esc(r.domain)}</td>
+      <td>${actionLabel}</td>
+      <td class="muted small">${esc(r.source)}</td>
+      <td><button type="button" class="btn ghost tiny" data-del-rule="${r.id}">Delete</button></td>
+    </tr>`;
+  }).join("");
+}
+
+function renderDnsPresets() {
+  $("dns-presets-list").innerHTML = dnsPresetsCache.map((p) => `
+    <div class="dns-preset-row">
+      <div>
+        <b>${esc(p.name)}</b>
+        <p class="muted small">${esc(p.description)}</p>
+        ${p.enabled ? `<span class="muted small">${p.domain_count.toLocaleString()} domains · ${scopeLabel({ scope: p.scope, scope_id: p.scope_id })}</span>` : ""}
+      </div>
+      <label class="switch" title="${p.enabled ? 'Disable' : 'Enable'} ${esc(p.name)}">
+        <input type="checkbox" data-preset-toggle="${p.id}" ${p.enabled ? "checked" : ""}>
+        <span class="slider"></span>
+      </label>
+    </div>`).join("");
+}
+
+async function refreshDns() {
+  try {
+    [dnsPresetsCache, dnsRulesCache] = await Promise.all([
+      API.get("/api/dns/presets"),
+      API.get("/api/dns/rules"),
+    ]);
+  } catch (_) { dnsPresetsCache = []; dnsRulesCache = []; }
+  renderDnsPresets();
+  renderDnsRules();
+  populateDnsTargetSelect($("dns-rule-target"), $("dns-rule-scope"));
+  populateDnsTargetSelect($("dns-import-target"), $("dns-import-scope"));
+}
+
+async function togglePreset(presetId, enable) {
+  const err = $("dns-rule-error");
+  err.classList.add("hidden");
+  try {
+    if (enable) {
+      await API.post(`/api/dns/presets/${presetId}/enable`, { scope: "global" });
+    } else {
+      await API.post(`/api/dns/presets/${presetId}/disable`, { scope: "global" });
+    }
+  } catch (e) {
+    err.textContent = "Preset update failed: " + e.message;
+    err.classList.remove("hidden");
+  }
+  await refreshDns();
+}
+
+async function submitDnsRule(ev) {
+  ev.preventDefault();
+  const err = $("dns-rule-error");
+  err.classList.add("hidden");
+  const scope = $("dns-rule-scope").value;
+  const scopeId = scope === "global" ? null : Number($("dns-rule-target").value) || null;
+  const action = $("dns-rule-action").value;
+  const domain = $("dns-rule-domain").value.trim();
+  const targetIp = $("dns-rule-target-ip").value.trim();
+  try {
+    const body = { scope, scope_id: scopeId, action, domain, enabled: true };
+    if (action === "redirect") body.target_ip = targetIp;
+    await API.post("/api/dns/rules", body);
+    $("dns-rule-domain").value = "";
+    $("dns-rule-target-ip").value = "";
+    await refreshDns();
+  } catch (e) {
+    err.textContent = e.message;
+    err.classList.remove("hidden");
+  }
+}
+
+async function submitDnsImport(ev) {
+  ev.preventDefault();
+  const result = $("dns-import-result");
+  const scope = $("dns-import-scope").value;
+  const scopeId = scope === "global" ? null : Number($("dns-import-target").value) || null;
+  try {
+    const res = await API.post("/api/dns/import", {
+      text: $("dns-import-text").value,
+      format: $("dns-import-format").value,
+      scope, scope_id: scopeId,
+      action: $("dns-import-action").value,
+    });
+    result.textContent = `Imported ${res.created} rule(s), skipped ${res.skipped} unenforceable line(s).`;
+    result.classList.remove("hidden");
+    $("dns-import-text").value = "";
+    await refreshDns();
+  } catch (e) {
+    result.textContent = "Import failed: " + e.message;
+    result.classList.remove("hidden");
+  }
+}
+
 function filterLogs() {
   let lines = logLines;
   if (logFilter !== "ALL") {
@@ -692,6 +874,7 @@ function openDeviceModal(id) {
   // per-device speed caps (Mbps, 0 = unlimited)
   $("d-limit-down").value = dev ? (dev.limit_down_mbps || 0) : 0;
   $("d-limit-up").value = dev ? (dev.limit_up_mbps || 0) : 0;
+  $("d-dns-server").value = dev ? (dev.dns_server || "") : "";
   $("d-fixed-wrap").classList.toggle("hidden", $("d-mode").value !== "fixed");
   $("modal-submit").textContent = dev ? "Save" : "Add";
   $("modal").classList.remove("hidden");
@@ -732,7 +915,9 @@ async function submitDevice(ev) {
   // per-device speed caps (Mbps, 0 = unlimited) — always sent, device-scoped
   const limitDown = Math.max(0, parseFloat($("d-limit-down").value) || 0);
   const limitUp = Math.max(0, parseFloat($("d-limit-up").value) || 0);
+  const dnsServer = $("d-dns-server").value.trim();
 
+  let targetDeviceId = editDeviceId;
   if (editDeviceId == null) {
     const mac = normalizeMac($("d-mac").value);
     if (!mac) { alert("Invalid MAC address."); return; }
@@ -745,7 +930,8 @@ async function submitDevice(ev) {
       body.quota_mode = mode;
       body.fixed_gb = fixed;
     }
-    await API.post("/api/devices", body);
+    const created = await API.post("/api/devices", body);
+    targetDeviceId = created.id;
   } else {
     const patch = { name, limit_down_mbps: limitDown, limit_up_mbps: limitUp };
     if (userId != null && userId !== originalUserId) patch.user_id = userId;
@@ -760,6 +946,13 @@ async function submitDevice(ev) {
       patch.fixed_gb = fixed;
     }
     await API.patch(`/api/devices/${editDeviceId}`, patch);
+  }
+  // dns_server has its own PATCH endpoint (validated as a bare IP there,
+  // see api/schemas.py's DnsServerUpdate) — a separate call either way,
+  // now that we have a real device id for a brand-new device too.
+  if (targetDeviceId != null) {
+    try { await API.patch(`/api/devices/${targetDeviceId}/dns`, { dns_server: dnsServer }); }
+    catch (e) { alert("Device saved, but the DNS server value was rejected: " + e.message); }
   }
   closeModal();
   await refreshAll();
@@ -784,6 +977,7 @@ function openUserModal(id) {
   $("u-speed-wrap").classList.remove("hidden");  // shown for new + existing users
   // per-user DNS-history retention (days); blank = global default
   $("u-history-days").value = u ? (u.history_days ?? "") : "";
+  $("u-dns-server").value = u ? (u.dns_server || "") : "";
   $("u-fixed-wrap").classList.toggle("hidden", $("u-mode").value !== "fixed");
   $("user-modal-submit").textContent = u ? "Save" : "Add";
   $("user-modal").classList.remove("hidden");
@@ -807,12 +1001,19 @@ async function submitUser(ev) {
   const historyDaysField = $("u-history-days").value;
   const historyDays = historyDaysField === "" ? null
     : Math.max(0, Math.min(365, parseInt(historyDaysField, 10) || 0));
+  const dnsServer = $("u-dns-server").value.trim();
+  let targetUserId = editUserId;
   if (editUserId == null) {
-    await API.post("/api/users", { name, quota_mode: mode, fixed_gb: fixed,
+    const created = await API.post("/api/users", { name, quota_mode: mode, fixed_gb: fixed,
       limit_down_mbps: limitDown, limit_up_mbps: limitUp });
+    targetUserId = created.id;
   } else {
     await API.patch(`/api/users/${editUserId}`, { name, quota_mode: mode, fixed_gb: fixed,
       limit_down_mbps: limitDown, limit_up_mbps: limitUp, history_days: historyDays });
+  }
+  if (targetUserId != null) {
+    try { await API.patch(`/api/users/${targetUserId}/dns`, { dns_server: dnsServer }); }
+    catch (e) { alert("User saved, but the DNS server value was rejected: " + e.message); }
   }
   closeUserModal();
   await refreshAll();
@@ -1351,6 +1552,24 @@ async function init() {
   $("hist-device").addEventListener("change", refreshHistory);
   $("hist-window").addEventListener("change", refreshHistory);
   $("hist-refresh").addEventListener("click", refreshHistory);
+  $("dns-rule-form").addEventListener("submit", submitDnsRule);
+  $("dns-import-form").addEventListener("submit", submitDnsImport);
+  $("dns-rule-scope").addEventListener("change", () =>
+    populateDnsTargetSelect($("dns-rule-target"), $("dns-rule-scope")));
+  $("dns-import-scope").addEventListener("change", () =>
+    populateDnsTargetSelect($("dns-import-target"), $("dns-import-scope")));
+  $("dns-rule-action").addEventListener("change", () =>
+    $("dns-rule-target-ip").classList.toggle("hidden", $("dns-rule-action").value !== "redirect"));
+  $("dns-presets-list").addEventListener("change", (ev) => {
+    const id = ev.target.dataset && ev.target.dataset.presetToggle;
+    if (id) togglePreset(id, ev.target.checked);
+  });
+  $("dns-rules-list").addEventListener("click", async (ev) => {
+    const id = ev.target.dataset && ev.target.dataset.delRule;
+    if (!id) return;
+    await API.del(`/api/dns/rules/${id}`);
+    await refreshDns();
+  });
   $("password-link").addEventListener("click", () => $("pwd-modal").classList.remove("hidden"));
   $("pwd-cancel").addEventListener("click", () => $("pwd-modal").classList.add("hidden"));
   $("pwd-form").addEventListener("submit", submitPassword);

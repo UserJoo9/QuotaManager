@@ -530,6 +530,18 @@ else
     warn "dnsmasq query-log fragment did not validate — browsing history will be empty"
 fi
 
+# --- 4.6. dnsmasq: domain-filtering base files (blacklists/DNS overrides) ---
+# quota/dns_rules.py (the DNS-filtering feature) writes generated rules into
+# these two files whenever the admin edits a domain rule / preset / per-client
+# DNS server in the dashboard. They start EMPTY here — the app owns their
+# content from the first rule onward. conf-dir is already guaranteed active
+# by step 4 above, so this step is just the placeholder files, nothing else.
+log "[4.6/8] preparing dnsmasq domain-filtering files (empty until rules are added)"
+for f in quota-tags.conf quota-domains.conf; do
+    [ -f "/etc/dnsmasq.d/$f" ] || printf '# Quota Manager — generated, do not edit by hand.\n' \
+        > "/etc/dnsmasq.d/$f"
+done
+
 # --- 5. nftables: NAT for the client subnet ----------------------------------
 log "[5/8] writing nftables NAT ruleset"
 # The app (run.py, quota/nftables.py) owns the `inet quota_gateway` table —

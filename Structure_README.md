@@ -17,6 +17,7 @@ the project layout, tests, and the release process.
 - [The maintenance loop](#the-maintenance-loop)
 - [Quota model](#quota-model)
 - [Speed shaping](#speed-shaping)
+- [DNS filtering (domain rules, presets, per-client DNS servers)](#dns-filtering-domain-rules-presets-per-client-dns-servers)
 - [Rogue devices & the ARP gateway-lock](#rogue-devices--the-arp-gateway-lock)
 - [Strong (WAN) mode](#strong-wan-mode)
 - [Key design decisions](#key-design-decisions)
@@ -180,6 +181,17 @@ at *their* `history_days` (NULL = the global `history.retention_days`). See
 the [REST API](#rest-api) `/api/history/{device_id}` row and the
 [Configuration](#configuration) `history:` block.
 
+**Domain filtering + per-client DNS servers** (when `cfg.dns_filter.enabled`,
+default on): `_sync_dns_rules` reads `domain_rules`, every user's/device's
+`dns_server`, and the device list fresh each tick, renders them into two
+files inside dnsmasq's `conf-dir` (`quota-tags.conf` binds every MAC to its
+own DHCP tag; `quota-domains.conf` holds the tag-restricted `address=`/
+`server=` lines), and reloads dnsmasq only when a file's content actually
+changed. The API additionally calls this immediately after any `/api/dns/*`
+or `/api/{users,devices}/{id}/dns` edit, so a rule change does not wait for
+the next tick. See [DNS filtering](#dns-filtering-domain-rules-presets-per-client-dns-servers)
+below for the full design.
+
 ---
 
 ## Quota model
@@ -286,6 +298,109 @@ Two engine-side details worth knowing:
   without creating it, `start()` unloads + reloads with the right `numifbs`.
   The apply itself never re-modprobes — a no-op `modprobe ifb numifbs=1` at
   apply time silently killed shaping on a live box.
+
+---
+
+## DNS filtering (domain rules, presets, per-client DNS servers)
+
+`quota/dns_rules.py` is a **third** generated-config layer, alongside
+nftables (packet accounting/blocking), tc (speed shaping), and
+`quota/dnslog.py` (browsing history) — but it never touches any of the
+other three. It rides entirely on the DHCP+DNS server the box already runs
+(`dnsmasq`), writing two extra files into its `conf-dir` (`/etc/dnsmasq.d`
+by default, alongside `quota-gateway.conf` and `quota-dnslog.conf`):
+
+- **`quota-tags.conf`** — `dhcp-host=<mac>,set:qmdev<id>` for every known
+  device. This is the whole mechanism that makes *per-device* or *per-user*
+  rules possible: dnsmasq selects config lines by DHCP tag, so binding a MAC
+  to a tag is the "is this rule for THIS device" selector.
+- **`quota-domains.conf`** — the actual rules, as tag-restricted
+  `address=/domain/target` (block/redirect) or `server=/domain/#`
+  (allow-list override) lines, plus tag-restricted `server=<ip>` lines for
+  per-user/per-device upstream DNS servers. A user-scoped rule/override is
+  fanned out to one line per device that user currently owns (dnsmasq only
+  understands per-device tags).
+
+```
+domain_rules (DB) ──┐
+dns_presets  (DB) ──┼─► DnsRuleManager.apply() ─► write quota-tags.conf
+users.dns_server ───┤                              write quota-domains.conf
+devices.dns_server ─┘                              (only if content changed)
+                                                            │
+                                                   dnsmasq --test (validate)
+                                                            │
+                                                  systemctl restart dnsmasq
+```
+
+Both files are rewritten and diffed on every maintenance tick and
+immediately after any `/api/dns/*` (or `/api/{users,devices}/{id}/dns`)
+edit — same signature-gated pattern as the nftables blocked set and the tc
+tree: an unchanged render never touches dnsmasq. Unlike a SIGHUP (which only
+re-reads `/etc/hosts` and lease-adjacent files), new `address=`/`server=`/
+`dhcp-host=` lines need a **restart** to take effect, so a rule change costs
+every client a brief (~1 s) DNS blip — acceptable for an admin edit, not
+something that happens on its own.
+
+**Blocklist presets** (`ads-tracking`, `social-media`, `streaming`,
+`gambling`) are curated source lists — hosts-format or AdBlock-Plus-format —
+fetched and compiled down to a flat domain set by `compile_source_text`.
+Enabling one bulk-inserts `domain_rules` rows (one `executemany` + one
+commit — see "Known bottlenecks" below) tagged
+`source='preset:<id>:<scope>:<scope_id>'`; disabling, or re-enabling at a
+**different** scope, deletes exactly those rows so a scope change never
+leaves an orphaned rule set behind. Only the network-address-shaped subset
+of an AdBlock-Plus list (`||domain^`) has a DNS-layer equivalent —
+element-hiding, path, and regex rules are dropped during compilation, which
+is an honest ceiling, not a bug.
+
+**Blacklist/allow-list a domain straight from browsing history**: the
+History tab's per-domain rows carry a live status badge (blocked / allowed /
+redirected / no rule) and one-click "Block this device" / "Block everyone" /
+"Allow" buttons, backed by `POST /api/dns/rules/quick`. The badge is computed
+by `dns_rules.resolve_domain_status`, which mirrors dnsmasq's OWN matching
+exactly rather than approximating it: longest-domain-match wins first (a
+rule for `ads.example.com` beats one for `example.com`, dnsmasq's rule, not
+an ordering choice made here), and ties are broken by the identical
+scope/action ordering `render_rules` renders in (global < user < device;
+allow after block within a scope) — because that ordering IS "last directive
+for this tag wins" in the generated config, the same tiebreak here reports
+the config's actual live behavior.
+
+**SQLite NULL-uniqueness note** (a real bug caught in review, fixed before
+merge): `domain_rules` has `UNIQUE(scope, scope_id, domain, action)` written
+as `UNIQUE(scope, scope_key, domain, action)`, where `scope_key` is a
+generated `COALESCE(scope_id, 0)` column. SQLite treats every `NULL` as
+distinct from every other `NULL`; every global rule has `scope_id IS NULL`,
+so a naive unique constraint on `scope_id` directly never collides for two
+global rows — re-submitting the same global rule silently inserted a
+duplicate instead of updating the existing one. `scope_key` gives the upsert
+a real, non-NULL key to collide on. A DB created by a pre-fix build is
+repaired in place by `Database._migrate_domain_rules_scope_key` (rebuilds
+the table, keeps the newest row per scope/scope_id/domain/action, drops the
+duplicates the old constraint let through).
+
+**Known limitation, by design of the technique**: this is DNS-layer
+filtering. A client using DNS-over-HTTPS/TLS to a resolver outside the box,
+or one that hardcodes a destination IP, bypasses it — the same way it
+already bypasses the box's regular DNS. Nothing about this feature changes
+that.
+
+**Known limitation, parallel to an existing one**: per-device/per-user rules
+and DNS-server overrides depend entirely on the DHCP tag
+(`quota-tags.conf`'s `dhcp-host=<mac>,set:qmdev<id>`), which dnsmasq only
+assigns to a MAC it has actually leased. A **static-IP device is invisible
+to tagging** the exact same way it is already invisible to the per-device
+block enforcement documented in `CLAUDE.md`'s `[LEGACY_DEBT_AND_RISKS]`
+("Per-device block can silently not cut a lease-less device") — a
+per-device/per-user domain rule or DNS-server override on a static-IP
+client silently does nothing, with no error surfaced anywhere.
+**Global-scope rules are unaffected** (no tag needed). The ARP gateway-lock
+(`engine.gateway_arp_lock`) only narrows this: it denies a static-IP device
+that points at the ROUTER as its gateway (the common bypass), but a
+static-IP device that already points at the BOX as its gateway is counted
+and blocked normally by IP yet still never gets a tag — it is not a full
+fix for the tagging gap, the same way it is not a full fix for the
+per-device block gap.
 
 Shaping sits after nftables in the packet path: blocked devices are already
 dropped in `forward`, and counters see the real pre-NAT src / post-NAT dst
@@ -661,6 +776,15 @@ history:
   dnsmasq_log_file: /var/log/quota-dnsmasq.log  # log-facility the setup
                               #   fragment points log-queries=extra at
   retention_days: 7           # global default; a user's "history_days" overrides
+
+dns_filter:
+  enabled: true               # domain rules / presets / per-client DNS servers.
+                              #   false => the feature is entirely inert.
+  conf_dir: /etc/dnsmasq.d    # dnsmasq's conf-dir (Debian/Kali default)
+  tags_file: quota-tags.conf     # per-device DHCP tag bindings (generated)
+  rules_file: quota-domains.conf # domain rules + DNS-server overrides (generated)
+  reload_dnsmasq: true        # restart dnsmasq when the generated files change
+  preset_cache_dir: data/dns_presets
 ```
 
 > **Speed shaping is switched on in the dashboard, not in this YAML.**
@@ -685,7 +809,14 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | GET | `/api/usage/{id}` · `/api/usage` | daily usage series per device / aggregated |
 | GET | `/api/events?limit=30` | audit events |
 | GET | `/api/logs?limit=300` | tail of the rotating log (newest first) |
-| GET | `/api/history/{device_id}?window=24&limit=100` | a device's DNS browsing history — `top_domains`, `activity` (minute buckets), `recent` (latest queries), `total_queries`. Auth-gated; `window` hours clamped 1–336, `limit` capped. Bandwidth is NOT duplicated here — the History tab reads live/per-period bytes from the dashboard payload |
+| GET | `/api/history/{device_id}?window=24&limit=100` | a device's DNS browsing history — `top_domains`, `activity` (minute buckets), `recent` (latest queries), `total_queries`. Auth-gated; `window` hours clamped 1–336, `limit` capped. Bandwidth is NOT duplicated here — the History tab reads live/per-period bytes from the dashboard payload. Every `top_domains`/`recent` row also carries a `status` (`blocked`/`allowed`/`redirected`/`none`) from `dns_rules.resolve_domain_status`, powering the History tab's filter badges + quick-action buttons |
+| GET/POST/PATCH/DELETE | `/api/dns/rules` | domain-filtering rules: list (optionally `?scope=&scope_id=`) / create (`{"scope","scope_id","action":"block"\|"allow"\|"redirect","domain","target_ip"}`) / enable-disable via PATCH / delete |
+| POST | `/api/dns/rules/quick` | one-click block/allow from a History-tab domain row: `{"domain","action":"block"\|"allow","scope":"global"\|"device","device_id"}` |
+| POST | `/api/dns/import` | paste raw hosts-format or AdBlock-Plus-format blocklist text (`{"text","format":"auto"\|"hosts"\|"adblock","scope","scope_id","action"}`) → bulk-creates domain rules in one transaction |
+| GET | `/api/dns/presets` | list built-in blocklist presets (ads-tracking, social-media, streaming, gambling) with their enabled state + domain count |
+| POST | `/api/dns/presets/{id}/enable` · `/disable` | fetch + compile a preset's sources into domain rules for a scope (`{"scope","scope_id"}`), or remove exactly those rules. Re-enabling at a DIFFERENT scope purges the old scope's rules first |
+| POST | `/api/dns/apply` | force an immediate dnsmasq regeneration + reload (normally automatic after every DNS-related edit) |
+| PATCH | `/api/users/{id}/dns` · `/api/devices/{id}/dns` | set/clear a per-user or per-device upstream DNS-server override (`{"dns_server": "1.1.1.1"}`, `""` clears it) |
 | GET/POST | `/api/bundle` | read / update bundle (`total_gb`, `reset_day`, or `add_gb` to recharge mid-month). A POST makes the dashboard the bundle owner (`bundle_source=dashboard`) |
 | POST | `/api/reset-month` | force an early period roll-over |
 | GET/POST | `/api/guest` | guest mode: auto-register new devices with their own small allowance |
@@ -752,6 +883,10 @@ QuotaManager/
 │   │                         #   on the client subnet so bypassers' frames hit the box
 │   ├── dnslog.py             # DNS browsing history: dnsmasq query-log parser +
 │   │                         #   DnslogTailer thread (bounded queue) -> dns_history
+│   ├── dns_rules.py          # DnsRuleManager: domain blacklist/allow/redirect rules,
+│   │                         #   blocklist presets, per-client DNS-server overrides,
+│   │                         #   resolve_domain_status (History-tab filter badges) —
+│   │                         #   generated dnsmasq config, no new service
 │   ├── topology.py           # WAN-topology detection: is ppp0 up (for the WAN tab)?
 │   ├── netmgr.py             # TopologyManager: the WAN tab's live LAN/WAN switch
 │   ├── vendor.py             # MAC OUI -> manufacturer (IEEE registry, lazy load)

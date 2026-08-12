@@ -1003,3 +1003,52 @@ select option { background: #0f0b18; }
   .topbar { margin: 10px 10px 0; padding: 10px 12px; }
   body { padding-bottom: env(safe-area-inset-bottom); }
 }
+
+/* ---------- DNS filtering (presets, rules, import, history badges) ---------- */
+.dns-presets-list { display: flex; flex-direction: column; gap: 10px; }
+.dns-preset-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius-md);
+}
+.dns-preset-row p { margin: 2px 0 0; }
+.dns-rule-form, .dns-import-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+  align-items: center;
+}
+.dns-rule-form select, .dns-rule-form input,
+.dns-import-row select, .dns-import-row select + select {
+  flex: 1 1 140px;
+  min-width: 120px;
+}
+.dns-import-form textarea {
+  width: 100%;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 0.82rem;
+  resize: vertical;
+  margin-bottom: 8px;
+}
+.btn.tiny { padding: 4px 10px; font-size: 0.75rem; border-radius: 8px; }
+.dns-quick-actions { display: inline-flex; gap: 6px; margin-left: 8px; flex-wrap: wrap; }
+.dns-badge {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.dns-badge.blocked { color: var(--danger); }
+.dns-badge.allowed { color: var(--ok); }
+.dns-badge.redirected { color: var(--warn); }
+.dns-badge.none { color: var(--text-dim); }
+
+@media (max-width: 720px) {
+  .dns-rule-form, .dns-import-row { flex-direction: column; align-items: stretch; }
+  .dns-preset-row { flex-direction: column; align-items: flex-start; }
+}

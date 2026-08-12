@@ -23,10 +23,13 @@ the API/service layer.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+
+log = logging.getLogger("quota.db")
 
 import aiosqlite
 
@@ -42,6 +45,17 @@ QUOTA_AUTO = "auto"
 BLOCK_OK = "ok"          # allowed, within quota
 BLOCK_QUOTA = "quota"    # exceeded monthly allowance
 BLOCK_ADMIN = "admin_off"  # manually switched off by admin
+
+# Domain-rule scope + action enums (see quota/dns_rules.py for the same
+# constants used by the dnsmasq renderer — kept independent so db.py never
+# has to import the renderer module).
+DNS_SCOPE_GLOBAL = "global"
+DNS_SCOPE_USER = "user"
+DNS_SCOPE_DEVICE = "device"
+
+DNS_ACTION_BLOCK = "block"
+DNS_ACTION_ALLOW = "allow"
+DNS_ACTION_REDIRECT = "redirect"
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +84,11 @@ class Device:
     #: tc shaper (quota/shaping.py).
     limit_down_mbps: float = 0.0
     limit_up_mbps: float = 0.0
+    #: Per-device upstream DNS server override (empty = inherit the user's
+    #: override, or the gateway's default upstreams if neither is set).
+    #: Rendered as a tag-restricted dnsmasq `server=` line — see
+    #: quota/dns_rules.py.
+    dns_server: str = ""
 
     @property
     def is_blocked(self) -> bool:
@@ -109,10 +128,34 @@ class User:
     #: Per-user DNS-history retention in days; None = the global
     #: ``history.retention_days`` default applies.
     history_days: Optional[int] = None
+    #: Per-user upstream DNS server override, inherited by every device of
+    #: this user that has no override of its own (empty = no override).
+    dns_server: str = ""
 
     @property
     def is_admin_blocked(self) -> bool:
         return self.block_state == BLOCK_ADMIN
+
+
+@dataclass
+class DomainRule:
+    """One domain-filtering rule: block/allow/redirect a domain (+ every
+    subdomain — dnsmasq's match already covers those), scoped globally, to a
+    user (fanned out to all their devices at render time), or to a single
+    device. See quota/dns_rules.py for how this becomes dnsmasq config."""
+
+    id: int
+    scope: str = DNS_SCOPE_GLOBAL          # 'global' | 'user' | 'device'
+    scope_id: Optional[int] = None         # user_id / device_id; None for global
+    action: str = DNS_ACTION_BLOCK         # 'block' | 'allow' | 'redirect'
+    domain: str = ""                       # normalized, no leading "*."
+    target_ip: Optional[str] = None        # only meaningful for 'redirect'
+    enabled: bool = True
+    #: 'manual' (admin-entered) | 'preset:<preset_id>:<scope>:<scope_id>'
+    #: (from an enabled blocklist preset) | 'import' (pasted hosts/
+    #: AdBlock-Plus text).
+    source: str = "manual"
+    created_at: float = 0.0
 
 
 @dataclass
@@ -144,7 +187,8 @@ CREATE TABLE IF NOT EXISTS devices (
     created_at       REAL NOT NULL,
     topup_gb         REAL NOT NULL DEFAULT 0,
     limit_down_mbps  REAL NOT NULL DEFAULT 0,
-    limit_up_mbps    REAL NOT NULL DEFAULT 0
+    limit_up_mbps    REAL NOT NULL DEFAULT 0,
+    dns_server       TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS leases (
@@ -214,12 +258,57 @@ CREATE TABLE IF NOT EXISTS users (
     notified_50      INTEGER NOT NULL DEFAULT 0,
     notified_75      INTEGER NOT NULL DEFAULT 0,
     notified_100     INTEGER NOT NULL DEFAULT 0,
-    history_days     INTEGER              -- NULL = global history.retention_days
+    history_days     INTEGER,             -- NULL = global history.retention_days
+    dns_server       TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS suppressed_macs (
     mac        TEXT PRIMARY KEY,
     created_at REAL NOT NULL
+);
+
+-- Domain-level DNS filtering (quota/dns_rules.py renders these into
+-- generated dnsmasq config). scope_id is a user_id or device_id depending on
+-- `scope`, and NULL for scope='global'.
+--
+-- scope_key exists ONLY so the UNIQUE constraint below actually behaves like
+-- an upsert key: SQLite treats every NULL as DISTINCT from every other NULL,
+-- so a naive UNIQUE(scope, scope_id, domain, action) never collides for two
+-- 'global' rows (scope_id is NULL on both) — re-submitting the same global
+-- rule silently INSERTs a duplicate instead of updating the existing one.
+-- scope_key is a NOT NULL stand-in (COALESCE(scope_id, 0)) so two 'global'
+-- rows for the same domain/action DO collide and the upsert in
+-- create_domain_rule fires correctly. 0 is never a real user/device id
+-- (AUTOINCREMENT starts at 1), so it cannot collide with a genuine scope_id.
+CREATE TABLE IF NOT EXISTS domain_rules (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope      TEXT NOT NULL DEFAULT 'global',
+    scope_id   INTEGER,
+    scope_key  INTEGER GENERATED ALWAYS AS (COALESCE(scope_id, 0)) STORED,
+    action     TEXT NOT NULL DEFAULT 'block',
+    domain     TEXT NOT NULL,
+    target_ip  TEXT,
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    source     TEXT NOT NULL DEFAULT 'manual',
+    created_at REAL NOT NULL,
+    UNIQUE(scope, scope_key, domain, action)
+);
+
+-- One row per built-in blocklist preset (quota/dns_rules.py:PRESETS) that
+-- has ever been enabled somewhere, so the dashboard can show its state
+-- (enabled/disabled, how many domains, when it was last refreshed) without
+-- re-fetching the source. Enabling a preset also inserts domain_rules rows
+-- (source='preset:<preset_id>:<scope>:<scope_id>') for its compiled domain
+-- list; disabling it, or re-enabling it at a DIFFERENT scope, deletes those
+-- rows again (see api/app.py's enable_dns_preset — the old-scope purge is
+-- what prevents an orphaned rule set from a scope change).
+CREATE TABLE IF NOT EXISTS dns_presets (
+    preset_id    TEXT PRIMARY KEY,
+    enabled      INTEGER NOT NULL DEFAULT 0,
+    scope        TEXT NOT NULL DEFAULT 'global',
+    scope_id     INTEGER,
+    domain_count INTEGER NOT NULL DEFAULT 0,
+    updated_at   REAL NOT NULL DEFAULT 0
 );
 """
 
@@ -321,8 +410,80 @@ class Database:
             await self._conn.commit()
         except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
             pass
+        # DNS filtering: per-user/per-device upstream DNS-server override
+        # column. ALTER no-ops when already present (fresh SCHEMA includes
+        # it); domain_rules/dns_presets are brand-new tables created by the
+        # executescript above, no ALTER needed for those, but a domain_rules
+        # table created by a PRE-FIX build (missing scope_key) does need a
+        # one-time rebuild — see _migrate_domain_rules_scope_key.
+        for table in ("devices", "users"):
+            try:
+                await self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN dns_server "
+                    "TEXT NOT NULL DEFAULT ''")
+                await self._conn.commit()
+            except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
+                pass
+        await self._migrate_domain_rules_scope_key()
         await self._backfill_users()
         await self._seed_gateway()
+        await self._conn.commit()
+
+    async def _migrate_domain_rules_scope_key(self) -> None:
+        """One-time repair for a ``domain_rules`` table created by a
+        pre-fix build of the DNS-filtering feature.
+
+        The original ``UNIQUE(scope, scope_id, domain, action)`` constraint
+        never actually deduplicated global-scope rows: SQLite treats every
+        NULL as distinct from every other NULL, so ``scope_id IS NULL``
+        never collided and re-submitting the same global rule silently
+        inserted a duplicate row instead of updating the existing one. The
+        fix adds a NOT NULL ``scope_key`` (``COALESCE(scope_id, 0)``) and
+        uniques on that instead (see the ``domain_rules`` table comment in
+        SCHEMA). A brand-new DB already gets the fixed table from
+        ``executescript`` above, so this is a no-op for it; only a DB that
+        already has the OLD shape gets rebuilt here, collapsing any
+        duplicates the old constraint let through (keeping the newest row
+        per scope/scope_id/domain/action).
+        """
+        row = await self._fetch_one(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='domain_rules'")
+        if row is None:
+            return  # nothing to migrate yet — SCHEMA creates the fixed table
+        cols = await self.conn.execute_fetchall("PRAGMA table_info(domain_rules)")
+        if any(c["name"] == "scope_key" for c in cols):
+            return  # already the fixed shape
+        log.warning("domain_rules predates the scope_key fix — rebuilding "
+                   "the table and dropping any duplicate global rules the "
+                   "old NULL-scope upsert bug let through")
+        await self._conn.executescript("""
+            ALTER TABLE domain_rules RENAME TO domain_rules_old;
+            CREATE TABLE domain_rules (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope      TEXT NOT NULL DEFAULT 'global',
+                scope_id   INTEGER,
+                scope_key  INTEGER GENERATED ALWAYS AS (COALESCE(scope_id, 0)) STORED,
+                action     TEXT NOT NULL DEFAULT 'block',
+                domain     TEXT NOT NULL,
+                target_ip  TEXT,
+                enabled    INTEGER NOT NULL DEFAULT 1,
+                source     TEXT NOT NULL DEFAULT 'manual',
+                created_at REAL NOT NULL,
+                UNIQUE(scope, scope_key, domain, action)
+            );
+        """)
+        await self._conn.execute("""
+            INSERT INTO domain_rules
+                (scope, scope_id, action, domain, target_ip, enabled, source, created_at)
+            SELECT scope, scope_id, action, domain, target_ip, enabled, source, created_at
+            FROM domain_rules_old
+            WHERE id IN (
+                SELECT MAX(id) FROM domain_rules_old
+                GROUP BY scope, COALESCE(scope_id, 0), domain, action
+            )
+        """)
+        await self._conn.execute("DROP TABLE domain_rules_old")
         await self._conn.commit()
 
     async def _backfill_users(self) -> None:
@@ -438,7 +599,8 @@ class Database:
 
     async def update_device(self, device_id: int, **fields: Any) -> Device | None:
         allowed = {"name", "quota_mode", "fixed_gb", "block_state",
-                   "user_id", "bypass", "limit_down_mbps", "limit_up_mbps"}
+                   "user_id", "bypass", "limit_down_mbps", "limit_up_mbps",
+                   "dns_server"}
         sets, args = [], []
         for key, value in fields.items():
             if key in allowed:
@@ -472,6 +634,9 @@ class Database:
         # rows are TTL-bounded by the quota period instead).
         await self.conn.execute(
             "DELETE FROM dns_history WHERE device_id=?", (device_id,))
+        # Device-scoped domain rules are meaningless once the device is gone
+        # (their dnsmasq tag would never be applied to anything again).
+        await self.delete_domain_rules_by_scope(DNS_SCOPE_DEVICE, device_id)
         await self.conn.commit()
 
     async def set_device_state(self, device_id: int, state: str) -> None:
@@ -551,7 +716,7 @@ class Database:
         allowed = {"name", "quota_mode", "fixed_gb", "block_state",
                    "limit_down_mbps", "limit_up_mbps",
                    "notified_50", "notified_75", "notified_100",
-                   "history_days"}
+                   "history_days", "dns_server"}
         sets, args = [], []
         for key, value in fields.items():
             if key in allowed:
@@ -585,8 +750,10 @@ class Database:
             await self.conn.execute(
                 "DELETE FROM usage_daily WHERE device_id=?", (r["id"],))
             await self.conn.execute("DELETE FROM devices WHERE id=?", (r["id"],))
+            await self.delete_domain_rules_by_scope(DNS_SCOPE_DEVICE, r["id"])
         await self.conn.execute("DELETE FROM users WHERE id=?", (user_id,))
         await self.conn.commit()
+        await self.delete_domain_rules_by_scope(DNS_SCOPE_USER, user_id)
         return len(rows)
 
     async def add_topup_user(self, user_id: int, extra_gb: float) -> None:
@@ -950,6 +1117,164 @@ class Database:
             "SELECT * FROM events ORDER BY ts DESC LIMIT ?", (limit,))
         return [dict(r) for r in rows]
 
+    # -- domain rules (DNS filtering) ----------------------------------------
+
+    async def create_domain_rule(self, scope: str, action: str, domain: str,
+                                 scope_id: int | None = None,
+                                 target_ip: str | None = None,
+                                 enabled: bool = True,
+                                 source: str = "manual") -> DomainRule:
+        """Insert (or update, if the same scope/scope_id/domain/action
+        combination already exists) one domain rule. The upsert targets
+        ``(scope, scope_key, domain, action)`` — NOT ``scope_id`` directly —
+        because SQLite treats every NULL as distinct, and scope_id is NULL
+        for every global rule; see the ``domain_rules`` table comment in
+        SCHEMA and ``_migrate_domain_rules_scope_key``."""
+        now = time.time()
+        await self.conn.execute(
+            """INSERT INTO domain_rules
+                 (scope, scope_id, action, domain, target_ip, enabled, source, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(scope, scope_key, domain, action) DO UPDATE SET
+                 target_ip=excluded.target_ip, enabled=excluded.enabled,
+                 source=excluded.source""",
+            (scope, scope_id, action, domain, target_ip, int(enabled),
+             source, now))
+        await self.conn.commit()
+        row = await self._fetch_one(
+            "SELECT * FROM domain_rules WHERE scope=? AND scope_id IS ? "
+            "AND domain=? AND action=?", (scope, scope_id, domain, action))
+        return _row_to_domain_rule(row)  # type: ignore[arg-type]
+
+    async def create_domain_rules_bulk(
+            self, scope: str, action: str, domains: list[str],
+            scope_id: int | None = None, source: str = "manual") -> int:
+        """Insert many domain rules in ONE transaction via ``executemany``.
+
+        Enabling a preset can mean 100k+ domains (e.g. the ads-tracking
+        list); doing an individual INSERT + commit per row in a Python loop
+        freezes SQLite for minutes and blocks the event loop for the whole
+        request. This does one ``executemany`` + one commit instead — same
+        shape as ``batch_add_dns_history``. Returns the number of domains
+        submitted (duplicates upsert in place, same as
+        :meth:`create_domain_rule`, so the count is submissions, not
+        necessarily new rows).
+        """
+        if not domains:
+            return 0
+        now = time.time()
+        rows = [(scope, scope_id, action, d, None, 1, source, now)
+               for d in domains]
+        await self.conn.executemany(
+            """INSERT INTO domain_rules
+                 (scope, scope_id, action, domain, target_ip, enabled, source, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(scope, scope_key, domain, action) DO UPDATE SET
+                 enabled=excluded.enabled, source=excluded.source""",
+            rows)
+        await self.conn.commit()
+        return len(rows)
+
+    async def get_domain_rule(self, rule_id: int) -> DomainRule | None:
+        row = await self._fetch_one(
+            "SELECT * FROM domain_rules WHERE id=?", (rule_id,))
+        return _row_to_domain_rule(row) if row else None
+
+    async def list_domain_rules(self, scope: str | None = None,
+                                scope_id: int | None = None,
+                                enabled_only: bool = False) -> list[DomainRule]:
+        """List rules, optionally filtered to one scope (and scope_id).
+        With no filter, returns every rule at every scope — what the
+        renderer (quota/dns_rules.py) needs to build the full config."""
+        sql = "SELECT * FROM domain_rules WHERE 1=1"
+        args: list[Any] = []
+        if scope is not None:
+            sql += " AND scope=?"
+            args.append(scope)
+            if scope_id is not None:
+                sql += " AND scope_id=?"
+                args.append(scope_id)
+        if enabled_only:
+            sql += " AND enabled=1"
+        sql += " ORDER BY id"
+        rows = await self.conn.execute_fetchall(sql, args)
+        return [_row_to_domain_rule(r) for r in rows]
+
+    async def update_domain_rule(self, rule_id: int, **fields: Any) -> DomainRule | None:
+        allowed = {"enabled", "target_ip", "domain", "action"}
+        sets, args = [], []
+        for key, value in fields.items():
+            if key in allowed:
+                sets.append(f"{key}=?")
+                args.append(int(value) if key == "enabled" else value)
+        if not sets:
+            return await self.get_domain_rule(rule_id)
+        args.append(rule_id)
+        await self.conn.execute(
+            f"UPDATE domain_rules SET {', '.join(sets)} WHERE id=?", args)
+        await self.conn.commit()
+        return await self.get_domain_rule(rule_id)
+
+    async def delete_domain_rule(self, rule_id: int) -> None:
+        await self.conn.execute("DELETE FROM domain_rules WHERE id=?", (rule_id,))
+        await self.conn.commit()
+
+    async def delete_domain_rules_by_source(self, source: str) -> int:
+        """Delete every rule with an exact ``source`` match (used to remove
+        a disabled preset's generated rules, or purge a preset's OLD
+        scope's rules when it is re-enabled somewhere else — see
+        api/app.py's enable_dns_preset). Returns the count removed."""
+        rows = await self.conn.execute_fetchall(
+            "SELECT id FROM domain_rules WHERE source=?", (source,))
+        await self.conn.execute(
+            "DELETE FROM domain_rules WHERE source=?", (source,))
+        await self.conn.commit()
+        return len(rows)
+
+    async def delete_domain_rules_by_scope(self, scope: str, scope_id: int | None) -> int:
+        """Delete every rule at one scope (used when a user/device is
+        deleted, so their per-scope rules don't linger orphaned)."""
+        rows = await self.conn.execute_fetchall(
+            "SELECT id FROM domain_rules WHERE scope=? AND scope_id IS ?",
+            (scope, scope_id))
+        await self.conn.execute(
+            "DELETE FROM domain_rules WHERE scope=? AND scope_id IS ?",
+            (scope, scope_id))
+        await self.conn.commit()
+        return len(rows)
+
+    # -- DNS blocklist presets ------------------------------------------------
+
+    async def get_preset_state(self, preset_id: str) -> dict[str, Any] | None:
+        row = await self._fetch_one(
+            "SELECT * FROM dns_presets WHERE preset_id=?", (preset_id,))
+        return dict(row) if row else None
+
+    async def list_preset_states(self) -> list[dict[str, Any]]:
+        rows = await self.conn.execute_fetchall(
+            "SELECT * FROM dns_presets ORDER BY preset_id")
+        return [dict(r) for r in rows]
+
+    async def set_preset_state(self, preset_id: str, enabled: bool,
+                               scope: str = DNS_SCOPE_GLOBAL,
+                               scope_id: int | None = None,
+                               domain_count: int = 0) -> None:
+        await self.conn.execute(
+            """INSERT INTO dns_presets (preset_id, enabled, scope, scope_id,
+                 domain_count, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(preset_id) DO UPDATE SET
+                 enabled=excluded.enabled, scope=excluded.scope,
+                 scope_id=excluded.scope_id, domain_count=excluded.domain_count,
+                 updated_at=excluded.updated_at""",
+            (preset_id, int(enabled), scope, scope_id, domain_count, time.time()))
+        await self.conn.commit()
+
+    async def delete_preset_state(self, preset_id: str) -> None:
+        await self.conn.execute(
+            "DELETE FROM dns_presets WHERE preset_id=?", (preset_id,))
+        await self.conn.commit()
+
 
 def _row_to_device(row: Any) -> Device:
     return Device(
@@ -965,6 +1290,7 @@ def _row_to_device(row: Any) -> Device:
         bypass=bool(row["bypass"]),
         limit_down_mbps=float(row["limit_down_mbps"] or 0.0),
         limit_up_mbps=float(row["limit_up_mbps"] or 0.0),
+        dns_server=row["dns_server"] or "",
     )
 
 
@@ -985,4 +1311,19 @@ def _row_to_user(row: Any) -> User:
         notified_75=bool(row["notified_75"]),
         notified_100=bool(row["notified_100"]),
         history_days=row["history_days"],
+        dns_server=row["dns_server"] or "",
+    )
+
+
+def _row_to_domain_rule(row: Any) -> DomainRule:
+    return DomainRule(
+        id=row["id"],
+        scope=row["scope"],
+        scope_id=row["scope_id"],
+        action=row["action"],
+        domain=row["domain"],
+        target_ip=row["target_ip"],
+        enabled=bool(row["enabled"]),
+        source=row["source"],
+        created_at=row["created_at"],
     )
