@@ -126,13 +126,24 @@ this step.
 
 ### 2. Set your bundle
 
-Edit the generated config to set your real monthly bundle:
+The dashboard asks for your bundle the first time you log in (step 4): a
+one-time **welcome panel** appears with two required fields —
+
+- **Internet bundle this month (GB)** — your real monthly allowance, e.g.
+  `140` for a 140 GB/month plan
+- **Reset day of the month** — the day your ISP resets the bundle (`0` = no
+  auto-reset; you recharge from the dashboard instead)
+
+It also lets you change the admin password in the same step. Both values can be
+changed later in the dashboard's **Bundle settings** card.
+
+Prefer editing config instead? The same two numbers live under `bundle` in
+`/etc/quota-gateway/config.yaml` (plus an optional `timezone`, which the
+welcome panel doesn't ask for). Edit and restart:
 
 ```bash
 sudo nano /etc/quota-gateway/config.yaml
 ```
-
-Change only the two numbers under `bundle` (and optionally add a `timezone`):
 
 ```yaml
 bundle:
@@ -141,11 +152,13 @@ bundle:
 timezone: ""             # optional IANA zone, e.g. Africa/Cairo
 ```
 
-Then restart:
-
 ```bash
 sudo systemctl restart quota-gateway
 ```
+
+> **Note:** once the bundle is set from the dashboard, the dashboard owns the
+> value — a later config.yaml edit is ignored until you clear the
+> `bundle_source` setting (see Troubleshooting).
 
 ### 3. Turn off the router's DHCP
 
