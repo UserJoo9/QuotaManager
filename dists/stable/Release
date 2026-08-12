@@ -1,0 +1,23 @@
+Architectures: all
+Codename: stable
+Components: main
+Date: Wed, 12 Aug 2026 19:29:51 +0000
+Label: Quota Manager
+Origin: Quota Manager
+Suite: stable
+MD5Sum:
+ a37e506eed53ec17e4335adecddebb8d              148 Release
+ a4d17b0466f089ef0ccdb3c9c26c4015             1363 main/binary-all/Packages
+ 1785df50e86f251a295d9bb166b57644              876 main/binary-all/Packages.gz
+SHA1:
+ 2f2c92aa592370dac401e33b728e15ad539f37cd              148 Release
+ d0cea60fd3ffe1f88d82da47975cd2e50433fbea             1363 main/binary-all/Packages
+ 76331e0c44561b22552efab92b42a74e453a06b2              876 main/binary-all/Packages.gz
+SHA256:
+ 98d649620bee7f1f99fcdd72059c6f61864fcca5d3a68c485e4cbf962894b3e6              148 Release
+ 1b186153da9530590560a610cdb7c7c239cd5c324d85e8f8638ae7456b0f431f             1363 main/binary-all/Packages
+ 64bf4733d32c702284191f69a446d6e18489879fdc5f365a5bf0e9502e3c1ceb              876 main/binary-all/Packages.gz
+SHA512:
+ 815befed7a90576734d176ed455b4cd9282d0cd09a6ad3071ee8d58b3e31c84308ee8f8148177204b6633f5ce3d6fcb47244cdadb2040ed877ad210f5ed53dd0              148 Release
+ cb908d5a38a3ba57461c63bde0c22d94424fe5bf02566450ac64fa44ce9f7cb40cd670a426c01cab3492bdeb14ed6ed5ccb15eadd07d91e3db03fa6fdfaacf92             1363 main/binary-all/Packages
+ 743f49e5e1d7ce303e7d2e0ed74ca4357d3f9bcfd54b74982d099500414f5e84962b5e271139641ccd36168a63f4b0806647344c9c35f5cb85cbe6005f35919d              876 main/binary-all/Packages.gz
