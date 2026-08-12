@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quota Manager</title>
-<link rel="stylesheet" href="/assets/styles.css?v=37">
+<link rel="stylesheet" href="/assets/styles.css?v=38">
 </head>
 <body>
   <div class="bg-glow"></div>
@@ -37,6 +37,7 @@
         <button class="nav-tab" data-panel="admin">Admin</button>
         <button class="nav-tab" data-panel="logs">Logs</button>
         <button class="nav-tab" data-panel="history">History</button>
+        <button class="nav-tab" data-panel="dns">DNS</button>
       </nav>
       <div class="topbar-right">
         <span id="net-status" class="net-status" title="Checking internet connection…">
@@ -432,7 +433,7 @@
             <div class="table-wrap">
               <table class="history-table">
                 <thead>
-                  <tr><th>Top domains</th><th class="num">Queries</th><th class="num">Share</th></tr>
+                  <tr><th>Top domains</th><th class="num">Queries</th><th class="num">Share</th><th>Filter</th></tr>
                 </thead>
                 <tbody id="hist-top"></tbody>
               </table>
@@ -448,6 +449,82 @@
               </div>
             </div>
           </div>
+        </div>
+      </section>
+
+      <!-- DNS: domain blacklist/allow/redirect rules, blocklist presets, -->
+      <!-- import, and per-user/per-device upstream DNS-server overrides. -->
+      <section id="panel-dns" class="nav-panel hidden">
+        <div class="glass card">
+          <h3>Blocklist presets</h3>
+          <p class="muted small">Ready-to-use domain lists. Enabling one fetches
+            + compiles its source(s) into rules for the household (or a
+            specific user/device below); disabling removes exactly those
+            rules again.</p>
+          <div id="dns-presets-list" class="dns-presets-list"></div>
+        </div>
+
+        <div class="glass card">
+          <h3>Domain rules</h3>
+          <p class="muted small">Block, allow, or redirect a domain (and every
+            subdomain of it) globally, for one user, or for one device.</p>
+          <form id="dns-rule-form" class="dns-rule-form">
+            <select id="dns-rule-scope" title="Scope">
+              <option value="global" selected>Global (everyone)</option>
+              <option value="user">One user</option>
+              <option value="device">One device</option>
+            </select>
+            <select id="dns-rule-target" class="hidden" title="User/device"></select>
+            <input id="dns-rule-domain" placeholder="example.com" required>
+            <select id="dns-rule-action" title="Action">
+              <option value="block" selected>Block</option>
+              <option value="allow">Allow (override a block)</option>
+              <option value="redirect">Redirect</option>
+            </select>
+            <input id="dns-rule-target-ip" class="hidden" placeholder="target IP">
+            <button type="submit" class="btn primary small">Add rule</button>
+          </form>
+          <p id="dns-rule-error" class="error hidden"></p>
+          <div class="table-wrap">
+            <table class="history-table">
+              <thead>
+                <tr><th>Scope</th><th>Domain</th><th>Action</th><th>Source</th><th></th></tr>
+              </thead>
+              <tbody id="dns-rules-list"></tbody>
+            </table>
+          </div>
+          <p id="dns-rules-empty" class="muted small hidden">No domain rules yet.</p>
+        </div>
+
+        <div class="glass card">
+          <h3>Import a blocklist</h3>
+          <p class="muted small">Paste a hosts-format (<code>0.0.0.0 domain</code>)
+            or AdBlock-Plus-format (<code>||domain^</code>) list. Only the
+            domain-shaped rules translate to DNS blocking — element-hiding
+            and path rules are skipped.</p>
+          <form id="dns-import-form" class="dns-import-form">
+            <textarea id="dns-import-text" rows="6"
+                      placeholder="0.0.0.0 ads.example.com&#10;||tracker.example.net^"></textarea>
+            <div class="dns-import-row">
+              <select id="dns-import-format" title="Format">
+                <option value="auto" selected>Auto-detect</option>
+                <option value="hosts">Hosts format</option>
+                <option value="adblock">AdBlock Plus format</option>
+              </select>
+              <select id="dns-import-scope" title="Scope">
+                <option value="global" selected>Global (everyone)</option>
+                <option value="user">One user</option>
+                <option value="device">One device</option>
+              </select>
+              <select id="dns-import-target" class="hidden" title="User/device"></select>
+              <select id="dns-import-action" title="Action">
+                <option value="block" selected>Block</option>
+                <option value="allow">Allow</option>
+              </select>
+              <button type="submit" class="btn ghost small">Import</button>
+            </div>
+          </form>
+          <p id="dns-import-result" class="muted small hidden"></p>
         </div>
       </section>
     </main>
@@ -508,6 +585,8 @@
           <label for="d-topup">Top up (extra GB)</label>
           <input type="number" id="d-topup" min="0.1" step="any" placeholder="0">
         </div>
+        <label for="d-dns-server">Upstream DNS server (blank = inherit)</label>
+        <input id="d-dns-server" placeholder="e.g. 1.1.1.1">
         <div class="modal-actions">
           <button type="button" id="modal-cancel" class="btn ghost">Cancel</button>
           <button type="submit" id="modal-submit" class="btn primary">Add</button>
@@ -548,6 +627,8 @@
         </div>
         <label for="u-history-days">History retention (days, blank = default)</label>
         <input type="number" id="u-history-days" min="0" max="365" step="1" placeholder="7">
+        <label for="u-dns-server">Upstream DNS server (blank = inherit)</label>
+        <input id="u-dns-server" placeholder="e.g. 1.1.1.1">
         <div class="modal-actions">
           <button type="button" id="user-modal-cancel" class="btn ghost">Cancel</button>
           <button type="submit" id="user-modal-submit" class="btn primary">Add</button>
@@ -598,6 +679,6 @@
     </div>
   </div>
 
-  <script src="/assets/app.js?v=32"></script>
+  <script src="/assets/app.js?v=33"></script>
 </body>
 </html>

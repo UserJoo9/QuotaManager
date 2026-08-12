@@ -133,3 +133,28 @@ history:
   enabled: true
   dnsmasq_log_file: /var/log/quota-dnsmasq.log
   retention_days: 7
+
+# Domain-level DNS filtering: per-user/per-device blacklists, allow-list
+# exceptions, custom host redirects, curated blocklist presets (ads/tracking,
+# social media, streaming, gambling), and per-user/per-device upstream
+# DNS-server overrides. Implemented as GENERATED dnsmasq config — no new
+# service is started, and this box already owns DHCP+DNS (see the dhcp:
+# block above). Rules/presets/DNS-server overrides themselves are edited in
+# the dashboard (stored in the DB, api/app.py's /api/dns/* routes); this
+# block only sets where the generated files live and whether to auto-reload.
+#   enabled: true              # master switch
+#   conf_dir: /etc/dnsmasq.d   # dnsmasq's conf-dir (Debian/Kali default)
+#   tags_file: quota-tags.conf     # per-device DHCP tag bindings
+#   rules_file: quota-domains.conf # domain rules + DNS-server overrides
+#   reload_dnsmasq: true       # restart dnsmasq when the generated files
+#                              # change (new address=/server= lines are only
+#                              # picked up on a restart, not a SIGHUP — costs
+#                              # clients a ~1s DNS blip per rule change)
+#   preset_cache_dir: data/dns_presets
+dns_filter:
+  enabled: true
+  conf_dir: /etc/dnsmasq.d
+  tags_file: quota-tags.conf
+  rules_file: quota-domains.conf
+  reload_dnsmasq: true
+  preset_cache_dir: data/dns_presets

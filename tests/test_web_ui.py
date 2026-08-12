@@ -61,8 +61,8 @@ def test_index_served(client):
     assert "System logs" in r.text
     assert 'id="panel-logs"' in r.text
     assert 'class="glass card admin-card"' in r.text
-    assert "assets/app.js?v=32" in r.text
-    assert "assets/styles.css?v=37" in r.text
+    assert "assets/app.js?v=33" in r.text
+    assert "assets/styles.css?v=38" in r.text
     # the internet reachability pill lives in the top bar, not the WAN status
     # panel (probed every 15 s; dot color = reachability).
     assert 'id="net-status"' in r.text
@@ -266,8 +266,10 @@ def test_history_tab_present(client):
 
 
 def test_history_assets_bumped(client):
-    """The History "All devices" tab bumped the cache-busting tags (styles
-    34->36, app.js 31->32) so browsers drop the pre-All-devices assets."""
+    """Cache-busting tags track the newest UI change. History's "All devices"
+    tab took styles 34->37, app.js 31->32; the DNS-filtering tab (rules,
+    presets, import, history status badges/quick-actions) took them to
+    38/33 — this always checks the CURRENT baseline, not the original bump."""
     r = client.get("/")
-    assert "assets/styles.css?v=37" in r.text
-    assert "assets/app.js?v=32" in r.text
+    assert "assets/styles.css?v=38" in r.text
+    assert "assets/app.js?v=33" in r.text
