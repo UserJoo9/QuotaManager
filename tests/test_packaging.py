@@ -191,6 +191,8 @@ def test_apt_repo_workflow_signs_and_publishes():
         "apt-ftparchive",        # Packages / Release index generator
         "apt-utils",             # ships apt-ftparchive
         "gnupg",
+        "sudo apt-get",          # the runner is not root — without sudo the
+                                 #   tool install died with E: lock permission
         "--detach-sign",         # Release.gpg
         "--clear-sign",          # InRelease
         "Release.gpg",

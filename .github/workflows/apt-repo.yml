@@ -97,8 +97,8 @@ jobs:
       - name: Install repo tooling (apt-ftparchive + gpg)
         run: |
           set -euo pipefail
-          apt-get update -qq
-          apt-get install -y --no-install-recommends -qq apt-utils gnupg
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends -qq apt-utils gnupg
 
       - name: Import the signing key
         env:
