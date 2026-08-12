@@ -7,37 +7,11 @@ Maintainer: Youssef Alkhodary <youssef.alkhodary@users.noreply.github.com>
 Depends: python3 (>= 3.10), python3-venv, python3-pip, dnsmasq, nftables,
          iproute2, kmod, ppp, ca-certificates
 Filename: pool/main/q/quota-manager/quota-manager_0.1.3_all.deb
-Size: 613970
-MD5sum: 8f5522570cbbac1ba1dd92bfc593d863
-SHA1: 343f7d2f285b08af065591a6bc9e70b1dd02f620
-SHA256: 8ca4f87bcf116483802de5bbc6b95697ef6ebd5971c51aa88b1a11f6c01352e5
-SHA512: 55526a36f3ff7983ad9d330f4b0ad5110dfa1d268b2865de8c1bdde15b97b5971dbb6618bed80f985e3374ec2d9eb7a6a8d58d16917ea5489cc1c6c5cf42cc4a
-Homepage: https://github.com/UserJoo9/QuotaManager
-Description: Fair-split metered-internet quota gateway
- Split a metered internet bundle fairly across users and devices. A person's
- allowance covers all their devices; when it runs out every device they own is
- cut at once (a per-device exemption keeps one device online). Per-device and
- per-user speed caps with low-latency fq_codel queues, a dark-purple
- glassmorphism admin dashboard, and a WebSocket live view.
- .
- The gateway needs a wired-NIC laptop running Debian/Kali as root. The package
- configures the network stack (dnsmasq + nftables + tc), installs the Python
- runtime into /opt/quota-manager, and runs the gateway as a systemd service.
-
-Package: quota-manager
-Architecture: all
-Version: 0.1.4
-Priority: optional
-Section: net
-Maintainer: Youssef Alkhodary <youssef.alkhodary@users.noreply.github.com>
-Depends: python3 (>= 3.10), python3-venv, python3-pip, dnsmasq, nftables,
-         iproute2, kmod, ppp, ca-certificates
-Filename: pool/main/q/quota-manager/quota-manager_0.1.4_all.deb
 Size: 614054
-MD5sum: edd5a94d266d1d9692ee1ebc0dce2b6f
-SHA1: e2e985345a7a3701439b0eadee8500335fc7f8bf
-SHA256: 0321570cef720780e9ab0003e53f97d29e34aa967f16a8e25ea554702def5400
-SHA512: 727bd78dbd10d6d9043b639aaebbc7342b8baf434c464e7ebfc9b1dcd70a9e1ab814b45033340ebd0172829dc882d3badc6168cb0392dcf3be7bea684f62f5b1
+MD5sum: bebddd4b1946520526bd291bdd0e0dc7
+SHA1: 581b27a39c05d2d874b64af7095e7fcdc3c25560
+SHA256: 0d1b1178fc72d45b0f13f3fbcdb6adf08c97912b49d1cb555fc8f0bc8b023188
+SHA512: bf4bb93b103c802e61a6455b27e61152e78e80075e633850dbd03f40e7e37b4da26968a1eef6ecd22d99fc03afaddf71cd9be78a7b6a583ada86e65da6e0b81e
 Homepage: https://github.com/UserJoo9/QuotaManager
 Description: Fair-split metered-internet quota gateway
  Split a metered internet bundle fairly across users and devices. A person's
