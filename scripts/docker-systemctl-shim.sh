@@ -14,7 +14,7 @@ case "$ACTION" in
         case "$SERVICE" in
             dnsmasq)
                 if pidof dnsmasq >/dev/null 2>&1; then
-                    kill -9 $(pidof dnsmasq) 2>/dev/null || true
+                    kill $(pidof dnsmasq) 2>/dev/null || true
                     sleep 0.2
                 fi
                 if command -v dnsmasq >/dev/null 2>&1; then
@@ -51,7 +51,7 @@ case "$ACTION" in
         case "$SERVICE" in
             dnsmasq)
                 if pidof dnsmasq >/dev/null 2>&1; then
-                    kill -9 $(pidof dnsmasq) 2>/dev/null || true
+                    kill $(pidof dnsmasq) 2>/dev/null || true
                 fi
                 exit 0
                 ;;

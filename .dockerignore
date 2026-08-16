@@ -42,7 +42,6 @@ Structure_README.md
 README.md
 CHANGELOG.md
 DOCKER_DEPLOYMENT.md
-LICENSE
 
 # ---- Docker & packaging (not needed inside the image) ----
 Dockerfile

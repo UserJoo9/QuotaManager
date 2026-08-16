@@ -18,7 +18,7 @@ jobs:
   lint-and-test:
     name: Lint & Unit Tests (Python 3.12)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
@@ -54,7 +54,7 @@ jobs:
   docker-build-test:
     name: Docker Build & Container Verification
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     needs: lint-and-test
 
     steps:

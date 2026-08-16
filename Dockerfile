@@ -49,6 +49,7 @@ COPY quota/ /app/quota/
 COPY web/ /app/web/
 COPY scripts/ /app/scripts/
 COPY run.py /app/run.py
+COPY LICENSE /app/LICENSE
 COPY config.yaml /app/config.default.yaml
 
 # Expose Web Dashboard Port (default 8080) and DNS / DHCP ports

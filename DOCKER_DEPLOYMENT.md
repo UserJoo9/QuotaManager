@@ -15,6 +15,9 @@ Quota Manager is a **hardware-level network gateway, bandwidth controller, and D
 | `dnsmasq` | Authoritative DHCP server (UDP 67) and DNS filter/resolver (UDP 53) |
 | ARP responder | Gateway lock and rogue device discovery |
 
+> [!NOTE]
+> **Speed Shaping Degradation:** The `ifb` kernel module is required for accurate download speed shaping (`tc` HTB). If this module cannot be loaded reliably inside the container, speed limits will degrade silently. Ensure the host system has the `ifb` module loaded (`modprobe ifb`).
+
 ### Docker Requirements
 
 | Setting | Why It Is Required |
@@ -24,6 +27,9 @@ Quota Manager is a **hardware-level network gateway, bandwidth controller, and D
 
 > [!WARNING]
 > **Security & Shared Hosts Notice:** `privileged: true` with `network_mode: host` provides root-level network and kernel capability on the host system. This is intended for dedicated gateway appliances, standalone home servers, or single-purpose virtual machines. Platforms like TrueNAS SCALE, strict Kubernetes clusters, or multi-tenant hosting environments may restrict privileged containers.
+
+> [!NOTE]
+> **WAN / PPPoE mode is not supported** inside Docker containers. The gateway relies on an existing upstream router for dial-out.
 
 ---
 
@@ -181,3 +187,6 @@ All persistent data survives container updates and restarts:
 | `logs/` | `/var/log/quota-gateway` | Application activity and error logs |
 | `dnsmasq.d/` | `/etc/dnsmasq.d` | Generated DNS filter rules and device tag mappings |
 | `leases/` | `/var/lib/misc` | DHCP lease state file (`dnsmasq.leases`) |
+
+> [!NOTE]
+> **Log Management:** DNS query logs are touched at `/var/log/quota-dnsmasq.log` (within the container overlay by default). To prevent this file from growing unbounded, map it to your host and configure a host-side `logrotate` (e.g., size 5M, rotate 3).
