@@ -5,8 +5,7 @@ Schema overview
 users          -- every person: quota mode, allowance, enforcement state.
 devices        -- every known MAC: name, owning user, per-device override.
 leases         -- current/known DHCP leases (mac <-> ip).
-suppressed_macs-- guest device MACs the admin manually deleted: while present
-                 they are not auto-registered (cleared once they leave).
+mac_lists      -- operator MAC whitelist/blacklist ('allow' / 'deny').
 bundle_config  -- single row: total_gb, reset_day, current period snapshot.
 usage_daily    -- append-only per-device daily byte totals.
 settings       -- key/value store (admin password hash, flags).
@@ -268,15 +267,13 @@ CREATE TABLE IF NOT EXISTS users (
     dns_server       TEXT NOT NULL DEFAULT ''
 );
 
-CREATE TABLE IF NOT EXISTS suppressed_macs (
-    mac        TEXT PRIMARY KEY,
-    created_at REAL NOT NULL
-);
-
 -- MAC whitelist/blacklist (quota/service.py): 'allow' = never quota-blocked
 -- (even over allowance), 'deny' = always blocked (even when the user is fine).
 -- Both are enforced at render time via resolve_device_state — no device rows
--- are touched, so removing a MAC from a list restores instantly.
+-- are touched, so removing a MAC from a list restores instantly. The 'deny'
+-- list doubles as the permanent blacklist that a manual user/device DELETE
+-- writes to: a blacklisted MAC never auto-registers and stays kernel-blocked
+-- even with no device row, until the admin removes it in the Network tab.
 CREATE TABLE IF NOT EXISTS mac_lists (
     mac        TEXT NOT NULL,
     kind       TEXT NOT NULL,  -- 'allow' | 'deny'
@@ -350,6 +347,10 @@ class Database:
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._conn.executescript(SCHEMA)
+        # Legacy cleanup: the old guest-deletion `suppressed_macs` table (v20,
+        # pre-blacklist) is orphaned — delete->deny-list replaced it and nothing
+        # references it anymore. Idempotent; a fresh DB simply has no such table.
+        await self._conn.execute("DROP TABLE IF EXISTS suppressed_macs")
         # Lightweight migration: topup_gb (per-device top-up persistence) was
         # added after the first release; ALTER is a no-op when it already exists.
         try:
@@ -641,20 +642,18 @@ class Database:
         return await self.get_device(device_id)
 
     async def delete_device(self, device_id: int,
-                            suppress_guest_mac: bool = False) -> None:
-        """Delete a device. When ``suppress_guest_mac`` is set AND the device
-        belongs to a guest user, its MAC is recorded in ``suppressed_macs`` so
-        run.py does not auto-register it again while it stays connected (the
-        manual-delete-never-returns rule). The month-reset path calls without
-        the flag — a returning guest after a reset re-registers fresh."""
+                            deny_list_mac: bool = False) -> None:
+        """Delete a device. When ``deny_list_mac`` is set, its MAC is added to
+        the deny list (permanent blacklist) FIRST, so run.py never auto-
+        registers it again while it stays connected and the kernel keeps
+        blocking it even without a device row. Removal is manual: deleting the
+        MAC from the deny list in the Network tab unblocks it. The month-reset
+        path never sets the flag — a returning guest after a reset registers
+        fresh."""
         row = await self._fetch_one(
             "SELECT mac, user_id FROM devices WHERE id=?", (device_id,))
-        if suppress_guest_mac and row is not None:
-            if row["user_id"] is not None:
-                user = await self._fetch_one(
-                    "SELECT guest FROM users WHERE id=?", (row["user_id"],))
-                if user is not None and user["guest"]:
-                    await self.add_suppressed_mac(row["mac"])
+        if deny_list_mac and row is not None:
+            await self.add_mac_list("deny", [row["mac"]])
         await self.conn.execute("DELETE FROM devices WHERE id=?", (device_id,))
         # app-layer FK cleanup: the device's DNS history dies with it (usage
         # rows are TTL-bounded by the quota period instead).
@@ -759,22 +758,22 @@ class Database:
         return await self.get_user(user_id)
 
     async def delete_user(self, user_id: int, cascade: bool = True,
-                          suppress_guest_macs: bool = False) -> int:
+                          deny_list_macs: bool = False) -> int:
         """Delete a user (cascade removes their devices + usage rows). When
-        ``suppress_guest_macs`` is set AND the user is a guest, their device
-        MACs are recorded in ``suppressed_macs`` first, so run.py will not
-        auto-register those devices again while they stay connected. Returns
-        how many devices were removed with them."""
-        user = await self._fetch_one("SELECT guest FROM users WHERE id=?",
-                                     (user_id,))
+        ``deny_list_macs`` is set, EVERY device MAC is added to the deny list
+        (permanent blacklist) first, so run.py never auto-registers those
+        devices again while they stay connected and the kernel keeps blocking
+        them even without device rows. Removal is manual: deleting the MACs
+        from the deny list in the Network tab unblocks them. The month-reset
+        path never sets the flag. Returns how many devices were removed."""
         rows = await self.conn.execute_fetchall(
             "SELECT id, mac FROM devices WHERE user_id=?", (user_id,))
         if rows and not cascade:
             raise ValueError(
                 "user still has devices; reassign or delete them first")
         for r in rows:
-            if suppress_guest_macs and user is not None and user["guest"]:
-                await self.add_suppressed_mac(r["mac"])
+            if deny_list_macs:
+                await self.add_mac_list("deny", [r["mac"]])
             await self.conn.execute(
                 "DELETE FROM usage_daily WHERE device_id=?", (r["id"],))
             await self.conn.execute("DELETE FROM devices WHERE id=?", (r["id"],))
@@ -845,42 +844,6 @@ class Database:
             (GATEWAY_MAC, time.time(), user_id))
         await self.conn.commit()
 
-    # -- suppressed MACs ------------------------------------------------------
-    # A manually-deleted guest device's MAC is recorded here so run.py does not
-    # auto-register it again while it stays connected. The row is cleared once
-    # the MAC drops out of the dnsmasq lease file (device genuinely left), so a
-    # later return registers a fresh guest. The month-reset path NEVER writes
-    # here — returning guests after a reset re-register normally.
-
-    async def add_suppressed_mac(self, mac: str) -> None:
-        """Record a MAC that must not auto-register. Lowercased + idempotent."""
-        await self.conn.execute(
-            "INSERT INTO suppressed_macs (mac, created_at) VALUES (?, ?) "
-            "ON CONFLICT(mac) DO NOTHING",
-            (mac.lower(), time.time()))
-        await self.conn.commit()
-
-    async def is_mac_suppressed(self, mac: str) -> bool:
-        row = await self._fetch_one(
-            "SELECT 1 FROM suppressed_macs WHERE mac=?", (mac.lower(),))
-        return row is not None
-
-    async def clear_suppressed_macs_not_in(self, keep: set[str]) -> int:
-        """Drop suppression rows for MACs no longer on the network.
-
-        ``keep`` is the set of currently-leased MACs (dnsmasq lease file). A
-        MAC that left the network loses its suppression, so a future return
-        registers fresh. Returns how many rows were cleared."""
-        keep_l = {m.lower() for m in keep}
-        rows = await self.conn.execute_fetchall("SELECT mac FROM suppressed_macs")
-        gone = [r["mac"] for r in rows if r["mac"] not in keep_l]
-        if gone:
-            ph = ",".join("?" for _ in gone)
-            await self.conn.execute(
-                f"DELETE FROM suppressed_macs WHERE mac IN ({ph})", gone)
-            await self.conn.commit()
-        return len(gone)
-
     # -- MAC whitelist/blacklist --------------------------------------------
 
     async def get_mac_list(self, kind: str) -> list[str]:
@@ -888,6 +851,20 @@ class Database:
         row = await self.conn.execute_fetchall(
             "SELECT mac FROM mac_lists WHERE kind=? ORDER BY mac", (kind,))
         return [r["mac"] for r in row]
+
+    async def add_mac_list(self, kind: str, macs: list[str]) -> None:
+        """Add MACs to the allow/deny list (additive — existing entries are
+        kept). Lowercased + idempotent; used by manual deletes to permanently
+        blacklist a device's MAC."""
+        kind = kind if kind in ("allow", "deny") else "allow"
+        cleaned = sorted({m.lower().strip() for m in macs if m and m.strip()})
+        if not cleaned:
+            return
+        await self.conn.executemany(
+            "INSERT OR IGNORE INTO mac_lists (mac, kind, created_at) "
+            "VALUES (?, ?, ?)",
+            [(m, kind, time.time()) for m in cleaned])
+        await self.conn.commit()
 
     async def set_mac_list(self, kind: str, macs: list[str]) -> None:
         """Replace the whole allow/deny list. Lowercased + idempotent."""

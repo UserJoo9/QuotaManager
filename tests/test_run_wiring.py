@@ -17,6 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from core import config as cfg_mod
+from quota import db as _db
 from quota.arp_scan import ArpScanner
 from quota.engine import GATEWAY_MAC, EngineCounters, EngineSnapshot
 from quota.tun2socks import Tun2socksStatus
@@ -1622,17 +1623,18 @@ def test_wan_internet_reads_dns_probe_while_box_cut(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# guest-deletion suppression + the protected Gateway user's accounting
+# delete -> MAC blacklist (deny list) + the protected Gateway user's accounting
 # --------------------------------------------------------------------------- #
 
-def test_suppressed_mac_is_not_re_registered(tmp_path):
-    """A manually-deleted guest stays deleted while its device is still on the
-    network: _persist_lease skips a suppressed MAC (checked before guest mode)."""
+def test_blacklisted_mac_is_not_re_registered(tmp_path):
+    """A manually-deleted device stays deleted while its device is still on the
+    network: _persist_lease skips a blacklisted (deny-listed) MAC (checked
+    before guest mode), for ANY owner — guest or normal."""
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
     asyncio.get_event_loop().run_until_complete(gw.startup())
-    # guest mode ON: a new device auto-registers as a GUEST (only a guest-owned
-    # delete records the suppression — a normal-user delete never does)
+    # guest mode ON: a new device auto-registers as a GUEST (a delete records
+    # the deny list for every owner, guest or normal)
     asyncio.get_event_loop().run_until_complete(gw.service.set_guest_mode(True))
     _cancel_maintenance(gw)  # the background loop must not race the manual calls
     try:
@@ -1641,24 +1643,40 @@ def test_suppressed_mac_is_not_re_registered(tmp_path):
         dev = asyncio.get_event_loop().run_until_complete(
             gw.database.get_device(mac=mac))
         assert dev is not None, "first sighting auto-registers as a guest"
-        # delete + suppress, exactly what DELETE /api/devices does for a guest
+        # delete + blacklist, exactly what DELETE /api/devices does
         asyncio.get_event_loop().run_until_complete(
-            gw.database.delete_device(dev.id, suppress_guest_mac=True))
+            gw.database.delete_device(dev.id, deny_list_mac=True))
         assert asyncio.get_event_loop().run_until_complete(
-            gw.database.is_mac_suppressed(mac)) is True
+            gw.database.get_mac_list("deny")) == [mac]
 
         # the device is still connected: another lease tick must NOT resurrect it
         asyncio.get_event_loop().run_until_complete(gw._persist_lease(mac, "192.168.2.41"))
         assert asyncio.get_event_loop().run_until_complete(
             gw.database.get_device(mac=mac)) is None, \
-            "suppressed MAC must not be re-registered while still connected"
+            "blacklisted MAC must not be re-registered while still connected"
+        # ...and its row-less entry is kernel-blocked through snapshot_state
+        snap = asyncio.get_event_loop().run_until_complete(gw.service.snapshot_state())
+        assert snap[mac]["blocked"] is True
+        assert snap[mac]["ip"] == "192.168.2.41"
+        # a NORMAL (non-guest) owner's delete blacklists too
+        n = asyncio.get_event_loop().run_until_complete(
+            gw.database.create_user(name="Dad", quota_mode=_db.QUOTA_FIXED,
+                                    fixed_gb=20.0))
+        ndev = asyncio.get_event_loop().run_until_complete(
+            gw.database.upsert_device("aa:bb:cc:dd:ee:83", user_id=n.id))
+        asyncio.get_event_loop().run_until_complete(
+            gw.database.delete_device(ndev.id, deny_list_mac=True))
+        assert asyncio.get_event_loop().run_until_complete(
+            gw.database.get_mac_list("deny")) == [mac, "aa:bb:cc:dd:ee:83"]
     finally:
         asyncio.get_event_loop().run_until_complete(gw.shutdown())
 
 
-def test_suppression_cleared_when_lease_drops(tmp_path):
-    """When the device genuinely leaves (its lease disappears from dnsmasq's
-    file), the suppression is cleared — a future reconnect registers fresh."""
+def test_blacklist_survives_lease_drop(tmp_path):
+    """The deny list is PERMANENT: when the device genuinely leaves (its lease
+    disappears from dnsmasq's file), the blacklist is NOT cleared — a future
+    reconnect stays blocked until the admin removes the MAC in the Network
+    tab."""
     cfg = _cfg(tmp_path)
     lease_file = tmp_path / "dnsmasq.leases"
     lease_file.write_text(
@@ -1676,24 +1694,56 @@ def test_suppression_cleared_when_lease_drops(tmp_path):
             gw.database.get_device(mac=mac))
         assert dev is not None, "lease device auto-registers as a guest"
         asyncio.get_event_loop().run_until_complete(
-            gw.database.delete_device(dev.id, suppress_guest_mac=True))
+            gw.database.delete_device(dev.id, deny_list_mac=True))
         assert asyncio.get_event_loop().run_until_complete(
-            gw.database.is_mac_suppressed(mac)) is True
+            gw.database.get_mac_list("deny")) == [mac]
 
         # the device leaves the network: the lease file no longer lists it
         # (other devices still are — a transiently EMPTY lease file is a
-        # dnsmasq restart and must NOT clear any suppression)
+        # dnsmasq restart and must NOT clear any deny row either)
         lease_file.write_text(
             "1730000000 aa:bb:cc:dd:ee:99 192.168.2.99 tablet 01:aa:bb:cc:dd:ee:99\n",
             encoding="utf-8")
         asyncio.get_event_loop().run_until_complete(gw._sync_dnsmasq_leases())
         assert asyncio.get_event_loop().run_until_complete(
-            gw.database.is_mac_suppressed(mac)) is False
+            gw.database.get_mac_list("deny")) == [mac]
 
-        # reconnecting now registers a fresh account
+        # reconnecting now does NOT register a fresh account — still blacklisted
         asyncio.get_event_loop().run_until_complete(gw._persist_lease(mac, "192.168.2.42"))
         assert asyncio.get_event_loop().run_until_complete(
-            gw.database.get_device(mac=mac)) is not None
+            gw.database.get_device(mac=mac)) is None, \
+            "a blacklisted MAC stays blocked after reconnect"
+    finally:
+        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+
+
+def test_unblacklist_re_registers_device(tmp_path):
+    """Removing a MAC from the deny list (Network tab) unblocks + re-registers:
+    the next lease tick mints a fresh account (the ONLY way back in)."""
+    cfg = _cfg(tmp_path)
+    gw = Gateway(cfg)
+    asyncio.get_event_loop().run_until_complete(gw.startup())
+    asyncio.get_event_loop().run_until_complete(gw.service.set_guest_mode(True))
+    _cancel_maintenance(gw)
+    try:
+        mac = "aa:bb:cc:dd:ee:84"
+        asyncio.get_event_loop().run_until_complete(gw._persist_lease(mac, "192.168.2.44"))
+        dev = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_device(mac=mac))
+        asyncio.get_event_loop().run_until_complete(
+            gw.database.delete_device(dev.id, deny_list_mac=True))
+        assert asyncio.get_event_loop().run_until_complete(
+            gw.database.get_device(mac=mac)) is None
+
+        # un-blacklist (the Network-tab save replaces the whole deny list)
+        asyncio.get_event_loop().run_until_complete(
+            gw.database.set_mac_list("deny", []))
+        asyncio.get_event_loop().run_until_complete(gw._persist_lease(mac, "192.168.2.44"))
+        redev = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_device(mac=mac))
+        assert redev is not None, "un-blacklisting must re-register the device"
+        assert asyncio.get_event_loop().run_until_complete(
+            gw.service.snapshot_state())[mac]["blocked"] is False
     finally:
         asyncio.get_event_loop().run_until_complete(gw.shutdown())
 

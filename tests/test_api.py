@@ -1250,7 +1250,7 @@ def test_logs_endpoint_tails_file(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# protected "Gateway" user + guest-deletion suppression (v20)
+# protected "Gateway" user + delete -> MAC blacklist (deny list)
 # ---------------------------------------------------------------------------
 
 def test_gateway_user_seeded_and_protected(client):
@@ -1343,9 +1343,10 @@ def test_gateway_device_cannot_be_recreated_or_reassigned(client):
     assert r.status_code == 400, r.text
 
 
-def test_delete_guest_device_suppresses_re_registration(client):
-    """A manual DELETE of a guest device records its MAC so run.py never
-    auto-registers it again while it stays connected."""
+def test_delete_device_blacklists_mac(client):
+    """A manual DELETE of a device blacklists its MAC (permanent deny list):
+    run.py never auto-registers it again while it stays connected, and the
+    Network-tab blacklist is the only way back in."""
     import asyncio
     c, db, _ = client
     _login(c)
@@ -1354,16 +1355,16 @@ def test_delete_guest_device_suppresses_re_registration(client):
     dev = asyncio.get_event_loop().run_until_complete(db.upsert_device(
         "aa:bb:cc:dd:ee:99", name="Phone", user_id=g.id))
     assert asyncio.get_event_loop().run_until_complete(
-        db.is_mac_suppressed("aa:bb:cc:dd:ee:99")) is False
+        db.get_mac_list("deny")) == []
 
     r = c.delete(f"/api/devices/{dev.id}")
     assert r.status_code == 200, r.text
     assert asyncio.get_event_loop().run_until_complete(
-        db.is_mac_suppressed("aa:bb:cc:dd:ee:99")) is True
+        db.get_mac_list("deny")) == ["aa:bb:cc:dd:ee:99"]
 
 
-def test_delete_guest_user_suppresses_its_macs(client):
-    """Deleting a guest USER suppresses every device MAC it owned."""
+def test_delete_user_blacklists_its_macs(client):
+    """Deleting a USER blacklists every device MAC it owned."""
     import asyncio
     c, db, _ = client
     _login(c)
@@ -1374,12 +1375,13 @@ def test_delete_guest_user_suppresses_its_macs(client):
     r = c.delete(f"/api/users/{g.id}")
     assert r.status_code == 200, r.text
     assert asyncio.get_event_loop().run_until_complete(
-        db.is_mac_suppressed("aa:bb:cc:dd:ee:98")) is True
+        db.get_mac_list("deny")) == ["aa:bb:cc:dd:ee:98"]
 
 
-def test_delete_normal_user_does_not_suppress(client):
-    """Only GUEST deletions suppress MACs — a normal user's device re-joins
-    normally if its MAC comes back."""
+def test_delete_normal_user_blacklists_its_macs(client):
+    """A NORMAL user's devices are blacklisted too (no guest-only carve-out):
+    deleting the user removes the cards AND the kernel keeps blocking the
+    still-connected devices."""
     import asyncio
     c, db, _ = client
     _login(c)
@@ -1390,10 +1392,63 @@ def test_delete_normal_user_does_not_suppress(client):
     r = c.delete(f"/api/users/{u.id}")
     assert r.status_code == 200, r.text
     assert asyncio.get_event_loop().run_until_complete(
-        db.is_mac_suppressed("aa:bb:cc:dd:ee:97")) is False
-    # the device is gone but the MAC was not suppressed
+        db.get_mac_list("deny")) == ["aa:bb:cc:dd:ee:97"]
+    # the device row is gone but the MAC stays blacklisted
     assert asyncio.get_event_loop().run_until_complete(
         db.get_device(mac="aa:bb:cc:dd:ee:97")) is None
+    # a deleted user's MAC is hidden from the dashboard and the report
+    dash = c.get("/api/dashboard").json()
+    assert all(d["mac"] != "aa:bb:cc:dd:ee:97" for d in dash["devices"])
+    assert all(dev["mac"] != "aa:bb:cc:dd:ee:97"
+               for u in dash["users"] for dev in u["devices"])
+    holder = SnapshotHolder()
+    with _client_from(create_app(db, QuotaService(db, timezone="Africa/Cairo"),
+                                 holder,
+                                 report_config=ReportConfig(
+                                     enabled=True, allow_client_subnet=True,
+                                     allowed_ips=[],
+                                     client_subnet="192.168.2.0/24")),
+                      "192.168.2.9") as rc:
+        report = rc.get("/api/report")
+        assert report.status_code == 200, report.text
+        assert all(d["mac"] != "aa:bb:cc:dd:ee:97"
+                   for u in report.json()["users"] for d in u["devices"])
+
+
+def test_unblacklist_restores_device(client):
+    """Removing a MAC from the deny list (Network tab) unblocks it: the device
+    card reappears in the dashboard."""
+    import asyncio
+    c, db, _ = client
+    _login(c)
+    u = asyncio.get_event_loop().run_until_complete(db.create_user(
+        name="Dad", quota_mode=_db.QUOTA_FIXED, fixed_gb=20.0))
+    asyncio.get_event_loop().run_until_complete(db.upsert_device(
+        "aa:bb:cc:dd:ee:96", name="Phone", user_id=u.id))
+    assert c.delete(f"/api/users/{u.id}").status_code == 200
+    assert asyncio.get_event_loop().run_until_complete(
+        db.get_mac_list("deny")) == ["aa:bb:cc:dd:ee:96"]
+
+    # un-blacklist via POST /api/mac-lists (an empty deny list)
+    r = c.post("/api/mac-lists", json={"deny": []})
+    assert r.status_code == 200, r.text
+    assert asyncio.get_event_loop().run_until_complete(
+        db.get_mac_list("deny")) == []
+
+
+def test_blacklisted_device_visible_in_mac_lists_api(client):
+    """A deleted device's MAC surfaces in GET /api/mac-lists (the Network-tab
+    blacklist), which is the ONLY place it appears."""
+    import asyncio
+    c, db, _ = client
+    _login(c)
+    u = asyncio.get_event_loop().run_until_complete(db.create_user(
+        name="Dad", quota_mode=_db.QUOTA_FIXED, fixed_gb=20.0))
+    asyncio.get_event_loop().run_until_complete(db.upsert_device(
+        "aa:bb:cc:dd:ee:95", name="Phone", user_id=u.id))
+    assert c.delete(f"/api/users/{u.id}").status_code == 200
+    lists = c.get("/api/mac-lists").json()
+    assert lists["deny"] == ["aa:bb:cc:dd:ee:95"]
 
 
 def test_speed_cap_edit_triggers_immediate_shaping_sync(tmp_path):

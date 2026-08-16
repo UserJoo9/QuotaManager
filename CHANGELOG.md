@@ -28,9 +28,26 @@ The version is the single source of truth in `quota/version.py`; a release tag
 - **Exempt-from-quota enforcement fix** (`quota/service.py`): the kernel
   enforcement map (`snapshot_state`) called `quota_blocked_for`, which ignores
   `users.exempt_quota`, while the dashboard payload and `evaluate_blocks` use
-  `user_quota_blocked` — an exempt over-quota user showed "unlimited" in the
+  `user_quota_blocked` �?" an exempt over-quota user showed "unlimited" in the
   UI but was still cut at the kernel. `snapshot_state` now uses
   `user_quota_blocked`, so the UI, `/report` and the nftables drop set agree.
+- **Deleting a device or user now blacklists its MACs — the phantom-device
+  fix** (`quota/db.py` + `quota/service.py` + `run.py` + `api/app.py`): a
+  manual `DELETE /api/devices/{id}` / `DELETE /api/users/{id}` writes every
+  involved MAC to the **deny list** (the old `suppressed_macs` table is gone —
+  suppression was guest-only, so deleting a NORMAL user's device left no
+  record and `_persist_lease` re-registered it as a fresh "Unnamed device"
+  every 15 s tick, the phantom-device loop). Blacklisted MACs never
+  auto-register (the `_persist_lease` deny gate, checked before guest mode),
+  the kernel keeps dropping them even without a device row
+  (`snapshot_state`'s new row-less deny pass maps the MAC's live lease to a
+  `admin_off` block entry — no usage ever accrues for it), and they are hidden
+  from the Management tab, `/report` and `/milestone` (the Network-tab
+  blacklist is the only place they appear). The blacklist is **permanent**: it
+  survives disconnect + reconnect and is removed only by editing the deny list
+  in the Network tab, which unblocks the device and re-registers it on the
+  next lease tick. The month-reset path (`delete_guest_users`) never
+  blacklists. Delete events now say "MAC blacklisted".
 
 ### Fixed
 

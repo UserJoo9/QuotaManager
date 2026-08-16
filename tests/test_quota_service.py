@@ -342,6 +342,39 @@ def test_device_bypass_exempts_from_user_quota(database):
     run(scenario())
 
 
+def test_deny_listed_mac_without_device_row_stays_blocked(database):
+    """A deny-listed MAC with a LIVE LEASE but NO device row (the admin
+    deleted the device/user — blacklist) must still appear in snapshot_state
+    as blocked: run.py turns that into a kernel @blocked entry, so the
+    still-connected device's internet stays cut. No allowance is reported and
+    no usage ever accrues (run.py skips row-less MACs when draining)."""
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        await d.set_bundle(_db.Bundle(total_gb=10.0, reset_day=1))
+        u = await d.create_user("A", _db.QUOTA_FIXED, 5.0)
+        dev = await d.upsert_device("AA:AA:AA:AA:AA:07", "p1", user_id=u.id)
+        await svc.open_period()
+        await d.upsert_lease("aa:aa:aa:aa:aa:07", "192.168.2.77", 24)
+        # the delete blacklists the MAC: device row gone, deny entry written
+        await d.add_mac_list("deny", ["aa:aa:aa:aa:aa:07"])
+        await d.delete_device(dev.id)
+        snap = await svc.snapshot_state()
+        entry = snap.get("aa:aa:aa:aa:aa:07")
+        assert entry is not None, "row-less deny-listed MAC must be in the map"
+        assert entry["ip"] == "192.168.2.77"
+        assert entry["blocked"] is True
+        assert entry["block_state"] == _db.BLOCK_ADMIN
+        assert entry["allowance_gb"] == 0.0
+        assert entry["used_gb"] == 0.0
+        # un-blacklisting removes the row-less entry (a fresh device row
+        # re-registers on the next lease tick)
+        await d.set_mac_list("deny", [])
+        assert "aa:aa:aa:aa:aa:07" not in await svc.snapshot_state()
+        await d.close()
+    run(scenario())
+
+
 def test_exempt_user_never_quota_blocked_in_snapshot_state(database):
     """The enforcement map (snapshot_state -> kernel blocked set) must honor
     the user's exempt_quota flag — a user marked "unlimited" is never

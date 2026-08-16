@@ -264,6 +264,25 @@ removing a MAC restores it on the next tick. Enforcement stays per-MAC/per-IP �
 the engine's `blocked` set still drops packets at line rate; only the *decision*
 is per-user.
 
+**Deleting a device or user blacklists its MACs** (the phantom-device fix):
+`DELETE /api/devices/{id}` / `DELETE /api/users/{id}` write every involved MAC
+to the deny list (`db.delete_device(deny_list_mac=True)` /
+`delete_user(deny_list_macs=True)`; the old guest-only `suppressed_macs` table
+is gone — a deleted NORMAL user's device re-registered as a fresh "Unnamed
+device" every 15 s tick). Blacklisted MACs never auto-register: `run.py`
+`_persist_lease` checks the deny list FIRST (before the guest branch), so a
+still-connected deleted device keeps its lease but no device row. Enforcement
+holds without a row: `snapshot_state`'s second pass maps every leased MAC that
+is deny-listed but row-less to `{ip, blocked: True, block_state: admin_off}`,
+so run.py's `ip_to_mac` + `blocked` maps reach the engine's `@blocked` drop
+set — while the usage drain skips row-less MACs, so no usage ever accrues. The
+dashboard, `/report` and `/milestone` payload loops skip deny-listed devices
+(the Network-tab blacklist is the only place they appear). The blacklist is
+**permanent**: it survives disconnect + reconnect (nothing clears it on lease
+drop) and is removed only by editing the deny list in the Network tab — which
+unblocks the device and re-registers it on the next lease tick. The
+month-reset path (`delete_guest_users`) never blacklists.
+
 **Exempt from quota** (`users.exempt_quota`): a flag that lifts the
 usage-vs-allowance gate entirely — an exempt user is never quota-blocked, no
 matter their usage. It sits *above* the quota gate but *below* manual admin
@@ -807,9 +826,13 @@ breaking-change baseline.
   usage + events + log tail. The gate reads `request.client.host` (no XFF
   handling), so the exposure is the documented "trusted LAN" assumption, not a
   spoofable bypass.
-- **A deleted-but-still-connected guest is untracked.** Its suppressed MAC keeps its
-  lease (internet works) but has no device row → no counter rule until it
-  disconnects and re-registers.
+- **A deleted-but-still-connected device is blacklisted, not untracked** (the
+  phantom-device fix): its MAC sits in the deny list — kernel-blocked through
+  the row-less `snapshot_state` pass (its lease is mapped to `admin_off`), and
+  hidden from the dashboard until the admin removes the MAC in the Network
+  tab. (Before the fix, a deleted GUEST kept its lease with no device row and
+  no counter rule until it disconnected; a deleted NORMAL user's device
+  re-registered every 15 s tick.)
 
 **Performance (no timing telemetry exists — drift/stall is unquantifiable):**
 - **On-loop subprocess storms.** `shaper.update_state` rebuilds the tc tree via
@@ -1096,9 +1119,9 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/dashboard` | full bundle + users + devices + usage snapshot |
-| GET/POST/PATCH/DELETE | `/api/users` & `/api/users/{id}` | list / create / update / delete users (allowance, block, speed caps; `exempt_quota: true` lifts the quota gate — the user is never quota-blocked, manual admin cuts still apply) |
+| GET/POST/PATCH/DELETE | `/api/users` & `/api/users/{id}` | list / create / update / delete users (allowance, block, speed caps; `exempt_quota: true` lifts the quota gate — the user is never quota-blocked, manual admin cuts still apply). **DELETE blacklists every device MAC it owns** (permanent deny list — see the quota-model section) |
 | POST | `/api/users/{id}/topup` | add GB to a user's allowance, clears their quota block |
-| GET/POST/PATCH/DELETE | `/api/devices` & `/api/devices/{id}` | list / create / update / delete devices (user, quota, bypass, speed caps) |
+| GET/POST/PATCH/DELETE | `/api/devices` & `/api/devices/{id}` | list / create / update / delete devices (user, quota, bypass, speed caps). **DELETE blacklists the device's MAC** (permanent deny list — see the quota-model section) |
 | POST | `/api/devices/{id}/topup` | add GB to a device, clears its quota block |
 | GET | `/api/usage/{id}` · `/api/usage` | daily usage series per device / aggregated |
 | GET | `/api/events?limit=30` | audit events |
@@ -1115,7 +1138,7 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | POST | `/api/reset-month` | force an early period roll-over |
 | GET/POST | `/api/guest` | guest mode: auto-register new devices with their own small allowance; also the **guest-limit** cap (`limit`, default 2 — stops MAC-spoofing spam), a default **guest speed limit** (`speed_limit_mbps`, 0 = unlimited — the tc shaper applies it as every guest account's aggregate ceiling, `min` with an explicit user cap) and the **STOP NEW CONNECTIONS** gate (`stop_new`) that blocks brand-new devices while letting registered ones join |
 | GET/POST | `/api/network` | speed-shaping settings: `enabled`, `total_down_mbps`, `total_up_mbps`, `aqm` — plus `vpn_share: {enabled, interface, status?}` from the DB (status = the cached applied state, present only when a manager is wired — `vpn_share.enabled: false` in config.yaml means boot without one) and `decline_random_macs` (a brand-new device with a randomized/locally-administered MAC is registered + immediately admin-blocked; the POST accepts a one-shot `decline_random_macs_existing: true` to sweep devices already joined) |
-| GET/POST | `/api/mac-lists` | the operator MAC whitelist/blacklist: `{"allow": [...], "deny": [...]}` (each key optional, MACs lowercased/deduped/sorted on save, stored in the `mac_lists` table with a `(mac, kind)` key so a MAC can sit in BOTH lists). Enforcement is resolved, never persisted: `resolve_device_state` precedence = **deny list > user admin cut > device admin cut > allow list > quota (unless bypass) > ok** — a blacklisted MAC is always blocked even with `bypass` or an allow-list entry; a whitelisted MAC is never quota-blocked (manual cuts still win). Removing a MAC from a list restores it on the next 15 s tick |
+| GET/POST | `/api/mac-lists` | the operator MAC whitelist/blacklist: `{"allow": [...], "deny": [...]}` (each key optional, MACs lowercased/deduped/sorted on save, stored in the `mac_lists` table with a `(mac, kind)` key so a MAC can sit in BOTH lists). Enforcement is resolved, never persisted: `resolve_device_state` precedence = **deny list > user admin cut > device admin cut > allow list > quota (unless bypass) > ok** — a blacklisted MAC is always blocked even with `bypass` or an allow-list entry; a whitelisted MAC is never quota-blocked (manual cuts still win). Removing a MAC from a list restores it on the next 15 s tick. **Deletes write to the deny list**: `DELETE /api/users/{id}` / `DELETE /api/devices/{id}` blacklist every involved MAC permanently (see the quota-model section) |
 | GET/POST | `/api/wan` | strong-mode topology: `GET` live status (topology/source/pending/ppp0 + the auto-renew `renew_enabled`/`renew_minutes`/`renew_last` schedule + saved creds), `POST {"topology": "lan"\|"wan", "pppoe_user", "pppoe_password", "wan_if"}` APPLIES the topology live — rewrites config.yaml + the DB together, runs `scripts/topology.sh` (NIC + dnsmasq + PPPoE dial) and schedules a restart (`restart_scheduled`, `script_output`). Creds travel to the applier via the environment, never argv. On an applier failure config.yaml + the DB are ROLLED BACK to the previous state (no restart) |
 | POST | `/api/wan/test` | test the PPPoE credentials WITHOUT changing anything: dials a throwaway `ppp200` link via `scripts/test_pppoe.sh` with `{"pppoe_user", "pppoe_password", "wan_if"}` and reports `status` (success/auth-failed/no-pppoe-server/link-down/error), the negotiated local/peer IPs, `internet` (ping check), and `detail` — never touches config.yaml, the DB, `ppp0`, routing or DNS |
 | POST | `/api/wan/renew` | renew the WAN public IP NOW (the WAN-tab Restart button): restarts the `quota-wan-ppp` PPPoE dial via the gateway's wired `wan_renew` callback → the ISP hands the new session a fresh public IP. Returns `{restarted, state: active\|inactive\|unknown, detail}`. **409** while ppp0 is down ("nothing to renew into") or WAN mode isn't active; **503** when no callback is wired (degraded boot); 500 on a raising callback. Internet drops for a few seconds while ppp0 re-dials |

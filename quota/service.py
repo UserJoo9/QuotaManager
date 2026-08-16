@@ -340,6 +340,24 @@ class QuotaService:
                 "blocked": state != _db.BLOCK_OK,
                 "block_state": state,
             }
+        # Second pass: deny-listed MACs with NO device row (the admin deleted
+        # the device/user — the MAC was blacklisted and never auto-registers).
+        # The device still holds a lease, so the kernel must keep dropping its
+        # packets: add a row-less entry with the leased IP so run.py's
+        # ip_to_mac + blocked maps reach the engine's @blocked set. No usage
+        # rows ever accrue for it (run.py skips row-less MACs when draining).
+        for mac, ip in leases.items():
+            if mac in out or mac not in deny_set:
+                continue
+            out[mac] = {
+                "ip": ip,
+                "name": "",
+                "mode": "",
+                "allowance_gb": 0.0,
+                "used_gb": 0.0,
+                "blocked": True,
+                "block_state": _db.BLOCK_ADMIN,
+            }
         return out
 
     # -- milestone notifications (page-only, per-user) ------------------------

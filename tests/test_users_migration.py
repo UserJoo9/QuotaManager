@@ -168,7 +168,7 @@ def test_bundle_allowances_drop_stale_mac_keys(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# protected "Gateway" seed + guest-deletion suppression (v20)
+# protected "Gateway" seed + delete -> MAC blacklist (deny list)
 # --------------------------------------------------------------------------- #
 
 def test_gateway_seed_is_idempotent(tmp_path):
@@ -199,64 +199,86 @@ def test_gateway_seed_is_idempotent(tmp_path):
         run(d.close())
 
 
-def test_suppressed_mac_roundtrip(tmp_path):
-    """add / check / clear lifecycle of the suppressed_macs table (case-
-    normalized + idempotent adds + clear_suppressed_macs_not_in)."""
-    path = tmp_path / "sup.db"
+def test_add_mac_list_roundtrip(tmp_path):
+    """add_mac_list: additive + case-normalized + idempotent (unlike the
+    replace-all set_mac_list, entries accumulate and duplicates are dropped)."""
+    path = tmp_path / "mac.db"
     d = _db.Database(path)
     run(d.connect())
     try:
-        run(d.add_suppressed_mac("AA:BB:CC:DD:EE:10"))
-        assert run(d.is_mac_suppressed("aa:bb:cc:dd:ee:10")) is True
-        assert run(d.is_mac_suppressed("AA:BB:CC:DD:EE:10")) is True
-        # idempotent add
-        run(d.add_suppressed_mac("aa:bb:cc:dd:ee:10"))
-        assert run(d.is_mac_suppressed("aa:bb:cc:dd:ee:10")) is True
-        # clearing keeps the still-present MAC, drops the gone one
-        run(d.add_suppressed_mac("AA:BB:CC:DD:EE:11"))
-        n = run(d.clear_suppressed_macs_not_in({"aa:bb:cc:dd:ee:10"}))
-        assert n == 1
-        assert run(d.is_mac_suppressed("aa:bb:cc:dd:ee:10")) is True
-        assert run(d.is_mac_suppressed("aa:bb:cc:dd:ee:11")) is False
+        run(d.add_mac_list("deny", ["AA:BB:CC:DD:EE:10"]))
+        assert run(d.get_mac_list("deny")) == ["aa:bb:cc:dd:ee:10"]
+        # additive: a second add keeps the first entry
+        run(d.add_mac_list("deny", ["aa:bb:cc:dd:ee:11"]))
+        assert run(d.get_mac_list("deny")) == [
+            "aa:bb:cc:dd:ee:10", "aa:bb:cc:dd:ee:11"]
+        # idempotent re-add
+        run(d.add_mac_list("deny", ["AA:BB:CC:DD:EE:10"]))
+        assert run(d.get_mac_list("deny")) == [
+            "aa:bb:cc:dd:ee:10", "aa:bb:cc:dd:ee:11"]
+        # blanks are dropped; the allow list is untouched
+        run(d.add_mac_list("deny", ["  ", ""]))
+        assert run(d.get_mac_list("deny")) == [
+            "aa:bb:cc:dd:ee:10", "aa:bb:cc:dd:ee:11"]
+        assert run(d.get_mac_list("allow")) == []
     finally:
         run(d.close())
 
 
-def test_delete_guest_device_suppresses_mac(tmp_path):
-    """delete_device(..., suppress_guest_mac=True) records the MAC ONLY when
-    the device belongs to a GUEST user (the month-reset path never does)."""
-    path = tmp_path / "supdev.db"
+def test_delete_device_deny_lists_mac(tmp_path):
+    """delete_device(..., deny_list_mac=True) blacklists the MAC for ANY owner
+    (guest or normal) — the month-reset path never does."""
+    path = tmp_path / "denydev.db"
     d = _db.Database(path)
     run(d.connect())
     try:
         g = run(d.create_user(name="", quota_mode=_db.QUOTA_FIXED,
                               fixed_gb=1.0, guest=True))
         gdev = run(d.upsert_device("aa:bb:cc:dd:ee:20", "Phone", user_id=g.id))
-        run(d.delete_device(gdev.id, suppress_guest_mac=True))
-        assert run(d.is_mac_suppressed("aa:bb:cc:dd:ee:20")) is True
+        run(d.delete_device(gdev.id, deny_list_mac=True))
+        assert run(d.get_mac_list("deny")) == ["aa:bb:cc:dd:ee:20"]
 
-        # a NON-guest (normal user) delete does NOT suppress
+        # a NON-guest (normal user) delete blacklists too
         n = run(d.create_user(name="Dad", quota_mode=_db.QUOTA_FIXED,
                               fixed_gb=20.0))
         ndev = run(d.upsert_device("aa:bb:cc:dd:ee:21", "Laptop", user_id=n.id))
-        run(d.delete_device(ndev.id, suppress_guest_mac=True))
-        assert run(d.is_mac_suppressed("aa:bb:cc:dd:ee:21")) is False
+        run(d.delete_device(ndev.id, deny_list_mac=True))
+        assert run(d.get_mac_list("deny")) == [
+            "aa:bb:cc:dd:ee:20", "aa:bb:cc:dd:ee:21"]
 
-        # delete_user with suppress_guest_macs covers every device of a guest
+        # without the flag the MAC is NOT blacklisted
+        n3 = run(d.create_user(name="Mom", quota_mode=_db.QUOTA_FIXED,
+                               fixed_gb=20.0))
+        ndev3 = run(d.upsert_device("aa:bb:cc:dd:ee:25", user_id=n3.id))
+        run(d.delete_device(ndev3.id))
+        assert run(d.get_mac_list("deny")) == [
+            "aa:bb:cc:dd:ee:20", "aa:bb:cc:dd:ee:21"]
+    finally:
+        run(d.close())
+
+
+def test_delete_user_deny_lists_all_macs(tmp_path):
+    """delete_user(..., deny_list_macs=True) blacklists EVERY device MAC it
+    owned, guest or normal."""
+    path = tmp_path / "denyuser.db"
+    d = _db.Database(path)
+    run(d.connect())
+    try:
         g2 = run(d.create_user(name="", quota_mode=_db.QUOTA_FIXED,
                                fixed_gb=1.0, guest=True))
         run(d.upsert_device("aa:bb:cc:dd:ee:22", user_id=g2.id))
         run(d.upsert_device("aa:bb:cc:dd:ee:23", user_id=g2.id))
-        run(d.delete_user(g2.id, cascade=True, suppress_guest_macs=True))
-        assert run(d.is_mac_suppressed("aa:bb:cc:dd:ee:22")) is True
-        assert run(d.is_mac_suppressed("aa:bb:cc:dd:ee:23")) is True
+        run(d.delete_user(g2.id, cascade=True, deny_list_macs=True))
+        assert run(d.get_mac_list("deny")) == [
+            "aa:bb:cc:dd:ee:22", "aa:bb:cc:dd:ee:23"]
 
-        # a normal user delete with the flag suppresses nothing
+        # a normal user delete with the flag blacklists too
         n2 = run(d.create_user(name="Mom", quota_mode=_db.QUOTA_FIXED,
                                fixed_gb=20.0))
         run(d.upsert_device("aa:bb:cc:dd:ee:24", user_id=n2.id))
-        run(d.delete_user(n2.id, cascade=True, suppress_guest_macs=True))
-        assert run(d.is_mac_suppressed("aa:bb:cc:dd:ee:24")) is False
+        run(d.delete_user(n2.id, cascade=True, deny_list_macs=True))
+        assert run(d.get_mac_list("deny")) == [
+            "aa:bb:cc:dd:ee:22", "aa:bb:cc:dd:ee:23", "aa:bb:cc:dd:ee:24"]
     finally:
         run(d.close())
 
@@ -279,10 +301,10 @@ def test_count_guest_users(tmp_path):
         run(d.close())
 
 
-def test_delete_guest_users_does_not_suppress(tmp_path):
-    """The month-reset path (delete_guest_users) NEVER writes suppression rows
-    — a returning guest after a reset re-registers fresh."""
-    path = tmp_path / "supreset.db"
+def test_delete_guest_users_never_blacklists(tmp_path):
+    """The month-reset path (delete_guest_users) NEVER writes deny-list rows —
+    a returning guest after a reset re-registers fresh."""
+    path = tmp_path / "denyreset.db"
     d = _db.Database(path)
     run(d.connect())
     try:
@@ -290,7 +312,7 @@ def test_delete_guest_users_does_not_suppress(tmp_path):
                               fixed_gb=1.0, guest=True))
         run(d.upsert_device("aa:bb:cc:dd:ee:30", user_id=g.id))
         run(d.delete_guest_users())
-        assert run(d.is_mac_suppressed("aa:bb:cc:dd:ee:30")) is False
+        assert run(d.get_mac_list("deny")) == []
         # ...and the Gateway seed survives the guest wipe
         assert len(run(d.list_users())) == 1
         assert run(d.list_users())[0].protected is True

@@ -453,17 +453,23 @@ class Gateway:
             # of a normal managed user.
             existing = await self.database.get_device(mac=mac)
             if existing is None:
-                # A manually-deleted guest stays deleted while its device is
-                # still on the network (suppressed_macs). Checked FIRST, before
-                # the guest-mode branch: suppression rows only ever hold guest
-                # MACs (the API records them on a guest delete), and gating on
-                # guest mode would re-register a deleted guest as a NORMAL user
-                # the moment guest mode is turned off while the device is still
-                # connected — violating "stays deleted while present". The lease
-                # binding above is kept, so the device keeps internet — it just
-                # has no quota account until it leaves and reconnects.
-                if await self.database.is_mac_suppressed(mac):
-                    log.info("suppressed MAC %s stays deleted — not "
+                # Blacklisted MACs (manual delete / Network-tab deny list) never
+                # auto-register, whatever their ownership state. Fetched only
+                # for unknown MACs (a tiny query on a ~15 s tick).
+                deny_list = set(await self.database.get_mac_list("deny"))
+                # A manually-deleted device/user stays deleted while its device
+                # is still on the network: the delete wrote the MAC to the
+                # deny list (permanent blacklist), and run.py must NOT
+                # auto-register it again. Checked FIRST, before the guest-mode
+                # branch: gating on guest mode would re-register a blacklisted
+                # device as a NORMAL user the moment guest mode is turned off
+                # while the device is still connected — violating "stays
+                # deleted while present". The lease binding above is kept, so
+                # the engine still sees the IP and keeps dropping the MAC's
+                # packets (snapshot_state's row-less deny pass). Un-blacklisting
+                # the MAC in the Network tab is the ONLY way back in.
+                if mac.lower() in deny_list:
+                    log.info("blacklisted MAC %s stays deleted — not "
                              "re-registered (%s)", mac, ip)
                     return
                 if await self.service.stop_new_connections():
@@ -558,13 +564,9 @@ class Gateway:
             for lease in db_leases:
                 if lease.mac not in seen:
                     await self.database.delete_lease(lease.mac)
-            # A MAC that LEFT the network loses its suppression: when the same
-            # device reconnects later it registers as a brand-new guest with a
-            # fresh allowance (the user's "same guest connected again after
-            # deletation it shows but start fresh"). Guarded on `seen` like the
-            # lease prune above, so a transiently empty lease file (dnsmasq
-            # just restarted) never wipes every suppression.
-            await self.database.clear_suppressed_macs_not_in(seen)
+            # The deny list is NOT pruned here: a blacklisted MAC stays
+            # blacklisted until the admin removes it in the Network tab, even
+            # if the device left the network in between (permanent blacklist).
 
     async def _scan_rogues(self) -> None:
         """Probe the LAN for active hosts that are NOT known DHCP devices.

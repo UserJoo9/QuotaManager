@@ -340,6 +340,11 @@ def create_app(
         allow_set = set(await database.get_mac_list("allow"))
         deny_set = set(await database.get_mac_list("deny"))
         for d in devices:
+            # Blacklisted MACs are hidden from Management: they live ONLY in
+            # the Network-tab blacklist (a delete wrote them there, or the
+            # admin typed them in). Un-blacklisting restores the card.
+            if d.mac in deny_set:
+                continue
             user = next((x for x in users if x.id == d.user_id), None)
             uv = user_views.get(d.user_id)
             state = service.resolve_device_state(
@@ -433,9 +438,14 @@ def create_app(
         # per-device breakdown: exact bytes per device for THIS user
         usage_by_device = await database.get_period_usage()
         devices = await database.list_devices(user_id=user.id)
+        deny_set = set(await database.get_mac_list("deny"))
         allowance = ms["allowance_gb"]
         device_rows = []
         for d in devices:
+            # a blacklisted device of this user is not a household device
+            # anymore — the Network-tab blacklist is the only place it shows
+            if d.mac in deny_set:
+                continue
             dusage = usage_by_device.get(d.id, {"up": 0, "down": 0})
             dused_gb = (dusage.get("up", 0) + dusage.get("down", 0)) / GB
             device_rows.append({
@@ -518,7 +528,12 @@ def create_app(
             })
         by_uid = {u["id"]: u for u in user_rows}
 
+        deny_set = set(await database.get_mac_list("deny"))
         for d in devices:
+            # Blacklisted MACs are hidden from the report too — the Network-tab
+            # blacklist is the only place they appear.
+            if d.mac in deny_set:
+                continue
             urow = by_uid.get(d.user_id)
             dusage = usage_by_device.get(d.id, {"up": 0, "down": 0})
             dused_gb = (dusage.get("up", 0) + dusage.get("down", 0)) / GB
@@ -882,12 +897,14 @@ def create_app(
             raise HTTPException(404, "device not found")
         if dev.mac == GATEWAY_MAC:
             raise HTTPException(400, "the gateway box device cannot be deleted")
-        # Deleting a guest's device records its MAC as suppressed so it does
-        # not re-register while it is still connected (run.py _persist_lease
-        # skips suppressed MACs). A normal device delete does not suppress.
-        await database.delete_device(device_id, suppress_guest_mac=True)
+        # Deleting a device blacklists its MAC (permanent deny list): it does
+        # not re-register while still connected, the kernel keeps blocking it
+        # even without a device row, and the Network-tab blacklist is the only
+        # way back in (remove the MAC there to unblock + re-register).
+        await database.delete_device(device_id, deny_list_mac=True)
         await database.add_event(
-            f"Device removed: {dev.name or dev.mac}", "warn")
+            f"Device removed: {dev.name or dev.mac} — MAC blacklisted "
+            f"({dev.mac})", "warn")
         return {"id": device_id, "deleted": True}
 
     @app.post("/api/devices/{device_id}/topup", dependencies=[Depends(_require_auth)])
@@ -944,13 +961,16 @@ def create_app(
         if getattr(user, "protected", False):
             raise HTTPException(400, "the protected Gateway user cannot be "
                                 "deleted — edit it instead")
-        # Deleting a guest user records its devices' MACs as suppressed so they
-        # do not re-register while still connected (run.py _persist_lease skips
-        # suppressed MACs). Month-reset cleanup never sets this flag.
+        # Deleting a user blacklists every device MAC it owned (permanent deny
+        # list): none re-register while still connected, the kernel keeps
+        # blocking them even without device rows, and the Network-tab
+        # blacklist is the only way back in. Month-reset cleanup never sets
+        # this flag.
         removed = await database.delete_user(user_id, cascade=True,
-                                             suppress_guest_macs=True)
+                                             deny_list_macs=True)
         await database.add_event(
-            f"User removed: {user.name or user_id} ({removed} device(s))", "warn")
+            f"User removed: {user.name or user_id} ({removed} device(s) — "
+            f"MACs blacklisted)", "warn")
         await service.recompute_allowances()
         return {"id": user_id, "deleted": True, "devices_removed": removed}
 
