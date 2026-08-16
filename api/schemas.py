@@ -125,6 +125,16 @@ class GuestUpdate(BaseModel):
     stop_new: Optional[bool] = None
 
 
+class MacListsUpdate(BaseModel):
+    """Replace one or both MAC lists (whitelist/blacklist). Each key is
+    optional — only the provided lists are replaced, the other stays."""
+
+    #: Whitelist: these MACs are never quota-blocked, whatever their usage.
+    allow: Optional[list[str]] = None
+    #: Blacklist: these MACs are always blocked, even when their user is fine.
+    deny: Optional[list[str]] = None
+
+
 class PasswordUpdate(BaseModel):
     current: str
     new: str = Field(..., min_length=4)

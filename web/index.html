@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quota Manager</title>
- <link rel="stylesheet" href="/assets/styles.css?v=48">
+ <link rel="stylesheet" href="/assets/styles.css?v=49">
 </head>
 <body>
   <div class="bg-glow"></div>
@@ -251,6 +251,32 @@
                 <span>Also cut random-MAC devices already joined</span>
               </label>
               <p id="decline-random-msg" class="muted small hidden"></p>
+            </div>
+            <hr class="sep">
+            <div class="toggle-row">
+              <div class="toggle-info">
+                <span class="toggle-title">MAC whitelist / blacklist</span>
+                <p class="toggle-help">Allow-list MACs are never quota-blocked,
+                  whatever their usage. Deny-list MACs are always cut, even when
+                  their user is fine. Both apply to existing devices on the next
+                  tick — one MAC per line (or comma-separated).</p>
+              </div>
+            </div>
+            <div class="mac-lists-grid">
+              <div class="field">
+                <label for="mac-allow-list">Allow list (never quota-blocked)</label>
+                <textarea id="mac-allow-list" rows="4"
+                  placeholder="aa:bb:cc:dd:ee:ff&#10;11:22:33:44:55:66"></textarea>
+              </div>
+              <div class="field">
+                <label for="mac-deny-list">Deny list (always blocked)</label>
+                <textarea id="mac-deny-list" rows="4"
+                  placeholder="aa:bb:cc:dd:ee:ff&#10;11:22:33:44:55:66"></textarea>
+              </div>
+            </div>
+            <div class="field">
+              <button id="mac-lists-btn" class="btn primary small">Save MAC lists</button>
+              <p id="mac-lists-msg" class="muted small hidden"></p>
             </div>
             <hr class="sep">
             <div class="toggle-row">
@@ -848,6 +874,6 @@
     </div>
   </div>
 
-    <script src="/assets/app.js?v=51"></script>
+    <script src="/assets/app.js?v=52"></script>
 </body>
 </html>

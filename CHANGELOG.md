@@ -6,6 +6,41 @@ The version is the single source of truth in `quota/version.py`; a release tag
 
 ## [Unreleased]
 
+### Added
+
+- **MAC whitelist / blacklist in the Network tab** (`quota/db.py` +
+  `quota/service.py` + `api/app.py` + `api/schemas.py` + `web/index.html` +
+  `web/assets/app.js` + `web/assets/styles.css`): a `mac_lists` table
+  (`PRIMARY KEY (mac, kind)` — a MAC can sit in BOTH lists) holds two
+  operator-maintained lists; `GET/POST /api/mac-lists` (`MacListsUpdate`,
+  optional `allow`/`deny` MAC lists, lowercased/deduped/sorted on save)
+  round-trips them. Enforcement rides the existing resolved-state path:
+  `resolve_device_state` gains `allow_listed` / `deny_listed` and the
+  precedence is **deny list > user admin cut > device admin cut > allow list >
+  quota (unless bypass) > ok** — a blacklisted MAC is always cut (even with
+  `bypass` or an allow-list entry), a whitelisted MAC is never quota-blocked
+  (manual cuts still win), and membership is resolved at render/enforcement
+  time, never persisted, so removing a MAC restores it immediately. The
+  dashboard Network tab gains a "MAC whitelist / blacklist" block
+  (`#mac-allow-list` / `#mac-deny-list` textareas + `#mac-lists-btn`), the
+  WS-snapshot clobber guard (`macListsDirty`), and a `.mac-lists-grid` 2-column
+  layout (1 column under 900 px). app.js **v=51→52**, styles.css **v=48→49**.
+- **Exempt-from-quota enforcement fix** (`quota/service.py`): the kernel
+  enforcement map (`snapshot_state`) called `quota_blocked_for`, which ignores
+  `users.exempt_quota`, while the dashboard payload and `evaluate_blocks` use
+  `user_quota_blocked` — an exempt over-quota user showed "unlimited" in the
+  UI but was still cut at the kernel. `snapshot_state` now uses
+  `user_quota_blocked`, so the UI, `/report` and the nftables drop set agree.
+
+### Fixed
+
+- **MAC lists could hold a MAC in only one list** (`quota/db.py`): the
+  `mac_lists` table had `mac TEXT PRIMARY KEY`, so `INSERT OR IGNORE` silently
+  dropped a deny entry for a MAC already in the allow list (and vice versa) —
+  a whitelisted device could never be blacklisted. The primary key is now
+  `(mac, kind)`; the table never shipped in a release, so no migration is
+  needed.
+
 ## [0.2.0] — 2026-08-16
 
 ### Added

@@ -247,16 +247,22 @@ used(u)       = Σ usage_daily of all devices owned by u
 blocked(u)    = used(u) ≥ allowance(u)   OR   admin switched the user off
 
 device state  = resolve_device_state(u, dev):
-                  user admin cut > device admin cut > user quota block
-                  unless dev.bypass (exempt from user quota) => online
+                  MAC deny-list > user admin cut > device admin cut
+                  > MAC allow-list > user quota block unless dev.bypass
+                  (exempt from user quota) => online
 ```
 
 The cut is **resolved at render/enforcement time** (`service.resolve_device_state`),
 never written to device rows — so a user-level admin cut is lossless and
 clearing it restores all devices. A per-device `bypass` keeps one device online
 despite its user's quota block; an explicit per-device admin cut always wins
-(precedence above). Enforcement stays per-MAC/per-IP — the engine's `blocked`
-set still drops packets at line rate; only the *decision* is per-user.
+(precedence above). The operator **MAC whitelist/blacklist** (`/api/mac-lists`,
+see the API table) rides the same resolver: a blacklisted MAC is always cut
+(even with `bypass` or an allow-list entry), a whitelisted MAC is never
+quota-blocked (manual cuts still win), and membership is never persisted —
+removing a MAC restores it on the next tick. Enforcement stays per-MAC/per-IP —
+the engine's `blocked` set still drops packets at line rate; only the *decision*
+is per-user.
 
 **Exempt from quota** (`users.exempt_quota`): a flag that lifts the
 usage-vs-allowance gate entirely — an exempt user is never quota-blocked, no
@@ -1109,6 +1115,7 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | POST | `/api/reset-month` | force an early period roll-over |
 | GET/POST | `/api/guest` | guest mode: auto-register new devices with their own small allowance; also the **guest-limit** cap (`limit`, default 2 — stops MAC-spoofing spam), a default **guest speed limit** (`speed_limit_mbps`, 0 = unlimited — the tc shaper applies it as every guest account's aggregate ceiling, `min` with an explicit user cap) and the **STOP NEW CONNECTIONS** gate (`stop_new`) that blocks brand-new devices while letting registered ones join |
 | GET/POST | `/api/network` | speed-shaping settings: `enabled`, `total_down_mbps`, `total_up_mbps`, `aqm` — plus `vpn_share: {enabled, interface, status?}` from the DB (status = the cached applied state, present only when a manager is wired — `vpn_share.enabled: false` in config.yaml means boot without one) and `decline_random_macs` (a brand-new device with a randomized/locally-administered MAC is registered + immediately admin-blocked; the POST accepts a one-shot `decline_random_macs_existing: true` to sweep devices already joined) |
+| GET/POST | `/api/mac-lists` | the operator MAC whitelist/blacklist: `{"allow": [...], "deny": [...]}` (each key optional, MACs lowercased/deduped/sorted on save, stored in the `mac_lists` table with a `(mac, kind)` key so a MAC can sit in BOTH lists). Enforcement is resolved, never persisted: `resolve_device_state` precedence = **deny list > user admin cut > device admin cut > allow list > quota (unless bypass) > ok** — a blacklisted MAC is always blocked even with `bypass` or an allow-list entry; a whitelisted MAC is never quota-blocked (manual cuts still win). Removing a MAC from a list restores it on the next 15 s tick |
 | GET/POST | `/api/wan` | strong-mode topology: `GET` live status (topology/source/pending/ppp0 + the auto-renew `renew_enabled`/`renew_minutes`/`renew_last` schedule + saved creds), `POST {"topology": "lan"\|"wan", "pppoe_user", "pppoe_password", "wan_if"}` APPLIES the topology live — rewrites config.yaml + the DB together, runs `scripts/topology.sh` (NIC + dnsmasq + PPPoE dial) and schedules a restart (`restart_scheduled`, `script_output`). Creds travel to the applier via the environment, never argv. On an applier failure config.yaml + the DB are ROLLED BACK to the previous state (no restart) |
 | POST | `/api/wan/test` | test the PPPoE credentials WITHOUT changing anything: dials a throwaway `ppp200` link via `scripts/test_pppoe.sh` with `{"pppoe_user", "pppoe_password", "wan_if"}` and reports `status` (success/auth-failed/no-pppoe-server/link-down/error), the negotiated local/peer IPs, `internet` (ping check), and `detail` — never touches config.yaml, the DB, `ppp0`, routing or DNS |
 | POST | `/api/wan/renew` | renew the WAN public IP NOW (the WAN-tab Restart button): restarts the `quota-wan-ppp` PPPoE dial via the gateway's wired `wan_renew` callback → the ISP hands the new session a fresh public IP. Returns `{restarted, state: active\|inactive\|unknown, detail}`. **409** while ppp0 is down ("nothing to renew into") or WAN mode isn't active; **503** when no callback is wired (degraded boot); 500 on a raising callback. Internet drops for a few seconds while ppp0 re-dials |

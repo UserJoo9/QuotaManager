@@ -273,6 +273,17 @@ CREATE TABLE IF NOT EXISTS suppressed_macs (
     created_at REAL NOT NULL
 );
 
+-- MAC whitelist/blacklist (quota/service.py): 'allow' = never quota-blocked
+-- (even over allowance), 'deny' = always blocked (even when the user is fine).
+-- Both are enforced at render time via resolve_device_state — no device rows
+-- are touched, so removing a MAC from a list restores instantly.
+CREATE TABLE IF NOT EXISTS mac_lists (
+    mac        TEXT NOT NULL,
+    kind       TEXT NOT NULL,  -- 'allow' | 'deny'
+    created_at REAL NOT NULL,
+    PRIMARY KEY (mac, kind)
+);
+
 -- Domain-level DNS filtering (quota/dns_rules.py renders these into
 -- generated dnsmasq config). scope_id is a user_id or device_id depending on
 -- `scope`, and NULL for scope='global'.
@@ -869,6 +880,30 @@ class Database:
                 f"DELETE FROM suppressed_macs WHERE mac IN ({ph})", gone)
             await self.conn.commit()
         return len(gone)
+
+    # -- MAC whitelist/blacklist --------------------------------------------
+
+    async def get_mac_list(self, kind: str) -> list[str]:
+        """All MACs in the allow/deny list (lowercased, sorted)."""
+        row = await self.conn.execute_fetchall(
+            "SELECT mac FROM mac_lists WHERE kind=? ORDER BY mac", (kind,))
+        return [r["mac"] for r in row]
+
+    async def set_mac_list(self, kind: str, macs: list[str]) -> None:
+        """Replace the whole allow/deny list. Lowercased + idempotent."""
+        kind = kind if kind in ("allow", "deny") else "allow"
+        cleaned = sorted({m.lower().strip() for m in macs if m and m.strip()})
+        await self.conn.execute("DELETE FROM mac_lists WHERE kind=?", (kind,))
+        await self.conn.executemany(
+            "INSERT OR IGNORE INTO mac_lists (mac, kind, created_at) "
+            "VALUES (?, ?, ?)",
+            [(m, kind, time.time()) for m in cleaned])
+        await self.conn.commit()
+
+    async def mac_lists(self) -> dict[str, list[str]]:
+        """Both lists: ``{"allow": [...], "deny": [...]}``."""
+        return {"allow": await self.get_mac_list("allow"),
+                "deny": await self.get_mac_list("deny")}
 
     # -- leases ------------------------------------------------------------
 

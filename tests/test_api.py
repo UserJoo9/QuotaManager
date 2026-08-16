@@ -1677,7 +1677,7 @@ def test_milestone_page_is_public(tmp_path):
         # shares the retuned stylesheet; pin the cache-bust so the theme
         # actually reaches this page (browser-cached ?v=41 would show the
         # pre-obsidian sheet).
-        assert "assets/styles.css?v=48" in r.text
+        assert "assets/styles.css?v=49" in r.text
     asyncio.get_event_loop().run_until_complete(database.close())
 
 
@@ -1730,7 +1730,7 @@ def test_report_page_respects_gate(tmp_path):
         assert r.status_code == 200
         assert "text/html" in r.headers["content-type"]
         assert b"Consumption report" in r.content
-        assert "assets/styles.css?v=48" in r.text
+        assert "assets/styles.css?v=49" in r.text
     with _client_from(app, "8.8.8.8") as c:
         assert c.get("/report").status_code == 403
     asyncio.get_event_loop().run_until_complete(database.close())

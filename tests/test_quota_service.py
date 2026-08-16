@@ -342,6 +342,132 @@ def test_device_bypass_exempts_from_user_quota(database):
     run(scenario())
 
 
+def test_exempt_user_never_quota_blocked_in_snapshot_state(database):
+    """The enforcement map (snapshot_state -> kernel blocked set) must honor
+    the user's exempt_quota flag — a user marked "unlimited" is never
+    quota-blocked there, while a manual admin cut still resolves."""
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        await d.set_bundle(_db.Bundle(total_gb=10.0, reset_day=1))
+        u = await d.create_user("A", _db.QUOTA_FIXED, 5.0, exempt_quota=True)
+        d1 = await d.upsert_device("AA:AA:AA:AA:AA:01", "p1", user_id=u.id)
+        await svc.open_period()
+        await d.add_usage(d1.id, "2026-08-01", int(10.5 * GB), 0)  # way over
+
+        snap = await svc.snapshot_state()
+        assert snap["aa:aa:aa:aa:aa:01"]["blocked"] is False, \
+            "exempt user's device must not be quota-blocked in the enforcement map"
+
+        # a manual admin cut still resolves through (exempt lifts quota only)
+        await d.set_device_state(d1.id, _db.BLOCK_ADMIN)
+        snap = await svc.snapshot_state()
+        assert snap["aa:aa:aa:aa:aa:01"]["blocked"] is True
+        await d.close()
+    run(scenario())
+
+
+def test_mac_lists_round_trip_and_normalization(database):
+    """set/get mac lists: lowercasing, dedupe, sorting; only the provided
+    list is replaced."""
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        assert await svc.mac_lists() == {"allow": [], "deny": []}
+
+        await svc.set_mac_list("allow", ["AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66",
+                                         "aa:bb:cc:dd:ee:ff"])  # dup + case
+        lists = await svc.mac_lists()
+        assert lists["allow"] == ["11:22:33:44:55:66", "aa:bb:cc:dd:ee:ff"]
+        assert lists["deny"] == []
+
+        # replacing deny leaves allow untouched; blanks are dropped
+        await svc.set_mac_list("deny", ["ee:ee:ee:ee:ee:ee", "  ", ""])
+        lists = await svc.mac_lists()
+        assert lists["deny"] == ["ee:ee:ee:ee:ee:ee"]
+        assert lists["allow"] == ["11:22:33:44:55:66", "aa:bb:cc:dd:ee:ff"]
+
+        # clearing a list works
+        await svc.set_mac_list("allow", [])
+        assert await svc.mac_lists() == {
+            "allow": [], "deny": ["ee:ee:ee:ee:ee:ee"]}
+        await d.close()
+    run(scenario())
+
+
+def test_mac_deny_list_always_blocks_even_when_user_ok(database):
+    """A deny-listed MAC resolves BLOCK_ADMIN in the enforcement map even
+    when the user is well under their allowance."""
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        await d.set_bundle(_db.Bundle(total_gb=10.0, reset_day=1))
+        u = await d.create_user("A", _db.QUOTA_AUTO)
+        d1 = await d.upsert_device("AA:AA:AA:AA:AA:01", "p1", user_id=u.id)
+        await svc.open_period()
+
+        assert (await svc.snapshot_state())["aa:aa:aa:aa:aa:01"]["blocked"] is False
+        await svc.set_mac_list("deny", ["AA:AA:AA:AA:AA:01"])
+        snap = await svc.snapshot_state()
+        assert snap["aa:aa:aa:aa:aa:01"]["blocked"] is True
+        assert snap["aa:aa:aa:aa:aa:01"]["block_state"] == _db.BLOCK_ADMIN
+
+        # removing the entry restores instantly (no device row was touched)
+        await svc.set_mac_list("deny", [])
+        assert (await svc.snapshot_state())["aa:aa:aa:aa:aa:01"]["blocked"] is False
+        await d.close()
+    run(scenario())
+
+
+def test_mac_allow_list_never_quota_blocked(database):
+    """An allow-listed MAC stays online despite its user being way over the
+    allowance; an explicit per-device admin cut still wins."""
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        await d.set_bundle(_db.Bundle(total_gb=10.0, reset_day=1))
+        u = await d.create_user("A", _db.QUOTA_AUTO)
+        d1 = await d.upsert_device("AA:AA:AA:AA:AA:01", "p1", user_id=u.id)
+        await d.upsert_device("AA:AA:AA:AA:AA:02", "p2", user_id=u.id)
+        await svc.open_period()
+        await d.add_usage(d1.id, "2026-08-01", int(10.5 * GB), 0)  # over the cap
+
+        await svc.set_mac_list("allow", ["AA:AA:AA:AA:AA:01"])
+        snap = await svc.snapshot_state()
+        assert snap["aa:aa:aa:aa:aa:01"]["blocked"] is False, \
+            "allow-listed device must stay online despite the user's quota block"
+        assert snap["aa:aa:aa:aa:aa:02"]["blocked"] is True, \
+            "non-listed sibling of the same user is still cut"
+
+        # an explicit per-device admin cut beats the allow list
+        await d.set_device_state(d1.id, _db.BLOCK_ADMIN)
+        snap = await svc.snapshot_state()
+        assert snap["aa:aa:aa:aa:aa:01"]["blocked"] is True
+        await d.close()
+    run(scenario())
+
+
+def test_mac_deny_list_wins_over_allow_and_bypass(database):
+    """Precedence: deny list beats the allow list and a device's bypass."""
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        await d.set_bundle(_db.Bundle(total_gb=10.0, reset_day=1))
+        u = await d.create_user("A", _db.QUOTA_AUTO)
+        d1 = await d.upsert_device("AA:AA:AA:AA:AA:01", "p1", user_id=u.id)
+        await svc.open_period()
+        await d.add_usage(d1.id, "2026-08-01", int(10.5 * GB), 0)
+
+        await d.update_device(d1.id, bypass=True)
+        await svc.set_mac_list("allow", ["AA:AA:AA:AA:AA:01"])
+        await svc.set_mac_list("deny", ["AA:AA:AA:AA:AA:01"])
+        snap = await svc.snapshot_state()
+        assert snap["aa:aa:aa:aa:aa:01"]["blocked"] is True, \
+            "deny list must win over allow list + bypass"
+        await d.close()
+    run(scenario())
+
+
 # ---------------------------------------------------------------------------
 # reset_day = 0  (no automatic reset; bundle is recharged mid-month)
 # ---------------------------------------------------------------------------

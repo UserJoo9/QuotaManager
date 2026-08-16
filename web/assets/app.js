@@ -104,6 +104,7 @@ let editDeviceId = null;   // device being edited (null = add mode)
 let settingsDirty = false; // admin typed in the bundle form — freeze its sync
 let expandedUsers = new Set(); // user ids whose device accordion is open
 let networkConfig = null;  // latest /api/network payload (Network preview)
+let macListsDirty = false; // admin typed in the MAC-lists textareas — freeze their sync
 let logLines = [];         // raw lines from /api/logs
 let logMeta = null;        // {total, truncated} from the last /api/logs call
 let logFilter = "ALL";     // active log level filter
@@ -1264,6 +1265,41 @@ async function cutExistingRandomMacs(ev) {
   await refreshNetwork();
 }
 
+/* MAC whitelist / blacklist: textareas hold one MAC per line (or
+   comma-separated); Save replaces both lists wholesale. Entries resolve at
+   enforcement time — existing devices pick the change up on the next tick. */
+async function refreshMacLists() {
+  if (macListsDirty) return; // never clobber an admin's in-progress edit
+  try {
+    const lists = await API.get("/api/mac-lists");
+    $("mac-allow-list").value = (lists.allow || []).join("\n");
+    $("mac-deny-list").value = (lists.deny || []).join("\n");
+  } catch (_) { /* MAC-lists panel is not critical */ }
+}
+
+async function submitMacLists() {
+  const msg = $("mac-lists-msg");
+  const split = (el) => (el.value || "")
+    .split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+  try {
+    await API.post("/api/mac-lists", {
+      allow: split($("mac-allow-list")),
+      deny: split($("mac-deny-list")),
+    });
+    macListsDirty = false;
+    if (msg) {
+      msg.textContent = "MAC lists saved — applied on the next tick.";
+      msg.classList.remove("hidden");
+    }
+    await refreshMacLists();
+  } catch (e) {
+    if (msg) {
+      msg.textContent = `Could not save: ${e.message}`;
+      msg.classList.remove("hidden");
+    }
+  }
+}
+
 /* ---------------- speed shaping (Network tab) ---------------- */
 
 async function refreshNetwork() {
@@ -1281,6 +1317,7 @@ async function refreshNetwork() {
     $("decline-random-existing").disabled = !n.decline_random_macs;
     renderVpnShare(n);
     renderNetworkPreview(n);
+    refreshMacLists(); // prefill the allow/deny textareas (non-critical)
   } catch (_) { /* network panel is not critical */ }
 }
 
@@ -1942,6 +1979,9 @@ async function init() {
   $("stop-new-toggle").addEventListener("change", toggleStopNew);
   $("decline-random-toggle").addEventListener("change", toggleDeclineRandom);
   $("decline-random-existing").addEventListener("change", cutExistingRandomMacs);
+  $("mac-lists-btn").addEventListener("click", submitMacLists);
+  $("mac-allow-list").addEventListener("input", () => { macListsDirty = true; });
+  $("mac-deny-list").addEventListener("input", () => { macListsDirty = true; });
   // speed shaping: saving sends all four fields; the master + AQM toggles just
   // mark the current draft — they take effect together on Save.
   $("shaping-save-btn").addEventListener("click", submitNetwork);

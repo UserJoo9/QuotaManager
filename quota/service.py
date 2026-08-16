@@ -215,14 +215,18 @@ class QuotaService:
 
     @staticmethod
     def resolve_device_state(user: _db.User | None, dev: _db.Device,
-                             user_quota_blocked: bool) -> str:
+                             user_quota_blocked: bool,
+                             allow_listed: bool = False,
+                             deny_listed: bool = False) -> str:
         """Resolve a device's effective block state through its owner user.
 
         Precedence (highest wins):
-          1. user admin_off   -> admin_off  (user-level cut covers all devices)
-          2. device admin_off -> admin_off  (per-device manual cut)
-          3. user quota-block -> quota      (unless the device has ``bypass``)
-          4. otherwise        -> ok
+          1. MAC deny-list  -> admin_off  (blacklist: always blocked)
+          2. user admin_off -> admin_off  (user-level cut covers all devices)
+          3. device admin_off -> admin_off (per-device manual cut)
+          4. MAC allow-list -> ok         (whitelist: never quota-blocked)
+          5. user quota-block -> quota    (unless the device has ``bypass``)
+          6. otherwise      -> ok
 
         This is the single source of truth for a device's state; it is used by
         the API views and :meth:`snapshot_state` (enforcement map), so a
@@ -230,12 +234,17 @@ class QuotaService:
         user-level cut is deliberately NOT written to ``devices.block_state`` —
         that would be lossy (you couldn't tell a user-fan-out from a genuine
         per-device toggle, and clearing the user cut would strand devices in
-        ``admin_off`` forever).
+        ``admin_off`` forever). The MAC lists are also resolved, never
+        persisted — removing a MAC from a list restores it immediately.
         """
+        if deny_listed:
+            return _db.BLOCK_ADMIN
         if user is not None and user.block_state == _db.BLOCK_ADMIN:
             return _db.BLOCK_ADMIN
         if dev.block_state == _db.BLOCK_ADMIN:
             return _db.BLOCK_ADMIN
+        if allow_listed:
+            return _db.BLOCK_OK
         if user_quota_blocked and not dev.bypass:
             return _db.BLOCK_QUOTA
         return _db.BLOCK_OK
@@ -303,6 +312,8 @@ class QuotaService:
         leases = {l.mac: l.ip for l in await self.db.list_leases()}
         usage_by_user = await self.db.get_period_usage_by_user()
         allowances = (await self.db.get_bundle()).allowances
+        allow_set = set(await self.db.get_mac_list("allow"))
+        deny_set = set(await self.db.get_mac_list("deny"))
         out: dict[str, dict[str, Any]] = {}
         for dev in devices:
             user = users.get(dev.user_id)
@@ -311,8 +322,12 @@ class QuotaService:
                 u = usage_by_user.get(user.id, {"up": 0, "down": 0})
                 used_gb = (u["up"] + u["down"]) / GB
                 allowance = allowances.get(user.id, 0.0)
-                quota_blocked = self.quota_blocked_for(user, allowance, used_gb)
-            state = self.resolve_device_state(user, dev, quota_blocked)
+                quota_blocked = self.user_quota_blocked(
+                    user, allowance, used_gb)
+            state = self.resolve_device_state(
+                user, dev, quota_blocked,
+                allow_listed=dev.mac in allow_set,
+                deny_listed=dev.mac in deny_set)
             out[dev.mac] = {
                 "ip": leases.get(dev.mac, ""),
                 "name": dev.name,
@@ -559,6 +574,27 @@ class QuotaService:
         await self.db.set_guest_fixed_gb(gb)
         await self.recompute_allowances()
         await self.db.add_event(f"Guest quota set to {gb:g} GB", "warn")
+
+    # -- MAC whitelist / blacklist ------------------------------------------
+
+    async def mac_lists(self) -> dict[str, list[str]]:
+        """Both MAC lists: ``{"allow": [...], "deny": [...]}``."""
+        return await self.db.mac_lists()
+
+    async def set_mac_list(self, kind: str, macs: list[str]) -> None:
+        """Replace the whole allow/deny MAC list.
+
+        ``kind`` is ``"allow"`` (never quota-blocked, whatever the usage) or
+        ``"deny"`` (always blocked, even when the user is fine). MACs are
+        lowercased; entries resolve at enforcement time — existing devices
+        pick the change up on the next tick, no device rows are touched.
+        """
+        kind = kind if kind in ("allow", "deny") else "allow"
+        await self.db.set_mac_list(kind, macs)
+        n = len({m.strip() for m in macs if m and m.strip()})
+        label = "allow" if kind == "allow" else "deny"
+        await self.db.add_event(
+            f"MAC {label}-list updated ({n} entries)", "warn" if n else "info")
 
     async def _clear_guest_users(self) -> None:
         """Delete every guest user + their devices/usage (period reset hook).

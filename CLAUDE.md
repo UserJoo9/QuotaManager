@@ -406,6 +406,51 @@ kernel counts and drops.
 _Pending work lives in TASKS.md; orphans + debt are tracked in
 [LEGACY_DEBT_AND_RISKS] below. Version history (newest first):_
 
+Checked 2026-08-16 (**MAC whitelist/blacklist + the exempt-quota enforcement fix,
+      uncommitted**):
+- [x] **MAC whitelist / blacklist** (`quota/db.py` + `quota/service.py` +
+      `api/app.py` + `api/schemas.py` + `web/`): a `mac_lists` table
+      (`PRIMARY KEY (mac, kind)` — a MAC can sit in BOTH lists) + `get_mac_list`
+      / `set_mac_list` / `mac_lists` DB accessors; `GET/POST /api/mac-lists`
+      (`MacListsUpdate`, optional `allow`/`deny` lists, lowercased/deduped/
+      sorted on save). Enforcement rides the resolved-state path:
+      `resolve_device_state` gains `allow_listed` / `deny_listed` with
+      precedence **deny list > user admin cut > device admin cut > allow list >
+      quota (unless bypass) > ok** — blacklisted MACs are always cut (even with
+      `bypass` + an allow-list entry), whitelisted MACs are never quota-blocked
+      (manual cuts still win), membership resolved never persisted (removal
+      restores on the next tick). `snapshot_state` fetches both lists once and
+      passes membership per device, so the UI, /report and kernel enforcement
+      agree. Network tab gains a MAC whitelist/blacklist block
+      (`#mac-allow-list`/`#mac-deny-list`/`#mac-lists-btn`/`#mac-lists-msg`), a
+      `macListsDirty` WS-clobber guard, and `.mac-lists-grid` CSS (2-col, 1-col
+      < 900 px). app.js **v=51→52**, styles.css **v=48→49**. Tests: +5
+      (`test_mac_lists_round_trip_and_normalization`,
+      `test_mac_deny_list_always_blocks_even_when_user_ok`,
+      `test_mac_allow_list_never_quota_blocked`,
+      `test_mac_deny_list_wins_over_allow_and_bypass` — the last one caught a
+      real schema bug: `mac TEXT PRIMARY KEY` made `INSERT OR IGNORE` drop a
+      deny entry for a MAC already allow-listed, fixed to the composite key).
+      Docs: CHANGELOG `[Unreleased]` `### Added` + `### Fixed`, README Network
+      row, Structure_README `/api/mac-lists` row, this entry.
+- [x] **exempt-from-quota enforcement fix** (`quota/service.py`, the user's
+      "Exempt from quota doesn't work" report): the kernel enforcement map
+      `snapshot_state()` called `quota_blocked_for` — which ignores
+      `users.exempt_quota` — while the dashboard payload + `evaluate_blocks`
+      use `user_quota_blocked`. An exempt over-quota user showed "unlimited"
+      in the UI but the nftables drop set still cut their devices. Now
+      `snapshot_state` uses `user_quota_blocked`, so all three consumers agree
+      (+ `test_exempt_user_never_quota_blocked_in_snapshot_state`).
+      **Gates status**: the user confirmed the box runs v0.2.0 and tested with
+      a brand-new device — STOP NEW CONNECTIONS / Decline random MACs / Guest
+      mode still reportedly do nothing, while the code path (run.py
+      `_persist_lease` gates → `set_device_state` → engine drop) is verified
+      correct by run-wiring tests. The exempt fix removes the one confirmed
+      enforcement bug in the same snapshot path; the remaining gates need a
+      box-side look (event log for "New connection blocked: …" lines, the
+      box's lease-file path vs config.yaml, whether new devices even appear in
+      the dashboard).
+
 Checked 2026-08-16 (**v0.2.0 released** — the whole v19–v28.4 bundle shipped as a
       minor version bump):
 - [x] **version bumped `0.1.3` → `0.2.0`** (`quota/version.py`, the single source

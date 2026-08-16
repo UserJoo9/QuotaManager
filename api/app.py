@@ -28,7 +28,8 @@ from contextlib import asynccontextmanager
 from api.schemas import (BundleUpdate, DeviceCreate, DeviceUpdate,
                          DnsImportRequest, DnsPresetEnable, DnsQuickRule,
                          DnsServerUpdate, DomainRuleCreate, DomainRuleUpdate,
-                         GuestUpdate, LoginRequest, MilestoneNotify,
+                         GuestUpdate, LoginRequest, MacListsUpdate,
+                         MilestoneNotify,
                          NetworkUpdate, PasswordUpdate, SetupComplete,
                          TopUpRequest, UserCreate, UserUpdate, WanRenewConfig,
                          WanTest, WanUpdate)
@@ -336,11 +337,15 @@ def create_app(
             }
 
         devices_view: list[dict[str, Any]] = []
+        allow_set = set(await database.get_mac_list("allow"))
+        deny_set = set(await database.get_mac_list("deny"))
         for d in devices:
             user = next((x for x in users if x.id == d.user_id), None)
             uv = user_views.get(d.user_id)
             state = service.resolve_device_state(
-                user, d, uv["quota_blocked"] if uv else False)
+                user, d, uv["quota_blocked"] if uv else False,
+                allow_listed=d.mac in allow_set,
+                deny_listed=d.mac in deny_set)
             dev_view = _device_view(
                 d, user, uv, leases, live, state,
                 usage_by_device.get(d.id, {"up": 0, "down": 0}))
@@ -1364,6 +1369,20 @@ def create_app(
                                                  "message": "status probe failed"}
         result["decline_random_macs"] = await service.decline_random_macs()
         return result
+
+    # -- MAC whitelist / blacklist ----------------------------------------------
+
+    @app.get("/api/mac-lists", dependencies=[Depends(_require_auth)])
+    async def get_mac_lists() -> dict[str, Any]:
+        return await service.mac_lists()
+
+    @app.post("/api/mac-lists", dependencies=[Depends(_require_auth)])
+    async def set_mac_lists(body: MacListsUpdate) -> dict[str, Any]:
+        if body.allow is not None:
+            await service.set_mac_list("allow", body.allow)
+        if body.deny is not None:
+            await service.set_mac_list("deny", body.deny)
+        return await service.mac_lists()
 
     # -- auth -----------------------------------------------------------------
 
