@@ -51,9 +51,6 @@ tests, release process): [Structure_README.md](Structure_README.md).
 
 ![Quota Manager dashboard](docs/screenshots/dashboard.png)
 
-*Placeholder — put a screenshot of the main dashboard at
-`docs/screenshots/dashboard.png`.*
-
 ---
 
 ## Table of contents

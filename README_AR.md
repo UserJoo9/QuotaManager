@@ -50,9 +50,6 @@
 
 ![لوحة تحكم Quota Manager](docs/screenshots/dashboard.png)
 
-*مكان مؤقت — ضع لقطة شاشة للواجهة الأساسية في
-`docs/screenshots/dashboard.png`.*
-
 ---
 
 ## جدول المحتويات

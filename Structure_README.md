@@ -20,6 +20,7 @@ the project layout, tests, and the release process.
 - [DNS filtering (domain rules, presets, per-client DNS servers)](#dns-filtering-domain-rules-presets-per-client-dns-servers)
 - [Rogue devices & the ARP gateway-lock](#rogue-devices--the-arp-gateway-lock)
 - [Strong (WAN) mode](#strong-wan-mode)
+- [VPN share](#vpn-share)
 - [Key design decisions](#key-design-decisions)
 - [Known bottlenecks & technical debt](#known-bottlenecks--technical-debt)
 - [Requirements](#requirements)
@@ -1300,7 +1301,7 @@ The `.deb` is built **only by GitHub Actions** and published to **GitHub
 Releases** — there is no local build step.
 
 1. **Bump the version** — edit `quota/version.py`
-   (`__version__ = "0.1.2"` → next semver) and add a `CHANGELOG.md` entry if you
+   (`__version__ = "0.1.3"` → next semver) and add a `CHANGELOG.md` entry if you
    want one.
 2. **Commit + push**:
 
@@ -1361,5 +1362,5 @@ populated and signed by `apt-repo.yml`. Setting it up the first time:
 3. **Backfill the current release** so the repo isn't empty (the release + its
    `.deb` already exist in GitHub Releases):
    ```bash
-   gh workflow run apt-repo.yml --ref main -f version=0.1.2
+   gh workflow run apt-repo.yml --ref main -f version=0.1.3
    ```
