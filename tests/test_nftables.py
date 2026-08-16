@@ -326,7 +326,7 @@ def test_start_resets_surviving_counters():
     reset = [c for c in fake.calls if c[1] == "reset" and c[2] == "counters"]
     assert reset, "start() should issue `nft reset counters`"
     # table-scoped: never touches counters in other tables
-    assert reset[0][3] == "inet quota_gateway"
+    assert reset[0][3:] == ["table", "inet", "quota_gateway"]
 
 
 def test_restart_does_not_resurrect_carried_over_counters():

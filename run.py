@@ -31,6 +31,7 @@ import asyncio
 import datetime as _dt
 import json
 import logging
+import os
 import re
 import signal
 import time
@@ -168,7 +169,13 @@ def _make_tun2socks_manager(cfg: cfg_mod.Config):
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Quota Manager gateway")
     p.add_argument("--config", default=None, help="path to config.yaml")
-    p.add_argument("--port", type=int, default=None, help="override web port")
+    env_port = os.environ.get("QUOTA_PORT")
+    p.add_argument(
+        "--port",
+        type=int,
+        default=int(env_port) if env_port and env_port.isdigit() else None,
+        help="override web port (can also set QUOTA_PORT env var)",
+    )
     p.add_argument("--debug", action="store_true", help="enable debug logging")
     return p.parse_args()
 
@@ -1192,7 +1199,8 @@ class Gateway:
 
 def main() -> None:
     args = _parse_args()
-    cfg = cfg_mod.load_config(args.config)
+    resolved_config_path = cfg_mod.resolve_config_path(args.config)
+    cfg = cfg_mod.load_config(resolved_config_path)
     if args.port is not None:
         cfg.web.port = args.port
     if args.debug:
@@ -1202,8 +1210,7 @@ def main() -> None:
     log.info("Quota Manager starting (bundle %.1f GB, reset day %d)",
              cfg.bundle.total_gb, cfg.bundle.reset_day)
 
-    config_path = args.config or cfg_mod.PROJECT_ROOT / "config.yaml"
-    gateway = Gateway(cfg, config_path=config_path)
+    gateway = Gateway(cfg, config_path=resolved_config_path)
 
     async def _serve() -> None:
         await gateway.startup()

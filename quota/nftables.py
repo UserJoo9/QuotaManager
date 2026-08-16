@@ -324,7 +324,7 @@ class NftablesEngine:
         # counters so the fresh baseline is valid; if the kernel's nft is too
         # old for `reset counters` this is best-effort and update_state()
         # reseeds _last from the carried-over values instead (_add_counter).
-        self._run_best_effort(["reset", "counters", f"{FAMILY} {self.table}"])
+        self._run_best_effort(["reset", "counters", "table", FAMILY, self.table])
         if self.available:
             log.info("nftables engine ready: table %s.%s (forward chain, "
                      "blocked set, per-device counters)", FAMILY, self.table)
