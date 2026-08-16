@@ -313,6 +313,7 @@ class TopologyManager:
                 "interface": shaping.interface,
                 "client_subnet": shaping.client_subnet,
                 "ifb": shaping.ifb,
+                "lan_rate_mbps": shaping.lan_rate_mbps,
             },
             "history": {
                 "enabled": cfg.history.enabled,

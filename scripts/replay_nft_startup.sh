@@ -69,10 +69,11 @@ step add rule $A input "arp operation 2 arp saddr ip $ROUTER arp daddr ip $CLIEN
 step add rule $T forward "ip saddr @blocked ip daddr != $LOCAL1 ip daddr != $LOCAL2 drop"
 step add rule $T forward "ip daddr @blocked ip saddr != $LOCAL1 ip saddr != $LOCAL2 drop"
 
-# --- _program_gateway(): input/output hooks + gw_blocked interval set --------
+# --- _program_gateway(): input/output hooks + gw_blocked/gw_allowed sets -----
 step add chain $T input  "{ type filter hook input priority 0; policy accept; }"
 step add chain $T output "{ type filter hook output priority 0; policy accept; }"
 step add set $T gw_blocked "{ type ipv4_addr; flags interval; }"
+step add set $T gw_allowed "{ type ipv4_addr; flags interval; }"
 
 # DNS + DHCP exemptions FIRST (never counted, never dropped: dnsmasq relay
 # and the lease handshake keep working while the box itself is cut)
@@ -81,10 +82,17 @@ step add rule $T input  "udp sport 53 accept"
 step add rule $T output "udp sport 67 accept"
 step add rule $T input  "udp sport 68 udp dport 67 accept"
 
+# gw_allowed accepts NEXT: the box's VPN-server connection(s) — the ONLY egress
+# that survives a Gateway cut while VPN share relays the household (membership
+# empty by default; set_gateway_allowed fills it)
+step add rule $T output "ip daddr @gw_allowed accept"
+step add rule $T input  "ip saddr @gw_allowed accept"
+
 # gw_blocked drops NEXT: a dropped packet terminates the chain before the
-# counters, so a blocked box's attempted bytes are never charged
-step add rule $T output "ip daddr @gw_blocked ip daddr != $LOCAL1 ip daddr != $LOCAL2 drop"
-step add rule $T input  "ip saddr @gw_blocked ip saddr != $LOCAL1 ip saddr != $LOCAL2 drop"
+# counters, so a blocked box's attempted bytes are never charged. Loopback is
+# exempt so the dashboard + tun2socks<->VPN-client hop keep working.
+step add rule $T output "ip daddr @gw_blocked ip daddr != $LOCAL1 ip daddr != $LOCAL2 ip daddr != 127.0.0.0/8 drop"
+step add rule $T input  "ip saddr @gw_blocked ip saddr != $LOCAL1 ip saddr != $LOCAL2 ip saddr != 127.0.0.0/8 drop"
 
 # count_gateway=on: named counters + counting rules LAST — only non-local,
 # non-exempted traffic that survives the block is metered

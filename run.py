@@ -31,6 +31,7 @@ import asyncio
 import datetime as _dt
 import json
 import logging
+import re
 import signal
 import time
 from pathlib import Path
@@ -49,9 +50,57 @@ from quota.engine import GATEWAY_MAC, EngineSnapshot, SnapshotHolder
 from quota.netmgr import TopologyManager
 from quota.nftables import NftablesEngine
 from quota.service import QuotaService
-from quota.topology import check_internet, check_internet_dns, detect_ppp
+from quota.topology import (check_internet, check_internet_dns, detect_ppp,
+                            restart_pppoe)
 
 log = logging.getLogger("quota.run")
+
+
+#: VPN-client process names the auto-learn step matches against ``ss`` output.
+_VPN_CLIENT_RE = re.compile(r"v2ray|sing[-_ ]?box|xray|tun2socks",
+                            re.IGNORECASE)
+
+
+def _default_run_command(argv: list[str]) -> tuple[int, str]:
+    import subprocess
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+        return proc.returncode, proc.stdout
+    except Exception:  # noqa: BLE001  (subprocess + timeout failures -> "" )
+        return 1, ""
+
+
+def _learn_vpn_servers(
+        run_command: Callable[[list[str]], tuple[int, str]] | None = None,
+) -> set[str]:
+    """IPv4 peers of the box's VPN client process, via ``ss``.
+
+    The "VPN share" relay rides the box's own connection(s) to the VPN
+    server(s) (clients -> tun -> VPN client on the box -> server). Those
+    server IPs must stay reachable when the box's OWN internet is cut
+    (``gw_blocked``) or the tunnel dies — the maintenance loop feeds the
+    learned set into the engine's ``gw_allowed`` whitelist. Matches the
+    ``ss`` Process column against the VPN-client process names; IPv6 peers
+    are skipped (the engine's ``gw_allowed`` set is ``ipv4_addr``). Any
+    subprocess failure degrades to an empty set (never raises).
+    """
+    run = run_command or _default_run_command
+    peers: set[str] = set()
+    for argv in (["ss", "-tnp"], ["ss", "-unp"]):
+        code, out = run(argv)
+        if code != 0:
+            continue
+        for line in (out or "").splitlines():
+            fields = line.split()
+            if len(fields) < 6 or not _VPN_CLIENT_RE.search(
+                    " ".join(fields[5:])):
+                continue
+            peer = fields[4]
+            # State Recv-Q Send-Q Local:Port Peer:Port Process...
+            if peer.count(":") != 1 or peer == "*:*":
+                continue  # skip IPv6 / wildcard peer rows
+            peers.add(peer.rsplit(":", 1)[0])
+    return peers
 
 
 def _make_engine(cfg: cfg_mod.Config, holder) -> NftablesEngine:
@@ -101,6 +150,21 @@ def _make_vpn_manager(cfg: cfg_mod.Config):
     return VpnShareManager(cfg)
 
 
+def _make_tun2socks_manager(cfg: cfg_mod.Config):
+    """Build the tun2socks auto-provisioner, or None when disabled.
+
+    ``vpn_share.tun2socks: false`` skips it entirely (users running their
+    own kernel-TUN client — sing-box/xray/WireGuard — don't need a bridge,
+    and a second tun would confuse VpnShareManager's tunnel detector).
+    """
+    from quota.tun2socks import Tun2socksManager  # lazy: platform + urllib
+
+    vs_cfg = getattr(cfg, "vpn_share", None)
+    if vs_cfg is None or not vs_cfg.enabled or not vs_cfg.tun2socks:
+        return None
+    return Tun2socksManager(cfg)
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Quota Manager gateway")
     p.add_argument("--config", default=None, help="path to config.yaml")
@@ -145,10 +209,24 @@ class Gateway:
         #: routing into the box's tunnel + the engine's gateway-meter
         #: suspension on every tick (and right after a Network-tab toggle).
         self.vpn_manager: object | None = None
+        #: tun2socks auto-provisioner (quota.tun2socks.Tun2socksManager);
+        #: None when cfg.vpn_share.tun2socks is false. Bridges userspace
+        #: VPN clients (v2rayN — no kernel tun) by downloading the pinned
+        #: binary on first use and spawning it against the client's SOCKS.
+        self.tun2socks_manager: object | None = None
         #: last VPN-share kernel status, surfaced through /api/network's
         #: ``vpn_share.status`` key (no DB/subprocess reads on the request
         #: path — the tick owns the probing).
         self._last_vpn_status: dict[str, object] = {"state": "off"}
+        #: STICKY auto-learned VPN-server IPs. While relaying, the box must
+        #: keep reaching its VPN server(s) even under a Gateway cut; a learned
+        #: set is only ADDED to (never shrunk) while the relay is on, so the
+        #: VPN client can re-dial without a 15 s window where the server is
+        #: unreachable. Cleared when the relay turns off (the cut then blocks
+        #: the box entirely again). Feed into engine.set_gateway_allowed().
+        self._vpn_allowed: set[str] = set()
+        #: injectable learner (tests fake the `ss` probe); default _learn_vpn_servers
+        self._vpn_learn: Callable[..., set[str]] = _learn_vpn_servers
         self.arp_lock: object | None = None  # quota.arp_lock.ArpLock (opt-in)
         # Built in startup(), AFTER the DB topology override: the scanner
         # resolves its probe networks from cfg at construction, so building it
@@ -188,6 +266,19 @@ class Gateway:
         #: serializes VPN-share reconciliation (tick + API immediate apply)
         #: the same way ``_shaping_lock`` serializes the tc tree.
         self._vpn_lock = asyncio.Lock()
+        #: serializes WAN public-IP renewals (manual Restart button + the
+        #: auto-renew schedule). Renewal restarts the PPPoE dial — two renews
+        #: at once would tear the session down twice (``_renew_wan_ip`` is the
+        #: only caller and it is already serialized per-tick; the lock also
+        #: guards a manual click landing mid-tick).
+        self._renew_lock = asyncio.Lock()
+        #: the last PPPoE restart result ({restarted, state, detail}); logged
+        #: and exposed to tests (no API surface of its own — the auto-renew
+        #: timestamp in the DB is what the WAN tab shows).
+        self._last_wan_renew: dict[str, object] | None = None
+        #: injectable PPPoE dial restarter (tests fake the systemctl calls);
+        #: default quota.topology.restart_pppoe.
+        self._pppoe_restart: Callable[..., dict[str, object]] = restart_pppoe
         self._maintenance_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
 
@@ -242,6 +333,7 @@ class Gateway:
         # are removed when the switch is off — see VpnShareManager.reconcile),
         # then every maintenance tick + right after a Network-tab toggle.
         self.vpn_manager = _make_vpn_manager(self.cfg)
+        self.tun2socks_manager = _make_tun2socks_manager(self.cfg)
         await self._sync_vpn_share()
 
         # -- ARP gateway-lock (opt-in) ---------------------------------------
@@ -367,14 +459,50 @@ class Gateway:
                     log.info("suppressed MAC %s stays deleted — not "
                              "re-registered (%s)", mac, ip)
                     return
-                if await self.service.is_guest_mode():
+                if await self.service.stop_new_connections():
+                    # "STOP NEW CONNECTIONS": a brand-new MAC is refused —
+                    # registered so it's visible + counted, but immediately
+                    # admin-blocked (kernel drop). Already-registered devices
+                    # are untouched (they never reach this branch).
+                    dev = await self.database.upsert_device(mac, name="")
+                    await self.database.set_device_state(
+                        dev.id, _db.BLOCK_ADMIN)
+                    await self.database.add_event(
+                        f"New connection blocked: {dev.mac} ({ip}) — "
+                        f"STOP NEW CONNECTIONS is on", "warn", dev.id)
+                elif (await self.service.decline_random_macs()
+                        and self.service.is_random_mac(mac)):
+                    # "Decline random MACs": a brand-new device with a
+                    # randomized (locally-administered) privacy MAC is refused —
+                    # registered so it's visible + counted, but immediately
+                    # admin-blocked. Random MACs carry no vendor OUI, so the
+                    # box can't identify or budget them; the admin gates them
+                    # until they rejoin with their real address.
+                    dev = await self.database.upsert_device(mac, name="")
+                    await self.database.set_device_state(
+                        dev.id, _db.BLOCK_ADMIN)
+                    await self.database.add_event(
+                        f"New connection blocked: {dev.mac} ({ip}) — "
+                        f"randomized (privacy) MAC declined", "warn", dev.id)
+                elif await self.service.is_guest_mode():
                     gq = await self.service.guest_quota_gb()
                     dev = await self.database.upsert_device(
                         mac, name="", quota_mode=_db.QUOTA_FIXED,
                         fixed_gb=gq, guest=True)
-                    await self.database.add_event(
-                        f"New GUEST device on network: {dev.mac} ({ip}) — "
-                        f"{gq:g} GB allowance", "info", dev.id)
+                    limit = await self.service.guest_limit()
+                    if await self.database.count_guest_users() > limit:
+                        # Guest cap reached: the account is still minted (so
+                        # the MAC is visible + counted) but immediately cut —
+                        # a MAC-changer can't spam fresh allowances forever.
+                        await self.database.set_device_state(
+                            dev.id, _db.BLOCK_ADMIN)
+                        await self.database.add_event(
+                            f"New GUEST blocked: {dev.mac} ({ip}) — "
+                            f"guest limit ({limit}) reached", "warn", dev.id)
+                    else:
+                        await self.database.add_event(
+                            f"New GUEST device on network: {dev.mac} ({ip}) — "
+                            f"{gq:g} GB allowance", "info", dev.id)
                 else:
                     dev = await self.database.upsert_device(mac, name="")
                     await self.database.add_event(
@@ -568,6 +696,11 @@ class Gateway:
         if self.dnslog is not None and self.dnslog.running:
             await self._dns_history_tick()
 
+        # 1e. WAN public-IP auto-renew on schedule (the dashboard WAN tab).
+        #     Only in WAN mode with ppp0 UP — a down dial means the internet
+        #     isn't working, and renewing into a dead line is pointless.
+        await self._wan_ip_renew_tick()
+
         # 2. Drain the packet engine's counters into usage_daily.
         #    flush() shells out to `nft -j list counters` (a subprocess). Run
         #    it off the event loop so a slow nft never stalls the WebSocket
@@ -669,6 +802,7 @@ class Gateway:
         try:
             async with self._shaping_lock:
                 config = await self.service.get_shaping_config()
+                guest_speed = await self.service.guest_speed_limit_mbps()
                 users = {u.id: u for u in await self.database.list_users()}
                 devices = {d.mac: d for d in await self.database.list_devices()}
                 rate_map: list[dict[str, object]] = []
@@ -677,20 +811,27 @@ class Gateway:
                     if dev is None or dev.user_id is None:
                         continue  # untracked or orphaned — nothing to shape
                     user = users.get(dev.user_id)
+                    user_down = float(user.limit_down_mbps or 0.0) if user else 0.0
+                    user_up = float(user.limit_up_mbps or 0.0) if user else 0.0
+                    # A default guest speed cap acts as the guest user's
+                    # aggregate ceiling: the shaper already applies
+                    # min(device, user), so only the stricter cap wins.
+                    if user is not None and user.guest and guest_speed > 0:
+                        user_down = min(user_down, guest_speed) if user_down else guest_speed
+                        user_up = min(user_up, guest_speed) if user_up else guest_speed
                     rate_map.append({
                         "ip": ip,
                         "device_id": dev.id,
                         "user_id": dev.user_id,
                         "down": float(dev.limit_down_mbps or 0.0),
                         "up": float(dev.limit_up_mbps or 0.0),
-                        "user_down": (float(user.limit_down_mbps or 0.0)
-                                      if user else 0.0),
-                        "user_up": (float(user.limit_up_mbps or 0.0)
-                                    if user else 0.0),
+                        "user_down": user_down,
+                        "user_up": user_up,
                     })
                 shaper.update_state(
                     rate_map, config["enabled"], config["total_down_mbps"],
-                    config["total_up_mbps"], config["aqm"])
+                    config["total_up_mbps"], config["aqm"],
+                    lan_rate_mbps=config["lan_rate_mbps"])
         except Exception:  # noqa: BLE001
             log.exception("failed to sync speed-shaping rules")
 
@@ -757,10 +898,19 @@ class Gateway:
         to reconcile (idempotent: apply when on, remove when off, self-heal
         leftovers), persists the detected tunnel as the pin (so a multi-VPN
         / restarted-tunnel box re-applies the SAME interface), and keeps the
-        engine's gateway-meter suspension in step (the box's input/output
-        metering must be inert while it relays the household's VPN — see
-        NftablesEngine.set_vpn_relay). All subprocesses run off the event
-        loop; a manager-less boot (vpn_share disabled in config) is a no-op.
+        engine's gateway cut in step (while relaying, the box's own internet
+        can be cut — Gateway OFF — and ONLY the VPN server endpoint(s) the
+        relay rides stay reachable via the ``gw_allowed`` whitelist, so the
+        household's tunnel survives; see NftablesEngine.set_gateway_allowed).
+        The routing manager is reconciled FIRST so a REAL kernel tunnel
+        (xray/sing-box/WireGuard tun) always wins and needs no config edits.
+        The tun2socks bridge (for userspace-netstack clients like v2rayN,
+        which never create a kernel tun) is only a FALLBACK: it is engaged
+        only when the routing found no tunnel, and a leftover bridge child is
+        stopped once a different real tunnel carries the subnet (never when
+        the route rides the bridge's OWN device — that would blackhole it).
+        All subprocesses run off the event loop; a manager-less boot (vpn_share
+        disabled in config) is a no-op.
         """
         manager = self.vpn_manager
         if manager is None:
@@ -769,25 +919,87 @@ class Gateway:
             async with self._vpn_lock:
                 enabled = (await self.database.get_setting(
                     "vpn_share_enabled", "0")) == "1"
-                pin = (await self.database.get_setting(
+                db_pin = (await self.database.get_setting(
                     "vpn_share_interface", "") or "").strip()
+                pin = db_pin
+                # Prefer a REAL kernel tunnel (xray/sing-box/WireGuard tun):
+                # reconcile the routing manager FIRST so its auto-detect wins.
+                # The tun2socks bridge is only the FALLBACK for userspace
+                # clients (v2rayN never creates a kernel tun) — engage it only
+                # when the routing found no tunnel, and stop a leftover bridge
+                # once a different real tunnel carries the subnet.
+                ts_status = None
+                bridge_iface = (self.tun2socks_manager.interface
+                                if self.tun2socks_manager is not None else "")
                 status = await asyncio.to_thread(
                     manager.reconcile, enabled, pin)
-                if status.state == "on" and pin != status.interface:
+                if enabled and status.state != "on":
+                    # No kernel tunnel was found/routed. For a userspace client
+                    # auto-provision the bridge and retry the routing pinned to
+                    # its device; otherwise report no-interface honestly.
+                    if self.tun2socks_manager is not None:
+                        ts_status = await asyncio.to_thread(
+                            self.tun2socks_manager.reconcile, True)
+                        if (ts_status.state == "running"
+                                and ts_status.interface):
+                            status = await asyncio.to_thread(
+                                manager.reconcile, True,
+                                ts_status.interface)
+                elif enabled and self.tun2socks_manager is not None:
+                    # A real tunnel is carrying the subnet. The bridge's own
+                    # device is legit (its child owns that tun — stopping it
+                    # would blackhole the route); any OTHER bridge leftover is
+                    # redundant now — stop it so the tunnel detector is clean.
+                    if status.interface != bridge_iface:
+                        ts_status = await asyncio.to_thread(
+                            self.tun2socks_manager.reconcile, False)
+                    else:
+                        ts_status = await asyncio.to_thread(
+                            self.tun2socks_manager.reconcile, True)
+                elif not enabled and self.tun2socks_manager is not None:
+                    ts_status = await asyncio.to_thread(
+                        self.tun2socks_manager.reconcile, False)
+                if status.state == "on" and db_pin != status.interface:
                     await self.database.set_setting(
                         "vpn_share_interface", status.interface)
                     log.info("vpn share: pinned tunnel interface %s",
                              status.interface)
-                # Suspend/restore the box's own gateway metering to follow
-                # the APPLIED relay state (engine cache-gates a no-op).
+                # While relaying, keep ONLY the box's VPN-server connection(s)
+                # reachable under a Gateway cut — the relay rides them. Learn
+                # the VPN client's established peers, union the explicit
+                # engine.gateway_allow_ips override, and keep the result STICKY
+                # (only add). The whitelist survives the SWITCH being on even
+                # when the tunnel is momentarily down (state no-interface /
+                # error): a cut box must keep its route to the VPN server or it
+                # can never re-dial. Only the switch turning OFF clears it — the
+                # cut then blocks the box entirely again. The engine cache-gates
+                # a no-op; loopback is exempt structurally.
                 if self.engine is not None:
-                    self.engine.set_vpn_relay(status.state == "on")
+                    allowed: list[str] = []
+                    if enabled:
+                        learned = await asyncio.to_thread(
+                            self._vpn_learn, None)
+                        self._vpn_allowed |= learned
+                        override = list(
+                            getattr(self.cfg.engine, "gateway_allow_ips", [])
+                            or [])
+                        allowed = sorted(self._vpn_allowed | set(override))
+                    else:
+                        self._vpn_allowed = set()
+                    self.engine.set_gateway_allowed(allowed)
                 self._last_vpn_status = {
                     "state": status.state,
                     "interface": status.interface or "",
                     "peer": status.peer or "",
                     "candidates": status.candidates or [],
                     "message": status.message or "",
+                    "tun2socks": (None if ts_status is None
+                                  else {
+                                      "state": ts_status.state,
+                                      "message": ts_status.message or "",
+                                      "proxy": ts_status.proxy or "",
+                                      "interface": ts_status.interface or "",
+                                  }),
                 }
         except Exception:  # noqa: BLE001
             log.exception("failed to reconcile VPN share")
@@ -805,6 +1017,68 @@ class Gateway:
         No probing here — the maintenance tick owns the subprocesses and
         caches the result."""
         return dict(self._last_vpn_status)
+
+    async def _renew_wan_ip(self) -> dict[str, object]:
+        """Restart the box's PPPoE dial to renew the public IP (the WAN-tab
+        Restart button + the auto-renew schedule). The dial runs through the
+        ``quota-wan-ppp`` systemd unit; restarting it tears the session down
+        and re-dials — on a metered Egyptian line the ISP assigns a fresh
+        public IP to the new session, the same effect as restarting the
+        router. Internet drops for a few seconds while ppp0 comes back up.
+
+        The renewal timestamp is persisted (``wan_ip_renew_last``) so the
+        auto-renew countdown restarts from now, manual and scheduled alike —
+        a gateway restart mid-schedule never immediately re-renews. Runs the
+        ``systemctl`` calls off the event loop; never raises (the injectable
+        restarter degrades to ``restarted=False`` with an honest detail).
+        """
+        async with self._renew_lock:
+            result = await asyncio.to_thread(self._pppoe_restart)
+            try:
+                await self.service.mark_wan_renew()
+            except Exception:  # noqa: BLE001
+                log.exception("wan renew: failed to record renewal time")
+            self._last_wan_renew = dict(result)
+            log.info("wan renew: %s", result)
+            return result
+
+    async def _wan_ip_renew_tick(self) -> None:
+        """Run the WAN auto-renew schedule once per maintenance tick.
+
+        Gates, in order: effective topology is WAN (no ppp0 in LAN mode) ->
+        the feature is enabled in the DB -> ppp0 is UP (a down dial means
+        internet isn't working — the schedule must not hammer a dead line) ->
+        the interval has elapsed since ``wan_ip_renew_last``. The timestamp is
+        read from the DB (the ``dnslog_state`` resume pattern), so a gateway
+        restart never resets the countdown.
+        """
+        if getattr(self.cfg.engine, "topology", "lan") != "wan":
+            return
+        try:
+            cfg_ = await self.service.get_wan_renew_config()
+        except Exception:  # noqa: BLE001
+            log.exception("wan renew: failed to read schedule")
+            return
+        if not cfg_["enabled"]:
+            return
+        link = detect_ppp("ppp0")
+        if link["state"] != "up":
+            return
+        last = cfg_["last"] or ""
+        if not last:
+            # Never renewed before: fire now so the countdown starts somewhere.
+            await self._renew_wan_ip()
+            return
+        try:
+            last_dt = _dt.datetime.fromisoformat(last)
+        except ValueError:
+            last_dt = None
+        if last_dt is None or last_dt.tzinfo is None:
+            await self._renew_wan_ip()
+            return
+        elapsed = (_dt.datetime.now(_dt.timezone.utc) - last_dt).total_seconds()
+        if elapsed >= cfg_["minutes"] * 60:
+            await self._renew_wan_ip()
 
     async def _wan_status(self) -> dict[str, object]:
         """Live WAN-mode status for the dashboard/API (cheap, every 15 s tick).
@@ -835,6 +1109,13 @@ class Gateway:
             "pending": configured if source == "dashboard" else None,
             "ppp0": "n/a", "ppp_ip": "", "ppp_peer": "",
         }
+        # The WAN-tab auto-renew schedule + last renewal time (ISO or ""). The
+        # dashboard reads these from the WS snapshot / GET /api/wan so the
+        # toggle + "last renewed" line stay live without a separate query.
+        renew = await self.service.get_wan_renew_config()
+        out["renew_enabled"] = renew["enabled"]
+        out["renew_minutes"] = renew["minutes"]
+        out["renew_last"] = renew["last"]
         if effective == "wan":
             ppp = detect_ppp("ppp0")
             out["ppp0"] = ppp["state"]
@@ -942,7 +1223,8 @@ def main() -> None:
                          report_config=report_cfg,
                          dns_apply=gateway._apply_dns_now,
                          vpn_apply=gateway._apply_vpn_now,
-                         vpn_status_getter=gateway._vpn_status)
+                         vpn_status_getter=gateway._vpn_status,
+                         wan_renew=gateway._renew_wan_ip)
         server_config = uvicorn.Config(
             app,
             host=cfg.web.host,

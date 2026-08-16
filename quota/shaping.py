@@ -18,22 +18,34 @@ two directions use two different HTB trees:
 
 Both trees are HTB (hierarchical token bucket) with **fq_codel on every leaf**.
 The class hierarchy enforces:
-* the **total-link cap** — root class rate = the configured line speed, so the
-  queue forms at the tc layer (where fq_codel can drain it fairly) instead of
-  in the modem's buffer ("bufferbloat": one heavy uploader/downloader no longer
-  inflates everyone's ping);
+* the **total-link cap** — the root caps at the LAN link rate
+  (``shaping.lan_rate_mbps``) while every WAN class is capped at the configured
+  line speed, so the internet queue forms at the tc layer (where fq_codel can
+  drain it fairly) instead of in the modem's buffer ("bufferbloat": one heavy
+  uploader/downloader no longer inflates everyone's ping);
 * the **per-user aggregate** — a user's device leaves sit under their user
   class, which is capped at the user's configured total;
 * the **per-device cap** — each device leaf ``rate = ceil = eff`` (hard cap).
+
+LAN traffic gets a **pass-through**: client<->uplink-subnet traffic (NAS,
+router admin, LAN transfers) AND client<->the box itself (dashboard, SSH,
+file shares like RustDisk) are not internet — a prio-1 ``1:99`` class under
+the root carries them at the full LAN link rate so LAN transfers never pay the
+WAN cap. The uplink subnet resolves exactly like the nftables engine
+(``engine.uplink_subnet`` wins, else derived from the dhcp block — the LAN
+snapshot, else the box's own NIC addresses as a last resort); the box's own
+addresses on the shaping NIC are always added (the kernel's address table, no
+config keys). The root's headroom matters only for that class — internet
+classes stay capped at the line rate.
 
 Devices with no cap on either axis go to the default class (still capped at the
 direction total + fq_codel, so untracked devices cannot flood the line).
 
 Class ids are deterministic (recomputed each reconcile); device trees live on
 separate qdiscs (``$IF`` / ``ifb0``) so ids may repeat across directions:
-root qdisc ``handle 1: htb default 2``; root class ``1:1`` (rate = direction
-total); default ``1:2``; download aggregate ``1:100``; user classes
-``1:<0x300+uid>``; device leaves ``1:<0x8000+devid>``.
+root qdisc ``handle 1: htb default 2``; root class ``1:1`` (rate = LAN link
+rate); default ``1:2``; LAN pass-through ``1:99``; download aggregate ``1:100``;
+user classes ``1:<0x300+uid>``; device leaves ``1:<0x8000+devid>``.
 
 The tree is rebuilt only when a **signature** of (enabled, totals, aqm, sorted
 device entries) changes — same idempotent-reconcile pattern as the
@@ -55,6 +67,8 @@ from __future__ import annotations
 import ipaddress
 import logging
 from typing import Any, Callable
+
+from quota.nftables import resolve_local_networks
 
 log = logging.getLogger("quota.shaping")
 
@@ -159,6 +173,70 @@ def _derive_client_subnet(gateway_ip: str, mask: str) -> str:
         return ""
 
 
+def _find_uplink_subnet(iface: str, client_subnet: str,
+                        run_command: RunCommand) -> str:
+    """Derive the LAN's uplink subnet from the box's OWN addresses (last-resort
+    fallback when the config can't resolve it).
+
+    ``ip -o -4 addr show dev <iface>`` lists every directly-connected IPv4
+    subnet on the shaping NIC (e.g. eth0 carries ``192.168.1.110/24`` uplink +
+    ``192.168.2.1/24`` client alias); the first subnet that is NOT the client
+    subnet is the uplink LAN. This is what the pass-through excludes, so it
+    works even when ``engine.uplink_subnet`` / the router snapshot keys are
+    missing or stale — the kernel always knows its own addresses. Returns ''
+    when the NIC has only the client subnet (nothing LAN-cross to pass through).
+    """
+    if not iface or not client_subnet:
+        return ""
+    code, out = run_command(["ip", "-o", "-4", "addr", "show", "dev", iface])
+    if code != 0:
+        return ""
+    try:
+        client = str(ipaddress.ip_network(client_subnet, strict=False))
+    except ValueError:
+        return ""
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 4 or parts[2] != "inet":
+            continue
+        addr, _, prefix = parts[3].partition("/")
+        if not prefix:
+            continue
+        try:
+            net = str(ipaddress.ip_network(f"{addr}/{prefix}", strict=False))
+        except ValueError:
+            continue
+        if net != client:
+            return net
+    return ""
+
+
+def _find_own_addresses(iface: str, run_command: RunCommand) -> list[str]:
+    """The box's OWN IPv4 addresses on ``iface`` (e.g. ``["192.168.2.1"]``).
+
+    Client->box traffic (dashboard, SSH, RustDisk to the gateway's own IP) is
+    redirected into ifb0 by the client-subnet ingress rule, so the LAN
+    pass-through must also exempt the box's own addresses — otherwise that
+    traffic is shaped as internet upload and throttled by the WAN cap. The
+    kernel's ``ip -o -4 addr show`` is the ground truth; no config keys.
+    Returns [] when the probe fails or the interface carries no IPv4.
+    """
+    if not iface:
+        return []
+    code, out = run_command(["ip", "-o", "-4", "addr", "show", "dev", iface])
+    if code != 0:
+        return []
+    addrs: list[str] = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 4 or parts[2] != "inet":
+            continue
+        addr, _, _ = parts[3].partition("/")
+        if addr:
+            addrs.append(addr)
+    return addrs
+
+
 class TcShaper:
     """Linux (tc/HTB/fq_codel) speed-shaping engine.
 
@@ -183,6 +261,32 @@ class TcShaper:
             dhcp = getattr(cfg, "dhcp", None)
             self.client_subnet = _derive_client_subnet(
                 getattr(dhcp, "gateway_ip", ""), getattr(dhcp, "subnet", ""))
+
+        # LAN link rate + the uplink subnet whose traffic must NOT be shaped.
+        # The subnet resolves exactly like the nftables engine (explicit
+        # engine.uplink_subnet wins, else derived from the dhcp block — the
+        # LAN snapshot in LAN or WAN mode, else the box's own NIC addresses);
+        # LAN-cross traffic rides a pass-through class at the full LAN rate
+        # instead of the WAN cap.
+        self._lan_rate_mbps = max(0.0, float(getattr(sc, "lan_rate_mbps", 0) or 0))
+        self.uplink_subnet = ""
+        if self.client_subnet:
+            self.uplink_subnet = next(
+                (n for n in resolve_local_networks(
+                    getattr(cfg, "engine", None), getattr(cfg, "dhcp", None))
+                 if n != self.client_subnet), "")
+        # Last-resort: the config keys are missing/stale (e.g. an older
+        # core/config.py that drops the LAN snapshot, or a hand-emptied
+        # router_ip) — derive the uplink subnet from the box's own NIC
+        # addresses instead, so the LAN pass-through still programs.
+        if not self.uplink_subnet:
+            self.uplink_subnet = _find_uplink_subnet(
+                self.iface, self.client_subnet, self._run_command)
+
+        # The box's own addresses on the shaping NIC: client->box / box->client
+        # traffic (dashboard, SSH, RustDisk to the gateway IP) is LAN, not
+        # internet — the pass-through must exempt it too.
+        self.own_addresses = _find_own_addresses(self.iface, self._run_command)
 
         self.available = True
         self._warned = False
@@ -215,8 +319,11 @@ class TcShaper:
         self._teardown()  # no stale qdisc from a previous process
         self._last_signature = None
         if self.available:
-            log.info("tc shaper ready: iface %s, client subnet %s, ifb %s",
-                     self.iface, self.client_subnet or "(unset)", self.ifb)
+            log.info("tc shaper ready: iface %s, client subnet %s, uplink %s "
+                     "(LAN pass-through %s), ifb %s",
+                     self.iface, self.client_subnet or "(unset)",
+                     self.uplink_subnet or "(none)",
+                     "on" if self.uplink_subnet else "off", self.ifb)
 
     def stop(self) -> None:
         """Stop accepting work. Rules are left in place on purpose — like the
@@ -259,18 +366,27 @@ class TcShaper:
         return True
 
     def update_state(self, rate_map: list[dict[str, Any]], enabled: bool,
-                     total_down: float, total_up: float, aqm: bool) -> None:
+                     total_down: float, total_up: float, aqm: bool,
+                     lan_rate_mbps: float | None = None) -> None:
         """Reconcile the kernel's tc tree with the desired shaping state."""
         self._rate_map = sorted(rate_map or [], key=lambda e: str(e.get("ip", "")))
         self._enabled = bool(enabled)
         self._total_down = max(0.0, float(total_down or 0.0))
         self._total_up = max(0.0, float(total_up or 0.0))
         self._aqm = bool(aqm)
+        if lan_rate_mbps is not None:
+            # The LAN pass-through rate is a live setting (Network-tab "LAN
+            # speed"), not just a boot-time config value: keep it in sync so
+            # the signature diff picks up an edit.
+            self._lan_rate_mbps = max(0.0, float(lan_rate_mbps or 0.0))
         if not self.available:
             return
-        if not (self._enabled and self._total_down > 0 and self._total_up > 0):
-            # Off (or totals not set): remove the tree, forget the signature so
-            # re-enabling rebuilds next tick.
+        if not (self._enabled and
+                (self._total_down > 0 or self._total_up > 0)):
+            # Off: remove the tree, forget the signature so re-enabling rebuilds
+            # next tick. A direction whose total is 0 is UNLIMITED (0 means no
+            # cap), so "0" for one direction must NOT tear down the other
+            # direction's tree — see _build_cmds for the per-direction build.
             self._teardown()
             self._last_signature = None
             return
@@ -294,7 +410,8 @@ class TcShaper:
              round(float(e.get("user_up") or 0.0), 3))
             for e in self._rate_map)
         return (self._enabled, round(self._total_down, 3),
-                round(self._total_up, 3), self._aqm, entries)
+                round(self._total_up, 3), self._aqm, self._lan_rate_mbps,
+                self.uplink_subnet, tuple(sorted(self.own_addresses)), entries)
 
     def _apply(self) -> bool:
         """Program the full tree from the stored state. On any failure, tear
@@ -313,23 +430,45 @@ class TcShaper:
         a no-op ``modprobe ifb numifbs=1`` at apply time is what killed the
         shaper on a box whose ifb was already loaded without an ifb0.
         """
-        cmds: list[list[str]] = [
+        cmds: list[list[str]] = []
+        # Download tree on $IF egress (post-NAT dst = client IP). Built only
+        # when the down total is set — a 0 down total is "unlimited" (no tree,
+        # no cap), and it must not take the upload shaping down with it.
+        if self._total_down > 0:
+            cmds += self._tree_cmds(self.iface, self._total_down, "dst")
+        if self._total_up > 0:
             # Upload direction: redirect client-subnet ingress into ifb0
             # (pre-NAT src is still the client IP), then shape there by src.
-            ["tc", "qdisc", "add", "dev", self.iface, "handle", "ffff:", "ingress"],
-            ["tc", "filter", "add", "dev", self.iface, "parent", "ffff:",
-             "protocol", "ip", "u32", "match", "ip", "src", self.client_subnet,
-             "action", "mirred", "egress", "redirect", "dev", self.ifb],
-        ]
-        # Download tree on $IF egress (post-NAT dst = client IP).
-        cmds += self._tree_cmds(self.iface, self._total_down, "dst")
-        # Upload tree on ifb0 egress (pre-NAT src = client IP).
-        cmds += self._tree_cmds(self.ifb, self._total_up, "src")
+            cmds += [
+                ["tc", "qdisc", "add", "dev", self.iface, "handle", "ffff:",
+                 "ingress"],
+                ["tc", "filter", "add", "dev", self.iface, "parent", "ffff:",
+                 "protocol", "ip", "u32", "match", "ip", "src",
+                 self.client_subnet, "action", "mirred", "egress", "redirect",
+                 "dev", self.ifb],
+                *self._tree_cmds(self.ifb, self._total_up, "src"),
+            ]
         return cmds
 
     def _tree_cmds(self, dev: str, total: float, match_field: str) -> list[list[str]]:
         """HTB + fq_codel commands for one direction's tree."""
         base = _rate(total)
+        # The root caps at the LAN link rate so the pass-through class can
+        # exceed the WAN line; every WAN class below stays capped at ``total``
+        # so fq_codel keeps draining the internet queue at the line rate.
+        if self._lan_rate_mbps > 0:
+            lan = self._lan_rate_mbps
+        else:
+            # A stale config/loader left the LAN rate at 0. NEVER fall back to
+            # the WAN total here — that would silently throttle LAN traffic to
+            # the line cap, defeating the pass-through. Use the documented
+            # default instead and say so.
+            lan = 1000.0
+            log.warning(
+                "shaping.lan_rate_mbps is unset/0 — LAN pass-through capped at "
+                "1000 Mbps (set it in config.yaml to change)"
+            )
+        lan_rate = _rate(lan)
         # Group the rate-map by owner user (a user's devices share their class).
         by_user: dict[int | None, dict[str, Any]] = {}
         for e in self._rate_map:
@@ -346,12 +485,12 @@ class TcShaper:
             ["tc", "qdisc", "add", "dev", dev, "root", "handle", "1:",
              "htb", "default", "2"],
             ["tc", "class", "add", "dev", dev, "parent", "1:", "classid",
-             "1:1", "htb", "rate", base, *base_burst],
+             "1:1", "htb", "rate", lan_rate, *_burst(lan)],
             # Default class: everything without a device leaf (unlimited
             # devices AND the box's own traffic). Capped at the direction
             # total so no traffic escapes the line-rate ceiling that makes
-            # fq_codel effective (a 1000mbit pass-through would let one
-            # unlimited downloader flood the modem buffer and inflate pings).
+            # fq_codel effective (a fast unlimited downloader cannot flood
+            # the modem buffer and inflate everyone's ping).
             ["tc", "class", "add", "dev", dev, "parent", "1:1", "classid",
              "1:2", "htb", "rate", base, "ceil", base, *base_burst],
             # Aggregate class under which all user/device classes live.
@@ -361,6 +500,63 @@ class TcShaper:
         if self._aqm:
             cmds.append(["tc", "qdisc", "add", "dev", dev, "parent", "1:2",
                          "handle", "2:", "fq_codel"])
+
+        # LAN pass-through: client<->uplink-subnet traffic (NAS, router admin,
+        # LAN transfers) AND client<->the box itself (dashboard, SSH, file
+        # shares like RustDisk) is not internet — it must run at full LAN speed,
+        # not the WAN cap. A prio-1 class 1:99 under the root carries it
+        # (prio-1 beats every prio-2 device filter, so a LAN-cross packet can
+        # never be stolen by a device's cap). Priorities are deliberately
+        # non-zero: tc treats an explicit ``prio 0`` filter as "no priority"
+        # and auto-assigns it AFTER all real priorities, so the pass-through
+        # would silently lose to the device caps (the live-box "LAN still
+        # throttled" bug):
+        #   upload tree (ifb0, pre-NAT src = client): match ip dst <uplink> AND
+        #     ip dst <box's own addresses> — the client-subnet ingress redirect
+        #     catches client->box traffic too, and without its own address it
+        #     would fall to the default class (throttled by total_up: the
+        #     live-box RustDisk report);
+        #   download tree (egress): match ip src <uplink> (LAN downloads to
+        #     clients + the box's own egress) AND ip src <box's own addresses>
+        #     (box->client LAN responses, never capped by the device leaves) AND
+        #     ip dst <uplink> (re-injected LAN uploads already shaped at ifb0 —
+        #     without this they would be re-capped by the default class on their
+        #     way out).
+        # The class programs whenever there is an uplink subnet OR the box has
+        # own addresses to exempt (a NIC with only the client alias still needs
+        # to pass client->box traffic through).
+        if (self.uplink_subnet and self.uplink_subnet != self.client_subnet) \
+                or self.own_addresses:
+            cmds.append(["tc", "class", "add", "dev", dev, "parent", "1:1",
+                         "classid", "1:99", "htb", "rate", lan_rate,
+                         "ceil", lan_rate, *_burst(lan)])
+            if self._aqm:
+                cmds.append(["tc", "qdisc", "add", "dev", dev, "parent",
+                             "1:99", "handle", "0x99:", "fq_codel"])
+            if match_field == "src":
+                if self.uplink_subnet and self.uplink_subnet != self.client_subnet:
+                    cmds.append(["tc", "filter", "add", "dev", dev, "parent",
+                                 "1:", "protocol", "ip", "prio", "1", "u32",
+                                 "match", "ip", "dst", self.uplink_subnet,
+                                 "flowid", "1:99"])
+                for addr in sorted(self.own_addresses):
+                    cmds.append(["tc", "filter", "add", "dev", dev, "parent",
+                                 "1:", "protocol", "ip", "prio", "1", "u32",
+                                 "match", "ip", "dst", addr, "flowid", "1:99"])
+            else:
+                if self.uplink_subnet and self.uplink_subnet != self.client_subnet:
+                    cmds.append(["tc", "filter", "add", "dev", dev, "parent",
+                                 "1:", "protocol", "ip", "prio", "1", "u32",
+                                 "match", "ip", "src", self.uplink_subnet,
+                                 "flowid", "1:99"])
+                    cmds.append(["tc", "filter", "add", "dev", dev, "parent",
+                                 "1:", "protocol", "ip", "prio", "1", "u32",
+                                 "match", "ip", "dst", self.uplink_subnet,
+                                 "flowid", "1:99"])
+                for addr in sorted(self.own_addresses):
+                    cmds.append(["tc", "filter", "add", "dev", dev, "parent",
+                                 "1:", "protocol", "ip", "prio", "1", "u32",
+                                 "match", "ip", "src", addr, "flowid", "1:99"])
 
         for uid in sorted(by_user):
             grp = by_user[uid]
@@ -397,7 +593,7 @@ class TcShaper:
                                  dev_cid, "handle", _device_qdisc(int(e["device_id"])),
                                  "fq_codel"])
                 cmds.append(["tc", "filter", "add", "dev", dev, "parent", "1:",
-                             "protocol", "ip", "prio", "1", "u32", "match",
+                             "protocol", "ip", "prio", "2", "u32", "match",
                              "ip", match_field, str(e["ip"]), "flowid", dev_cid])
         return cmds
 

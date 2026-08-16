@@ -20,6 +20,51 @@ const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
+/* ---------------- privacy eye ---------------- */
+/* Hides on-screen sensitive details — MAC addresses (device rows, rogue rows,
+   device modal) and the saved PPPoE credentials prefill (username + password) —
+   so the dashboard can be shown without giving away device identities or the
+   WAN credentials. The pref lives in localStorage (default: hidden) and
+   re-renders in place; only the display is masked, the edit fields keep their
+   real values. */
+
+let privacyHide = localStorage.getItem("quota_privacy_hide") !== "0";
+
+function macText(mac) {
+  if (!privacyHide) return mac || "";
+  const m = String(mac || "");
+  const parts = m.split(/[:\-]/);
+  if (parts.length !== 6) return m;
+  return `${parts[0]}:${parts[1]}:${parts[2]}:••:••:••`;
+}
+
+function setPrivacyButton() {
+  const btn = $("privacy-eye");
+  if (!btn) return;
+  btn.classList.toggle("off", !privacyHide);
+  btn.setAttribute("aria-label",
+    privacyHide ? "Show sensitive details (MACs, PPPoE credentials)" : "Hide sensitive details");
+  btn.title = privacyHide
+    ? "Showing masked MACs + hidden PPPoE credentials — click to reveal"
+    : "Hide MAC addresses + PPPoE credentials";
+}
+
+function togglePrivacy() {
+  privacyHide = !privacyHide;
+  localStorage.setItem("quota_privacy_hide", privacyHide ? "1" : "0");
+  setPrivacyButton();
+  // re-render in place: device rows + rogue rows pick up the mask via macText()
+  renderUsers(dashboard.users, dashboard.devices, dashboard.gateway);
+  renderRogue(dashboard.rogue);
+  // the device modal's MAC line — refresh it if it is open
+  if (!$("modal").classList.contains("hidden") && editDeviceId != null) {
+    openDeviceModal(editDeviceId);
+  }
+  // the WAN panel prefill (credentials) — re-prefetch so the user/pass fields
+  // clear/set when masking flips
+  if (!$("panel-wan") || !$("panel-wan").classList.contains("hidden")) refreshWan();
+}
+
 /* ---------------- API client ---------------- */
 
 const API = {
@@ -87,6 +132,7 @@ function render(data) {
   renderWan(data.wan); // null-safe — {} before the first Gateway tick
   renderNetStatus(data.internet);
   renderNetworkPreview(networkConfig); // null-safe — refreshed by refreshNetwork()
+  renderVpnShare(data); // live status rides the WS snapshot so "applying…" advances
   const v = $("app-version");
   if (v) v.textContent = data.version ? `Quota Manager ${data.version}` : "—";
 }
@@ -215,7 +261,7 @@ function renderRogue(rogue) {
             aria-label="${r.online ? "Online" : "Offline"}"></span>
       <div class="rogue-meta">
         <div class="rogue-ip">${esc(r.ip)}<span class="muted small"> · not in DHCP</span></div>
-        <div class="rogue-mac">${esc(r.mac)}${vendorTag ? ` · <span class="device-vendor">${vendorTag}</span>` : ""}</div>
+        <div class="rogue-mac">${esc(macText(r.mac))}${vendorTag ? ` · <span class="device-vendor">${vendorTag}</span>` : ""}</div>
       </div>
     </div>`;
   }).join("");
@@ -267,6 +313,9 @@ function userCard(u, udevs, gw, ghost) {
   // per-user aggregate speed caps (Mbps; shown only when one is set)
   const speedTag = (u.limit_down_mbps || u.limit_up_mbps)
     ? ` <span class="speed-tag" title="Total speed for all this user's devices">↓${u.limit_down_mbps || "∞"} ↑${u.limit_up_mbps || "∞"}</span>` : "";
+  // quota-exempt users are never quota-blocked (manual admin cuts still apply)
+  const exemptTag = u.exempt_quota
+    ? ` <span class="bypass-tag" title="Exempt from quota — never quota-blocked, however much they use">unlimited</span>` : "";
   return `
   <div class="glass card user-card ${u.blocked ? "blocked" : ""}">
     <div class="user-head">
@@ -278,7 +327,7 @@ function userCard(u, udevs, gw, ghost) {
         </svg>
       </button>
       <div class="user-head-info">
-        <div class="user-name">${statusDot(u.block_state, connected)}${esc(u.name || (u.guest ? "Guest" : "Unnamed user"))}${guestTag}${gatewayTag}${speedTag}${statusTag(u.block_state)}</div>
+        <div class="user-name">${statusDot(u.block_state, connected)}${esc(u.name || (u.guest ? "Guest" : "Unnamed user"))}${guestTag}${gatewayTag}${exemptTag}${speedTag}${statusTag(u.block_state)}</div>
         <div class="user-sub">${udevs.length} device${udevs.length === 1 ? "" : "s"} ·
           ${u.quota_mode === "fixed" ? `Fixed ${u.fixed_gb ?? u.allowance_gb} GB` : "Auto (share of remainder)"}</div>
       </div>
@@ -341,7 +390,7 @@ function deviceRow(d) {
     <div class="device-head">
       <div>
         <div class="device-name">${esc(d.name || (d.guest ? "Guest" : d.vendor) || "Unnamed device")}${speedTag}</div>
-        <div class="device-mac">${esc(d.mac)}${statusDot(d.block_state, d.connected)}${d.ip ? ` · <span class="device-ip">${esc(d.ip)}</span>` : ""}${vendorTag}${guestTag}${gatewayTag}${bypassTag}${statusTag(d.block_state)}</div>
+        <div class="device-mac">${esc(macText(d.mac))}${statusDot(d.block_state, d.connected)}${d.ip ? ` · <span class="device-ip">${esc(d.ip)}</span>` : ""}${vendorTag}${guestTag}${gatewayTag}${bypassTag}${statusTag(d.block_state)}</div>
       </div>
     </div>
     ${devBar}
@@ -357,15 +406,16 @@ function deviceRow(d) {
   </div>`;
 }
 
-/* ---------------- top-bar panels (management / bundle / admin / logs) ---------------- */
+/* ---------------- sidebar panels (management / network / wan / admin / logs) ---------------- */
 
 function switchPanel(name) {
+  try { localStorage.setItem("quota_active_panel", name); } catch (_) { /* ignore */ }
   document.querySelectorAll(".nav-tab").forEach((b) =>
     b.classList.toggle("active", b.dataset.panel === name));
   document.querySelectorAll(".nav-panel").forEach((p) =>
     p.classList.toggle("hidden", p.id !== `panel-${name}`));
-  if (name === "logs") refreshLogs();
-  if (name === "network") refreshNetwork();
+  if (name === "admin") refreshLogs(); // the System Logs console lives on the Admin page
+  if (name === "network") { refreshNetwork(); refreshGuest(); }
   if (name === "wan") refreshWan();
   if (name === "history") refreshHistory();
   if (name === "dns") refreshDns();
@@ -559,10 +609,13 @@ function populateDnsTargetSelect(sel, scopeSel) {
   if (scope === "global") return;
   if (scope === "user") {
     sel.innerHTML = (dashboard.users || [])
-      .map((u) => `<option value="${u.id}">${esc(u.name || `User #${u.id}`)}</option>`).join("");
+      .map((u) => {
+        const note = u.exempt_quota ? " — unlimited" : "";
+        return `<option value="${u.id}">${esc(u.name || `User #${u.id}`)}${note}</option>`;
+      }).join("");
   } else {
     sel.innerHTML = (dashboard.devices || [])
-      .map((d) => `<option value="${d.id}">${esc(d.name || d.mac)}</option>`).join("");
+      .map((d) => `<option value="${d.id}">${esc(d.name || d.vendor || d.mac)} (${esc(d.user_name || `User #${d.user_id}`)})</option>`).join("");
   }
 }
 
@@ -573,7 +626,7 @@ function scopeLabel(rule) {
     return `User: ${esc(u ? (u.name || `#${rule.scope_id}`) : `#${rule.scope_id}`)}`;
   }
   const dev = (dashboard.devices || []).find((x) => x.id === rule.scope_id);
-  return `Device: ${esc(dev ? (dev.name || dev.mac) : `#${rule.scope_id}`)}`;
+  return `Device: ${esc(dev ? `${dev.name || dev.vendor || dev.mac} (${dev.user_name || `User #${dev.user_id}`})` : `#${rule.scope_id}`)}`;
 }
 
 function renderDnsRules() {
@@ -819,7 +872,7 @@ async function refreshAll() {
   render(data);
   refreshGuest();
   refreshNetwork();
-  if (!$("panel-logs").classList.contains("hidden")) refreshLogs();
+  if (!$("panel-admin").classList.contains("hidden")) refreshLogs();
 }
 
 /* ---------------- device modal ---------------- */
@@ -838,7 +891,8 @@ function populateUserSelect(selectedId, allowNew) {
   let html = "";
   if (allowNew) html += `<option value="__new__">New user…</option>`;
   for (const u of dashboard.users || []) {
-    html += `<option value="u_${u.id}">${esc(u.name || `User #${u.id}`)}</option>`;
+    const note = u.exempt_quota ? " — unlimited" : "";
+    html += `<option value="u_${u.id}">${esc(u.name || `User #${u.id}`)}${note}</option>`;
   }
   sel.innerHTML = html;
   sel.value = selectedId != null ? `u_${selectedId}` : "__new__";
@@ -852,7 +906,7 @@ function openDeviceModal(id) {
 
   $("modal-title").textContent = dev ? "Edit device" : "Add device";
   $("modal-sub").textContent = dev
-    ? `${esc(dev.mac)} — quota lives on the user; reassign or exempt here.`
+    ? `${macText(dev.mac)} — quota lives on the user; reassign or exempt here.`
     : "New devices from DHCP appear automatically. Add one by MAC.";
 
   $("d-mac-wrap").classList.toggle("hidden", !!dev);
@@ -893,6 +947,13 @@ function refreshDeviceModalFields() {
   // speed caps are always per-device — shown for new devices AND on every edit
   // (a device keeps its own limit even when its user has none).
   $("d-speed-wrap").classList.remove("hidden");
+  // A quota-exempt user is never quota-blocked, so the per-device bypass is
+  // redundant for its devices — disable it instead of silently ignoring it.
+  const uid = selectedUserId();
+  const user = uid != null ? (dashboard.users || []).find((x) => x.id === uid) : null;
+  const userExempt = !!user && !!user.exempt_quota;
+  $("d-bypass").disabled = userExempt;
+  $("d-bypass-exempt-note").classList.toggle("hidden", !userExempt);
 }
 
 function closeModal() {
@@ -978,6 +1039,7 @@ function openUserModal(id) {
   // per-user DNS-history retention (days); blank = global default
   $("u-history-days").value = u ? (u.history_days ?? "") : "";
   $("u-dns-server").value = u ? (u.dns_server || "") : "";
+  $("u-exempt").checked = u ? !!u.exempt_quota : false;
   $("u-fixed-wrap").classList.toggle("hidden", $("u-mode").value !== "fixed");
   $("user-modal-submit").textContent = u ? "Save" : "Add";
   $("user-modal").classList.remove("hidden");
@@ -1002,14 +1064,16 @@ async function submitUser(ev) {
   const historyDays = historyDaysField === "" ? null
     : Math.max(0, Math.min(365, parseInt(historyDaysField, 10) || 0));
   const dnsServer = $("u-dns-server").value.trim();
+  const exemptQuota = $("u-exempt").checked;
   let targetUserId = editUserId;
   if (editUserId == null) {
     const created = await API.post("/api/users", { name, quota_mode: mode, fixed_gb: fixed,
-      limit_down_mbps: limitDown, limit_up_mbps: limitUp });
+      limit_down_mbps: limitDown, limit_up_mbps: limitUp, exempt_quota: exemptQuota });
     targetUserId = created.id;
   } else {
     await API.patch(`/api/users/${editUserId}`, { name, quota_mode: mode, fixed_gb: fixed,
-      limit_down_mbps: limitDown, limit_up_mbps: limitUp, history_days: historyDays });
+      limit_down_mbps: limitDown, limit_up_mbps: limitUp, history_days: historyDays,
+      exempt_quota: exemptQuota });
   }
   if (targetUserId != null) {
     try { await API.patch(`/api/users/${targetUserId}/dns`, { dns_server: dnsServer }); }
@@ -1115,6 +1179,9 @@ async function refreshGuest() {
     const g = await API.get("/api/guest");
     $("guest-mode-toggle").checked = g.enabled;
     $("guest-quota").value = g.quota_gb;
+    $("guest-speed-limit").value = g.speed_limit_mbps;
+    $("guest-limit").value = g.limit;
+    $("stop-new-toggle").checked = g.stop_new;
   } catch (_) { /* guest panel is not critical */ }
 }
 
@@ -1134,6 +1201,69 @@ async function submitGuestQuota() {
   await refreshAll();
 }
 
+async function submitGuestLimit() {
+  const n = parseInt($("guest-limit").value, 10);
+  if (!(n >= 1)) { alert("Guest limit must be at least 1."); return; }
+  await API.post("/api/guest", { limit: n });
+  await refreshGuest();
+}
+
+async function submitGuestSpeed() {
+  const mbps = parseFloat($("guest-speed-limit").value);
+  if (!(mbps >= 0)) { alert("Guest speed limit must be 0 or positive (0 = unlimited)."); return; }
+  await API.post("/api/guest", { speed_limit_mbps: mbps });
+  await refreshGuest();
+}
+
+async function toggleStopNew(ev) {
+  await API.post("/api/guest", { stop_new: ev.target.checked });
+  await refreshGuest();
+}
+
+/* Decline random MACs: a randomized (locally-administered) MAC carries no
+   vendor OUI, so the box can't identify/budget the device. The toggle blocks
+   new ones on first sight; the one-shot checkbox also cuts devices that
+   ALREADY joined with a random MAC (the server sweeps them, then resets the
+   flag). */
+async function toggleDeclineRandom(ev) {
+  const msg = $("decline-random-msg");
+  try {
+    await API.post("/api/network", { decline_random_macs: ev.target.checked });
+    if (msg) { msg.textContent = ""; msg.classList.add("hidden"); }
+  } catch (e) {
+    if (msg) {
+      msg.textContent = `Could not save: ${e.message}`;
+      msg.classList.remove("hidden");
+    }
+    ev.target.checked = !ev.target.checked;
+  }
+  await refreshNetwork();
+}
+
+async function cutExistingRandomMacs(ev) {
+  if (!ev.target.checked) return;
+  const msg = $("decline-random-msg");
+  if (!confirm("Cut every device that already joined with a randomized MAC? "
+      + "Blocked ones stay cut until an admin lifts them.")) {
+    ev.target.checked = false;
+    return;
+  }
+  try {
+    await API.post("/api/network",
+      { decline_random_macs: true, decline_random_macs_existing: true });
+    if (msg) {
+      msg.textContent = "Existing randomized-MAC devices were cut.";
+      msg.classList.remove("hidden");
+    }
+  } catch (e) {
+    if (msg) {
+      msg.textContent = `Sweep failed: ${e.message}`;
+      msg.classList.remove("hidden");
+    }
+  }
+  await refreshNetwork();
+}
+
 /* ---------------- speed shaping (Network tab) ---------------- */
 
 async function refreshNetwork() {
@@ -1143,7 +1273,12 @@ async function refreshNetwork() {
     $("shaping-toggle").checked = n.enabled;
     $("set-total-down").value = n.total_down_mbps || "";
     $("set-total-up").value = n.total_up_mbps || "";
+    $("set-lan-rate").value = n.lan_rate_mbps || "";
     $("aqm-toggle").checked = n.aqm;
+    // random-MAC gate: toggle + the one-shot "cut existing" checkbox (the
+    // latter only makes sense while the gate is on).
+    $("decline-random-toggle").checked = !!n.decline_random_macs;
+    $("decline-random-existing").disabled = !n.decline_random_macs;
     renderVpnShare(n);
     renderNetworkPreview(n);
   } catch (_) { /* network panel is not critical */ }
@@ -1165,7 +1300,7 @@ function renderVpnShare(n) {
     text = `Sharing through ${iface || "the VPN tunnel"} — every device's internet exits via the VPN.`;
     cls = "ok";
   } else if (st.state === "no-interface") {
-    text = "No VPN tunnel detected — start the VPN client in TUN mode first.";
+    text = "No VPN tunnel detected — starting the automatic tun2socks bridge (one-time download)…";
   } else if (st.state === "error") {
     text = `Error: ${st.message || "could not program the routing."}`;
   } else if (vs.enabled) {
@@ -1175,6 +1310,39 @@ function renderVpnShare(n) {
   }
   statusEl.textContent = text;
   statusEl.className = `vpn-status muted small ${cls}`.trim();
+  // Auto-provisioned tun2socks bridge status (userspace VPN clients like
+  // v2rayN have no kernel tun; quota/tun2socks.py downloads + runs the
+  // bridge). Progress/failure messages are honest — a Gateway-OFF box that
+  // can't download yet must say so, not silently retry forever.
+  const ts = st.tun2socks;
+  const tsEl = $("vpn-ts-hint");
+  if (tsEl) {
+    if (ts && ts.state !== "running" && ts.state !== "off" && ts.message) {
+      tsEl.textContent = ts.message;
+      tsEl.classList.remove("hidden");
+    } else {
+      tsEl.textContent = "";
+      tsEl.classList.add("hidden");
+    }
+  }
+  // When the Gateway's own internet is cut (Gateway OFF) the relay must keep
+  // the box's VPN-server connection alive — it does, automatically (the
+  // engine's gw_allowed whitelist). Say so plainly, so a cut Gateway doesn't
+  // read as a broken tunnel.
+  const gw = (dashboard && dashboard.gateway) || {};
+  const hintEl = $("vpn-gw-hint");
+  if (hintEl) {
+    if (gw.blocked_programmed && st.state === "on") {
+      hintEl.textContent = "Gateway OFF: the box's own internet is cut, but its VPN-server connection stays open automatically — devices still reach the internet through the tunnel.";
+      hintEl.classList.remove("hidden");
+    } else if (gw.blocked_programmed && vs.enabled) {
+      hintEl.textContent = "Gateway OFF: the box's own internet is cut — devices route through the VPN tunnel once the relay applies.";
+      hintEl.classList.remove("hidden");
+    } else {
+      hintEl.textContent = "";
+      hintEl.classList.add("hidden");
+    }
+  }
 }
 
 function renderNetworkPreview(n) {
@@ -1183,6 +1351,7 @@ function renderNetworkPreview(n) {
   $("np-status").className = `stat-value ${n.enabled ? "ok" : "off"}`;
   $("np-down").textContent = n.total_down_mbps ? `${n.total_down_mbps} Mbps` : "—";
   $("np-up").textContent = n.total_up_mbps ? `${n.total_up_mbps} Mbps` : "—";
+  $("np-lan").textContent = n.lan_rate_mbps ? `${n.lan_rate_mbps} Mbps` : "1000 Mbps";
   $("np-aqm").textContent = n.aqm ? "On" : "Off";
   const capped = (dashboard && dashboard.devices
     ? dashboard.devices : []).filter((d) => d.limit_down_mbps || d.limit_up_mbps);
@@ -1208,10 +1377,21 @@ async function submitNetwork() {
     enabled: $("shaping-toggle").checked,
     total_down_mbps: parseFloat($("set-total-down").value) || 0,
     total_up_mbps: parseFloat($("set-total-up").value) || 0,
+    lan_rate_mbps: parseFloat($("set-lan-rate").value) || 0,
     aqm: $("aqm-toggle").checked,
     vpn_share: $("vpn-toggle").checked,
   };
   await API.post("/api/network", body);
+  await refreshAll();
+}
+
+/* The VPN-share switch saves IMMEDIATELY on change (like the guest-mode
+   toggle) — a partial POST with only vpn_share so it never clobbers the
+   shaping totals. Without this, flipping the switch and refreshing the page
+   silently reverted to OFF, because nothing persisted until the panel's
+   separate Save button was clicked. */
+async function toggleVpnShare(ev) {
+  await API.post("/api/network", { vpn_share: ev.target.checked });
   await refreshAll();
 }
 
@@ -1335,6 +1515,44 @@ function renderWan(wan) {
       applyBtn.removeAttribute("title");
     }
   }
+  // -- WAN public-IP renewal: the Restart button + the auto-renew schedule are
+  //    disabled unless WAN mode is active AND ppp0 is actually UP. A down dial
+  //    means internet isn't working — restarting the PPPoE session would just
+  //    reconnect to a dead line. The disabled note only appears in WAN mode
+  //    with a down link (LAN has no ppp0 to speak of).
+  const renewEnabled = wanOn && linkUp;
+  const restartBtn = $("wan-restart-btn");
+  if (restartBtn) restartBtn.disabled = !renewEnabled;
+  const renewNote = $("wan-renew-disabled-note");
+  if (renewNote) renewNote.classList.toggle("hidden", renewEnabled || !wanOn);
+  const renewToggle = $("wan-renew-toggle");
+  if (renewToggle) {
+    renewToggle.disabled = !renewEnabled;
+    renewToggle.checked = !!wan.renew_enabled;
+  }
+  const renewMinutes = $("wan-renew-minutes");
+  if (renewMinutes) {
+    renewMinutes.disabled = !renewEnabled;
+    renewMinutes.value = wan.renew_minutes || 15;
+  }
+  const renewSave = $("wan-renew-save");
+  if (renewSave) renewSave.disabled = !renewEnabled;
+  const renewLast = $("wan-renew-last");
+  if (renewLast) renewLast.textContent = fmtRenewLast(wan.renew_last);
+}
+
+// WAN public-IP renewal: the "last renewed" timestamp rendered as a friendly
+// relative time ("just now" / "x min ago"), or "—" when never renewed.
+function fmtRenewLast(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "—";
+  const diff = Date.now() - d.getTime();
+  if (diff < 0) return "just now";
+  if (diff < 60000) return "just now";
+  if (diff < 3600000) return Math.floor(diff / 60000) + " min ago";
+  if (diff < 86400000) return Math.floor(diff / 3600000) + " h ago";
+  return d.toLocaleString();
 }
 
 async function refreshWan() {
@@ -1346,10 +1564,15 @@ async function refreshWan() {
     wanToggleDirty = false;
     // Prefill the saved PPPoE credentials (GET /api/wan serves them from the
     // DB; the WS snapshot does NOT carry them). Only when the user is not
-    // mid-editing a draft — a dirty toggle keeps its typed values.
+    // mid-editing a draft — a dirty toggle keeps its typed values. Both the
+    // username AND the password are gated on the privacy eye — and the gating
+    // is a two-way street: while details are masked the fields are actively
+    // CLEARED (not just left un-prefilled), so a value revealed earlier and
+    // then re-hidden disappears from the screen immediately instead of
+    // lingering in the DOM until a refresh.
     const user = $("wan-user"), pass = $("wan-pass"), wanif = $("wan-if");
-    if (user && !wanToggleDirty) user.value = w.pppoe_user || "";
-    if (pass && !wanToggleDirty) pass.value = w.pppoe_password || "";
+    if (user && !wanToggleDirty) user.value = privacyHide ? "" : (w.pppoe_user || "");
+    if (pass && !wanToggleDirty) pass.value = privacyHide ? "" : (w.pppoe_password || "");
     if (wanif && !wanToggleDirty) wanif.value = w.wan_if || "";
     renderWan(w);
     await maybeAutoDiagnose(w);
@@ -1525,6 +1748,66 @@ async function revertWan(ev) {
   }
 }
 
+async function renewWanIp(ev) {
+  ev.preventDefault();
+  if (!confirm("Restart the PPPoE dial now to renew the public IP?\n\n" +
+               "Internet will drop for a few seconds while ppp0 re-dials. On " +
+               "most Egyptian lines the ISP hands the new session a fresh public IP.")) return;
+  const btn = ev.currentTarget;
+  btn.disabled = true;
+  btn.textContent = "Restarting…";
+  try {
+    const r = await API.post("/api/wan/renew");
+    $("wan-apply-msg").textContent = r.restarted
+      ? "PPPoE dial restarted — ppp0 re-dialing (a new public IP if the ISP " +
+        "rotates it per session)."
+      : `PPPoE restart did not confirm: ${r.detail || "the service is not active"}`;
+    // Refetch the live status once the dial has had a moment to settle, so the
+    // Public IP + last-renewed lines update without waiting for the next 15 s tick.
+    setTimeout(async () => { await refreshWan(); }, 3000);
+  } catch (err) {
+    alert(err.message === "unauthorized" ? "Session expired — please log in again."
+      : `Renew failed: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Restart PPPoE — renew public IP";
+  }
+}
+
+async function submitWanRenew(ev) {
+  ev.preventDefault();
+  const enabled = $("wan-renew-toggle").checked;
+  const minutes = parseInt($("wan-renew-minutes").value, 10) || 15;
+  const btn = ev.currentTarget;
+  const msg = $("wan-renew-msg");
+  btn.disabled = true;
+  msg.className = "test-msg loading";
+  msg.textContent = "Saving…";
+  try {
+    const r = await API.post("/api/wan/renew-config", { enabled, minutes });
+    // The response carries the clamped config — mirror it into the live status
+    // so the WAN panel reflects the saved schedule immediately.
+    if (wanStatus) {
+      wanStatus.renew_enabled = r.enabled;
+      wanStatus.renew_minutes = r.minutes;
+      wanStatus.renew_last = r.last;
+    }
+    renderWan(wanStatus || {});
+    msg.className = "test-msg ok";
+    msg.textContent = enabled
+      ? `Auto-renew ${r.minutes} min — the PPPoE dial restarts on schedule ` +
+        "(internet drops briefly each time)."
+      : "Auto-renew disabled.";
+  } catch (err) {
+    msg.className = "test-msg fail";
+    msg.textContent = err.message === "unauthorized"
+      ? "Session expired — please log in again."
+      : `Save failed: ${err.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function submitPassword(ev) {
   ev.preventDefault();
   const cur = $("p-cur").value;
@@ -1547,9 +1830,89 @@ async function logout() {
   showLogin();
 }
 
+/* ---------------- ambient particle layer ---------------- */
+
+// Ultra-subtle drifting dust over the obsidian base. Self-contained (no deps),
+// DPR-aware, pauses when the tab is hidden, and fully disabled for users who
+// prefer reduced motion. Guards on element presence so it degrades to a no-op
+// anywhere the canvas is absent.
+function initParticles() {
+  const canvas = document.getElementById("bg-particles");
+  if (!canvas) return;
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  let w = 0, h = 0, dpr = 1;
+  const particles = [];
+  const COUNT = 50;
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    w = window.innerWidth;
+    h = window.innerHeight;
+    canvas.width = Math.floor(w * dpr);
+    canvas.height = Math.floor(h * dpr);
+    canvas.style.width = w + "px";
+    canvas.style.height = h + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function seed() {
+    particles.length = 0;
+    for (let i = 0; i < COUNT; i++) {
+      particles.push({
+        x: Math.random() * w,
+        y: Math.random() * h,
+        r: Math.random() * 1.5 + 1.5,
+        vx: (Math.random() - 0.5) * 0.6,
+        vy: -(Math.random() * 0.4 + 0.4),
+        a: Math.random() * 0.1 + 0.35,
+        tw: Math.random() * Math.PI * 2,
+      });
+    }
+  }
+
+  function tick() {
+    ctx.clearRect(0, 0, w, h);
+    ctx.shadowColor = "rgba(59, 130, 246, 0.8)";
+    ctx.shadowBlur = 8;
+    for (const p of particles) {
+      p.x += p.vx;
+      p.y += p.vy;
+      p.tw += 0.008;
+      if (p.y < -6) { p.y = h + 6; p.x = Math.random() * w; }
+      if (p.x < -6) p.x = w + 6;
+      if (p.x > w + 6) p.x = -6;
+      const alpha = p.a * (0.7 + 0.3 * Math.sin(p.tw));
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(59, 130, 246, " + alpha.toFixed(3) + ")";
+      ctx.fill();
+    }
+    ctx.shadowBlur = 0;
+    raf = requestAnimationFrame(tick);
+  }
+
+  let raf = null;
+  function start() { if (!raf) raf = requestAnimationFrame(tick); }
+  function stop() { if (raf) { cancelAnimationFrame(raf); raf = null; } }
+
+  resize();
+  seed();
+  start();
+
+  window.addEventListener("resize", () => { resize(); seed(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) stop();
+    else start();
+  });
+}
+
 /* ---------------- init ---------------- */
 
 async function init() {
+  initParticles();
   $("login-form").addEventListener("submit", submitLogin);
   $("device-form").addEventListener("submit", submitDevice);
   $("settings-form").addEventListener("submit", submitSettings);
@@ -1565,15 +1928,24 @@ async function init() {
   });
   $("d-user").addEventListener("change", refreshDeviceModalFields);
   $("logout-btn").addEventListener("click", logout);
+  // privacy eye: mask MACs + hide the saved PPPoE credentials prefill
+  setPrivacyButton();
+  $("privacy-eye").addEventListener("click", togglePrivacy);
   $("reset-month-btn").addEventListener("click", doResetMonth);
   $("recharge-btn").addEventListener("click", submitRecharge);
   document.querySelectorAll(".nav-tab").forEach((b) =>
     b.addEventListener("click", () => switchPanel(b.dataset.panel)));
   $("guest-mode-toggle").addEventListener("change", toggleGuestMode);
   $("guest-quota-btn").addEventListener("click", submitGuestQuota);
+  $("guest-limit-btn").addEventListener("click", submitGuestLimit);
+  $("guest-speed-btn").addEventListener("click", submitGuestSpeed);
+  $("stop-new-toggle").addEventListener("change", toggleStopNew);
+  $("decline-random-toggle").addEventListener("change", toggleDeclineRandom);
+  $("decline-random-existing").addEventListener("change", cutExistingRandomMacs);
   // speed shaping: saving sends all four fields; the master + AQM toggles just
   // mark the current draft — they take effect together on Save.
   $("shaping-save-btn").addEventListener("click", submitNetwork);
+  $("vpn-toggle").addEventListener("change", toggleVpnShare);
   // WAN mode: the toggle picks the desired mode; Apply/Revert do the live
   // switch (the gateway rewires itself and restarts automatically). A flip is
   // a DRAFT until Apply/Revert succeeds — wanToggleDirty freezes the 5 s WS
@@ -1587,6 +1959,8 @@ async function init() {
   $("wan-test-btn").addEventListener("click", testPppoe);
   $("wan-apply-btn").addEventListener("click", submitWan);
   $("wan-revert-btn").addEventListener("click", revertWan);
+  $("wan-restart-btn").addEventListener("click", renewWanIp);
+  $("wan-renew-save").addEventListener("click", submitWanRenew);
   // browsing history: refetch on device/window change or manual refresh
   $("hist-device").addEventListener("change", refreshHistory);
   $("hist-window").addEventListener("change", refreshHistory);
@@ -1676,6 +2050,11 @@ async function init() {
       showApp();
       await refreshAll();
       await refreshWan(); // prefill saved PPPoE creds on load (only /api/wan carries them)
+      // remember the last visited sidebar tab across page reloads
+      const savedPanel = localStorage.getItem("quota_active_panel");
+      if (savedPanel && document.querySelector(`.nav-tab[data-panel="${savedPanel}"]`)) {
+        switchPanel(savedPanel);
+      }
       wsConnect();
       await showWelcomeIfNeeded();
     } else {

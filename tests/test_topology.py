@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import socket
 
-from quota.topology import check_internet, check_internet_dns, detect_ppp
+from quota.topology import (
+    check_internet, check_internet_dns, detect_ppp, restart_pppoe)
 
 
 def _mk_fake(responses: dict[str, tuple[int, str]]) -> callable:
@@ -195,3 +196,70 @@ def test_internet_dns_falls_through_to_second_server():
     """The first resolver failing does not stop the probe — the next is tried."""
     assert check_internet_dns(servers=("8.8.8.8", "1.1.1.1"),
                               query=lambda s, t: s == "8.8.8.8") is True
+
+
+# restart_pppoe — the WAN-tab "renew public IP" restart (fake systemctl)
+# ---------------------------------------------------------------------------
+
+def test_restart_pppoe_restarts_and_reports_active():
+    """A successful restart reports restarted=True and the service's state."""
+    calls = []
+
+    def run(argv):
+        calls.append(argv)
+        if argv[0] == "systemctl" and argv[1] == "restart":
+            return (0, "")
+        return (0, "active\n")  # is-active
+
+    out = restart_pppoe("ppp0", run_command=run)
+    assert out["restarted"] is True
+    assert out["state"] == "active"
+    assert "ppp0" in out["detail"]
+    assert calls[0] == ["systemctl", "restart", "quota-wan-ppp"]
+    assert calls[1] == ["systemctl", "is-active", "quota-wan-ppp"]
+
+
+def test_restart_pppoe_reports_inactive_state():
+    """After a restart the unit can read inactive (pppd exiting) — still a
+    restart attempt, honestly reported."""
+    def run(argv):
+        if argv[0] == "systemctl" and argv[1] == "restart":
+            return (0, "")
+        return (0, "inactive\n")
+
+    out = restart_pppoe("ppp0", run_command=run)
+    assert out["restarted"] is True
+    assert out["state"] == "inactive"
+
+
+def test_restart_pppoe_failed_restart_is_honest():
+    """A failing restart never claims success — it carries the stderr detail."""
+    out = restart_pppoe(
+        "ppp0",
+        run_command=lambda argv:
+            (1, "Failed to restart quota-wan-ppp.service: Unit not found."))
+    assert out["restarted"] is False
+    assert out["state"] == "unknown"
+    assert "Unit not found" in out["detail"]
+
+
+def test_restart_pppoe_missing_systemctl_degrades():
+    """No systemctl (Windows dev box / no root) => restarted=False, no raise."""
+    out = restart_pppoe(
+        "ppp0",
+        run_command=lambda argv: (127, "command not found"))
+    assert out["restarted"] is False
+    assert out["state"] == "unknown"
+    assert "command not found" in out["detail"]
+
+
+def test_restart_pppoe_unknown_is_active_answer_mapped():
+    """An is-active answer outside active/inactive maps to "unknown"."""
+    def run(argv):
+        if argv[0] == "systemctl" and argv[1] == "restart":
+            return (0, "")
+        return (0, "activating\n")  # transitional
+
+    out = restart_pppoe("ppp0", run_command=run)
+    assert out["restarted"] is True
+    assert out["state"] == "unknown"

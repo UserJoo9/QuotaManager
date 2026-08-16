@@ -34,37 +34,69 @@ def test_index_served(client):
     # v10: top-bar tab navigation replaces the stacked sections; the
     # "Usage this period" chart section stays gone (moved to Management).
     assert "Usage this period" not in r.text
-    # top-bar nav buttons (v11 adds the Network tab for speed shaping)
+    # top-bar nav buttons (v11 adds the Network tab for speed shaping;
+    # the v25 merge folded Bundle settings into it; v27 renames it to "Network")
     assert 'data-panel="management"' in r.text
-    assert 'data-panel="bundle"' in r.text
     assert 'data-panel="network"' in r.text
     assert 'data-panel="admin"' in r.text
-    assert 'data-panel="logs"' in r.text
+    assert 'data-panel="logs"' not in r.text
     assert ">Management<" in r.text
-    assert ">Bundle settings<" in r.text
     assert ">Network<" in r.text
     assert ">Admin<" in r.text
-    assert ">Logs<" in r.text
+    assert ">Logs<" not in r.text
+    # v26: the Logs tab is gone — the full System Logs console is embedded on
+    # the Admin page (2-column top grid + the logs card below).
+    assert "System Logs" in r.text
+    assert 'id="panel-logs"' not in r.text
+    assert "admin-layout" in r.text
+    assert "admin-grid" in r.text
+    assert "Security &amp; Credentials" in r.text
+    assert "System Info &amp; About" in r.text
+    assert 'id="log-filters"' in r.text
+    assert 'id="log-search"' in r.text
+    assert 'id="log-refresh"' in r.text
+    assert 'id="log-download"' in r.text
     # Activity tab/panel removed (System logs shows the same info)
     assert "panel-activity" not in r.text
     assert "events-list" not in r.text
     assert "tab-activity" not in r.text
-    # guest-mode UI on the Bundle settings panel
+    # v25: the standalone Bundle settings tab is gone — its controls moved
+    # into the unified Network & Quota panel (bundle config + guest mode +
+    # connection toggles) with a 65/35 grid and a single overview card.
+    assert "panel-bundle" not in r.text
+    assert ">Bundle settings<" not in r.text
+    assert 'id="panel-network"' in r.text
+    assert "netquota-layout" in r.text
+    assert "Bundle configuration" in r.text
+    assert "Connection &amp; security" in r.text
+    assert "Live Network &amp; Bundle overview" in r.text
+    # guest-mode UI on the Network & Quota panel
     assert "Guest mode" in r.text
     assert 'id="guest-mode-toggle"' in r.text
     assert 'id="guest-quota"' in r.text
+    assert 'id="guest-speed-limit"' in r.text
+    assert 'id="guest-limit"' in r.text
+    assert 'id="stop-new-toggle"' in r.text
+    # v27: decline-random-MAC gate (toggle + one-shot existing sweep)
+    assert 'id="decline-random-toggle"' in r.text
+    assert 'id="decline-random-existing"' in r.text
+    # v27: per-user "exempt from quota" (user modal checkbox + device-modal note)
+    assert 'id="u-exempt"' in r.text
+    assert 'id="d-bypass-exempt-note"' in r.text
+    # v27: privacy eye (sidebar quick action) — mask MACs + PPPoE password
+    assert 'id="privacy-eye"' in r.text
     # Bundle summary lives INSIDE the Management panel (first tab only), and
     # the Consumption donut section was removed (no usage-chart canvas).
     assert 'id="panel-management"' in r.text
     assert r.text.index('id="panel-management"') < r.text.index("bundle-used")
     assert 'id="usage-chart"' not in r.text
-    assert "System logs" in r.text
-    assert 'id="panel-logs"' in r.text
-    assert 'class="glass card admin-card"' in r.text
-    assert "assets/app.js?v=34" in r.text
-    assert "assets/styles.css?v=39" in r.text
-    # the internet reachability pill lives in the top bar, not the WAN status
-    # panel (probed every 15 s; dot color = reachability).
+    assert "assets/app.js?v=51" in r.text
+    assert "assets/styles.css?v=48" in r.text
+    # v24: the sidebar collapse toggle is gone — the sidebar is a fixed rail.
+    assert "sidebar-toggle" not in r.text
+    assert "sidebar-collapsed" not in r.text
+    # the internet reachability pill lives in the sidebar footer, not the WAN
+    # status panel (probed every 15 s; dot color = reachability).
     assert 'id="net-status"' in r.text
     assert "net-label" in r.text
     assert "Checking…" in r.text
@@ -83,6 +115,8 @@ def test_index_served(client):
     assert 'id="shaping-toggle"' in r.text
     assert 'id="set-total-down"' in r.text
     assert 'id="set-total-up"' in r.text
+    assert 'id="set-lan-rate"' in r.text
+    assert 'id="np-lan"' in r.text
     assert 'id="aqm-toggle"' in r.text
     assert 'id="shaping-save-btn"' in r.text
     # speed-limit inputs in the device + user modals
@@ -143,6 +177,17 @@ def test_wan_tab_present(client):
     assert 'id="wan-source"' in r.text
     assert 'id="wan-ppp0"' in r.text
     assert 'id="wan-ppp-ip"' in r.text
+    # v24: WAN public-IP renewal — the Restart button + the auto-renew schedule
+    # block (the schedule + button are disabled until ppp0 is actually UP).
+    assert 'id="wan-restart-btn"' in r.text
+    assert 'id="wan-renew-last"' in r.text
+    assert 'id="wan-renew-disabled-note"' in r.text
+    assert 'id="wan-renew-toggle"' in r.text
+    assert 'id="wan-renew-minutes"' in r.text
+    assert 'id="wan-renew-save"' in r.text
+    assert 'id="wan-renew-msg"' in r.text
+    assert "Restart PPPoE — renew public IP" in r.text
+    assert "Auto-renew" in r.text
     # the guide names both physical paths (single-NIC bridge + two-NIC fallback)
     assert "bridge" in r.text or "AP mode" in r.text
     assert "Apply now" in r.text
@@ -161,6 +206,17 @@ def test_wan_tab_present(client):
     assert "revertWan" in rjs.text
     # v19.6: init prefills the saved creds on page load (not only on tab click)
     assert "prefill saved PPPoE creds on load" in rjs.text
+    # v27.1: the privacy eye hides BOTH PPPoE creds — the username prefill is
+    # gated on privacyHide just like the password, so a masked panel shows no
+    # username either. v27.2: the gating is two-way — while masked the fields
+    # are actively CLEARED (not merely left un-prefilled), so a value revealed
+    # then re-hidden vanishes immediately instead of lingering until a refresh.
+    assert "user.value = privacyHide ? \"\" : (w.pppoe_user" in rjs.text
+    assert "pass.value = privacyHide ? \"\" : (w.pppoe_password" in rjs.text
+    # v28: the last visited sidebar tab is remembered across page reloads —
+    # switchPanel persists it, init restores a saved panel only if it still
+    # exists in the nav (falls back to the default Management page otherwise).
+    assert "quota_active_panel" in rjs.text
     # v19.7: when WAN is configured but ppp0 is down, the panel auto-runs the
     # throwaway PPPoE test and renders an actionable per-failure verdict.
     assert "auto-testing the PPPoE line to find out why" in rjs.text
@@ -178,6 +234,14 @@ def test_wan_tab_present(client):
     assert "/api/wan/test" in rjs.text
     assert "/api/wan" in rjs.text
     assert "data.wan" in rjs.text
+    # v24: WAN renewal JS — the manual Restart + the auto-renew save both call
+    # their endpoints; renderWan drives the disabled state off ppp0 being up.
+    assert "renewWanIp" in rjs.text
+    assert "submitWanRenew" in rjs.text
+    assert '"/api/wan/renew"' in rjs.text
+    assert '"/api/wan/renew-config"' in rjs.text
+    assert "renewEnabled" in rjs.text
+    assert "fmtRenewLast" in rjs.text
     # When WAN is already active and online, "Apply now" is dimmed —
     # only Test PPPoE connection and Revert to LAN stay active.
     assert "WAN mode is already active and online — nothing to re-apply." in rjs.text
@@ -194,12 +258,14 @@ def test_wan_tab_present(client):
 def test_assets_served(client):
     r = client.get("/assets/styles.css")
     assert r.status_code == 200
+    # v22+: obsidian glass theme — backdrop blur + gradient glows, sidebar shell
     assert "backdrop-filter" in r.text
-    # v0.1.3: user cards stacked full-width (single column) — the 2/3-col
-    # media-query overrides were removed with the layout restructure.
+    assert ".sidebar" in r.text
+    # v22: user cards reflow as a 2-column masonry (CSS columns) so an expanded
+    # accordion card lengthens its column instead of leaving a grid hole.
     # (normalize CRLF so the assertion is line-ending agnostic)
     css = r.text.replace("\r\n", "\n")
-    assert ".device-grid {\n  display: grid;\n  grid-template-columns: 1fr;\n" in css
+    assert ".device-grid {\n  columns: 2;\n" in css
     # v21: the per-device [user] badge pill on aggregate history recent rows
     assert ".hist-device-badge" in css
 
@@ -269,7 +335,12 @@ def test_history_assets_bumped(client):
     """Cache-busting tags track the newest UI change. History's "All devices"
     tab took styles 34->37, app.js 31->32; the DNS-filtering tab (rules,
     presets, import, history status badges/quick-actions) took them to
-    38/33 — this always checks the CURRENT baseline, not the original bump."""
+    38/33; the v25 Network & Quota merge took them to 46/45; the v26 Admin
+    page (System Logs console embedded) took them to 47/46; the v27 batch
+    (privacy eye, decline-random gate, exempt-from-quota UI) took them to
+    48/47; the v27.1 PPPoE-username privacy fix took app.js to 48 — this
+    always checks the CURRENT baseline, not the original bump."""
     r = client.get("/")
-    assert "assets/styles.css?v=39" in r.text
-    assert "assets/app.js?v=34" in r.text
+    assert "assets/styles.css?v=48" in r.text
+    assert "assets/app.js?v=51" in r.text
+

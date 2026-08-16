@@ -48,6 +48,8 @@ class UserCreate(BaseModel):
     #: this user's devices together cannot exceed these.
     limit_down_mbps: Optional[float] = _cap_field()
     limit_up_mbps: Optional[float] = _cap_field()
+    #: Exempt this user from quota (never quota-blocked; admin cuts still apply).
+    exempt_quota: Optional[bool] = None
 
 
 class UserUpdate(BaseModel):
@@ -60,6 +62,9 @@ class UserUpdate(BaseModel):
     #: Per-user DNS-history retention in days; None = global default. 0 = keep
     #: nothing (history is effectively off for this user).
     history_days: Optional[int] = Field(None, ge=0, le=365)
+    #: Exempt this user from quota — never quota-blocked, however much they
+    #: use. A manual admin cut (user/device level) still applies.
+    exempt_quota: Optional[bool] = None
 
 
 class NetworkUpdate(BaseModel):
@@ -72,12 +77,23 @@ class NetworkUpdate(BaseModel):
     total_down_mbps: Optional[float] = _cap_field()
     #: Total UPLOAD line speed in Mbps (same reasoning as total_down).
     total_up_mbps: Optional[float] = _cap_field()
+    #: LAN pass-through rate in Mbps — the speed limit for LAN (client
+    #: <-> uplink-subnet) traffic. 0/empty = the 1000 Mbps default; the WAN
+    #: caps never apply to LAN transfers.
+    lan_rate_mbps: Optional[float] = _cap_field()
     #: Bufferbloat avoidance (fq_codel on every queue). Default on.
     aqm: Optional[bool] = None
     #: "VPN share" master switch: route the whole client subnet through the
     #: box's VPN tunnel (quota/vpnshare.py policy routing). None = leave the
     #: current switch untouched (only the shaping fields changed).
     vpn_share: Optional[bool] = None
+    #: Refuse brand-new devices with a randomized (locally-administered) MAC.
+    #: Registered + immediately admin-blocked on first sight.
+    decline_random_macs: Optional[bool] = None
+    #: One-shot flag riding alongside ``decline_random_macs=true``: also
+    #: admin-block every device that ALREADY joined with a random MAC. Reset
+    #: after the sweep (the setting itself only gates new registrations).
+    decline_random_macs_existing: Optional[bool] = None
 
 
 class TopUpRequest(BaseModel):
@@ -100,6 +116,13 @@ class GuestUpdate(BaseModel):
     enabled: Optional[bool] = None
     #: Allowance for each guest (GB). Applies to existing guests immediately.
     quota_gb: Optional[float] = Field(None, gt=0, le=100000)
+    #: Maximum number of guest accounts (stops MAC-spoofing spam).
+    limit: Optional[int] = Field(None, ge=1, le=10000)
+    #: Default speed cap (Mbps) for each guest's aggregate bandwidth
+    #: (0 = unlimited). Applies to existing guests immediately.
+    speed_limit_mbps: Optional[float] = Field(None, ge=0, le=100000)
+    #: Refuse brand-new devices while allowing already-registered ones.
+    stop_new: Optional[bool] = None
 
 
 class PasswordUpdate(BaseModel):
@@ -288,3 +311,16 @@ class WanTest(BaseModel):
     pppoe_user: Optional[str] = None
     pppoe_password: Optional[str] = None
     wan_if: Optional[str] = None
+
+
+class WanRenewConfig(BaseModel):
+    """WAN public-IP auto-renew schedule (the dashboard WAN tab).
+
+    ``enabled`` arms the periodic PPPoE re-dial (``quota-wan-ppp`` restart);
+    ``minutes`` is the interval, clamped to a 5-minute floor in the service —
+    every renewal drops internet for a few seconds, so a lower bound keeps a
+    typo from hammering the line (no upper bound: any longer interval works).
+    """
+
+    enabled: bool
+    minutes: int

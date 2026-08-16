@@ -92,11 +92,14 @@ def mgr(cfg: Config | None = None, fake: FakeIp | None = None,
 
 def tunnel_mgr(*tunnels: str) -> tuple[VpnShareManager, FakeIp]:
     """A manager whose sysfs carries the given TUN devices (ready for
-    direct ``apply`` calls, which refuse to route into a missing device)."""
+    direct ``apply`` calls, which refuse to route into a missing device).
+    Each tunnel carries an IPv4 address — a live tunnel always does (the
+    IPv4 liveness gate refuses address-less junk devices)."""
     m, fake = mgr(sysfs_root=make_sysfs(*((t, "65534") for t in tunnels)))
     fake.addr_shows("2: eth0    inet 192.168.2.1/24 scope global eth0\n")
-    for t in tunnels:
-        fake.script[("ip", "-o", "-4", "addr", "show", "dev", t)] = (0, "")
+    for i, t in enumerate(tunnels):
+        fake.script[("ip", "-o", "-4", "addr", "show", "dev", t)] = \
+            (0, f"{i + 3}: {t}    inet 10.8.0.{i + 2}/24 scope global {t}\n")
     return m, fake
 
 
@@ -127,6 +130,18 @@ def test_detect_prefers_ipv4_carrying_tunnel():
         (0, "3: wg0    inet 10.8.0.2/24 scope global wg0\n")
     m = VpnShareManager(make_cfg(), run_command=fake, sysfs_root=root)
     assert m.detect_interfaces() == ["wg0", "utun4"]
+
+
+def test_detect_ranks_xray_tun_like_classic_tunnels():
+    # xray's kernel tun is named "xray_tun" (not tun0) — it must rank as a
+    # first-class tunnel, not the generic tail group, so a real xray TUN wins
+    # over a leftover junk ARPHRD_NONE device.
+    root = make_sysfs(("xray_tun", "65534"), ("evice", "65534"))
+    fake = FakeIp()
+    for dev in ("xray_tun", "evice"):
+        fake.script[("ip", "-o", "-4", "addr", "show", "dev", dev)] = (0, "")
+    m = VpnShareManager(make_cfg(), run_command=fake, sysfs_root=root)
+    assert m.detect_interfaces() == ["xray_tun", "evice"]
 
 
 def test_peer_ip_only_from_peer_field():
@@ -203,6 +218,70 @@ def test_apply_dev_only_scope_link_fallback():
     assert st.state == STATE_ON
     assert fake.has("ip", "route", "replace", "table", "200",
                     "default", "dev", "utun4", "scope", "link")
+
+
+def test_apply_brings_link_up_before_default_route():
+    """The kernel refuses a route through a DOWN/missing tunnel ("Device for
+    nexthop is not up"). The manager must ensure the link is UP first, and
+    that bring-up must happen BEFORE the default route lands."""
+    m, fake = tunnel_mgr("utun4")
+    st = m.apply("utun4")
+    assert st.state == STATE_ON
+    up_i = next(i for i, c in enumerate(fake.calls)
+                if c == ["ip", "link", "set", "dev", "utun4", "up"])
+    route_i = next(i for i, c in enumerate(fake.calls)
+                   if c[:2] == ["ip", "route"] and "default" in c)
+    assert up_i < route_i
+
+
+def test_apply_link_up_failure_does_not_abort():
+    """A failed `ip link set ... up` (no such device / not root) must be
+    non-fatal — the route add is still attempted."""
+    m, fake = tunnel_mgr("utun4")
+    fake.script[("ip", "link", "set", "dev", "utun4", "up")] = (2, "cannot")
+    st = m.apply("utun4")
+    assert st.state == STATE_ON
+
+
+def test_apply_route_retried_after_link_up_then_succeeds():
+    """A route that fails once (fresh tunnel still settling) must succeed on
+    the next attempt after a short pause — not give up after one try."""
+    m, fake = tunnel_mgr("utun4")
+    fail = ("ip", "route", "replace", "table", "200", "default",
+            "dev", "utun4")
+    fail_fallback = ("ip", "route", "replace", "table", "200", "default",
+                     "dev", "utun4", "scope", "link")
+    n = 0
+
+    def flaky(argv):
+        nonlocal n
+        if tuple(argv) == fail or tuple(argv) == fail_fallback:
+            n += 1
+            if n == 1:
+                return 1, "Device for nexthop is not up"
+        return fake.script.get(tuple(argv), (0, ""))
+
+    m._run_command = flaky
+    st = m.apply("utun4")
+    assert st.state == STATE_ON
+    assert n == 2  # failed once (route + fallback), retried, succeeded
+
+
+def test_apply_default_route_failure_reports_link_state():
+    """When every attempt + the scope-link fallback fail, the message must
+    carry the interface's REAL state (not the kernel's bare "not up"), so
+    the dashboard shows whether the device is missing, down, or dead."""
+    m, fake = tunnel_mgr("utun4")
+    fake.script[("ip", "route", "replace", "table", "200", "default",
+                 "dev", "utun4")] = (2, "Cannot find device utun4")
+    fake.script[("ip", "route", "replace", "table", "200", "default",
+                 "dev", "utun4", "scope", "link")] = (2, "Cannot find device utun4")
+    fake.script[("ip", "-o", "link", "show", "dev", "utun4")] = \
+        (0, "8: utun4: <POINTOPOINT,DOWN> mtu 1500 qdisc noqueue state DOWN\n")
+    st = m.apply("utun4")
+    assert st.state == STATE_ERROR
+    assert m._applied is False  # retry next tick
+    assert "DOWN" in st.message
 
 
 def test_apply_rule_file_exists_is_idempotent():
@@ -311,7 +390,8 @@ def test_reconcile_on_respects_pin_over_detection():
     fake = FakeIp()
     fake.addr_shows("2: eth0    inet 192.168.2.1/24 scope global eth0\n")
     for dev in ("utun4", "wg0"):
-        fake.script[("ip", "-o", "-4", "addr", "show", "dev", dev)] = (0, "")
+        fake.script[("ip", "-o", "-4", "addr", "show", "dev", dev)] = \
+            (0, f"5: {dev}    inet 10.8.0.2/24 scope global {dev}\n")
     m = VpnShareManager(make_cfg(), run_command=fake, sysfs_root=root)
     st = m.reconcile(True, interface_pin="wg0")
     assert st.state == STATE_ON and st.interface == "wg0"
@@ -339,7 +419,8 @@ def test_reconcile_pin_gone_falls_back_to_redetected_tunnel():
     m, fake = tunnel_mgr("utun4")
     assert m.reconcile(True, interface_pin="utun4").state == STATE_ON
     m.sysfs_root = make_sysfs(("wg0", "65534"))
-    fake.script[("ip", "-o", "-4", "addr", "show", "dev", "wg0")] = (0, "")
+    fake.script[("ip", "-o", "-4", "addr", "show", "dev", "wg0")] = \
+        (0, "3: wg0    inet 10.8.0.2/24 scope global wg0\n")
     st = m.reconcile(True, interface_pin="utun4")
     assert st.state == STATE_ON and st.interface == "wg0"
     assert fake.has("ip", "route", "replace", "table", "200",
@@ -359,9 +440,46 @@ def test_reconcile_cfg_iface_wins_over_pin():
     cfg = make_cfg(tunnel_iface="wg0")
     fake = FakeIp()
     fake.addr_shows("2: eth0    inet 192.168.2.1/24 scope global eth0\n")
-    fake.script[("ip", "-o", "-4", "addr", "show", "dev", "wg0")] = (0, "")
+    fake.script[("ip", "-o", "-4", "addr", "show", "dev", "wg0")] = \
+        (0, "4: wg0    inet 10.8.0.2/24 scope global wg0\n")
     m = VpnShareManager(cfg, run_command=fake,
                         sysfs_root=make_sysfs(("utun4", "65534"),
                                               ("wg0", "65534")))
     st = m.reconcile(True, interface_pin="utun4")
     assert st.interface == "wg0"
+
+
+def test_reconcile_refuses_stale_pin_without_ipv4():
+    """A stale pin to a junk device that still EXISTS in sysfs but carries no
+    IPv4 (the live-box "evice" — ARPHRD_NONE yet routes nothing) must NOT be
+    routed into: that would blackhole the whole subnet. The pin is dropped and
+    the real tunnel (which carries an address) is detected instead."""
+    root = make_sysfs(("evice", "65534"), ("utun4", "65534"))
+    fake = FakeIp()
+    fake.addr_shows("2: eth0    inet 192.168.2.1/24 scope global eth0\n")
+    fake.script[("ip", "-o", "-4", "addr", "show", "dev", "evice")] = (0, "")
+    fake.script[("ip", "-o", "-4", "addr", "show", "dev", "utun4")] = \
+        (0, "8: utun4    inet 10.9.0.2 peer 10.9.0.1/32 scope global utun4\n")
+    m = VpnShareManager(make_cfg(), run_command=fake, sysfs_root=root)
+    st = m.reconcile(True, interface_pin="evice")
+    assert st.state == STATE_ON and st.interface == "utun4"
+    # the junk device was never routed into
+    assert not fake.has("ip", "route", "replace", "table", "200",
+                        "default", "dev", "evice")
+    assert fake.has("ip", "route", "replace", "table", "200",
+                    "default", "via", "10.9.0.1", "dev", "utun4")
+
+
+def test_reconcile_refuses_apply_into_addressless_tunnel():
+    """apply() itself gates on the tunnel carrying an IPv4: a device that
+    exists but never gains an address (a junk ARPHRD_NONE) is reported as
+    no-interface, never routed into — the subnet cannot be blackholed."""
+    root = make_sysfs(("evice", "65534"))
+    fake = FakeIp()
+    fake.addr_shows("2: eth0    inet 192.168.2.1/24 scope global eth0\n")
+    fake.script[("ip", "-o", "-4", "addr", "show", "dev", "evice")] = (0, "")
+    m = VpnShareManager(make_cfg(), run_command=fake, sysfs_root=root)
+    st = m.reconcile(True, interface_pin="evice")
+    assert st.state == STATE_NO_INTERFACE
+    assert not fake.has("ip", "rule", "add", "from", "192.168.2.0/24",
+                        "lookup", "200", "pref", "1000")

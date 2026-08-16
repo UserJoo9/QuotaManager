@@ -26,10 +26,11 @@ and the ``blocked`` set run on the client subnet BEFORE the VPN device is
 reached (client -> PREROUTING -> routing -> FORWARD -> tunnel), and speed
 shaping (tc) matches the same pre/post-NAT client IPs — so quota blocks,
 counting, and per-device speed caps all keep applying to traffic that exits
-through the VPN. Only the box's own input/output metering (q_gw counters +
-gw_blocked, see NftablesEngine.set_vpn_relay) is suspended while relaying,
-because the tunnel relay would otherwise be charged a second time to the
-"Gateway" user — and a quota-cut Gateway would kill everyone's VPN.
+through the VPN. The box's own input/output metering keeps working normally
+while relaying: relay traffic is never double-charged to the "Gateway" user,
+and if the Gateway user's internet is cut (gw_blocked), ONLY the VPN-server
+endpoint(s) stay reachable via the engine's gw_allowed whitelist — so the
+household's tunnel survives a cut box (see NftablesEngine.set_gateway_allowed).
 
 Honest limits
 -------------
@@ -54,6 +55,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -176,10 +178,11 @@ class VpnShareManager:
             return []
 
         def rank(name: str) -> tuple[int, str]:
-            p = 2 if re.match(r"^(tun|utun|wg|vpn|nordlynx|tailscale)\d*$", name) else 1
+            p = 1 if re.search(r"(tun|utun|wg|vpn)\d*$", name) else 2
             return (0 if self._has_ipv4(name) else 1, p,
                     "0" if re.match(r"^wg", name) else (
-                        "1" if re.match(r"^tun", name) else "2"), name)
+                        "1" if re.match(r"^tun", name) else (
+                            "2" if re.match(r"^xray", name) else "3")), name)
 
         return sorted(candidates, key=rank)
 
@@ -188,6 +191,39 @@ class VpnShareManager:
         subprocess). A pinned tunnel that went away must never be routed
         into — the VPN client may have restarted as a new tun index."""
         return (self.sysfs_root / iface).is_dir()
+
+    def _ensure_link_up(self, iface: str) -> bool:
+        """Best-effort: bring the tunnel device's link UP so the kernel
+        accepts a route through it.
+
+        A freshly spawned tun2socks device can lag behind the process; this
+        is the one deterministic point where the link state matters, so the
+        routing manager makes sure it is up right before programming the
+        default route (never raises, never fatal)."""
+        try:
+            code, out = self._run_command(
+                ["ip", "link", "set", "dev", iface, "up"])
+        except Exception:  # noqa: BLE001
+            code = 1
+            out = ""
+        if code != 0:
+            log.info("vpn share: could not bring %s up: %s",
+                     iface, (out or "").strip())
+        return code == 0
+
+    def _link_state(self, iface: str) -> str:
+        """A compact ``ip``-style description of the interface so a routing
+        failure is diagnosable (does it exist? is the link UP? does it carry
+        an address?) instead of a bare "Device for nexthop is not up"."""
+        code, out = self._run_command(
+            ["ip", "-o", "link", "show", "dev", iface])
+        if code == 0 and (out or "").strip():
+            return (out or "").strip().splitlines()[0]
+        code, out = self._run_command(
+            ["ip", "-o", "-4", "addr", "show", "dev", iface])
+        if code == 0 and (out or "").strip():
+            return (out or "").strip().splitlines()[0]
+        return "interface missing or ip(8) failed"
 
     def _has_ipv4(self, iface: str) -> bool:
         code, out = self._run_command(["ip", "-o", "-4", "addr", "show",
@@ -262,15 +298,31 @@ class VpnShareManager:
             return VpnShareStatus(STATE_NO_INTERFACE, message=(
                 "no VPN tunnel interface found — start the VPN client "
                 "(TUN mode: sing-box / xray / WireGuard / tun2socks)"))
-        if not self._iface_exists(iface):
+        if iface and not self._iface_exists(iface):
             return VpnShareStatus(STATE_NO_INTERFACE, interface=iface,
                                   message=(f"tunnel {iface} is not present — "
                                            "is the VPN client running?"))
+        # A tunnel with no IPv4 is a dead/junk device (the live-box "evice"):
+        # routing into it would blackhole the whole subnet. A freshly spawned
+        # tun2socks can lag behind the process, so wait within a short settle
+        # window for the address to land; a device that never gains one is
+        # reported as no-interface, never routed into.
+        if iface:
+            deadline = time.monotonic() + 2.0
+            while not self._has_ipv4(iface) and time.monotonic() < deadline:
+                time.sleep(0.5)
+            if not self._has_ipv4(iface):
+                return VpnShareStatus(
+                    STATE_NO_INTERFACE, interface=iface,
+                    message=(f"tunnel {iface} carries no IPv4 address — "
+                             "is the VPN client running?"))
         st = VpnShareStatus(STATE_ON, interface=iface, peer=self.peer_ip(iface))
 
         def ok(argv: list[str], tolerate: tuple[str, ...] = ()) -> bool:
             code, out = self._run_command(argv)
             if code == 0:
+                st.state = STATE_ON
+                st.message = ""
                 return True
             out_l = (out or "").lower()
             if any(t in out_l for t in tolerate):
@@ -304,23 +356,29 @@ class VpnShareManager:
                              self.uplink_subnet, "dev", lan])
         # 3. The default route into the tunnel: via its peer when it carries
         #    one, else dev-only (plain `scope link` fallback for devices that
-        #    reject a bare dev route).
+        #    reject a bare dev route). A tunnel must be UP for the kernel to
+        #    accept a route through it, so ensure the link is up first and
+        #    retry — a freshly spawned tun2socks device can lag behind the
+        #    process. On final failure, report the link's REAL state (the
+        #    kernel's bare "Device for nexthop is not up" hides whether the
+        #    device is missing, down, or unaddressed).
         if st.peer:
-            ok(["ip", "route", "replace", "table", str(self.table),
-                "default", "via", st.peer, "dev", iface])
+            route = ["ip", "route", "replace", "table", str(self.table),
+                     "default", "via", st.peer, "dev", iface]
         else:
-            code, out = self._run_command(
-                ["ip", "route", "replace", "table", str(self.table),
-                 "default", "dev", iface])
-            if code != 0:
-                code, out = self._run_command(
-                    ["ip", "route", "replace", "table", str(self.table),
-                     "default", "dev", iface, "scope", "link"])
-            if code != 0:
-                st.state = STATE_ERROR
-                st.message = f"ip route default dev {iface}: {out.strip()}"
-                log.error("vpn share: default route into %s failed: %s",
-                          iface, out.strip())
+            route = ["ip", "route", "replace", "table", str(self.table),
+                     "default", "dev", iface]
+        for _ in range(3):
+            self._ensure_link_up(iface)
+            if ok(route):
+                break
+            if not st.peer and ok(route + ["scope", "link"]):
+                break
+            time.sleep(0.5)
+        else:
+            st.message = f"{' '.join(route)}: {self._link_state(iface)}"
+            log.error("vpn share: default route into %s failed; "
+                      "link state: %s", iface, self._link_state(iface))
         if st.state != STATE_ON:
             return st
         self._iface = iface
@@ -364,10 +422,14 @@ class VpnShareManager:
             iface = self._cfg_iface or interface_pin
             # A pinned tunnel that vanished is treated like no pin at all:
             # re-detect (the VPN client may have restarted as a new tun
-            # index) rather than route into a dead device.
-            if iface and not self._iface_exists(iface):
-                log.warning("vpn share: pinned tunnel %s is gone — "
-                            "re-detecting", iface)
+            # index) rather than route into a dead device. Same for a pinned
+            # device that still EXISTS but carries no IPv4 — a stale/junk
+            # ARPHRD_NONE device (the live-box "evice") is present in sysfs
+            # yet routes nothing; honoring it would blackhole the subnet.
+            if iface and (not self._iface_exists(iface)
+                          or not self._has_ipv4(iface)):
+                log.warning("vpn share: pinned tunnel %s is gone or carries "
+                            "no IPv4 — re-detecting", iface)
                 iface = ""
             if not iface:
                 cands = self.detect_interfaces()

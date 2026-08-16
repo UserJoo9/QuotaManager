@@ -34,14 +34,17 @@ class FakeNft:
         #: (table, rule-expr) in insertion order; ``rules`` exposes the exprs.
         self._rules: list[tuple[str, str]] = []
         #: (table, hook) -> [(handle, expr)] — what ``nft -a list chain``
-        #: reports back for that chain (the VPN-relay handle lookup reads it).
+        #: reports back for that chain (kept in sync with inserts/deletes).
         self.chain_rules: dict[tuple[str, str], list[tuple[int, str]]] = {}
-        #: When True, ``nft insert rule`` fails (simulates no-root / nft
-        #: error) — the relay suspension must not be claimed.
+        #: When True, ``nft insert rule`` fails (simulates no-root / nft error).
         self.reject_inserts: bool = False
+        #: When True, ``nft add element`` fails — the gw_allowed whitelist
+        #: must stay uncommitted (cache-gate -> retry next tick).
+        self.reject_add_element: bool = False
         #: table -> setname -> member IPs
         self._sets: dict[str, dict[str, set[str]]] = {
-            "inet quota_gateway": {"blocked": set(), "known_ips": set()},
+            "inet quota_gateway": {"blocked": set(), "known_ips": set(),
+                                   "gw_allowed": set()},
             "arp quota_arp_lock": {},
         }
         self.tables: set[str] = set()
@@ -57,6 +60,10 @@ class FakeNft:
     @property
     def known_ips(self) -> set[str]:
         return self._sets["inet quota_gateway"]["known_ips"]
+
+    @property
+    def gw_allowed(self) -> set[str]:
+        return self._sets["inet quota_gateway"]["gw_allowed"]
 
     @staticmethod
     def _table(args: list[str]) -> str:
@@ -108,9 +115,8 @@ class FakeNft:
         if cmd == "insert" and args[1] == "rule":
             if self.reject_inserts:
                 return 1, "fake: no permission"
-            # nft insert rule inet quota_gateway output <expr> — the
-            # VPN-relay suspension. Recorded in the chain listing so the
-            # engine's handle lookup finds it (handle grows per chain).
+            # nft insert rule inet quota_gateway output <expr> — recorded in
+            # the chain listing so handle-based lookups/deletes find it.
             table, hook = args[2].rsplit(" ", 1)
             handle = len(self.chain_rules.get((table, hook), [])) + 1
             self.chain_rules.setdefault((table, hook), []).append(
@@ -118,7 +124,7 @@ class FakeNft:
             return 0, ""
         if cmd == "delete" and args[1] == "rule":
             # nft delete rule inet quota_gateway output handle 3 — drops the
-            # exact relay accept, leaving every other rule untouched.
+            # exact rule, leaving every other rule untouched.
             table, hook = args[2].rsplit(" ", 1)
             handle_s = args[3].removeprefix("handle ").strip()
             deleted = [(h, e) for h, e in self.chain_rules.get((table, hook), [])
@@ -132,6 +138,8 @@ class FakeNft:
             self.counters[name] = 0
             return 0, ""
         if cmd == "add" and args[1] == "element":
+            if self.reject_add_element:
+                return 1, "fake: element add failed"
             # args[2] == "inet quota_gateway blocked", args[-1] == "{ ip }"
             name = args[2].split()[-1]
             target = self._sets[self._table(args)].setdefault(name, set())
@@ -484,6 +492,24 @@ def test_wan_mode_derives_router_admin_subnet_from_lan_snapshot():
     assert eng._local_networks == ["192.168.1.0/24", "192.168.2.0/24"]
 
 
+def test_lan_mode_derives_uplink_from_lan_snapshot_when_router_key_empty():
+    """The live-box case: LAN topology whose ACTIVE router_ip was erased (or
+    never written) but whose LAN snapshot (uplink_ip + lan_cidr) is intact —
+    the uplink subnet must still resolve so accounting/block exclusions (and
+    the shaper's LAN pass-through) stay correct."""
+    fake = FakeNft()
+    cfg = Config()
+    cfg.engine.topology = "lan"           # LAN mode (the default) — the branch
+    cfg.engine.client_subnet = "192.168.2.0/24"
+    cfg.engine.uplink_subnet = ""
+    cfg.dhcp.gateway_ip = "192.168.2.1"
+    cfg.dhcp.router_ip = ""               # ACTIVE router key empty
+    cfg.dhcp.uplink_ip = "192.168.1.110"  # LAN snapshot intact
+    cfg.dhcp.lan_cidr = 24
+    eng = NftablesEngine(cfg, SnapshotHolder(), run_command=fake)
+    assert eng._local_networks == ["192.168.1.0/24", "192.168.2.0/24"]
+
+
 def test_wan_mode_forces_arp_lock_off():
     """WAN mode has no router on the client segment to lock against — the ARP
     gateway-lock is forced off even when gateway_arp_lock is set. Only the
@@ -634,14 +660,17 @@ def test_gateway_chains_and_counters_programmed():
     assert ("ip saddr != 192.168.1.0/24 ip saddr != 192.168.2.0/24 "
             "counter name q_gw_down") in joined
     # DNS exemptions come before the gw_blocked drops (clients keep DNS while
-    # the box itself is cut), and the drops carry the same LAN exclusions.
+    # the box itself is cut), and the drops carry the LAN exclusions + loopback
+    # (a cut box keeps its local services and dashboard working).
     out_idx = joined.index("udp dport 53 accept")
     drop_idx = joined.index("ip daddr @gw_blocked")
     assert out_idx < drop_idx
+    # the gw_allowed accepts come after the exemptions but BEFORE the drops
+    assert joined.index("ip daddr @gw_allowed accept") < drop_idx
     assert ("ip daddr @gw_blocked ip daddr != 192.168.1.0/24 "
-            "ip daddr != 192.168.2.0/24 drop") in joined
+            "ip daddr != 192.168.2.0/24 ip daddr != 127.0.0.0/8 drop") in joined
     assert ("ip saddr @gw_blocked ip saddr != 192.168.1.0/24 "
-            "ip saddr != 192.168.2.0/24 drop") in joined
+            "ip saddr != 192.168.2.0/24 ip saddr != 127.0.0.0/8 drop") in joined
     # DHCP exemptions also come BEFORE the drops: a NEW client's DISCOVER/REQUEST
     # has saddr 0.0.0.0 (not a local subnet) and the OFFER/ACK replies go to the
     # broadcast 255.255.255.255 — both would match the drops and leave the device
@@ -760,84 +789,78 @@ def test_count_gateway_false_skips_counters_but_blocks():
     assert _gateway_set(fake) == {"0.0.0.0/0"}
 
 
-def test_vpn_relay_suspends_gateway_metering_when_active():
-    """VPN share on -> unconditional accepts land FIRST in the box's own
-    input/output chains (above gw_blocked + q_gw counters), so relayed client
-    traffic passes and is never double-charged to the Gateway user."""
+def test_gateway_allowed_programs_whitelist_above_the_cut():
+    """VPN share on -> the learned VPN-server IPs land in the gw_allowed set,
+    whose accept rules sit ABOVE the gw_blocked drops and q_gw counters in the
+    box's own input/output chains — so the relay's egress survives a Gateway
+    cut and is never double-charged to the Gateway user."""
     fake = FakeNft()
     eng = _engine(fake)
     eng.start()
-    eng.set_vpn_relay(True)
-    inserted = [c for c in fake.calls
-                if c[1] == "insert" and c[2] == "rule"]
-    assert len(inserted) == 2
-    assert [c[3] for c in inserted] == [
-        "inet quota_gateway output", "inet quota_gateway input"]
-    for c in inserted:
-        assert c[4] == 'comment "quota-vpn-relay" accept'
-    # the handles were actually verified by re-reading the chains
-    listing = [c for c in fake.calls
-               if c[1] == "-a" and c[2] == "list" and c[3] == "chain"]
-    assert len(listing) == 2
+    eng.set_gateway_allowed(["1.2.3.4", "5.6.7.8"])
+    assert fake.gw_allowed == {"1.2.3.4", "5.6.7.8"}
+    joined = " | ".join(fake.rules)
+    # accepts are present in BOTH gateway chains
+    assert "ip daddr @gw_allowed accept" in joined
+    assert "ip saddr @gw_allowed accept" in joined
+    # and they precede the drops/counters (program order: exemptions, allowed,
+    # drops, counters) — the drop comes AFTER the accept in the output chain.
+    joined2 = " | ".join(fake.rules)
+    assert joined2.index("ip daddr @gw_allowed accept") < \
+        joined2.index("ip daddr @gw_blocked")
 
 
-def test_vpn_relay_active_is_claimed_only_when_rules_hold():
-    """A failed insert (no root / nft error) must NOT claim the suspension —
-    _vpn_relay_active stays None so the maintenance tick retries."""
+def test_gateway_allowed_clears_and_is_cache_gated():
+    """An empty membership clears the set (Gateway OFF now blocks the box
+    entirely), and an identical membership is a no-op (no re-flush/re-add that
+    would re-open a free window every tick)."""
     fake = FakeNft()
     eng = _engine(fake)
     eng.start()
-    fake.reject_inserts = True  # nft errors mean no rule landed
-    eng.set_vpn_relay(True)
-    assert eng._vpn_relay_active is None
+    eng.set_gateway_allowed(["1.2.3.4"])
+    eng.set_gateway_allowed(["1.2.3.4"])  # identical -> cache-gated no-op
+    flush = [c for c in fake.calls
+             if c[1] == "flush" and c[2] == "set"]
+    assert len(flush) == 1
+    assert fake.gw_allowed == {"1.2.3.4"}
+    # order-insensitive: same membership, different order -> still no-op
+    eng.set_gateway_allowed(["1.2.3.4"])
+    assert len(flush) == 1
+    # clearing
+    eng.set_gateway_allowed([])
+    assert fake.gw_allowed == set()
+    assert eng.gateway_allowed == ()
+    assert len([c for c in fake.calls if c[1] == "flush" and c[2] == "set"]) == 2
 
 
-def test_vpn_relay_restore_deletes_exactly_the_accept_rules():
+def test_gateway_allowed_failure_stays_uncommitted():
+    """A failed element add must NOT claim the whitelist — gateway_allowed
+    stays None (the maintenance tick can retry a transient failure; a
+    persistent nft error disables the engine like any other kernel failure)."""
     fake = FakeNft()
     eng = _engine(fake)
     eng.start()
-    eng.set_vpn_relay(True)
-    assert eng._vpn_relay_active is True
-    eng.set_vpn_relay(False)
-    deletes = [c for c in fake.calls
-               if c[1] == "delete" and c[2] == "rule"]
-    assert len(deletes) == 2
-    for c in deletes:
-        assert c[3].startswith("inet quota_gateway ")
-    assert not any(fake.chain_rules.values())  # both rules removed
-    assert eng._vpn_relay_active is False
+    fake.reject_add_element = True
+    eng.set_gateway_allowed(["1.2.3.4"])
+    assert eng.gateway_allowed is None
+    assert fake.gw_allowed == set()
 
 
-def test_vpn_relay_restore_keeps_untouched_rules():
-    """Only the quota-vpn-relay accept is deleted — the exemptions, gw_blocked
-    drops and q_gw counters under it stay (the fake keeps unrelated rules)."""
+def test_gateway_cut_exempts_loopback():
+    """A Gateway cut (gw_blocked) drops the box's own internet but never
+    loopback — the dashboard and the tun2socks<->VPN-client hop keep working
+    while the box's egress is cut."""
     fake = FakeNft()
     eng = _engine(fake)
     eng.start()
-    fake.chain_rules.setdefault(("inet quota_gateway", "output"), []).append(
-        (9, 'comment "dns-exempt" accept'))
-    eng.set_vpn_relay(True)
-    eng.set_vpn_relay(False)
-    remaining = {h for h, _ in
-                 fake.chain_rules.get(("inet quota_gateway", "output"), [])}
-    assert 9 in remaining
-    assert eng._vpn_relay_active is False
-
-
-def test_vpn_relay_restore_with_missing_rule_stays_uncommitted():
-    """If the listing can't see the accept (e.g. the engine restarted and
-    nft lost the table), restore must not delete blind — and it settles on
-    the accurate False state (no relay accept in the kernel)."""
-    fake = FakeNft()
-    eng = _engine(fake)
-    eng.start()
-    eng.set_vpn_relay(True)
-    fake.chain_rules = {}  # rules vanish behind the engine's back
-    eng.set_vpn_relay(False)
-    deletes = [c for c in fake.calls
-               if c[1] == "delete" and c[2] == "rule"]
-    assert deletes == []  # nothing to delete by handle
-    assert eng._vpn_relay_active is False  # honest: relay is off in the kernel
+    joined = " | ".join(fake.rules)
+    # the gw_blocked drops carry the LAN exclusions PLUS loopback
+    assert ("ip daddr @gw_blocked ip daddr != 192.168.1.0/24 "
+            "ip daddr != 192.168.2.0/24 ip daddr != 127.0.0.0/8 drop") in joined
+    assert ("ip saddr @gw_blocked ip saddr != 192.168.1.0/24 "
+            "ip saddr != 192.168.2.0/24 ip saddr != 127.0.0.0/8 drop") in joined
+    eng.set_gateway_blocked(True)
+    assert _gateway_set(fake) == {"0.0.0.0/0"}
 
 
 def test_gateway_dhcp_exemption_rules_are_valid_nft_grammar():

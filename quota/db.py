@@ -115,6 +115,11 @@ class User:
     #: here. Editable like any other user — setting its allowance to 0 cuts
     #: the box's internet while clients keep working.
     protected: bool = False
+    #: Exempt from quota: the user is never quota-blocked no matter how much
+    #: they use. Admin cuts (user/device level) still apply — exemption only
+    #: lifts the usage-vs-allowance gate. Per-device ``bypass`` is redundant
+    #: for an exempt user's devices (their quota gate is already open).
+    exempt_quota: bool = False
     #: Per-user aggregate internet speed cap in Mbps (0 = unlimited): all of a
     #: user's devices share this ceiling. Enforced by the Linux tc shaper.
     limit_down_mbps: float = 0.0
@@ -253,6 +258,7 @@ CREATE TABLE IF NOT EXISTS users (
     created_at       REAL NOT NULL,
     guest            INTEGER NOT NULL DEFAULT 0,
     protected        INTEGER NOT NULL DEFAULT 0,
+    exempt_quota     INTEGER NOT NULL DEFAULT 0,
     limit_down_mbps  REAL NOT NULL DEFAULT 0,
     limit_up_mbps    REAL NOT NULL DEFAULT 0,
     notified_50      INTEGER NOT NULL DEFAULT 0,
@@ -387,6 +393,15 @@ class Database:
         try:
             await self._conn.execute(
                 "ALTER TABLE users ADD COLUMN protected "
+                "INTEGER NOT NULL DEFAULT 0")
+            await self._conn.commit()
+        except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
+            pass
+        # quota exemption: a user that is never quota-blocked no matter their
+        # usage (admin cuts still apply). ALTER no-ops on existing DBs.
+        try:
+            await self._conn.execute(
+                "ALTER TABLE users ADD COLUMN exempt_quota "
                 "INTEGER NOT NULL DEFAULT 0")
             await self._conn.commit()
         except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
@@ -687,17 +702,19 @@ class Database:
                           guest: bool = False,
                           protected: bool = False,
                           limit_down_mbps: float = 0.0,
-                          limit_up_mbps: float = 0.0) -> User:
+                          limit_up_mbps: float = 0.0,
+                          exempt_quota: bool = False) -> User:
         """Insert a user (no devices). Used by the API, by new-device
         auto-registration, by the v2 migration backfill, and by
         :meth:`_seed_gateway` (``protected=True`` for the Gateway account)."""
         cur = await self.conn.execute(
             "INSERT INTO users (name, quota_mode, fixed_gb, block_state, "
-            "topup_gb, created_at, guest, protected, "
+            "topup_gb, created_at, guest, protected, exempt_quota, "
             "limit_down_mbps, limit_up_mbps) "
-            "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
             (name, quota_mode, fixed_gb, block_state, time.time(),
-             int(guest), int(protected), limit_down_mbps, limit_up_mbps))
+             int(guest), int(protected), int(exempt_quota),
+             limit_down_mbps, limit_up_mbps))
         await self.conn.commit()
         row = await self._fetch_one("SELECT * FROM users WHERE id=?",
                                     (cur.lastrowid,))
@@ -716,7 +733,7 @@ class Database:
         allowed = {"name", "quota_mode", "fixed_gb", "block_state",
                    "limit_down_mbps", "limit_up_mbps",
                    "notified_50", "notified_75", "notified_100",
-                   "history_days", "dns_server"}
+                   "history_days", "dns_server", "exempt_quota"}
         sets, args = [], []
         for key, value in fields.items():
             if key in allowed:
@@ -762,6 +779,15 @@ class Database:
             "UPDATE users SET topup_gb = topup_gb + ? WHERE id=?",
             (extra_gb, user_id))
         await self.conn.commit()
+
+    async def count_guest_users(self) -> int:
+        """How many guest user accounts currently exist (blocked or not).
+        Feeds the guest-limit check: when the limit is reached, a brand-new
+        device is still registered as a guest but immediately admin-blocked,
+        so MAC-changing spam stops getting a fresh allowance."""
+        row = await self._fetch_one(
+            "SELECT COUNT(*) AS n FROM users WHERE guest=1")
+        return int(row["n"]) if row else 0
 
     async def delete_guest_users(self) -> int:
         """Delete every guest user (cascade removes their devices + usage).
@@ -1305,6 +1331,7 @@ def _row_to_user(row: Any) -> User:
         created_at=row["created_at"],
         guest=bool(row["guest"]),
         protected=bool(row["protected"]),
+        exempt_quota=bool(row["exempt_quota"]),
         limit_down_mbps=float(row["limit_down_mbps"] or 0.0),
         limit_up_mbps=float(row["limit_up_mbps"] or 0.0),
         notified_50=bool(row["notified_50"]),

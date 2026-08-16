@@ -567,6 +567,112 @@ def test_guest_settings_round_trip(database):
     run(scenario())
 
 
+def test_guest_limit_settings_round_trip(database):
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        assert await svc.guest_limit() == 2        # default cap
+        assert await svc.stop_new_connections() is False
+        assert await svc.guest_speed_limit_mbps() == 0.0   # default unlimited
+
+        await svc.set_guest_limit(4)
+        assert await svc.guest_limit() == 4
+        await svc.set_guest_limit(1)
+        assert await svc.guest_limit() == 1
+        await svc.set_guest_limit(0)              # clamped up to the floor
+        assert await svc.guest_limit() == 1
+
+        await svc.set_guest_speed_limit(8)
+        assert await svc.guest_speed_limit_mbps() == 8.0
+        await svc.set_guest_speed_limit(0)        # 0 lifts the cap
+        assert await svc.guest_speed_limit_mbps() == 0.0
+        await svc.set_guest_speed_limit(-3)       # clamped down to the floor
+        assert await svc.guest_speed_limit_mbps() == 0.0
+
+        await svc.set_stop_new_connections(True)
+        assert await svc.stop_new_connections() is True
+        await svc.set_stop_new_connections(False)
+        assert await svc.stop_new_connections() is False
+        await d.close()
+    run(scenario())
+
+
+def test_user_quota_blocked_respects_exempt_flag(database):
+    """An exempt user is NEVER quota-blocked, whatever their usage — the
+    exemption lifts the usage-vs-allowance gate only (manual admin cuts still
+    resolve through resolve_device_state). Everyone else keeps the gate,
+    including the protected Gateway account."""
+    async def scenario():
+        d = await database()
+        normal = await d.create_user("A", _db.QUOTA_FIXED, 5.0)
+        exempt = await d.create_user("E", _db.QUOTA_FIXED, 5.0,
+                                     exempt_quota=True)
+        assert normal.exempt_quota is False
+        assert exempt.exempt_quota is True
+
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        # over the allowance: normal blocked, exempt not
+        assert svc.user_quota_blocked(normal, 5.0, 6.0) is True
+        assert svc.user_quota_blocked(exempt, 5.0, 6.0) is False
+        # under the allowance: nobody blocked
+        assert svc.user_quota_blocked(normal, 5.0, 4.0) is False
+        assert svc.user_quota_blocked(exempt, 5.0, 4.0) is False
+        # allowance 0 = unmetered for a normal user; still unmetered when exempt
+        assert svc.user_quota_blocked(normal, 0.0, 10.0) is False
+        assert svc.user_quota_blocked(exempt, 0.0, 10.0) is False
+        # the flag is editable: clearing it re-arms the quota gate
+        await d.update_user(exempt.id, exempt_quota=False)
+        unexempt = await d.get_user(exempt.id)
+        assert unexempt.exempt_quota is False
+        assert svc.user_quota_blocked(unexempt, 5.0, 6.0) is True
+        await d.close()
+    run(scenario())
+
+
+def test_decline_random_macs_settings_and_is_random_mac(database):
+    """The random-MAC gate: the is_random_mac helper (locally-administered
+    bit), the settings round-trip, and the one-shot existing sweep that cuts
+    already-joined randomized devices (a real-OUI device is never touched)."""
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        # is_random_mac: IEEE's locally-administered bit (0x02 in the first
+        # byte) is exactly what OSes set on a randomized/privacy MAC.
+        assert svc.is_random_mac("02:42:ac:11:00:02") is True
+        assert svc.is_random_mac("52:74:f2:b1:a8:7f") is True
+        assert svc.is_random_mac("aa:bb:cc:dd:ee:ff") is True    # 0xaa & 0x02
+        assert svc.is_random_mac("00:11:22:33:44:55") is False   # real OUI
+        assert svc.is_random_mac("3c:7c:3f:aa:bb:cc") is False   # global only
+        assert svc.is_random_mac("") is False
+        assert svc.is_random_mac("garbage") is False
+
+        # settings round-trip
+        assert await svc.decline_random_macs() is False
+        await svc.set_decline_random_macs(True)
+        assert await svc.decline_random_macs() is True
+        await svc.set_decline_random_macs(False)
+        assert await svc.decline_random_macs() is False
+
+        # one-shot existing sweep: randomized devices cut, real OUIs untouched
+        keep = await d.create_user("Keep", _db.QUOTA_FIXED, 10.0)
+        cut = await d.create_user("Cut", _db.QUOTA_FIXED, 10.0)
+        real_dev = await d.upsert_device("3c:7c:3f:aa:bb:cc", name="real",
+                                         user_id=keep.id)
+        rand_dev = await d.upsert_device("02:42:ac:11:00:02", name="rand",
+                                         user_id=cut.id)
+        assert rand_dev.block_state == _db.BLOCK_OK
+        assert real_dev.block_state == _db.BLOCK_OK
+        await svc.set_decline_random_macs(True, also_existing=True)
+        assert (await d.get_device(rand_dev.id)).block_state == _db.BLOCK_ADMIN, (
+            "already-joined randomized device must be cut by the sweep")
+        assert (await d.get_device(real_dev.id)).block_state == _db.BLOCK_OK, (
+            "a real-OUI device is never touched by the sweep")
+        # the gate itself stays on after the sweep
+        assert await svc.decline_random_macs() is True
+        await d.close()
+    run(scenario())
+
+
 def test_shaping_settings_round_trip(database):
     async def scenario():
         d = await database()
@@ -574,7 +680,8 @@ def test_shaping_settings_round_trip(database):
         # defaults: off, no totals, AQM on
         cfg = await svc.get_shaping_config()
         assert cfg == {"enabled": False, "total_down_mbps": 0.0,
-                       "total_up_mbps": 0.0, "aqm": True}
+                       "total_up_mbps": 0.0, "aqm": True,
+                       "lan_rate_mbps": 1000.0}
 
         # partial update — only the fields passed change
         cfg = await svc.set_shaping(enabled=True, total_down_mbps=100,
@@ -583,6 +690,13 @@ def test_shaping_settings_round_trip(database):
         assert cfg["total_down_mbps"] == 100.0
         assert cfg["total_up_mbps"] == 20.0
         assert cfg["aqm"] is True           # untouched
+
+        # LAN rate round-trips independently of the WAN totals
+        cfg = await svc.set_shaping(lan_rate_mbps=250)
+        assert cfg["lan_rate_mbps"] == 250.0
+        assert cfg["total_down_mbps"] == 100.0   # WAN untouched
+        cfg = await svc.set_shaping(lan_rate_mbps=0)
+        assert cfg["lan_rate_mbps"] == 0.0
 
         cfg = await svc.set_shaping(aqm=False)
         assert cfg["aqm"] is False          # totals + enabled survive
@@ -599,6 +713,66 @@ def test_shaping_settings_round_trip(database):
         assert cfg["total_down_mbps"] == 100.0
         await d.close()
     run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# WAN public-IP renewal (auto-renew schedule settings)
+# ---------------------------------------------------------------------------
+
+def test_wan_renew_config_round_trip(database):
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        # defaults: disabled, 15 min, never renewed
+        cfg = await svc.get_wan_renew_config()
+        assert cfg == {"enabled": False, "minutes": 15, "last": ""}
+
+        cfg = await svc.set_wan_renew_config(True, 30)
+        assert cfg["enabled"] is True
+        assert cfg["minutes"] == 30
+        assert cfg["last"] == ""
+
+        cfg = await svc.set_wan_renew_config(False, 45)
+        assert cfg["enabled"] is False
+        assert cfg["minutes"] == 45     # interval survives disabling
+
+        await svc.mark_wan_renew()
+        cfg = await svc.get_wan_renew_config()
+        assert cfg["minutes"] == 45
+        assert cfg["last"] != ""        # ISO timestamp recorded
+        from datetime import datetime
+        datetime.fromisoformat(cfg["last"])  # parses as ISO
+        await d.close()
+    run(scenario())
+
+
+def test_wan_renew_minutes_clamped_to_floor(database):
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        # the floor: every renewal drops internet, so a typo can't hammer the line
+        cfg = await svc.set_wan_renew_config(True, 2)
+        assert cfg["minutes"] == 5
+
+        # no upper bound: any longer interval is allowed
+        cfg = await svc.set_wan_renew_config(True, 1440)
+        assert cfg["minutes"] == 1440
+
+        # a corrupted setting falls back to the default
+        await svc.db.set_setting(QuotaService.WAN_RENEW_MINUTES_KEY, "banana")
+        cfg = await svc.get_wan_renew_config()
+        assert cfg["minutes"] == 15
+        await d.close()
+    run(scenario())
+
+
+def test_wan_renew_minutes_static_clamp():
+    """The clamp helper: below floor -> floor, garbage -> default, big kept."""
+    assert QuotaService._clamp_renew_minutes("1") == 5
+    assert QuotaService._clamp_renew_minutes("99999") == 99999
+    assert QuotaService._clamp_renew_minutes("") == 15
+    assert QuotaService._clamp_renew_minutes("abc") == 15
+    assert QuotaService._clamp_renew_minutes(None) == 15
 
 
 def test_guest_quota_clamped_to_min(database):

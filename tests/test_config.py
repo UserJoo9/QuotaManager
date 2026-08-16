@@ -9,6 +9,21 @@ from __future__ import annotations
 from core import config as cfg_mod
 
 
+def test_shaping_lan_rate_mbps_defaults_to_lan_speed():
+    """The shaping root + LAN pass-through cap at the LAN link rate (1 Gbps by
+    default) so client<->uplink-subnet traffic is never throttled by the WAN
+    line rate; a config-file value lands on the dataclass field."""
+    cfg = cfg_mod.Config()
+    assert cfg.shaping.lan_rate_mbps == 1000.0
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "config.yaml"
+        p.write_text("shaping:\n  lan_rate_mbps: 2500\n", encoding="utf-8")
+        loaded = cfg_mod.load_config(p)
+    assert loaded.shaping.lan_rate_mbps == 2500.0
+
+
 def test_config_has_no_arp_section():
     """Proxy-ARP is gone: the Linux topology masquerades the client subnet and
     never needs the scapy responder."""
@@ -39,6 +54,54 @@ def test_engine_count_gateway_defaults_true():
         p.write_text("engine:\n  count_gateway: false\n", encoding="utf-8")
         loaded = cfg_mod.load_config(p)
     assert loaded.engine.count_gateway is False
+
+
+def test_engine_gateway_allow_ips_defaults_empty():
+    """The VPN-share gateway whitelist defaults to auto-learned only; an
+    explicit list unions on top (a manual override for VPN clients the
+    auto-learn step can't identify)."""
+    cfg = cfg_mod.Config()
+    assert cfg.engine.gateway_allow_ips == []
+    engine = cfg_mod.EngineConfig(gateway_allow_ips=["1.2.3.4", "5.6.7.8"])
+    assert engine.gateway_allow_ips == ["1.2.3.4", "5.6.7.8"]
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "config.yaml"
+        p.write_text("engine:\n  gateway_allow_ips: [1.2.3.4, 5.6.7.8]\n",
+                     encoding="utf-8")
+        loaded = cfg_mod.load_config(p)
+    assert loaded.engine.gateway_allow_ips == ["1.2.3.4", "5.6.7.8"]
+
+
+def test_vpn_share_tun2socks_defaults():
+    """The tun2socks auto-provisioner defaults ON (userspace VPN clients like
+    v2rayN never expose a kernel tun) with a v2rayN-shaped SOCKS fallback, and
+    every knob is overridable via YAML."""
+    cfg = cfg_mod.Config()
+    vs = cfg.vpn_share
+    assert vs.tun2socks is True
+    assert vs.socks_proxy == "127.0.0.1:10808"
+    assert vs.tun_interface == "tun0"
+    assert vs.tun_ip == "10.0.0.1"
+    assert vs.tun_gw == "10.0.0.2"
+    assert vs.binary == "/usr/local/bin/tun2socks"
+    assert vs.download_url == ""
+    assert vs.download_sha256 == ""
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "config.yaml"
+        p.write_text("vpn_share:\n  tun2socks: false\n  socks_proxy: "
+                     "127.0.0.1:10809\n  tun_interface: utun9\n",
+                     encoding="utf-8")
+        loaded = cfg_mod.load_config(p)
+    assert loaded.vpn_share.tun2socks is False
+    assert loaded.vpn_share.socks_proxy == "127.0.0.1:10809"
+    assert loaded.vpn_share.tun_interface == "utun9"
+    # untouched fields keep their defaults
+    assert loaded.vpn_share.tun_ip == "10.0.0.1"
+    assert loaded.vpn_share.binary == "/usr/local/bin/tun2socks"
 
 
 def test_engine_topology_defaults_lan():
