@@ -19,6 +19,7 @@ services:
       - QUOTA_CONFIG=/app/config.yaml
       - QUOTA_PORT=${QUOTA_PORT:-8080}
       - PYTHONUNBUFFERED=1
+      - QUOTA_AUTO_GATEWAY=${QUOTA_AUTO_GATEWAY:-1}
       # Gateway Network Settings (Optional overrides - defaults shown)
       # - LAN_IF=eth0
       # - CLIENT_IP=192.168.2.1

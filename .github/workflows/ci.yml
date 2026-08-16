@@ -73,11 +73,12 @@ jobs:
 
       - name: Run container unit tests
         run: |
-          docker run --rm --privileged -e PYTHONPATH=/app -v "${PWD}/tests:/app/tests:ro" quota-manager:ci-test pytest --ignore=tests/test_packaging.py --ignore=tests/test_ci.py -v
+          docker run --rm --privileged -e PYTHONPATH=/app -e QUOTA_AUTO_GATEWAY=0 -v "${PWD}/tests:/app/tests:ro" quota-manager:ci-test pytest --ignore=tests/test_packaging.py --ignore=tests/test_ci.py -v
 
       - name: Test container startup & HTTP response
         run: |
-          # Start container with host networking & privileged access
+          # Skip gateway network init — CI has no physical LAN interface
+          export QUOTA_AUTO_GATEWAY=0
           docker compose up -d
 
           # Wait for the service to bind and initialize
