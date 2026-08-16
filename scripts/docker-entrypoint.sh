@@ -47,11 +47,20 @@ if [ "${QUOTA_AUTO_GATEWAY:-1}" = "1" ]; then
         for cand in $(ip route 2>/dev/null | awk '/default/ {print $5}') \
                     $(ls /sys/class/net 2>/dev/null | grep -v '^lo$'); do
             [ -d "/sys/class/net/$cand/wireless" ] && continue
+            # Skip virtual interfaces (bridges, veths) which lack a physical device link
+            [ ! -L "/sys/class/net/$cand/device" ] && continue
             LAN_IF="$cand"
             break
         done
+        if [ -z "$LAN_IF" ]; then
+            echo "[docker-entrypoint] ERROR: Could not auto-detect a physical wired LAN interface." >&2
+            echo "[docker-entrypoint] ERROR: Please specify LAN_IF explicitly in your environment." >&2
+            exit 1
+        fi
+        echo "[docker-entrypoint] Auto-detected physical LAN interface: $LAN_IF"
+    else
+        echo "[docker-entrypoint] Using explicitly configured LAN interface: $LAN_IF"
     fi
-    LAN_IF="${LAN_IF:-eth0}"
 
     CLIENT_IP="${CLIENT_IP:-192.168.2.1}"
     LAN_CIDR="${LAN_CIDR:-24}"
@@ -62,6 +71,13 @@ if [ "${QUOTA_AUTO_GATEWAY:-1}" = "1" ]; then
     LEASE_HOURS="${LEASE_HOURS:-24}"
     WAN_GATEWAY="${WAN_GATEWAY:-192.168.1.1}"
     UPSTREAM_DNS="${UPSTREAM_DNS:-8.8.8.8}"
+
+    # Surface the uplink subnet to remind the user about config.yaml
+    UPLINK_IP=$(ip -4 addr show dev "$LAN_IF" 2>/dev/null | awk '/inet / {print $2}' | grep -v "^${CLIENT_IP}/" | head -n1)
+    if [ -n "$UPLINK_IP" ]; then
+        echo "[docker-entrypoint] IMPORTANT: Host uplink IP is $UPLINK_IP."
+        echo "[docker-entrypoint] IMPORTANT: Ensure 'engine.uplink_subnet' in config.yaml matches this network to avoid metering local traffic."
+    fi
 
     # 1. Enable IPv4 forwarding in kernel
     if [ -w /proc/sys/net/ipv4/ip_forward ]; then

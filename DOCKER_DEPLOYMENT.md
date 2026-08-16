@@ -31,6 +31,9 @@ Quota Manager is a **hardware-level network gateway, bandwidth controller, and D
 > [!NOTE]
 > **WAN / PPPoE mode is not supported** inside Docker containers. The gateway relies on an existing upstream router for dial-out.
 
+> [!NOTE]
+> **Host LAN Metering:** If your upstream router's subnet is not `192.168.1.0/24`, traffic to local devices on your host network may be counted as internet usage. To fix this, edit your `config.yaml` and update `engine.uplink_subnet` and `dhcp.uplink_ip` to match your actual host LAN subnet and router IP.
+
 ---
 
 ## Network Prerequisites
