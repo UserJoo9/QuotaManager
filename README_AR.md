@@ -1,6 +1,6 @@
 # Quota Manager
 
-![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+<a href="README.md"><img src="https://img.shields.io/badge/English-English-blue" alt="English"></a> ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 
 <table>
   <tr>
