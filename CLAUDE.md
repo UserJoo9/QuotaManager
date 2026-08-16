@@ -406,36 +406,6 @@ kernel counts and drops.
 _Pending work lives in TASKS.md; orphans + debt are tracked in
 [LEGACY_DEBT_AND_RISKS] below. Version history (newest first):_
 
-Checked 2026-08-16 (**v0.2.1 released** — Docker deployment via PR #5):
-- [x] **version bumped `0.2.0` → `0.2.1`** (`quota/version.py`, the single source
-      of truth) and tagged **`v0.2.1`**. The release ships the Docker container
-      support contributed by kirolos-esmat in PR #5: `Dockerfile` (Debian
-      bookworm, Python 3.12), `docker-compose.yml` (`network_mode: host` +
-      `privileged: true`), `scripts/docker-entrypoint.sh` (auto-gateway init:
-      IP forwarding, IPv6 off, client-subnet alias, `inet quota_nat` masquerade,
-      dnsmasq DHCP/DNS config, DNS-query-log fragment, domain-filter stubs;
-      `LAN_IF` auto-detection with physical-NIC validation; uplink-subnet
-      metering warning), `scripts/docker-systemctl-shim.sh` (SIGTERM-based
-      dnsmasq/quota-gateway restart; honest errors for unsupported host
-      services), `core/config.py` `resolve_config_path()` (directory-config
-      mount support), `run.py` `QUOTA_PORT` env var, `quota/nftables.py`
-      restart-safe `nft reset counters` syntax fix. CI/CD: `ci.yml` (pyflakes
-      + pytest + container smoke test, 15-min timeout) and
-      `docker-publish.yml` (multi-arch GHCR push on `v*` tags +
-      `workflow_dispatch`). Docs: `DOCKER_DEPLOYMENT.md` (full deployment
-      guide), README/README_AR updated with Docker install method. The release
-      description is auto-composed from the `[0.2.1] — 2026-08-16` CHANGELOG
-      section as usual; the `apt-repo.yml` `workflow_run` publishes the `.deb`
-      to the signed apt repo on `gh-pages`
-      (https://UserJoo9.github.io/QuotaManager/), so `apt-get update && apt-get
-      install quota-manager` upgrades to v0.2.1; the new `docker-publish.yml`
-      pushes `ghcr.io/userjoo9/quotamanager:v0.2.1` (multi-arch `amd64` +
-      `arm64`).
-- [x] **docs synced**: CHANGELOG `[Unreleased]` renamed → `[0.2.1] — 2026-08-16`
-      (+ a fresh empty `[Unreleased]` placeholder); README + README_AR `.deb`
-      example → `quota-manager_0.2.1_all.deb`; Structure_README version refs →
-      0.2.1.
-
 Checked 2026-08-16 (**v0.2.0 released** — the whole v19–v28.4 bundle shipped as a
       minor version bump):
 - [x] **version bumped `0.1.3` → `0.2.0`** (`quota/version.py`, the single source

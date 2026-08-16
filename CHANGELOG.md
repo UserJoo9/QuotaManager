@@ -6,39 +6,6 @@ The version is the single source of truth in `quota/version.py`; a release tag
 
 ## [Unreleased]
 
-## [0.2.1] — 2026-08-16
-
-### Added
-
-- **Docker deployment** (`Dockerfile` + `docker-compose.yml` +
-  `scripts/docker-entrypoint.sh`): Quota Manager can now run as a container on
-  any Linux server (Docker / Dockge / Portainer) via a multi-arch image
-  (`amd64` + `arm64`). The entrypoint auto-initialises the gateway on first
-  boot: IP forwarding, IPv6 off, client-subnet alias, `inet quota_nat`
-  masquerade, dnsmasq DHCP/DNS config, the DNS-query-log fragment and
-  domain-filter stubs. A `QUOTA_PORT` env var, `resolve_config_path()`
-  (`core/config.py`) and volume mounts for `config.yaml`, `data/`, `logs/`,
-  `dnsmasq.d/`, `leases/` round out the container runtime. (`PR #5`,
-  kirolos-esmat)
-- **Systemctl shim for containers** (`scripts/docker-systemctl-shim.sh`):
-  translates `systemctl restart dnsmasq` / `quota-gateway` inside the image
-  (SIGTERM-based, not `kill -9`) and returns honest exit codes for unsupported
-  host services.
-- **CI / CD Docker workflows** (`.github/workflows/`): `ci.yml` (pyflakes +
-  full pytest + container build/smoke test, 15-minute timeout) and
-  `docker-publish.yml` (multi-arch GHCR push on `v*` tags +
-  `workflow_dispatch`).
-- **Docker deployment guide** (`DOCKER_DEPLOYMENT.md`): host requirements,
-  environment variables, persistent volumes, security notes, and honest limits
-  (host-side `ifb` module for speed shaping, WAN/PPPoE unsupported in
-  containers, host-side logrotate for DNS query logs).
-
-### Fixed
-
-- **nftables restart-safe counter reset** (`quota/nftables.py`): the `reset
-  counters` command now uses the documented `nft reset counters table inet
-  quota_gateway` form; the old syntax was silently wrong on some nft versions.
-
 ## [0.2.0] — 2026-08-16
 
 ### Added
