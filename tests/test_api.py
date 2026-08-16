@@ -119,11 +119,12 @@ def test_device_crud_and_dashboard(client):
 def test_network_and_user_speed_caps(client):
     c, _, _ = client
     _login(c)
-    # defaults: shaping off, no totals, AQM on, VPN share off
+    # defaults: shaping off, no totals, AQM on, VPN share off, random-MAC gate off
     n = c.get("/api/network").json()
     assert n == {"enabled": False, "total_down_mbps": 0.0,
-                 "total_up_mbps": 0.0, "aqm": True,
-                 "vpn_share": {"enabled": False, "interface": ""}}
+                 "total_up_mbps": 0.0, "aqm": True, "lan_rate_mbps": 1000.0,
+                 "vpn_share": {"enabled": False, "interface": ""},
+                 "decline_random_macs": False}
 
     # partial POST — only the given fields change
     r = c.post("/api/network", json={"enabled": True, "total_down_mbps": 100})
@@ -138,6 +139,13 @@ def test_network_and_user_speed_caps(client):
     assert r.json()["total_up_mbps"] == 20.0
     assert r.json()["aqm"] is False
     assert r.json()["enabled"] is True   # untouched by the partial update
+
+    # LAN pass-through rate round-trips independently of the WAN totals
+    r = c.post("/api/network", json={"lan_rate_mbps": 250})
+    assert r.json()["lan_rate_mbps"] == 250.0
+    assert r.json()["total_down_mbps"] == 100.0   # WAN untouched
+    r = c.post("/api/network", json={"lan_rate_mbps": 0})
+    assert r.json()["lan_rate_mbps"] == 0.0
 
     # per-user aggregate caps
     r = c.post("/api/users", json={"name": "Mom", "quota_mode": "auto",
@@ -549,12 +557,15 @@ def test_device_consumption_is_per_device(client):
 
 
 def test_guest_defaults(client):
-    """Guest mode is off by default with a 1 GB guest allowance."""
+    """Guest mode is off by default with a 1 GB guest allowance, a default
+    guest limit of 2, no default guest speed cap and stop-new off."""
     c, _, _ = client
     _login(c)
     r = c.get("/api/guest")
     assert r.status_code == 200
-    assert r.json() == {"enabled": False, "quota_gb": 1.0}
+    assert r.json() == {"enabled": False, "quota_gb": 1.0,
+                        "limit": 2, "speed_limit_mbps": 0.0,
+                        "stop_new": False}
 
 
 def test_guest_enable_and_quota(client):
@@ -563,13 +574,61 @@ def test_guest_enable_and_quota(client):
     _login(c)
     r = c.post("/api/guest", json={"enabled": True})
     assert r.status_code == 200, r.text
-    assert r.json() == {"enabled": True, "quota_gb": 1.0}
+    assert r.json() == {"enabled": True, "quota_gb": 1.0,
+                        "limit": 2, "speed_limit_mbps": 0.0,
+                        "stop_new": False}
 
     r = c.post("/api/guest", json={"quota_gb": 5})
-    assert r.json() == {"enabled": True, "quota_gb": 5.0}
+    assert r.json() == {"enabled": True, "quota_gb": 5.0,
+                        "limit": 2, "speed_limit_mbps": 0.0,
+                        "stop_new": False}
 
     r = c.post("/api/guest", json={"enabled": False})
-    assert r.json() == {"enabled": False, "quota_gb": 5.0}
+    assert r.json() == {"enabled": False, "quota_gb": 5.0,
+                        "limit": 2, "speed_limit_mbps": 0.0,
+                        "stop_new": False}
+
+
+def test_guest_limit_and_stop_new(client):
+    """POST /api/guest also sets the guest-limit cap and the
+    stop-new-connections gate independently."""
+    c, _, _ = client
+    _login(c)
+    r = c.post("/api/guest", json={"limit": 3, "stop_new": True})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"enabled": False, "quota_gb": 1.0,
+                        "limit": 3, "speed_limit_mbps": 0.0,
+                        "stop_new": True}
+
+    r = c.post("/api/guest", json={"limit": 1})
+    assert r.json()["limit"] == 1
+    assert r.json()["stop_new"] is True  # stop_new untouched by a limit edit
+
+    r = c.post("/api/guest", json={"stop_new": False})
+    assert r.json()["stop_new"] is False
+    assert r.json()["limit"] == 1
+
+
+def test_guest_speed_limit_round_trip(client):
+    """POST /api/guest sets the default guest speed cap (Mbps) independently
+    of every other guest setting; 0 lifts the cap (unlimited)."""
+    c, _, _ = client
+    _login(c)
+    r = c.post("/api/guest", json={"speed_limit_mbps": 8})
+    assert r.status_code == 200, r.text
+    assert r.json()["speed_limit_mbps"] == 8.0
+    assert r.json()["limit"] == 2          # untouched by a speed edit
+    assert r.json()["quota_gb"] == 1.0
+
+    r = c.get("/api/guest")
+    assert r.json()["speed_limit_mbps"] == 8.0   # persisted
+
+    r = c.post("/api/guest", json={"speed_limit_mbps": 0})
+    assert r.json()["speed_limit_mbps"] == 0.0   # unlimited
+
+    # negative values are rejected by the schema
+    r = c.post("/api/guest", json={"speed_limit_mbps": -1})
+    assert r.status_code == 422
 
 
 def test_guest_quota_updates_existing_guest(client):
@@ -944,6 +1003,192 @@ def test_wan_test_pppoe_failure_is_500(tmp_path):
         assert r.status_code == 500
         assert "PPPoE test failed" in r.json()["detail"]
         assert "boom" in r.json()["detail"]
+    asyncio.get_event_loop().run_until_complete(database.close())
+
+
+def test_wan_renew_restarts_pppoe(tmp_path):
+    """v24: POST /api/wan/renew invokes the wired renew callback (the gateway's
+    _renew_wan_ip) and returns its restart result. Only allowed while WAN mode
+    is active AND ppp0 is up."""
+    import asyncio
+    database = _db.Database(tmp_path / "wan-renew.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    holder.swap(EngineSnapshot(wan_status={
+        "topology": "wan", "configured": "wan", "source": "dashboard",
+        "pending": "wan", "ppp0": "up", "ppp_ip": "1.2.3.4", "ppp_peer": "",
+    }))
+    calls: list[bool] = []
+
+    async def _renew():
+        calls.append(True)
+        return {"restarted": True, "state": "active", "detail": "dialed"}
+
+    asyncio.get_event_loop().run_until_complete(database.connect())
+    app = create_app(database, service, holder, wan_renew=_renew)
+    with TestClient(app) as c:
+        c.post("/api/login", json={"password": "admin"})
+        r = c.post("/api/wan/renew")
+        assert r.status_code == 200, r.text
+        assert r.json() == {"restarted": True, "state": "active",
+                            "detail": "dialed"}
+    assert calls == [True]
+    asyncio.get_event_loop().run_until_complete(database.close())
+
+
+def test_wan_renew_requires_wan_and_ppp0_up(tmp_path):
+    """v24: a renewal is refused while ppp0 is down (nothing to renew into) or
+    WAN mode isn't active (no PPPoE line) — 409, and the callback never runs."""
+    import asyncio
+    database = _db.Database(tmp_path / "wan-renew-gate.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    calls: list[bool] = []
+
+    async def _renew():
+        calls.append(True)
+        return {"restarted": True, "state": "active", "detail": ""}
+
+    asyncio.get_event_loop().run_until_complete(database.connect())
+    app = create_app(database, service, holder, wan_renew=_renew)
+
+    def _wan(**overrides):
+        base = {"topology": "wan", "configured": "wan", "source": "dashboard",
+                "pending": "wan", "ppp0": "up", "ppp_ip": "1.2.3.4",
+                "ppp_peer": ""}
+        base.update(overrides)
+        return base
+
+    with TestClient(app) as c:
+        c.post("/api/login", json={"password": "admin"})
+        holder.swap(EngineSnapshot(wan_status=_wan(ppp0="down")))
+        r = c.post("/api/wan/renew")
+        assert r.status_code == 409
+        assert "ppp0 is down" in r.json()["detail"]
+        holder.swap(EngineSnapshot(wan_status=_wan(topology="lan", ppp0="n/a")))
+        r = c.post("/api/wan/renew")
+        assert r.status_code == 409
+        assert "not active" in r.json()["detail"]
+        # no snapshot yet ({} -> not wan) is also refused
+        holder.swap(EngineSnapshot())
+        r = c.post("/api/wan/renew")
+        assert r.status_code == 409
+    assert calls == [], "the callback must never run when the gates refuse"
+    asyncio.get_event_loop().run_until_complete(database.close())
+
+
+def test_wan_renew_requires_callback(tmp_path):
+    """No renew callback wired (degraded boot / tests without a gateway) -> 503."""
+    import asyncio
+    database = _db.Database(tmp_path / "wan-renew-no-cb.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    holder.swap(EngineSnapshot(wan_status={
+        "topology": "wan", "configured": "wan", "source": "dashboard",
+        "pending": "wan", "ppp0": "up", "ppp_ip": "1.2.3.4", "ppp_peer": "",
+    }))
+    asyncio.get_event_loop().run_until_complete(database.connect())
+    app = create_app(database, service, holder)  # wan_renew=None
+    with TestClient(app) as c:
+        c.post("/api/login", json={"password": "admin"})
+        r = c.post("/api/wan/renew")
+        assert r.status_code == 503
+        assert "degraded boot" in r.json()["detail"]
+    asyncio.get_event_loop().run_until_complete(database.close())
+
+
+def test_wan_renew_failure_is_500(tmp_path):
+    """A callback that raises (e.g. systemctl missing) -> HTTP 500 with the cause."""
+    import asyncio
+    database = _db.Database(tmp_path / "wan-renew-fail.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    holder.swap(EngineSnapshot(wan_status={
+        "topology": "wan", "configured": "wan", "source": "dashboard",
+        "pending": "wan", "ppp0": "up", "ppp_ip": "1.2.3.4", "ppp_peer": "",
+    }))
+
+    async def _renew():
+        raise RuntimeError("systemctl not found")
+
+    asyncio.get_event_loop().run_until_complete(database.connect())
+    app = create_app(database, service, holder, wan_renew=_renew)
+    with TestClient(app) as c:
+        c.post("/api/login", json={"password": "admin"})
+        r = c.post("/api/wan/renew")
+        assert r.status_code == 500
+        assert "WAN renew failed" in r.json()["detail"]
+        assert "systemctl not found" in r.json()["detail"]
+    asyncio.get_event_loop().run_until_complete(database.close())
+
+
+def test_wan_renew_requires_auth(tmp_path):
+    """The renew endpoints sit behind the same session gate as the rest of /api."""
+    import asyncio
+    database = _db.Database(tmp_path / "wan-renew-auth.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    asyncio.get_event_loop().run_until_complete(database.connect())
+    app = create_app(database, service, holder, wan_renew=lambda: {})
+    with TestClient(app) as c:
+        assert c.post("/api/wan/renew").status_code == 401
+        assert c.post("/api/wan/renew-config",
+                      json={"enabled": True, "minutes": 15}).status_code == 401
+    asyncio.get_event_loop().run_until_complete(database.close())
+
+
+def test_wan_renew_config_round_trip(tmp_path):
+    """v24: POST /api/wan/renew-config persists the auto-renew schedule with the
+    minutes clamped to the 5-minute floor and returns the stored config."""
+    import asyncio
+    database = _db.Database(tmp_path / "wan-renew-cfg.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    asyncio.get_event_loop().run_until_complete(database.connect())
+    app = create_app(database, service, holder)
+    with TestClient(app) as c:
+        c.post("/api/login", json={"password": "admin"})
+        # below the floor -> clamped up to 5
+        r = c.post("/api/wan/renew-config", json={"enabled": True, "minutes": 2})
+        assert r.status_code == 200, r.text
+        assert r.json() == {"enabled": True, "minutes": 5, "last": ""}
+        # a longer interval is kept
+        r = c.post("/api/wan/renew-config", json={"enabled": False, "minutes": 30})
+        assert r.json() == {"enabled": False, "minutes": 30, "last": ""}
+        # persisted, not just returned
+        async def _read():
+            return (await database.get_setting("wan_ip_renew_enabled", None),
+                    await database.get_setting("wan_ip_renew_minutes", None))
+        enabled, minutes = asyncio.get_event_loop().run_until_complete(_read())
+        assert (enabled, minutes) == ("0", "30")
+    asyncio.get_event_loop().run_until_complete(database.close())
+
+
+def test_dashboard_surfaces_renew_schedule(tmp_path):
+    """The renew schedule rides the wan_status snapshot into both /api/wan and
+    the dashboard payload, so the WAN tab shows the toggle + last-renewed line
+    without a separate query."""
+    import asyncio
+    database = _db.Database(tmp_path / "wan-renew-keys.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    asyncio.get_event_loop().run_until_complete(database.connect())
+    base = {"topology": "wan", "configured": "wan", "source": "dashboard",
+            "pending": "wan", "ppp0": "up", "ppp_ip": "1.2.3.4", "ppp_peer": "",
+            "renew_enabled": True, "renew_minutes": 20,
+            "renew_last": "2026-08-15T00:00:00+00:00"}
+    holder.swap(EngineSnapshot(wan_status=base))
+    app = create_app(database, service, holder)
+    with TestClient(app) as c:
+        c.post("/api/login", json={"password": "admin"})
+        data = c.get("/api/wan").json()
+        assert data["renew_enabled"] is True
+        assert data["renew_minutes"] == 20
+        assert data["renew_last"] == "2026-08-15T00:00:00+00:00"
+        wan = c.get("/api/dashboard").json()["wan"]
+        assert wan["renew_enabled"] is True
+        assert wan["renew_minutes"] == 20
+        assert wan["renew_last"] == "2026-08-15T00:00:00+00:00"
     asyncio.get_event_loop().run_until_complete(database.close())
 
 
@@ -1325,6 +1570,97 @@ def test_vpn_share_toggle_via_network(client):
     assert r.json()["vpn_share"]["interface"] == ""
 
 
+def test_decline_random_macs_via_network(client):
+    """The random-MAC gate rides /api/network: the switch persists, a partial
+    POST leaves shaping untouched, and the one-shot "existing" sweep runs in
+    the same call (the flag itself resets; the gate stays on)."""
+    c, _, _ = client
+    _login(c)
+    assert c.get("/api/network").json()["decline_random_macs"] is False
+
+    r = c.post("/api/network", json={"decline_random_macs": True})
+    assert r.status_code == 200
+    assert r.json()["decline_random_macs"] is True
+    # persists across requests (the DB setting, not a memory toggle)
+    assert c.get("/api/network").json()["decline_random_macs"] is True
+
+    # a partial POST with the sweep flag does not touch the shaping totals
+    r = c.post("/api/network", json={"decline_random_macs": True,
+                                     "decline_random_macs_existing": True})
+    assert r.status_code == 200
+    assert r.json()["decline_random_macs"] is True
+    n = c.get("/api/network").json()
+    assert n["enabled"] is False
+    assert n["decline_random_macs"] is True
+
+    r = c.post("/api/network", json={"decline_random_macs": False})
+    assert r.json()["decline_random_macs"] is False
+    assert c.get("/api/network").json()["decline_random_macs"] is False
+
+
+def test_user_exempt_from_quota(client):
+    """A user created with exempt_quota is never quota-blocked even when over
+    their allowance (the dashboard resolves through user_quota_blocked and
+    carries the flag); clearing the flag re-arms the quota gate; the /report
+    payload carries the flag too."""
+    import asyncio
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+    c, db, _ = client
+    _login(c)
+    # open a period so usage registers against real allowances
+    asyncio.get_event_loop().run_until_complete(
+        db.set_bundle(_db.Bundle(total_gb=100.0, reset_day=1)))
+    svc = QuotaService(db, timezone="Africa/Cairo")
+    asyncio.get_event_loop().run_until_complete(svc.open_period())
+    asyncio.get_event_loop().run_until_complete(svc.recompute_allowances())
+
+    uid = c.post("/api/users", json={"name": "Unlimited",
+                                     "quota_mode": "fixed",
+                                     "fixed_gb": 5.0,
+                                     "exempt_quota": True}).json()["id"]
+    uid2 = c.post("/api/users", json={"name": "Normal", "quota_mode": "fixed",
+                                      "fixed_gb": 5.0}).json()["id"]
+
+    def user_view(i):
+        return next(x for x in c.get("/api/dashboard").json()["users"]
+                    if x["id"] == i)
+
+    assert user_view(uid)["exempt_quota"] is True
+    assert user_view(uid2)["exempt_quota"] is False
+
+    # give each a device + 6 GB of usage against a 5 GB allowance
+    today = _dt.now(_tz.utc).date().isoformat()
+    dev1 = asyncio.get_event_loop().run_until_complete(
+        db.upsert_device("02:00:00:00:00:01", name="Laptop", user_id=uid))
+    dev2 = asyncio.get_event_loop().run_until_complete(
+        db.upsert_device("02:00:00:00:00:02", name="Phone", user_id=uid2))
+    asyncio.get_event_loop().run_until_complete(
+        db.add_usage(dev1.id, today, int(6.0 * GB), 0))
+    asyncio.get_event_loop().run_until_complete(
+        db.add_usage(dev2.id, today, int(6.0 * GB), 0))
+
+    # exempt survives the over-usage; the normal user is quota-blocked
+    assert user_view(uid)["quota_blocked"] is False
+    assert user_view(uid2)["quota_blocked"] is True
+
+    # PATCH clears the flag — the quota gate re-arms for the same usage
+    r = c.patch(f"/api/users/{uid}", json={"exempt_quota": False})
+    assert r.status_code == 200
+    assert user_view(uid)["exempt_quota"] is False
+    assert user_view(uid)["quota_blocked"] is True
+
+    # /report surfaces the flag (the report page renders the same math)
+    holder = SnapshotHolder()
+    with _client_from(create_app(db, QuotaService(db, timezone="Africa/Cairo"),
+                                 holder), "192.168.2.9") as rc:
+        rp = rc.get("/api/report")
+        if rp.status_code == 200:
+            ru = next(x for x in rp.json().get("users", [])
+                      if x.get("id") == uid)
+            assert "exempt_quota" in ru
+
+
 def test_milestone_page_is_public(tmp_path):
     """GET /milestone serves the HTML page with no session cookie."""
     import asyncio
@@ -1339,10 +1675,11 @@ def test_milestone_page_is_public(tmp_path):
         assert "text/html" in r.headers["content-type"]
         assert b"Quota" in r.content
         # shares the retuned stylesheet; pin the cache-bust so the theme
-        # actually reaches this page (browser-cached ?v=34 would show the
-        # pre-purple sheet).
-        assert "assets/styles.css?v=38" in r.text
+        # actually reaches this page (browser-cached ?v=41 would show the
+        # pre-obsidian sheet).
+        assert "assets/styles.css?v=48" in r.text
     asyncio.get_event_loop().run_until_complete(database.close())
+
 
 
 def test_report_gated_by_source_ip(tmp_path):
@@ -1393,7 +1730,7 @@ def test_report_page_respects_gate(tmp_path):
         assert r.status_code == 200
         assert "text/html" in r.headers["content-type"]
         assert b"Consumption report" in r.content
-        assert "assets/styles.css?v=38" in r.text
+        assert "assets/styles.css?v=48" in r.text
     with _client_from(app, "8.8.8.8") as c:
         assert c.get("/report").status_code == 403
     asyncio.get_event_loop().run_until_complete(database.close())

@@ -141,3 +141,36 @@ def check_internet_dns(servers: tuple[str, ...] = ("8.8.8.8", "1.1.1.1"),
         except Exception:  # noqa: BLE001 — a resolver failure must not crash a tick
             continue
     return False
+
+
+def restart_pppoe(interface: str = "ppp0",
+                  run_command: RunCommand | None = None) -> dict[str, object]:
+    """Restart the PPPoE dial to renew the public IP (the WAN-tab Restart).
+
+    In WAN mode the box dials the line itself through the ``quota-wan-ppp``
+    systemd unit (pppd in the foreground with ``persist`` — see
+    ``scripts/topology.sh``). Restarting that unit tears the session down and
+    re-dials; on metered Egyptian lines the ISP hands out a fresh public IP on
+    the new session — the same effect as restarting the router. The dial is
+    interrupted for a few seconds while ppp0 comes back up.
+
+    Returns ``{"restarted": bool, "state": "active"|"inactive"|"unknown",
+    "detail": str}`` — ``state`` is ``systemctl is-active``'s answer right
+    after the restart. Never raises: a missing ``systemctl``, no root, or a
+    failed restart degrades to ``restarted=False`` with an honest ``detail``
+    (mirrors :func:`detect_ppp`'s best-effort contract). ``run_command`` is
+    injectable for tests (default: a subprocess).
+    """
+    run = run_command or _default_run_command
+    rc, out = run(["systemctl", "restart", "quota-wan-ppp"])
+    if rc != 0:
+        return {"restarted": False, "state": "unknown",
+                "detail": out.strip() or
+                f"systemctl restart quota-wan-ppp exited {rc}"}
+    code, out2 = run(["systemctl", "is-active", "quota-wan-ppp"])
+    text = (out2 or "").strip().lower()
+    state = text if text in ("active", "inactive") else "unknown"
+    return {"restarted": True, "state": state,
+            "detail": f"quota-wan-ppp restarted — the PPPoE session re-dialed "
+                      f"on {interface} (a fresh public IP if the ISP rotates "
+                      f"it per session)"}

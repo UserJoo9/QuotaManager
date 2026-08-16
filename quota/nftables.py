@@ -56,7 +56,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from ipaddress import ip_address, ip_network
 from typing import Any, Callable
@@ -116,10 +115,11 @@ def resolve_local_networks(engine_cfg: Any, dhcp_cfg: Any,
 
     Explicit ``engine.client_subnet`` / ``engine.uplink_subnet`` values win;
     otherwise each is derived from the dhcp block (``gateway_ip`` -> client
-    subnet, ``router_ip`` -> uplink subnet). An invalid explicit value warns and
-    falls back to derivation. Returns a deduped, sorted list; empty when nothing
-    resolves (fall back to counting every forwarded packet — the pre-LAN-aware
-    behaviour).
+    subnet, ``router_ip`` -> uplink subnet), the uplink falling back to the LAN
+    snapshot (``dhcp.uplink_ip`` + ``dhcp.lan_cidr``) when the router key is
+    empty. An invalid explicit value warns and falls back to derivation.
+    Returns a deduped, sorted list; empty when nothing resolves (fall back to
+    counting every forwarded packet — the pre-LAN-aware behaviour).
 
     Under ``engine.topology == "wan"`` the box terminates the WAN itself (dials
     PPPoE on ppp0), but it KEEPS the old uplink IP as a secondary alias so
@@ -162,7 +162,9 @@ def resolve_local_networks(engine_cfg: Any, dhcp_cfg: Any,
         return sorted({n for n in (client, uplink) if n})
 
     return sorted({n for n in (one("client_subnet", "gateway_ip"),
-                               one("uplink_subnet", "router_ip")) if n})
+                               one("uplink_subnet", "router_ip")
+                               or one("uplink_subnet", "uplink_ip", "lan_cidr"))
+                   if n})
 
 
 def _match(seed: str, negated_key: str, networks: list[str]) -> str:
@@ -271,11 +273,11 @@ class NftablesEngine:
         self._last_gateway = EngineCounters()
         #: last-programmed ``gw_blocked`` membership (None = never programmed).
         self._gateway_blocked: bool | None = None
-        #: VPN-share relay suspension state (None = never programmed). While
-        #: True the input/output gateway chains carry a first-position accept
-        #: (``set_vpn_relay``) so the box's own metering is inert — the box is
-        #: relaying the household's VPN, not consuming the bundle itself.
-        self._vpn_relay_active: bool | None = None
+        #: last ``gw_allowed`` membership pushed to the kernel (None = never
+        #: programmed). While "VPN share" relays the household through the box's
+        #: tunnel, the VPN server endpoints live here — the ONE box-side egress
+        #: that survives a Gateway cut (see :meth:`set_gateway_allowed`).
+        self._gateway_allowed: tuple[str, ...] | None = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -465,25 +467,34 @@ class NftablesEngine:
           user's device usage.
         * a ``gw_blocked`` interval set + two drop rules toggle the box's own
           internet cut (see :meth:`set_gateway_blocked`).
+        * a ``gw_allowed`` set + two accept rules keep ONE box-side egress
+          alive under that cut: the VPN server connection(s) the "VPN share"
+          relay rides (see :meth:`set_gateway_allowed`). Loopback is exempt
+          from the cut structurally, so the box's own local services (and the
+          tun2socks<->VPN-client hop) keep working.
 
-        Rule order in each chain is: exemptions FIRST, drops NEXT, counters
-        LAST. The DNS-exemption accepts (udp 53) keep dnsmasq's upstream queries
-        flowing for CLIENTS while the box itself is cut, and the DHCP-exemption
-        accepts (udp 67/68) keep NEW clients able to complete the lease
-        handshake — because they run before any counter, this relayed service
-        traffic is never charged to the "Gateway" user (household DNS is not the
-        box's own usage). The ``gw_blocked`` drops come before the counters too:
-        a dropped packet terminates the chain, so a blocked box's attempted
-        bytes are never counted (they never leave the box, so they consume
-        nothing from the bundle). Only non-local, non-exempted traffic that
-        survives the block reaches the counters. LAN traffic is excluded from
-        every rule (dashboard/SSH from the LAN stay reachable). The rules are
-        programmed once — only the set's membership changes.
+        Rule order in each chain is: exemptions FIRST, allowed accepts NEXT,
+        drops NEXT, counters LAST. The DNS-exemption accepts (udp 53) keep
+        dnsmasq's upstream queries flowing for CLIENTS while the box itself is
+        cut, and the DHCP-exemption accepts (udp 67/68) keep NEW clients able
+        to complete the lease handshake — because they run before any counter,
+        this relayed service traffic is never charged to the "Gateway" user
+        (household DNS is not the box's own usage). The ``gw_allowed`` accepts
+        sit before the drops AND the counters, so relay traffic is neither cut
+        nor double-charged; the ``gw_blocked`` drops come before the counters
+        too: a dropped packet terminates the chain, so a blocked box's
+        attempted bytes are never counted (they never leave the box, so they
+        consume nothing from the bundle). Only non-local, non-exempted traffic
+        that survives the block reaches the counters. LAN traffic is excluded
+        from every rule (dashboard/SSH from the LAN stay reachable). The rules
+        are programmed once — only the sets' memberships change.
         """
         for hook in ("input", "output"):
             self._run(["add", "chain", f"{FAMILY} {self.table} {hook}",
                        f"{{ type filter hook {hook} priority 0; policy accept; }}"])
         self._run(["add", "set", f"{FAMILY} {self.table} gw_blocked",
+                   "{ type ipv4_addr; flags interval; }"])
+        self._run(["add", "set", f"{FAMILY} {self.table} gw_allowed",
                    "{ type ipv4_addr; flags interval; }"])
         # DNS exemptions FIRST: dnsmasq keeps resolving for clients even while
         # the box itself is cut. Accepted before any counter, so relayed client
@@ -502,13 +513,24 @@ class NftablesEngine:
                    "udp sport 67 accept"])
         self._run(["add", "rule", f"{FAMILY} {self.table} input",
                    "udp sport 68 udp dport 67 accept"])
+        # gw_allowed accepts NEXT: the box's connections to the VPN server(s)
+        # (the "VPN share" relay) survive the cut below — and, being accepted
+        # before any counter, are never charged to the Gateway user either.
+        # Membership is empty by default; set_gateway_allowed fills it.
+        self._run(["add", "rule", f"{FAMILY} {self.table} output",
+                   "ip daddr @gw_allowed accept"])
+        self._run(["add", "rule", f"{FAMILY} {self.table} input",
+                   "ip saddr @gw_allowed accept"])
         # gw_blocked drops BEFORE the counters: a dropped packet terminates the
         # chain, so a blocked box's attempted bytes are never counted (they
-        # never leave the box — nothing is consumed from the bundle).
+        # never leave the box — nothing is consumed from the bundle). Loopback
+        # is exempt so the box's own local services (dashboard, tun2socks ->
+        # VPN client) keep working while its internet is cut.
+        gw_exclusions = self._local_networks + ["127.0.0.0/8"]
         out_drop = _match("ip daddr @gw_blocked", "ip daddr",
-                          self._local_networks) + " drop"
+                          gw_exclusions) + " drop"
         in_drop = _match("ip saddr @gw_blocked", "ip saddr",
-                         self._local_networks) + " drop"
+                         gw_exclusions) + " drop"
         self._run(["add", "rule", f"{FAMILY} {self.table} output", out_drop])
         self._run(["add", "rule", f"{FAMILY} {self.table} input", in_drop])
         # Counters LAST: only non-local, non-exempted traffic that survives the
@@ -563,76 +585,48 @@ class NftablesEngine:
         """
         return self._gateway_blocked
 
-    def set_vpn_relay(self, active: bool) -> None:
-        """Suspend (True) or restore the box's own gateway metering.
+    def set_gateway_allowed(self, ips: list[str]) -> None:
+        """Program the ``gw_allowed`` set — the box egress that survives a cut.
 
-        With "VPN share" on, the box relays the whole household through its
-        tunnel — every client byte crosses the box's input/output hooks a
-        second time (client -> forward -> tunnel -> uplink). Without this,
-        the relay volume would be charged AGAIN to the protected "Gateway"
-        user (the forward-chain per-device counters already counted it once)
-        and, worse, a quota-cut Gateway user's ``gw_blocked`` drop would kill
-        the VPN relay and with it every client's internet.
+        The box's OWN internet can be cut (``gw_blocked`` = ``0.0.0.0/0``)
+        while "VPN share" relays the household through the box's tunnel. The
+        relay rides the box's connection(s) to the VPN server(s) (clients ->
+        tun -> VPN client on the box -> server out of the box), so those
+        endpoints must stay reachable or the tunnel dies — the ONLY box-side
+        egress that keeps working under the cut (DNS/DHCP and loopback are
+        exempt structurally). Membership is fed by the maintenance loop from
+        the VPN-client process's established sockets, plus any explicit
+        ``engine.gateway_allow_ips``; empty clears the set.
 
-        Suspension = an unconditional ``accept`` rule inserted FIRST in the
-        input/output chains (above the DNS/DHCP exemptions, the gw_blocked
-        drops and the q_gw counters); restoring = deleting exactly that rule
-        by handle. Forward-chain accounting/blocking and the ARP lock are
-        untouched — per-device quota enforcement keeps working through the
-        tunnel. Cache-gated like ``set_gateway_blocked``; a failure leaves
-        the desired state uncommitted so the maintenance tick retries.
+        The accept rules sit in the input/output chains ABOVE the
+        ``gw_blocked`` drops and the q_gw counters (programmed once in
+        ``_program_gateway``), so allowed relay traffic is never dropped and
+        never double-charged to the protected Gateway user — while everything
+        else the box sends stays cut. Cache-gated like ``set_gateway_blocked``
+        (mirror the ``blocked`` set — see :meth:`update_state`): re-flushing
+        an identical set every ~15 s would re-open a small free window each
+        tick. A failure leaves the desired state uncommitted so the
+        maintenance tick retries.
         """
         if not self.available:
             return
-        if active == self._vpn_relay_active:
+        key = tuple(sorted({i for i in ips if i}))
+        if key == self._gateway_allowed:
             return
-        if active:
-            self._vpn_relay_active = None  # not yet committed; retry on failure
-            self._run(["insert", "rule", f"{FAMILY} {self.table} output",
-                       'comment "quota-vpn-relay" accept'])
-            self._run(["insert", "rule", f"{FAMILY} {self.table} input",
-                       'comment "quota-vpn-relay" accept'])
-            # Only claim committed when BOTH hooks accepted the insert.
-            if self._vpn_relay_rule_holds("output") and \
-                    self._vpn_relay_rule_holds("input"):
-                self._vpn_relay_active = True
-                log.info("nftables: gateway metering suspended for VPN "
-                         "share (relay egress is household traffic)")
+        self._gateway_allowed = None  # not yet committed; retry next tick on failure
+        if not self._run(["flush", "set", f"{FAMILY} {self.table} gw_allowed"]):
             return
-        # Restoring: remove exactly the accept rule(s), leaving the original
-        # exemptions/drops/counters underneath untouched.
-        removed = True
-        for hook in ("output", "input"):
-            handle = self._find_vpn_relay_handle(hook)
-            if handle is not None:
-                removed &= self._run(["delete", "rule",
-                                      f"{FAMILY} {self.table} {hook}",
-                                      f"handle {handle}"])
-        self._vpn_relay_active = False if removed else None
-        if removed:
-            log.info("nftables: gateway metering restored (VPN share off)")
+        if key and not self._run(
+                ["add", "element", f"{FAMILY} {self.table} gw_allowed",
+                 "{ " + ", ".join(key) + " }"]):
+            return
+        self._gateway_allowed = key
+        log.info("nftables: gw_allowed = %s", list(key))
 
-    def _vpn_relay_rule_holds(self, hook: str) -> bool:
-        """Did the insert survive? A failed insert (no root / nft error)
-        means no rule — and the relay suspension must not be claimed."""
-        return self._find_vpn_relay_handle(hook) is not None
-
-    def _find_vpn_relay_handle(self, hook: str) -> str | None:
-        """Handle of our ``quota-vpn-relay`` accept in a hook chain, via
-        ``nft -a list chain`` (the ``-a`` flag prints ``# handle N``). None
-        when absent or the listing failed (a plain read — never disables
-        the engine)."""
-        code, out = self._run_command(
-            ["nft", "-a", "list", "chain", f"{FAMILY} {self.table}", hook])
-        if code != 0:
-            return None
-        for line in (out or "").splitlines():
-            if "quota-vpn-relay" not in line:
-                continue
-            m = re.search(r"#\s*handle\s+(\d+)", line)
-            if m:
-                return m.group(1)
-        return None
+    @property
+    def gateway_allowed(self) -> tuple[str, ...] | None:
+        """Last ``gw_allowed`` membership pushed to the kernel (None = never)."""
+        return self._gateway_allowed
 
     def flush(self) -> EngineSnapshot:
         """Return byte deltas since the last flush, as an EngineSnapshot."""

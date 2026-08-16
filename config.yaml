@@ -91,6 +91,14 @@ engine:
   # uncounted (its quota block, if the admin sets one, still applies via the
   # gateway chains).
   count_gateway: true
+  # Manual override for the "VPN share" gateway whitelist: VPN-server IPs/CIDRs
+  # that must stay reachable when the box's OWN internet is cut (Gateway OFF in
+  # the dashboard) while "VPN share" relays the household through the box's
+  # tunnel. Normally these endpoints are AUTO-learned every ~15 s from the VPN
+  # client's established connections (v2ray/sing-box/xray/tun2socks) — set this
+  # only for a VPN client the auto-learn step can't identify, or a fixed server
+  # you always want allowed. Empty (default) = auto-learned only.
+  gateway_allow_ips: []
 
 # Speed shaping (tc/HTB + fq_codel): per-device and per-user internet speed caps
 # + low-latency (bufferbloat-free) queues. The runtime totals / per-device /
@@ -100,11 +108,16 @@ engine:
 #   interface: ""         # empty = auto-detect (the NIC holding gateway_ip)
 #   client_subnet: ""     # empty = derive from gateway_ip + dhcp.subnet
 #   ifb: ifb0
+#   lan_rate_mbps: 1000   # LAN link rate — LAN (client<->uplink-subnet) traffic
+#                         # rides a pass-through class at this full rate instead
+#                         # of the WAN cap (uplink subnet resolved like the
+#                         # nftables engine: engine.uplink_subnet wins)
 shaping:
   enabled: true
   interface: ""
   client_subnet: ""
   ifb: ifb0
+  lan_rate_mbps: 1000
 
 # "VPN share" — route the whole client subnet through the box's VPN. The box
 # runs a VPN client in TUN mode (sing-box/xray `tun`, WireGuard, or tun2socks
@@ -118,11 +131,35 @@ shaping:
 #                          # (first ARPHRD_NONE tun/utun/wg, stored in the DB)
 #   route_table: 200       # route table used by the client-subnet policy rule
 #   rule_pref: 1000        # rule priority (must beat the main table, 32766)
+#   tun2socks: true        # auto-install + run tun2socks ONLY when VPN share
+#                          # is on but no kernel TUN exists (userspace clients
+#                          # like v2rayN never create one). A real kernel
+#                          # tunnel (xray/sing-box/WireGuard) is always
+#                          # preferred and needs no config edits — the bridge
+#                          # is only the fallback. Downloads the pinned,
+#                          # sha256-verified binary on first use (one-time).
+#   socks_proxy: "127.0.0.1:10808"  # fallback SOCKS; auto-detect prefers the
+#                          # VPN client's actual listener (ss -tlnp)
+#   tun_interface: tun0    # device tun2socks creates (+ tun_ip/tun_gw addrs)
+#   tun_ip: 10.0.0.1
+#   tun_gw: 10.0.0.2
+#   binary: /usr/local/bin/tun2socks
+#   download_url: ""       # empty = auto-built from the pinned release+arch
+#   download_sha256: ""    # empty = built-in per-arch pin; a binary without
+#                          # a pinned checksum is never installed
 vpn_share:
   enabled: true
   interface: ""
   route_table: 200
   rule_pref: 1000
+  tun2socks: true
+  socks_proxy: "127.0.0.1:10808"
+  tun_interface: tun0
+  tun_ip: 10.0.0.1
+  tun_gw: 10.0.0.2
+  binary: /usr/local/bin/tun2socks
+  download_url: ""
+  download_sha256: ""
 
 web:
   host: 0.0.0.0

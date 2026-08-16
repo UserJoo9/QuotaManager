@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ from fastapi.testclient import TestClient
 from core import config as cfg_mod
 from quota.arp_scan import ArpScanner
 from quota.engine import GATEWAY_MAC, EngineCounters, EngineSnapshot
+from quota.tun2socks import Tun2socksStatus
 from quota.vpnshare import VpnShareStatus
 from run import Gateway
 
@@ -51,6 +53,65 @@ def _cancel_maintenance(gw: Gateway) -> None:
         asyncio.get_event_loop().run_until_complete(task)
     except asyncio.CancelledError:
         pass
+
+
+def _boot_wan_gateway(tmp_path, monkeypatch, ppp, renew, restarter=None):
+    """Boot a Gateway under the WAN DB override with a fake ppp0 link.
+
+    Two-phase (the established pattern): a throwaway Gateway seeds the DB with
+    the dashboard-owned topology + the renew schedule, shuts down, and a second
+    Gateway re-boots so the override is applied at startup (run.py re-applies
+    the DB topology before building the engine). ``ppp`` is the fake
+    detect_ppp state, ``renew`` the renew-settings dict, ``restarter`` the fake
+    PPPoE dial restarter (default: a silent success). The background
+    maintenance loop is cancelled so the caller owns the tick schedule.
+
+    Returns ``(gw, loop)`` — the caller runs ticks on ``loop`` and must finish
+    with ``loop.run_until_complete(gw.shutdown()); loop.close()``.
+    """
+    seed = Gateway(_cfg(tmp_path))
+    seed_loop = asyncio.new_event_loop()
+    try:
+        seed_loop.run_until_complete(seed.startup())
+        seed_loop.run_until_complete(
+            seed.database.set_setting("topology_source", "dashboard"))
+        seed_loop.run_until_complete(
+            seed.database.set_setting("topology", "wan"))
+        seed_loop.run_until_complete(
+            seed.database.set_setting("wan_ip_renew_enabled",
+                                      "1" if renew["enabled"] else "0"))
+        seed_loop.run_until_complete(
+            seed.database.set_setting("wan_ip_renew_minutes",
+                                      str(renew["minutes"])))
+        seed_loop.run_until_complete(
+            seed.database.set_setting("wan_ip_renew_last", renew["last"]))
+        seed_loop.run_until_complete(seed.shutdown())
+    finally:
+        seed_loop.close()
+
+    # run.py does `from quota.topology import detect_ppp` — patch the run.py
+    # reference (the module attr looked up at call time).
+    monkeypatch.setattr("run.detect_ppp",
+                        lambda *a, **k: {"state": ppp, "local": "1.2.3.4",
+                                         "peer": ""})
+    gw = Gateway(_cfg(tmp_path))
+    if restarter is not None:
+        gw._pppoe_restart = restarter
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(gw.startup())
+        task = getattr(gw, "_maintenance_task", None)
+        if task is not None:  # cancel so the manual tick is the only one
+            task.cancel()
+            try:
+                loop.run_until_complete(task)
+            except asyncio.CancelledError:
+                pass
+    except BaseException:
+        loop.run_until_complete(gw.shutdown())
+        loop.close()
+        raise
+    return gw, loop
 
 
 def test_gateway_startup_shutdown():
@@ -316,6 +377,179 @@ def test_guest_device_reconnects_keeps_identity(tmp_path):
         asyncio.get_event_loop().run_until_complete(gw.shutdown())
 
 
+def test_guest_limit_blocks_new_guest_after_cap(tmp_path):
+    """When the guest limit is reached, a NEW device is still registered as a
+    guest (visible + counted) but is immediately admin-blocked — a MAC-changer
+    can't mint a fresh allowance forever."""
+    from quota import db as db_mod
+
+    cfg = _cfg(tmp_path)
+    gw = Gateway(cfg)
+    asyncio.get_event_loop().run_until_complete(gw.startup())
+    try:
+        asyncio.get_event_loop().run_until_complete(
+            gw.service.set_guest_mode(True))
+        asyncio.get_event_loop().run_until_complete(
+            gw.service.set_guest_limit(2))
+        # fill the cap with two guests
+        asyncio.get_event_loop().run_until_complete(
+            gw._persist_lease("aa:bb:cc:dd:ee:41", "192.168.1.130"))
+        asyncio.get_event_loop().run_until_complete(
+            gw._persist_lease("aa:bb:cc:dd:ee:42", "192.168.1.131"))
+        assert asyncio.get_event_loop().run_until_complete(
+            gw.database.count_guest_users()) == 2
+
+        # third brand-new device beyond the cap -> guest but admin-blocked
+        asyncio.get_event_loop().run_until_complete(
+            gw._persist_lease("aa:bb:cc:dd:ee:43", "192.168.1.132"))
+        dev = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_device(mac="aa:bb:cc:dd:ee:43"))
+        assert dev is not None
+        user = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_user(dev.user_id))
+        assert user is not None and user.guest
+        assert dev.block_state == db_mod.BLOCK_ADMIN, (
+            "over-cap guest must be cut immediately")
+
+        # raising the cap lets the NEXT brand-new device join normally
+        asyncio.get_event_loop().run_until_complete(
+            gw.service.set_guest_limit(4))
+        asyncio.get_event_loop().run_until_complete(
+            gw._persist_lease("aa:bb:cc:dd:ee:44", "192.168.1.133"))
+        dev4 = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_device(mac="aa:bb:cc:dd:ee:44"))
+        assert dev4.block_state == db_mod.BLOCK_OK
+    finally:
+        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+
+
+def test_guest_limit_default_is_two(tmp_path):
+    """The default guest cap is 2 (documented anti-MAC-spam value)."""
+    cfg = _cfg(tmp_path)
+    gw = Gateway(cfg)
+    asyncio.get_event_loop().run_until_complete(gw.startup())
+    try:
+        assert asyncio.get_event_loop().run_until_complete(
+            gw.service.guest_limit()) == 2
+    finally:
+        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+
+
+def test_stop_new_connections_blocks_brand_new_device(tmp_path):
+    """With STOP NEW CONNECTIONS on, a brand-new MAC is registered but
+    immediately admin-blocked; an already-registered device keeps joining."""
+    from quota import db as db_mod
+
+    cfg = _cfg(tmp_path)
+    gw = Gateway(cfg)
+    asyncio.get_event_loop().run_until_complete(gw.startup())
+    try:
+        # an existing device (joined before the gate) keeps its identity
+        asyncio.get_event_loop().run_until_complete(
+            gw._persist_lease("aa:bb:cc:dd:ee:51", "192.168.1.140"))
+        dev = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_device(mac="aa:bb:cc:dd:ee:51"))
+        uid = dev.user_id
+
+        asyncio.get_event_loop().run_until_complete(
+            gw.service.set_stop_new_connections(True))
+        assert asyncio.get_event_loop().run_until_complete(
+            gw.service.stop_new_connections()) is True
+
+        # a brand-new MAC is registered but cut
+        asyncio.get_event_loop().run_until_complete(
+            gw._persist_lease("aa:bb:cc:dd:ee:52", "192.168.1.141"))
+        dev2 = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_device(mac="aa:bb:cc:dd:ee:52"))
+        assert dev2 is not None, "refused device must still be registered"
+        assert dev2.block_state == db_mod.BLOCK_ADMIN, (
+            "brand-new device must be cut while STOP NEW CONNECTIONS is on")
+
+        # the pre-existing device reconnects normally (identity preserved)
+        asyncio.get_event_loop().run_until_complete(
+            gw.database.delete_lease("aa:bb:cc:dd:ee:51"))
+        asyncio.get_event_loop().run_until_complete(
+            gw._persist_lease("aa:bb:cc:dd:ee:51", "192.168.1.142"))
+        dev3 = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_device(mac="aa:bb:cc:dd:ee:51"))
+        assert dev3.user_id == uid, "existing device must keep its identity"
+        assert dev3.block_state != db_mod.BLOCK_ADMIN, (
+            "existing device must not be cut by the gate")
+
+        # turning the gate off lets the next brand-new device join normally
+        asyncio.get_event_loop().run_until_complete(
+            gw.service.set_stop_new_connections(False))
+        asyncio.get_event_loop().run_until_complete(
+            gw._persist_lease("aa:bb:cc:dd:ee:53", "192.168.1.143"))
+        dev4 = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_device(mac="aa:bb:cc:dd:ee:53"))
+        assert dev4.block_state == db_mod.BLOCK_OK
+    finally:
+        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+
+
+def test_decline_random_macs_blocks_brand_new_randomized_device(tmp_path):
+    """With "Decline random MACs" on, a brand-new device whose MAC is
+    randomized (locally-administered bit) is registered but immediately
+    admin-blocked; real-OUI and already-registered devices are untouched."""
+    from quota import db as db_mod
+
+    cfg = _cfg(tmp_path)
+    gw = Gateway(cfg)
+    asyncio.get_event_loop().run_until_complete(gw.startup())
+    try:
+        # an existing random-MAC device (joined before the gate) keeps identity
+        asyncio.get_event_loop().run_until_complete(
+            gw._persist_lease("02:42:ac:11:00:02", "192.168.1.140"))
+        dev = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_device(mac="02:42:ac:11:00:02"))
+        uid = dev.user_id
+
+        asyncio.get_event_loop().run_until_complete(
+            gw.service.set_decline_random_macs(True))
+        assert asyncio.get_event_loop().run_until_complete(
+            gw.service.decline_random_macs()) is True
+
+        # a brand-new randomized MAC is registered but cut
+        asyncio.get_event_loop().run_until_complete(
+            gw._persist_lease("02:42:ac:11:00:03", "192.168.1.141"))
+        dev2 = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_device(mac="02:42:ac:11:00:03"))
+        assert dev2 is not None, "declined device must still be registered"
+        assert dev2.block_state == db_mod.BLOCK_ADMIN, (
+            "brand-new randomized device must be cut while the gate is on")
+
+        # a real-OUI brand-new device joins normally
+        asyncio.get_event_loop().run_until_complete(
+            gw._persist_lease("3c:7c:3f:aa:bb:cc", "192.168.1.142"))
+        dev3 = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_device(mac="3c:7c:3f:aa:bb:cc"))
+        assert dev3.block_state == db_mod.BLOCK_OK, (
+            "a real-OUI device is never gated")
+
+        # the pre-existing random-MAC device reconnects normally
+        asyncio.get_event_loop().run_until_complete(
+            gw.database.delete_lease("02:42:ac:11:00:02"))
+        asyncio.get_event_loop().run_until_complete(
+            gw._persist_lease("02:42:ac:11:00:02", "192.168.1.143"))
+        dev4 = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_device(mac="02:42:ac:11:00:02"))
+        assert dev4.user_id == uid, "existing device must keep its identity"
+        assert dev4.block_state == db_mod.BLOCK_OK, (
+            "an already-registered device must not be cut by the gate")
+
+        # turning the gate off lets the next brand-new random MAC join normally
+        asyncio.get_event_loop().run_until_complete(
+            gw.service.set_decline_random_macs(False))
+        asyncio.get_event_loop().run_until_complete(
+            gw._persist_lease("02:42:ac:11:00:04", "192.168.1.144"))
+        dev5 = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_device(mac="02:42:ac:11:00:04"))
+        assert dev5.block_state == db_mod.BLOCK_OK
+    finally:
+        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+
+
 def test_auto_registered_device_not_instantly_quota_blocked(tmp_path):
     """Regression: a brand-new DHCP device must receive its allowance BEFORE
     the next block evaluation.
@@ -537,17 +771,19 @@ def test_maintenance_tick_syncs_shaper(tmp_path):
             def stop(self):
                 pass
             def update_state(self, rate_map, enabled, total_down,
-                             total_up, aqm):
-                calls.append((rate_map, enabled, total_down, total_up, aqm))
+                             total_up, aqm, lan_rate_mbps=None):
+                calls.append((rate_map, enabled, total_down, total_up, aqm,
+                              lan_rate_mbps))
 
         gw.shaper = _FakeShaper()  # type: ignore[assignment]
         asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
 
         assert len(calls) == 1, "one maintenance tick must sync the shaper"
-        rate_map, enabled, total_down, total_up, aqm = calls[0]
+        rate_map, enabled, total_down, total_up, aqm, lan_rate = calls[0]
         assert enabled is True
         assert total_down == 100.0 and total_up == 20.0
         assert aqm is True
+        assert lan_rate == 1000.0   # DB default for the LAN pass-through rate
         assert len(rate_map) == 1
         entry = rate_map[0]
         assert entry["ip"] == "192.168.2.110"
@@ -560,6 +796,95 @@ def test_maintenance_tick_syncs_shaper(tmp_path):
             gw.service.set_shaping(enabled=False))
         asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
         assert calls[-1][1] is False
+
+        # a LAN pass-through rate edit flows into the shaper immediately
+        asyncio.get_event_loop().run_until_complete(
+            gw.service.set_shaping(enabled=True, lan_rate_mbps=250))
+        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        assert calls[-1][-1] == 250.0
+    finally:
+        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+
+
+def test_shaper_applies_default_guest_speed_cap(tmp_path):
+    """A default guest speed cap (Mbps) becomes the aggregate ceiling for every
+    guest user's rate-map entry: it caps an unlimited guest and tightens an
+    explicit guest cap (min wins); non-guest users are untouched; 0 lifts it."""
+    cfg = _cfg(tmp_path)
+    gw = Gateway(cfg, internet_probe=lambda: True)
+    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _cancel_maintenance(gw)
+    try:
+        mac = "aa:bb:cc:dd:ee:77"
+        asyncio.get_event_loop().run_until_complete(
+            gw._persist_lease(mac, "192.168.2.120"))
+        dev = asyncio.get_event_loop().run_until_complete(
+            gw.database.get_device(mac=mac))
+
+        # move the device under a guest account and enable shaping
+        guest = asyncio.get_event_loop().run_until_complete(
+            gw.database.create_user(name="", quota_mode="fixed",
+                                    fixed_gb=1.0, guest=True))
+        asyncio.get_event_loop().run_until_complete(
+            gw.database.update_device(dev.id, user_id=guest.id))
+        asyncio.get_event_loop().run_until_complete(
+            gw.service.set_shaping(enabled=True, total_down_mbps=100.0,
+                                   total_up_mbps=20.0))
+
+        calls: list[tuple[list, bool, float, float, bool]] = []
+
+        class _FakeShaper:
+            available = True
+            def start(self):
+                pass
+            def stop(self):
+                pass
+            def update_state(self, rate_map, enabled, total_down,
+                             total_up, aqm, lan_rate_mbps=None):
+                calls.append((rate_map, enabled, total_down, total_up, aqm,
+                              lan_rate_mbps))
+
+        gw.shaper = _FakeShaper()  # type: ignore[assignment]
+
+        # 1) an unlimited guest is capped at the default guest speed
+        asyncio.get_event_loop().run_until_complete(
+            gw.service.set_guest_speed_limit(8))
+        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        entry = calls[-1][0][0]
+        assert entry["user_down"] == 8.0 and entry["user_up"] == 8.0
+        assert entry["down"] == 0.0          # device cap untouched (unlimited)
+
+        # 2) an explicit guest cap below the default wins (min)
+        asyncio.get_event_loop().run_until_complete(
+            gw.database.update_user(guest.id, limit_down_mbps=4.0,
+                                    limit_up_mbps=2.0))
+        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        entry = calls[-1][0][0]
+        assert entry["user_down"] == 4.0 and entry["user_up"] == 2.0
+
+        # 3) default 0 = unlimited — no guest cap is applied
+        asyncio.get_event_loop().run_until_complete(
+            gw.service.set_guest_speed_limit(0))
+        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        entry = calls[-1][0][0]
+        assert entry["user_down"] == 4.0 and entry["user_up"] == 2.0
+
+        # 4) a non-guest user is never clamped by the default guest cap
+        other_mac = "aa:bb:cc:dd:ee:88"
+        asyncio.get_event_loop().run_until_complete(
+            gw._persist_lease(other_mac, "192.168.2.121"))
+        # lift the explicit guest cap again so the default is the ceiling
+        asyncio.get_event_loop().run_until_complete(
+            gw.database.update_user(guest.id, limit_down_mbps=0.0,
+                                    limit_up_mbps=0.0))
+        asyncio.get_event_loop().run_until_complete(
+            gw.service.set_guest_speed_limit(8))
+        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        entries = {e["ip"]: e for e in calls[-1][0]}
+        other = entries["192.168.2.121"]
+        assert other["user_down"] == 0.0 and other["user_up"] == 0.0
+        # the guest entry carries the default cap once its own cap is lifted
+        assert entries["192.168.2.120"]["user_down"] == 8.0
     finally:
         asyncio.get_event_loop().run_until_complete(gw.shutdown())
 
@@ -684,26 +1009,30 @@ class _FakeVpnManager:
 
 
 class _FakeEngineRelay:
-    """Records engine.set_vpn_relay calls (the real NftablesEngine is
+    """Records engine.set_gateway_allowed calls (the real NftablesEngine is
     disabled in hermetic configs; quota/nftables.py's own tests cover the
-    insert/delete rule program). ``stop`` satisfies shutdown()."""
+    gw_allowed program). ``stop`` satisfies shutdown()."""
 
     def __init__(self) -> None:
-        self.calls: list[bool] = []
+        self.allowed_calls: list[list[str]] = []
+        self.gateway_allowed: tuple | None = None
 
-    def set_vpn_relay(self, active: bool) -> None:
-        self.calls.append(active)
+    def set_gateway_allowed(self, ips: list[str]) -> None:
+        self.allowed_calls.append(list(ips))
+        self.gateway_allowed = tuple(ips)
 
     def stop(self) -> None:
         pass
 
 
-def test_sync_vpn_share_pins_tunnel_and_suspends_gateway_metering(tmp_path):
+def test_sync_vpn_share_pins_tunnel_and_allows_vpn_server(tmp_path):
     """The maintenance loop's VPN sync must: reconcile the manager toward the
     DB switch, PIN a detected tunnel so a multi-VPN box stays on the same
-    interface, and keep the box's own gateway metering suspended while the
-    relay is actually applied (not when the switch merely says on)."""
+    interface, and while the relay is APPLIED feed the engine's gw_allowed
+    whitelist from the learned VPN-server peers (so the box's own internet can
+    be cut — Gateway OFF — without killing the household's tunnel)."""
     cfg = _cfg(tmp_path)
+    cfg.vpn_share.tun2socks = False  # hermetic: the bridge is a real downloader
     gw = Gateway(cfg)
     loop = asyncio.new_event_loop()
     try:
@@ -718,6 +1047,7 @@ def test_sync_vpn_share_pins_tunnel_and_suspends_gateway_metering(tmp_path):
         fake_engine = _FakeEngineRelay()
         gw.vpn_manager = fake_mgr
         gw.engine = fake_engine  # type: ignore[assignment]
+        gw._vpn_learn = lambda _: {"1.2.3.4"}  # fake the `ss` auto-learn probe
         # switch on, no pin yet -> reconcile(enabled=True, pin=""), manager
         # reports utun4 -> the pin is persisted for the NEXT tick
         loop.run_until_complete(gw.database.set_setting(
@@ -729,18 +1059,195 @@ def test_sync_vpn_share_pins_tunnel_and_suspends_gateway_metering(tmp_path):
         pin = loop.run_until_complete(
             gw.database.get_setting("vpn_share_interface", ""))
         assert pin == "utun4"
-        # the relay IS applied -> the box's own metering must be suspended
-        assert fake_engine.calls == [True]
+        # the relay IS applied -> the learned VPN server is whitelisted so it
+        # stays reachable under a Gateway cut (and stays sticky across ticks)
+        assert fake_engine.allowed_calls == [["1.2.3.4"]]
+        loop.run_until_complete(gw._sync_vpn_share())
+        assert fake_engine.allowed_calls[-1] == ["1.2.3.4"]  # sticky: unchanged
         assert gw._last_vpn_status["state"] == "on"
         # switch off -> reconcile(enabled=False, pinned utun4) and the
-        # engine restore fires (relay no longer applied)
+        # whitelist is cleared (a Gateway cut now blocks the box entirely)
         loop.run_until_complete(gw.database.set_setting(
             "vpn_share_enabled", "0"))
         fake_mgr.status = VpnShareStatus(state="off")
         loop.run_until_complete(gw._sync_vpn_share())
-        assert fake_mgr.calls[1] == (False, "utun4")
-        assert fake_engine.calls == [True, False]
+        assert fake_mgr.calls[2] == (False, "utun4")
+        assert fake_engine.allowed_calls[-1] == []
         assert gw._last_vpn_status["state"] == "off"
+    finally:
+        loop.run_until_complete(gw.shutdown())
+        loop.close()
+
+
+def test_sync_vpn_share_keeps_whitelist_when_tunnel_blips(tmp_path):
+    """A Gateway-cut box must keep its route to the VPN server even when the
+    tunnel momentarily drops (VPN client reconnecting) — if the whitelist was
+    cleared on tunnel state, the box could never re-dial the VPN and the
+    household tunnel would die permanently. The whitelist is gated on the
+    SWITCH (enabled), not the transient tunnel state; only the switch off
+    clears it."""
+    cfg = _cfg(tmp_path)
+    cfg.vpn_share.tun2socks = False  # hermetic: the bridge is a real downloader
+    gw = Gateway(cfg)
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(gw.startup())
+        if gw._maintenance_task is not None:
+            gw._maintenance_task.cancel()
+            try:
+                loop.run_until_complete(gw._maintenance_task)
+            except asyncio.CancelledError:
+                pass
+        fake_mgr = _FakeVpnManager()
+        fake_engine = _FakeEngineRelay()
+        gw.vpn_manager = fake_mgr
+        gw.engine = fake_engine  # type: ignore[assignment]
+        gw._vpn_learn = lambda _: {"1.2.3.4"}
+        loop.run_until_complete(gw.database.set_setting(
+            "vpn_share_enabled", "1"))
+        # tunnel up -> whitelist learns the VPN server
+        fake_mgr.status = VpnShareStatus(state="on", interface="xray_tun")
+        loop.run_until_complete(gw._sync_vpn_share())
+        assert fake_engine.allowed_calls[-1] == ["1.2.3.4"]
+        # tunnel blips (no-interface) while the SWITCH is still on: the learned
+        # whitelist must survive so the box can re-dial the VPN server
+        fake_mgr.status = VpnShareStatus(state="no-interface")
+        loop.run_until_complete(gw._sync_vpn_share())
+        assert fake_engine.allowed_calls[-1] == ["1.2.3.4"]  # NOT cleared
+        assert gw._last_vpn_status["state"] == "no-interface"
+        # switch off -> whitelist cleared (the cut blocks the box entirely)
+        loop.run_until_complete(gw.database.set_setting(
+            "vpn_share_enabled", "0"))
+        fake_mgr.status = VpnShareStatus(state="off")
+        loop.run_until_complete(gw._sync_vpn_share())
+        assert fake_engine.allowed_calls[-1] == []
+    finally:
+        loop.run_until_complete(gw.shutdown())
+        loop.close()
+
+
+class _FakeTun2socks:
+    """Stands in for Tun2socksManager in the wiring test: records the
+    reconcile args, returns a scripted Tun2socksStatus."""
+
+    def __init__(self) -> None:
+        self.calls: list[bool] = []
+        self.status = Tun2socksStatus()
+        self.interface = "tun0"  # mirrors Tun2socksManager.interface
+
+    def reconcile(self, active: bool) -> Tun2socksStatus:
+        self.calls.append(active)
+        return self.status if active else Tun2socksStatus()
+
+
+def test_sync_vpn_share_bridges_userspace_vpn_with_tun2socks(tmp_path):
+    """VPN share on a userspace-netstack client (v2rayN — no kernel tun ever
+    appears): the routing manager is reconciled FIRST and finds nothing, so
+    the tun2socks bridge auto-provisioner is engaged as the FALLBACK and the
+    routing is RETRIED with the bridge interface as the pin. While the bridge
+    device carries the subnet it is kept (never stopped — the child owns that
+    tun). The bridge status rides the cached vpn status; turning the share
+    off stops the bridge too."""
+    cfg = _cfg(tmp_path)
+    gw = Gateway(cfg)
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(gw.startup())
+        if gw._maintenance_task is not None:
+            gw._maintenance_task.cancel()  # the background loop must not race
+            try:
+                loop.run_until_complete(gw._maintenance_task)
+            except asyncio.CancelledError:
+                pass
+        fake_mgr = _FakeVpnManager()
+        fake_ts = _FakeTun2socks()
+        fake_engine = _FakeEngineRelay()
+        gw.vpn_manager = fake_mgr
+        gw.tun2socks_manager = fake_ts
+        gw.engine = fake_engine  # type: ignore[assignment]
+        gw._vpn_learn = lambda _: set()
+        # switch on: routing first finds no kernel tunnel, then the bridge is
+        # engaged and the routing retried with the bridge device as the pin
+        loop.run_until_complete(gw.database.set_setting(
+            "vpn_share_enabled", "1"))
+        fake_mgr.status = VpnShareStatus(state="no-interface")
+        fake_ts.status = Tun2socksStatus(
+            state="running", message="sharing the VPN client through tun0",
+            proxy="127.0.0.1:10808", interface="tun0")
+        loop.run_until_complete(gw._sync_vpn_share())
+        assert fake_ts.calls == [True]  # bridge engaged only as a fallback
+        assert fake_mgr.calls == [(True, ""), (True, "tun0")]
+        assert gw._last_vpn_status["state"] == "no-interface"
+        assert gw._last_vpn_status["tun2socks"]["state"] == "running"
+        assert gw._last_vpn_status["tun2socks"]["interface"] == "tun0"
+        # bridge up + routing now succeeds -> the bridge's own device keeps the
+        # child alive (never stopped) and the pin is persisted
+        fake_mgr.status = VpnShareStatus(state="on", interface="tun0")
+        loop.run_until_complete(gw._sync_vpn_share())
+        assert fake_ts.calls == [True, True]  # kept, not stopped
+        assert fake_mgr.calls[-1] == (True, "")
+        pin = loop.run_until_complete(
+            gw.database.get_setting("vpn_share_interface", ""))
+        assert pin == "tun0"
+        assert gw._last_vpn_status["state"] == "on"
+        # switch off -> the routing is removed AND the bridge child is stopped
+        loop.run_until_complete(gw.database.set_setting(
+            "vpn_share_enabled", "0"))
+        fake_mgr.status = VpnShareStatus(state="off")
+        loop.run_until_complete(gw._sync_vpn_share())
+        assert fake_ts.calls == [True, True, False]
+        assert fake_mgr.calls[-1] == (False, "tun0")
+        assert gw._last_vpn_status["tun2socks"]["state"] == "off"
+    finally:
+        loop.run_until_complete(gw.shutdown())
+        loop.close()
+
+
+def test_sync_vpn_share_kernel_tunnel_wins_over_bridge(tmp_path):
+    """A REAL kernel tunnel (xray/sing-box/WireGuard tun) must win over the
+    tun2socks bridge: the routing manager is reconciled FIRST, and when it
+    routes into a kernel tunnel the bridge is NOT engaged (and a leftover
+    bridge whose device is NOT the routed one is stopped so it can't squat a
+    second tun). A kernel-TUN VPN client therefore needs no config edits and
+    never downloads the bridge."""
+    cfg = _cfg(tmp_path)
+    gw = Gateway(cfg)
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(gw.startup())
+        if gw._maintenance_task is not None:
+            gw._maintenance_task.cancel()  # the background loop must not race
+            try:
+                loop.run_until_complete(gw._maintenance_task)
+            except asyncio.CancelledError:
+                pass
+        fake_mgr = _FakeVpnManager()
+        fake_ts = _FakeTun2socks()
+        fake_engine = _FakeEngineRelay()
+        gw.vpn_manager = fake_mgr
+        gw.tun2socks_manager = fake_ts
+        gw.engine = fake_engine  # type: ignore[assignment]
+        gw._vpn_learn = lambda _: {"1.2.3.4"}
+        # switch on with a REAL kernel tunnel present -> routing routes into it
+        # directly; the bridge is never engaged (no download, no spawn)
+        loop.run_until_complete(gw.database.set_setting(
+            "vpn_share_enabled", "1"))
+        fake_mgr.status = VpnShareStatus(
+            state="on", interface="xray_tun", candidates=["xray_tun"])
+        loop.run_until_complete(gw._sync_vpn_share())
+        assert fake_ts.calls == [False]  # idempotent keep-stopped, never spawn
+        assert fake_mgr.calls == [(True, "")]
+        assert gw._last_vpn_status["state"] == "on"
+        assert gw._last_vpn_status["interface"] == "xray_tun"
+        assert gw._last_vpn_status["tun2socks"]["state"] == "off"
+        # a stale bridge whose device is NOT the real tunnel is stopped, so a
+        # junk/second tun can never divert the subnet away from xray_tun
+        fake_ts.calls.clear()
+        fake_ts.status = Tun2socksStatus(state="running", interface="tun0")
+        fake_mgr.status = VpnShareStatus(state="on", interface="xray_tun")
+        loop.run_until_complete(gw._sync_vpn_share())
+        assert fake_ts.calls == [False]  # stopped as redundant
+        assert fake_mgr.calls[-1] == (True, "xray_tun")  # pin persisted
     finally:
         loop.run_until_complete(gw.shutdown())
         loop.close()
@@ -796,6 +1303,183 @@ def test_holder_swap_carries_wan_status_wan(tmp_path):
     finally:
         loop2.run_until_complete(gw2.shutdown())
         loop2.close()
+
+
+def test_wan_renew_tick_fires_after_interval(tmp_path, monkeypatch):
+    """v24: the WAN auto-renew schedule restarts the PPPoE dial once the
+    interval has elapsed since the last renewal (ppp0 up + enabled + WAN)."""
+    monkeypatch.setattr("run.detect_ppp",
+                        lambda *a, **k: {"state": "up", "local": "1.2.3.4",
+                                         "peer": ""})
+    restarts: list[dict] = []
+    gw, loop = _boot_wan_gateway(
+        tmp_path, monkeypatch,
+        ppp="up",
+        renew={"enabled": True, "minutes": 30,
+               "last": (datetime.now(timezone.utc) - timedelta(minutes=40))
+               .isoformat()},
+        restarter=lambda: restarts.append({}) or
+        {"restarted": True, "state": "active", "detail": "dialed"})
+    try:
+        loop.run_until_complete(gw._wan_ip_renew_tick())
+        assert restarts, "the interval elapsed — the dial must restart"
+        # the renewal timestamp is persisted so the countdown restarts now
+        last = loop.run_until_complete(
+            gw.database.get_setting("wan_ip_renew_last", ""))
+        assert last, "mark_wan_renew must persist the new timestamp"
+        datetime.fromisoformat(last)
+    finally:
+        loop.run_until_complete(gw.shutdown())
+        loop.close()
+
+
+def test_wan_renew_tick_skips_when_disabled(tmp_path, monkeypatch):
+    """Enabled off -> the schedule never restarts the dial."""
+    monkeypatch.setattr("run.detect_ppp",
+                        lambda *a, **k: {"state": "up", "local": "1.2.3.4",
+                                         "peer": ""})
+    restarts: list[dict] = []
+    gw, loop = _boot_wan_gateway(
+        tmp_path, monkeypatch, ppp="up",
+        renew={"enabled": False, "minutes": 30, "last": ""},
+        restarter=lambda: restarts.append({}) or
+        {"restarted": True, "state": "active", "detail": ""})
+    try:
+        loop.run_until_complete(gw._wan_ip_renew_tick())
+        assert restarts == [], "disabled schedule must never fire"
+    finally:
+        loop.run_until_complete(gw.shutdown())
+        loop.close()
+
+
+def test_wan_renew_tick_skips_when_ppp0_down(tmp_path, monkeypatch):
+    """v24: a down ppp0 gates the schedule — restarting the dial would just
+    reconnect to a dead line (and hammer the modem every tick otherwise)."""
+    monkeypatch.setattr("run.detect_ppp",
+                        lambda *a, **k: {"state": "down", "local": "",
+                                         "peer": ""})
+    restarts: list[dict] = []
+    gw, loop = _boot_wan_gateway(
+        tmp_path, monkeypatch, ppp="down",
+        renew={"enabled": True, "minutes": 5, "last": ""},
+        restarter=lambda: restarts.append({}) or
+        {"restarted": True, "state": "active", "detail": ""})
+    try:
+        loop.run_until_complete(gw._wan_ip_renew_tick())
+        assert restarts == [], "a down line must never be renewed"
+    finally:
+        loop.run_until_complete(gw.shutdown())
+        loop.close()
+
+
+def test_wan_renew_tick_skips_in_lan_mode(tmp_path, monkeypatch):
+    """LAN topology has no ppp0 — the schedule is a no-op even when enabled."""
+    monkeypatch.setattr("run.detect_ppp",
+                        lambda *a, **k: {"state": "up", "local": "1.2.3.4",
+                                         "peer": ""})
+    restarts: list[dict] = []
+    cfg = _cfg(tmp_path)
+    gw = Gateway(cfg)
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(gw.startup())
+        loop.run_until_complete(
+            gw.database.set_setting("wan_ip_renew_enabled", "1"))
+        gw._pppoe_restart = lambda: restarts.append({}) or \
+            {"restarted": True, "state": "active", "detail": ""}
+        loop.run_until_complete(gw._wan_ip_renew_tick())
+        assert restarts == [], "LAN mode has no ppp0 to restart"
+    finally:
+        loop.run_until_complete(gw.shutdown())
+        loop.close()
+
+
+def test_wan_renew_tick_fires_when_never_renewed(tmp_path, monkeypatch):
+    """No wan_ip_renew_last yet -> fire immediately (the countdown starts now),
+    so a freshly-enabled schedule does not wait for an unknown last time."""
+    monkeypatch.setattr("run.detect_ppp",
+                        lambda *a, **k: {"state": "up", "local": "1.2.3.4",
+                                         "peer": ""})
+    restarts: list[dict] = []
+    gw, loop = _boot_wan_gateway(
+        tmp_path, monkeypatch, ppp="up",
+        renew={"enabled": True, "minutes": 60, "last": ""},
+        restarter=lambda: restarts.append({}) or
+        {"restarted": True, "state": "active", "detail": ""})
+    try:
+        loop.run_until_complete(gw._wan_ip_renew_tick())
+        assert restarts, "never renewed — the first tick must fire"
+    finally:
+        loop.run_until_complete(gw.shutdown())
+        loop.close()
+
+
+def test_wan_renew_tick_resumes_countdown_after_restart(tmp_path, monkeypatch):
+    """The last-renewal timestamp is read from the DB, so a gateway restart
+    mid-schedule must NOT re-renew (the countdown continues from the persisted
+    timestamp — a just-renewed line stays quiet)."""
+    monkeypatch.setattr("run.detect_ppp",
+                        lambda *a, **k: {"state": "up", "local": "1.2.3.4",
+                                         "peer": ""})
+    restarts: list[dict] = []
+    gw, loop = _boot_wan_gateway(
+        tmp_path, monkeypatch, ppp="up",
+        renew={"enabled": True, "minutes": 60,
+               "last": (datetime.now(timezone.utc) - timedelta(minutes=2))
+               .isoformat()},
+        restarter=lambda: restarts.append({}) or
+        {"restarted": True, "state": "active", "detail": ""})
+    try:
+        loop.run_until_complete(gw._wan_ip_renew_tick())
+        assert restarts == [], "2 min elapsed vs a 60 min interval — no fire"
+    finally:
+        loop.run_until_complete(gw.shutdown())
+        loop.close()
+
+
+def test_wan_renew_manual_restart_records_timestamp(tmp_path):
+    """The manual Restart button calls _renew_wan_ip directly: it runs the
+    restarter, updates the last-renewed state, and persists the timestamp
+    (restart-resume)."""
+    gw = Gateway(_cfg(tmp_path))
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(gw.startup())
+        gw._pppoe_restart = lambda: {"restarted": True, "state": "active",
+                                     "detail": "dialed"}
+        result = loop.run_until_complete(gw._renew_wan_ip())
+        assert result["restarted"] is True
+        assert gw._last_wan_renew == result
+        last = loop.run_until_complete(
+            gw.database.get_setting("wan_ip_renew_last", ""))
+        assert last, "a manual renewal must persist its timestamp"
+        datetime.fromisoformat(last)
+    finally:
+        loop.run_until_complete(gw.shutdown())
+        loop.close()
+
+
+def test_wan_status_carries_renew_schedule(tmp_path, monkeypatch):
+    """The WS snapshot / GET /api/wan carry the auto-renew config so the WAN
+    tab renders the toggle + last-renewed line without a separate query."""
+    monkeypatch.setattr("run.detect_ppp",
+                        lambda *a, **k: {"state": "up", "local": "1.2.3.4",
+                                         "peer": ""})
+    last_iso = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    gw, loop = _boot_wan_gateway(
+        tmp_path, monkeypatch, ppp="up",
+        renew={"enabled": True, "minutes": 60, "last": last_iso},
+        restarter=lambda: {"restarted": True, "state": "active", "detail": ""})
+    try:
+        loop.run_until_complete(gw._maintenance_tick())
+        ws = dict(gw.holder.get().wan_status or {})
+        assert ws["renew_enabled"] is True
+        assert ws["renew_minutes"] == 60
+        assert ws["renew_last"] == last_iso  # rides the snapshot, never reset
+        assert ws["ppp0"] == "up"
+    finally:
+        loop.run_until_complete(gw.shutdown())
+        loop.close()
 
 
 def test_wan_internet_gated_on_ppp0_link(tmp_path, monkeypatch):
@@ -1299,8 +1983,9 @@ def test_immediate_reshaping_waits_for_shaping_lock(tmp_path):
             def stop(self):
                 pass
             def update_state(self, rate_map, enabled, total_down,
-                             total_up, aqm):
-                calls.append((rate_map, enabled, total_down, total_up, aqm))
+                             total_up, aqm, lan_rate_mbps=None):
+                calls.append((rate_map, enabled, total_down, total_up, aqm,
+                              lan_rate_mbps))
 
         gw.shaper = _FakeShaper()  # type: ignore[assignment]
         # prime the ip->mac map a real tick would have filled, so the re-sync
@@ -1318,8 +2003,9 @@ def test_immediate_reshaping_waits_for_shaping_lock(tmp_path):
         lock.release()  # synchronous in 3.10+ (only acquire() is a coroutine)
         asyncio.get_event_loop().run_until_complete(task)
         assert len(calls) == 1, "re-sync programs the tree once the lock frees"
-        rate_map, enabled, total_down, total_up, aqm = calls[0]
+        rate_map, enabled, total_down, total_up, aqm, lan_rate = calls[0]
         assert enabled is True and total_down == 100.0 and total_up == 20.0
+        assert lan_rate == 1000.0
         assert rate_map[0]["ip"] == "192.168.2.130"
     finally:
         asyncio.get_event_loop().run_until_complete(gw.shutdown())

@@ -201,6 +201,19 @@ class QuotaService:
         return allowance > 0 and used_gb >= allowance
 
     @staticmethod
+    def user_quota_blocked(user: _db.User | None, allowance: float,
+                           used_gb: float) -> bool:
+        """Is the user quota-blocked, honouring the quota-exemption flag?
+
+        An exempt user is NEVER quota-blocked, whatever their usage — the
+        exemption lifts the usage-vs-allowance gate only; a manual admin cut
+        (user/device level) still resolves through ``resolve_device_state``.
+        """
+        if user is not None and user.exempt_quota:
+            return False
+        return QuotaService.quota_blocked_for(user, allowance, used_gb)
+
+    @staticmethod
     def resolve_device_state(user: _db.User | None, dev: _db.Device,
                              user_quota_blocked: bool) -> str:
         """Resolve a device's effective block state through its owner user.
@@ -241,7 +254,7 @@ class QuotaService:
         for uid, allowance in allowances.items():
             u = usage_by_user.get(uid, {"up": 0, "down": 0})
             used_gb = (u["up"] + u["down"]) / GB
-            out[uid] = self.quota_blocked_for(users.get(uid), allowance, used_gb)
+            out[uid] = self.user_quota_blocked(users.get(uid), allowance, used_gb)
         return out
 
     async def evaluate_blocks(self) -> list[dict[str, Any]]:
@@ -400,9 +413,14 @@ class QuotaService:
 
     # -- guest mode ------------------------------------------------------------
 
-    #: Settings keys for guest mode (a toggle + the guest allowance in GB).
+    #: Settings keys for guest mode (a toggle + the guest allowance in GB +
+    #: the max number of guest accounts, to stop MAC-spoofing spam + an
+    #: optional default speed cap applied to every guest account).
     GUEST_MODE_KEY = "guest_mode"
     GUEST_QUOTA_KEY = "guest_quota_gb"
+    GUEST_LIMIT_KEY = "guest_limit"
+    GUEST_SPEED_KEY = "guest_speed_limit_mbps"
+    STOP_NEW_KEY = "stop_new_connections"
 
     async def is_guest_mode(self) -> bool:
         """True when newly connected devices auto-register as guests."""
@@ -423,6 +441,115 @@ class QuotaService:
         await self.db.add_event(
             f"Guest mode {'enabled' if enabled else 'disabled'}",
             "warn" if enabled else "info")
+
+    async def guest_limit(self) -> int:
+        """Maximum number of guest accounts (default 2). Guards against a
+        MAC-changing device minting a fresh guest allowance forever."""
+        raw = await self.db.get_setting(self.GUEST_LIMIT_KEY, "")
+        try:
+            return max(1, int(raw or 2))
+        except ValueError:
+            return 2
+
+    async def set_guest_limit(self, n: int) -> None:
+        """Raise/lower the guest-account cap. Existing guests are untouched;
+        the limit gates brand-new guest registrations."""
+        n = max(1, int(n))
+        await self.db.set_setting(self.GUEST_LIMIT_KEY, str(n))
+        await self.db.add_event(f"Guest limit set to {n}", "warn")
+
+    async def guest_speed_limit_mbps(self) -> float:
+        """Default speed cap (Mbps) applied to every guest account's AGGREGATE
+        bandwidth (0 = unlimited). Guests with their own user-level cap use the
+        stricter of the two; per-device caps are unchanged."""
+        raw = await self.db.get_setting(self.GUEST_SPEED_KEY, "")
+        try:
+            return max(0.0, float(raw or 0.0))
+        except ValueError:
+            return 0.0
+
+    async def set_guest_speed_limit(self, mbps: float) -> None:
+        """Change the default guest speed cap. 0 lifts the cap (unlimited)."""
+        mbps = round(max(0.0, float(mbps)), 3)
+        await self.db.set_setting(self.GUEST_SPEED_KEY, str(mbps))
+        await self.db.add_event(
+            f"Guest speed limit set to {mbps:g} Mbps",
+            "warn" if mbps else "info")
+
+    async def stop_new_connections(self) -> bool:
+        """True when brand-new devices are refused (blocked on first sight),
+        while already-registered devices keep joining normally."""
+        return (await self.db.get_setting(self.STOP_NEW_KEY, "0")) == "1"
+
+    async def set_stop_new_connections(self, enabled: bool) -> None:
+        """Turn the stop-new-connections gate on/off."""
+        await self.db.set_setting(self.STOP_NEW_KEY, "1" if enabled else "0")
+        await self.db.add_event(
+            f"STOP NEW CONNECTIONS {'enabled' if enabled else 'disabled'}",
+            "warn" if enabled else "info")
+
+    # -- decline random MACs ----------------------------------------------------
+
+    #: Settings keys for the random-MAC gate: refuse brand-new devices whose
+    #: MAC is randomized (locally administered), plus the one-shot "also cut
+    #: devices that already joined with a random MAC" sweep.
+    DECLINE_RANDOM_KEY = "decline_random_macs"
+    DECLINE_RANDOM_EXISTING_KEY = "decline_random_macs_existing"
+
+    @staticmethod
+    def is_random_mac(mac: str) -> bool:
+        """Is ``mac`` randomized (locally administered)?
+
+        IEEE assigns the first octet's two LSBs: bit 0 = unicast/multicast,
+        bit 1 = globally unique / locally administered. OSes that randomize a
+        MAC for privacy always set the locally-administered bit, so a MAC whose
+        first byte has ``0x02`` set is almost certainly a randomized address —
+        the real vendor OUI is gone, which is exactly why vendor lookups come
+        up empty for them.
+        """
+        try:
+            first = int(mac.replace(":", "").replace("-", "")[:2], 16)
+        except (ValueError, IndexError):
+            return False
+        return bool(first & 0x02)
+
+    async def decline_random_macs(self) -> bool:
+        """True when brand-new devices with a randomized MAC are refused
+        (registered + immediately admin-blocked on first sight)."""
+        return (await self.db.get_setting(self.DECLINE_RANDOM_KEY, "0")) == "1"
+
+    async def set_decline_random_macs(self, enabled: bool,
+                                      also_existing: bool = False) -> None:
+        """Turn the random-MAC gate on/off.
+
+        When ``also_existing`` is set AND ``enabled``, devices that already
+        joined with a randomized MAC are admin-blocked in one sweep (like the
+        guest-limit cap, blocked ones stay cut until an admin acts). The
+        one-shot flag itself is always reset — the setting only governs brand-
+        new registrations.
+        """
+        await self.db.set_setting(self.DECLINE_RANDOM_KEY,
+                                  "1" if enabled else "0")
+        await self.db.add_event(
+            f"Decline random MACs {'enabled' if enabled else 'disabled'}",
+            "warn" if enabled else "info")
+        if enabled and also_existing:
+            n = 0
+            for dev in await self.db.list_devices():
+                if (dev.mac != _db.GATEWAY_MAC
+                        and self.is_random_mac(dev.mac)
+                        and dev.block_state != _db.BLOCK_ADMIN):
+                    await self.db.set_device_state(dev.id, _db.BLOCK_ADMIN)
+                    await self.db.add_event(
+                        f"Random-MAC device cut: {dev.mac} — randomized "
+                        f"address already on the network", "warn", dev.id)
+                    n += 1
+            if n:
+                await self.db.add_event(
+                    f"Decline random MACs: cut {n} existing randomized device(s)",
+                    "warn")
+        # one-shot flag always resets; it only ever rides alongside a set
+        await self.db.set_setting(self.DECLINE_RANDOM_EXISTING_KEY, "0")
 
     async def set_guest_quota(self, gb: float) -> None:
         """Change the guest allowance. Applied to EVERY existing guest right
@@ -453,6 +580,7 @@ class QuotaService:
     SHAPING_DOWN_KEY = "shaping_total_down_mbps"
     SHAPING_UP_KEY = "shaping_total_up_mbps"
     SHAPING_AQM_KEY = "shaping_aqm"
+    SHAPING_LAN_RATE_KEY = "shaping_lan_rate_mbps"
 
     async def get_shaping_config(self) -> dict[str, Any]:
         """Current shaping settings (the shaper reads these each maintenance
@@ -469,8 +597,15 @@ class QuotaService:
                 await self.db.get_setting(self.SHAPING_UP_KEY, "0") or 0))
         except ValueError:
             total_up = 0.0
+        try:
+            lan_rate = max(0.0, float(
+                await self.db.get_setting(self.SHAPING_LAN_RATE_KEY, "1000")
+                or 0))
+        except ValueError:
+            lan_rate = 1000.0
         return {"enabled": enabled, "total_down_mbps": total_down,
-                "total_up_mbps": total_up, "aqm": aqm}
+                "total_up_mbps": total_up, "aqm": aqm,
+                "lan_rate_mbps": lan_rate}
 
     # -- VPN share (policy-routing the client subnet into the box's tunnel) ------
 
@@ -506,10 +641,74 @@ class QuotaService:
         iface = (iface or "").strip()
         await self.db.set_setting(self.VPN_INTERFACE_KEY, iface)
 
+    # -- WAN public-IP renewal (re-dial the PPPoE line) --------------------------
+
+    #: Settings keys for the WAN-tab "renew public IP" feature (see
+    #: quota.topology.restart_pppoe). ``wan_ip_renew_enabled`` arms the auto
+    #: schedule, ``wan_ip_renew_minutes`` is its interval (default 15, clamped
+    #: to >= :data:`WAN_RENEW_MIN_MINUTES`) and ``wan_ip_renew_last`` persists
+    #: the last renewal time (ISO) so a gateway restart does not reset the
+    #: countdown — the ``dnslog_state`` resume pattern.
+    WAN_RENEW_KEY = "wan_ip_renew_enabled"
+    WAN_RENEW_MINUTES_KEY = "wan_ip_renew_minutes"
+    WAN_RENEW_LAST_KEY = "wan_ip_renew_last"
+    #: The floor for the auto-renew interval (minutes). Every renewal restarts
+    #: the PPPoE dial and drops internet for a few seconds — a lower bound
+    #: keeps a typo or a malicious edit from hammering the line. No upper
+    #: bound: any longer interval is allowed.
+    WAN_RENEW_MIN_MINUTES = 5
+
+    async def get_wan_renew_config(self) -> dict[str, Any]:
+        """Current WAN auto-renew settings + the last renewal time (ISO or "").
+        Only reads the saved config for the WAN tab — the schedule itself only
+        ever RUNS in WAN mode with ppp0 up (run.py's maintenance tick)."""
+        enabled = (await self.db.get_setting(self.WAN_RENEW_KEY, "0")) == "1"
+        minutes = self._clamp_renew_minutes(
+            await self.db.get_setting(self.WAN_RENEW_MINUTES_KEY, ""))
+        last = (await self.db.get_setting(self.WAN_RENEW_LAST_KEY, "") or "").strip()
+        return {"enabled": enabled, "minutes": minutes, "last": last}
+
+    async def set_wan_renew_config(self, enabled: bool, minutes: int) -> dict[str, Any]:
+        """Persist the auto-renew schedule. ``minutes`` is clamped to the
+        floor (>= 5); the new interval applies on the next maintenance tick.
+        A ``warn`` event records the change (renewal drops internet briefly)."""
+        minutes = self._clamp_renew_minutes(str(minutes))
+        await self.db.set_setting(self.WAN_RENEW_KEY, "1" if enabled else "0")
+        await self.db.set_setting(self.WAN_RENEW_MINUTES_KEY, str(minutes))
+        await self.db.add_event(
+            "WAN public-IP auto-renew " +
+            (f"enabled — the PPPoE dial restarts every {minutes} min "
+             "(internet drops briefly each time)"
+             if enabled else "disabled"),
+            "warn" if enabled else "info")
+        return await self.get_wan_renew_config()
+
+    async def mark_wan_renew(self) -> None:
+        """Record that a renewal just happened (manual or scheduled) so the
+        auto-renew countdown restarts from NOW — a gateway restart mid-schedule
+        must not immediately re-renew. A ``warn`` event records the renewal
+        (it drops internet for a few seconds)."""
+        await self.db.set_setting(
+            self.WAN_RENEW_LAST_KEY,
+            _dt.datetime.now(_dt.timezone.utc).isoformat())
+        await self.db.add_event(
+            "WAN public IP renewed — the PPPoE dial restarted (internet "
+            "dropped briefly while ppp0 re-dialed)",
+            "warn")
+
+    @staticmethod
+    def _clamp_renew_minutes(raw: str) -> int:
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            return 15
+        return max(QuotaService.WAN_RENEW_MIN_MINUTES, n)
+
     async def set_shaping(self, enabled: bool | None = None,
                           total_down_mbps: float | None = None,
                           total_up_mbps: float | None = None,
-                          aqm: bool | None = None) -> dict[str, Any]:
+                          aqm: bool | None = None,
+                          lan_rate_mbps: float | None = None) -> dict[str, Any]:
         """Persist a shaping change. Each non-None field is written; a ``warn``
         event records what changed. No engine call here — the maintenance loop
         consumes the settings next tick (same pattern as guest mode)."""
@@ -526,6 +725,11 @@ class QuotaService:
             total_up_mbps = max(0.0, float(total_up_mbps))
             await self.db.set_setting(self.SHAPING_UP_KEY, str(total_up_mbps))
             changes.append(f"total up {total_up_mbps:g} Mbps")
+        if lan_rate_mbps is not None:
+            lan_rate_mbps = max(0.0, float(lan_rate_mbps))
+            await self.db.set_setting(self.SHAPING_LAN_RATE_KEY,
+                                      str(lan_rate_mbps))
+            changes.append(f"LAN rate {lan_rate_mbps:g} Mbps")
         if aqm is not None:
             await self.db.set_setting(self.SHAPING_AQM_KEY, "1" if aqm else "0")
             changes.append("low-latency queues " +

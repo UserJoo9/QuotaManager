@@ -155,7 +155,16 @@ Every ~15 s (`run.py` → `Gateway._maintenance_tick`):
 1. **Rolls the quota period** if stale (month boundary), or skips when
    `reset_day=0`.
 2. **Syncs device bindings** from dnsmasq's lease file — new devices
-   auto-register into the dashboard.
+   auto-register into the dashboard. `_persist_lease` is the single admission
+   gate for a brand-new MAC and applies three gates in order: **STOP NEW
+   CONNECTIONS** (blocks every brand-new device while registered ones keep
+   joining), **Decline random MACs** (a device whose MAC has the
+   locally-administered bit set — i.e. no vendor OUI, so the box can't
+   identify or budget it — is registered but immediately cut; the same branch
+   powers the one-shot "also cut already joined" sweep via `is_random_mac`),
+   and the **guest limit** (over-cap guests are registered but cut). All three
+   ride the same registered-then-admin-blocked pattern, so refused devices are
+   visible in the dashboard and enforced at line rate on the next tick.
 3. **Drains engine counter deltas** into `usage_daily`.
 4. **Re-evaluates block states** — each user's usage vs. their allowance, and
    fans the cut out to all of their devices (`resolve_device_state`).
@@ -196,11 +205,19 @@ below for the full design.
 (boot + every maintenance tick + the Network-tab toggle via `_apply_vpn_now`)
 reads the DB switch (`vpn_share_enabled`, set from the Network tab), reconciles
 `VpnShareManager` off the event loop, persists the detected tunnel as the pin,
-feeds `engine.set_vpn_relay(state == "on")` — suspending the box's OWN gateway
-metering while the relay doubles the volume through its input/output hooks —
-and caches `_last_vpn_status` for the API. The `_vpn_lock` keeps the toggle and
-the tick from reconciling concurrently. See
-[VPN share](#vpn-share) below for the full design.
+and while the relay is APPLIED feeds `engine.set_gateway_allowed(...)` — the
+learned VPN-server endpoints (auto-learned via `ss` from the VPN client's
+sockets, sticky, plus any `engine.gateway_allow_ips` override) that stay
+reachable when the box's OWN internet is cut (Gateway OFF), so the relay the
+household rides survives the cut — and caches `_last_vpn_status` for the API.
+When the routing manager finds no kernel tunnel (userspace VPN clients like
+v2rayN), `_sync_vpn_share` FIRST reconciles the tun2socks auto-provisioner
+(`quota/tun2socks.py` — downloads the pinned binary on first use, spawns the
+bridge against the client's SOCKS listener) and retries the routing once the
+bridge reports running; its status rides the cached `vpn_share.status.tun2socks`.
+Relay-off clears the whitelist and kills the bridge child (a cut then blocks the
+box entirely). The `_vpn_lock` keeps the toggle and the tick from reconciling
+concurrently. See [VPN share](#vpn-share) below for the full design.
 
 ---
 
@@ -239,6 +256,16 @@ clearing it restores all devices. A per-device `bypass` keeps one device online
 despite its user's quota block; an explicit per-device admin cut always wins
 (precedence above). Enforcement stays per-MAC/per-IP — the engine's `blocked`
 set still drops packets at line rate; only the *decision* is per-user.
+
+**Exempt from quota** (`users.exempt_quota`): a flag that lifts the
+usage-vs-allowance gate entirely — an exempt user is never quota-blocked, no
+matter their usage. It sits *above* the quota gate but *below* manual admin
+cuts, so a blocked exempt user stays blocked until an admin lifts it. It is
+resolved through the single choke point `QuotaService.user_quota_blocked()`
+(used by the enforcement map, the dashboard payload and the /report payload);
+the per-device `bypass` becomes redundant for an exempt user's devices, so the
+UI disables it. Migration is an idempotent `ALTER TABLE users ADD COLUMN
+exempt_quota` (default 0).
 
 New DHCP devices auto-create their own user (one device ⇒ one user); legacy
 device-only databases are migrated in place by `db.connect()` (idempotent
@@ -292,17 +319,75 @@ the direction total (NOT a pass-through), so an unlimited downloader cannot
 flood the modem buffer and inflate everyone's ping.
 
 ```
-effective(d, dir)  = min(dev.limit(d, dir) or ∞, user.limit(u, dir) or ∞)
+effective(d, dir)  = min(dev.limit(d, dir) or ∞, user.limit(d, dir) or ∞)
                      clamped to the direction total (Network tab)
                      → 0/unlimited sends the device to the default class,
                        capped at the direction total, NOT a pass-through
 ```
 
+**The caps shape the internet, not the LAN.** Client↔uplink-subnet traffic
+(NAS, router admin, LAN transfers) **and client↔the box itself** (dashboard,
+SSH, file shares like RustDisk to the gateway IP) rides a **prio-1 pass-through
+class `1:99`** under each HTB root at the **full LAN link rate**
+(`shaping.lan_rate_mbps`, default 1000) — LAN transfers never pay the WAN cap.
+**The pass-through rate never falls back to the WAN total**: a box whose
+config.yaml omits the key (setup-generated configs now write
+`lan_rate_mbps: 1000` explicitly) and whose `core/config.py` predates the field
+would otherwise get a `1:99` capped at the line limit — `_tree_cmds` falls back
+to the 1000 Mbps default with a `warning` log instead.
+The root `1:1` caps at the LAN rate (headroom only the pass-through can use);
+the default `1:2`, aggregate `1:100` and every device leaf stay capped at the
+WAN line rate, so bufferbloat control is unchanged. The uplink subnet resolves
+through the engine's own `resolve_local_networks` (`engine.uplink_subnet` wins,
+else derived from the dhcp block — the LAN snapshot in LAN or WAN mode, else the
+box's own NIC addresses), so the
+pass-through and the nftables counters/drop exclusions always agree; the box's
+**own addresses** on the shaping NIC (`_find_own_addresses`, the kernel's
+`ip addr` table) are always added to the pass-through too — the client-subnet
+ingress redirect catches client→box packets just like internet uploads, so
+without them a RustDisk transfer to the gateway's own IP would be throttled by
+the WAN upload cap (the live-box report). The LAN
+filters run at `prio 1`, ahead of every `prio 2` device filter — all
+priorities deliberately non-zero, since tc treats an explicit `prio 0` filter
+as "no priority" and auto-assigns it after every real priority (the live-box
+"LAN still throttled" bug: the pass-through existed but sorted behind the
+device caps) — and cover both
+directions: the ifb0 upload tree matches `ip dst <uplink>` (pre-NAT src =
+client) **and `ip dst <box's own addresses>`** (client→box); the egress
+download tree matches `ip src <uplink>` (LAN downloads to
+clients + the box's own egress) **and `ip src <box's own addresses>`** (box→client
+LAN responses, never capped by the device leaves) **and** `ip dst <uplink>`
+(re-injected LAN uploads already shaped at ifb0 — without it the default class
+would re-cap them on the way out). The pass-through programs whenever there is
+an uplink subnet **or** the box has own addresses (a NIC with only the client
+alias still passes client→box traffic). `fq_codel` rides the pass-through leaf
+too. **"0" is per-direction**: a 0 WAN up/down total means *that* direction is
+unlimited —
+`update_state` tears down only when both totals are 0, and `_build_cmds` builds
+the eth0 down tree only when `total_down > 0` and the ifb0 ingress redirect +
+upload tree only when `total_up > 0`, so "upload unlimited" never disables the
+download caps (and vice versa). **The LAN rate is
+also a UI-editable DB setting**: the Network tab's speed section is split into
+**WAN — internet** (the real line down/up rates) and **LAN — internal
+transfers** (`set-lan-rate`, the LAN pass-through rate, 0 = the 1000 Mbps
+default). `POST /api/network` accepts `lan_rate_mbps` (partial posts leave it
+untouched), `QuotaService.set_shaping` persists `shaping_lan_rate_mbps`, and
+`run.py` feeds it into `shaper.update_state(lan_rate_mbps=…)` on every tick
+(+ the API's immediate re-sync) — the DB setting overrides the boot-time
+`shaping.lan_rate_mbps` config value, so an edit rebuilds `1:99` at the new
+rate immediately and never needs a config.yaml edit on the box.
+
+A default **guest speed limit** (`guest_speed_limit_mbps`, 0 = unlimited) slots
+into the user term: `_sync_shaping` caps every guest user's aggregate at
+`min(user.limit, guest_speed)` when the default is set (the shaper already
+applies `min(dev, user)`, so only the stricter cap wins) — one field caps the
+whole household's guest allowance set without per-device edits.
+
 Two engine-side details worth knowing:
 
 - The tree is rebuilt only when a **signature** of (enabled, totals, aqm,
-  sorted caps) changes — the same idempotent-reconcile pattern as the nftables
-  `_last_blocked_ips` cache.
+  sorted caps, lan rate, uplink subnet) changes — the same idempotent-reconcile
+  pattern as the nftables `_last_blocked_ips` cache.
 - `ifb0` (the fake-bridge device uploads are redirected into) is brought up
   once in `start()` and verified to exist; if the module was already loaded
   without creating it, `start()` unloads + reloads with the right `numifbs`.
@@ -510,6 +595,17 @@ gateway rewires itself and restarts; a few seconds of internet downtime). To
 revert: put the router back in routed/NAT mode, then **Revert to LAN**. The one
 always-hands-on step is the physical router rewiring.
 
+**Renewing the public IP.** On a metered line the ISP hands a fresh public IP
+to each new PPPoE session — the box's dial means that renewal is now a
+dashboard action, not a router restart: the WAN-tab **Restart PPPoE — renew
+public IP** button (`POST /api/wan/renew`) restarts the `quota-wan-ppp` systemd
+unit (via `quota/topology.restart_pppoe`, best-effort, never raises), tearing
+the session down and re-dialing. An **auto-renew schedule** (`POST
+/api/wan/renew-config`, interval clamped to a 5-minute floor — every renewal
+drops internet briefly) re-dials on its own. Both only run while ppp0 is
+actually **up** (a dead dial has nothing to renew into), and the last-renewed
+timestamp is persisted so a gateway restart never re-renews mid-schedule.
+
 ---
 
 ## VPN share
@@ -532,8 +628,13 @@ programs:
   mirroring the nftables local-net exclusions.
 
 Rules only ever land when sysfs confirms the tunnel device exists (`/sys/class/
-net/<iface>`), and a missing tunnel is never routed into — that would
-blackhole the subnet. `peer_ip()` handles both `ip -o` shapes (bare local
+net/<iface>`), a missing tunnel is never routed into — that would blackhole the
+subnet — and a tunnel is only routed into once it carries an IPv4 address (a
+freshly spawned tun2socks gets a 2 s settle window to gain its address; a junk
+ARPHRD_NONE device like the live-box "evice" exists in sysfs yet routes
+nothing, so an address-less device is reported as no-interface, never routed
+into). A stale pin whose device is gone OR address-less is dropped and the
+tunnel re-detected instead. `peer_ip()` handles both `ip -o` shapes (bare local
 address vs `local ... peer ...`); the dev-only route falls back to `scope link`
 (no peer/HUTI interfaces like WireGuard's). The detected device is **pinned in
 the DB** (`vpn_share_interface` set by run.py; the `vpn_share.interface`
@@ -542,31 +643,80 @@ same interface. `remove()` tears the rule + table down deterministically and
 `is_rule_installed()` makes every call idempotent — `reconcile` self-heals any
 crash/reboot/tunnel-restart leftover on the next 15 s tick.
 
-**Gateway-meter suspension (`NftablesEngine.set_vpn_relay`, vpn share only).**
-Relayed volume traverses the box's own input/output hooks a second time
+**Gateway cut + relay whitelist (`NftablesEngine.set_gateway_allowed`, vpn share
+only).** Relayed volume traverses the box's own input/output hooks a second time
 (client → forward → tunnel → uplink), which would be charged AGAIN to the
-protected Gateway user — and a quota-cut Gateway's `gw_blocked` drop would kill
-the household's VPN. Suspension inserts an unconditional
-`comment "quota-vpn-relay" accept` **first** in the input/output chains (above
-the DNS/DHCP exemptions, `gw_blocked` drops and `q_gw` counters) and restores
-by deleting exactly that rule **by handle** (`nft -a list chain` lookup,
-cache-gated like the blocked set). A failed insert is never claimed (retry next
-tick); forward-chain per-device quota + the ARP lock stay untouched. The state
-is enforced from the APPLIED relay state, not the switch.
+protected Gateway user — so the relay traffic is never metered, AND you can
+deliberately cut the box's own internet (Gateway OFF → `gw_blocked` = `0.0.0.0/0`)
+while the household tunnel survives: only the box's VPN-server endpoint(s) stay
+reachable. The `gw_allowed` set's accept rules are programmed once in
+`_program_gateway` **above** the `gw_blocked` drops and `q_gw` counters (after
+the DNS/DHCP exemptions), so allowed relay traffic is neither cut nor
+double-charged. Membership is fed by run.py's `_sync_vpn_share`: learned via
+`ss -tnp`/`ss -unp` from the VPN client's established sockets (process-name
+match: v2ray/sing-box/xray/tun2socks), kept STICKY while the SWITCH is on —
+the client can re-dial without a gap, and a momentary tunnel blip (VPN client
+reconnecting) does NOT clear the whitelist (a cut box must keep its route to
+the VPN server or the tunnel could never come back) — plus any explicit
+`engine.gateway_allow_ips` override; only the switch turning OFF clears the
+set. Loopback (`127.0.0.0/8`) is exempt from the
+cut structurally (dashboard + the tun2socks↔VPN-client hop keep working). The
+set is cache-gated like the `blocked` set (a same-membership re-flush every tick
+would re-open a short free window); a failed element add is never claimed (retry
+next tick). Forward-chain per-device quota + the ARP lock stay untouched.
 
 **Wiring.** run.py `_sync_vpn_share` runs at boot + every maintenance tick (+
 immediately on the Network-tab toggle) under `_vpn_lock`, reconciles off the
-event loop, persists the pin, feeds `engine.set_vpn_relay` and caches
+event loop, persists the pin, feeds `engine.set_gateway_allowed` and caches
 `_last_vpn_status` (never the switch — always the applied state) for
 `GET /api/network`. `vpn_share.enabled: false` in config.yaml means the manager
 is never built and the API's `status` key is absent (degraded boot no-op).
 
+**tun2socks auto-provisioner (`quota/tun2socks.py`, NEW).** A userspace-netstack
+VPN client (v2rayN) never exposes a kernel tun, so the routing manager reports
+`no-interface` forever. `Tun2socksManager` closes that gap fully
+automatically — the box provisions the bridge itself:
+
+- **Download + verify:** tun2socks is not in Kali's repos, so the manager
+  fetches the static binary from the PINNED GitHub release (v2.7.0, goreleaser
+  `.zip`), verifying the per-architecture sha256 that the release API publishes
+  (`ARCH_SHA256`; `vpn_share.download_url`/`download_sha256` override). An
+  unknown architecture or a missing/ mismatched checksum REFUSES to install —
+  an unverified binary is never executed. The download runs once per boot
+  (`_binary_ok` cache) with a 60 s retry gate; "installing…" is surfaced as a
+  status while it runs.
+- **Proxy auto-detect:** the bridge pipes into the VPN client's LOCAL SOCKS
+  listener, found via `ss -tlnp` (process match v2ray/sing-box/xray), falling
+  back to `vpn_share.socks_proxy` (default `127.0.0.1:10808` — v2rayN's
+  default). An explicit empty config value = "no fallback": a missing listener
+  then reports `no-proxy` honestly instead of targeting a made-up port.
+- **Spawn/kill:** a child process (`-device tun0 -proxy socks5://… -tun-ip
+  10.0.0.1 -tun-gw 10.0.0.2`) is kept running while the share is on; a crashed
+  child is re-spawned only after a 10 s gate (no spawn loop against a dead
+  proxy), a failed spawn surfaces `error`, and turning the share off terminates
+  the child. tun2socks itself assigns the tun addresses, so the routing
+  manager's normal auto-detect picks `tun0` up and pins it.
+- **Ordering (run.py):** `_sync_vpn_share` reconciles the routing manager
+  FIRST so a real kernel tunnel (xray/sing-box/WireGuard tun) always wins —
+  no config edits, no bridge download. The tun2socks bridge is only the
+  FALLBACK for userspace clients: when the routing found no kernel tunnel the
+  bridge is reconciled, and the routing retried once with the bridge interface
+  as the pin. While the bridge's own device carries the subnet it is kept
+  (its child owns that tun — stopping it would blackhole the route); a
+  leftover bridge whose device is NOT the routed tunnel is stopped so a
+  junk/second tun never diverts the subnet. The bridge's status rides the
+  cached `vpn_share.status.tun2socks` (`state/message/proxy/interface`) and
+  the Network tab renders its messages (downloading / no-proxy / no-binary /
+  error) — a Gateway-OFF box that can't download yet says so instead of
+  silently retrying. `vpn_share.tun2socks: false` skips the manager entirely
+  (only needed when a userspace client is ALSO a kernel-TUN client).
+
 **Limits, honestly:** IPv4 only (a provider's IPv6 TUN is not routed); DoH/DoT
 is untouched (DNS stays on dnsmasq, and DNS-layer filtering still applies); if
 the tunnel drops, the subnet is blackholed on purpose — never silently
-re-routed around the quota; the box's own internet still flows (and stays
-metered into the Gateway user) while relaying — the suspension only covers the
-relay volume that would otherwise be double-counted.
+re-routed around the quota; while relaying, the box's own internet flows (and
+stays metered into the Gateway user) UNLESS you cut it — the whitelist only
+keeps the VPN-server endpoints reachable under that cut.
 
 ---
 
@@ -596,12 +746,33 @@ These are the non-obvious choices that keep the system correct and cheap:
   blocks + accounting degrade independently, and each subsystem logs once and
   continues.
 - **A phone-first control plane.** The dashboard, the public `/milestone` page
-  and the `/report` page are all responsive + touch-first: the topbar tabs
-  become a horizontally swipeable strip, grids stack to one column, the bundle
+  and the `/report` page are all responsive + touch-first: the sidebar nav
+  becomes a horizontally swipeable strip, grids stack to one column, the bundle
   ring shrinks, modals/overlays scroll instead of clipping (a tall modal on a
   phone never loses its buttons off-screen), and touch targets are ≥ 36 px. The
   family's day-to-day loop — checking quota, topping up, viewing the milestone
   page, reading the report — works entirely from a phone.
+- **An obsidian-glass control plane.** The dashboard is a dark glassmorphism
+  UI: midnight-obsidian base (`#07080A` → `#0D0E12`) with ambient cobalt
+  radial glows + an ultra-subtle drifting particle canvas (~11 dust nodes,
+  1–2.5 px, `0.15–0.25` opacity), electric-cobalt accents
+  (`#3B82F6`/`#2563EB`), heavy frosted `blur(20px)` panels on
+  `rgba(13,16,23,0.65)` (sidebar, cards, modals, status pill), gradient conic
+  bundle ring + gradient data bars with a soft cobalt ambient glow, a fixed
+  full-width sidebar (brand badge, SVG nav — Management / Network / WAN /
+  Admin / History / DNS — status pill + quick-action footer with a **privacy
+  eye** that masks MACs + the PPPoE credentials prefill), 2-column
+  CSS-column masonry for user cards, monospace data metrics and spring
+  (`cubic-bezier(0.16,1,0.3,1)`) transitions. The last visited sidebar panel is
+  remembered in localStorage (`quota_active_panel`), so a page refresh returns
+  to the tab you were on (falling back to Management when the saved panel no
+  longer exists). The **Admin** page holds the
+  **System Logs** console (a monospace terminal that flex-fills the viewport,
+  level-filtered ALL/INFO/WARNING/ERROR + search/refresh/export) embedded below
+  its 2-column Security &amp; Credentials / System Info &amp; About cards.
+  `/milestone`
+  + `/report` share the same stylesheet (via the `--glass-*`/`--accent*` CSS
+  variables) so the family pages stay on-theme with zero duplicated styling.
 
 ---
 
@@ -799,6 +970,11 @@ engine:
   # laptop itself counts against it and can cut the box until topped up / the
   # period rolls. false skips the counters but keeps the drop rules.
   count_gateway: true
+  # VPN-server IPs that stay reachable when the box's OWN internet is cut
+  # (Gateway OFF) while "VPN share" relays the household. Normally AUTO-learned
+  # from the VPN client's sockets — set only for a client the auto-learn can't
+  # identify. Empty = auto-learned only.
+  gateway_allow_ips: []
   # LOCAL (LAN) traffic never consumes the bundle: client<->client and
   # client<->uplink-LAN (router admin, NAS, router-as-DNS) are excluded from
   # the counting rules (and the block drops keep LAN access for blocked
@@ -828,6 +1004,13 @@ shaping:
   interface: ""               # NIC that carries the client subnet; empty => auto-detect
   client_subnet: ""           # client CIDR; empty => derived from dhcp.gateway_ip + subnet
   ifb: ifb0                   # virtual device used to shape uploads (modprobe ifb)
+  lan_rate_mbps: 1000         # LAN link rate: client<->uplink-subnet traffic (NAS,
+                              #   router admin, LAN transfers) rides a pass-through
+                              #   class at this full rate instead of the WAN cap;
+                              #   editable in the Network tab (set-lan-rate) and
+                              #   persisted as the shaping_lan_rate_mbps setting,
+                              #   which overrides this boot value; 0 = the 1000
+                              #   Mbps default (NEVER the WAN direction total)
 
 report:
   enabled: true               # on-demand internal report (/report + /api/report).
@@ -857,14 +1040,38 @@ dns_filter:
 vpn_share:
   enabled: false              # "VPN share": route the whole client subnet
                               #   through a VPN tunnel the box runs (TUN mode
-                              #   sing-box/xray/WireGuard/tun2socks). The real
-                              #   switch lives in the Network tab (DB setting);
-                              #   false here = the manager is never built.
+                              #   sing-box/xray/WireGuard, or a userspace
+                              #   client like v2rayN bridged by tun2socks —
+                              #   see below). The real switch lives in the
+                              #   Network tab (DB setting); false here = the
+                              #   manager is never built.
   interface: ""               # initial tunnel-device pin; empty => auto-detect
                               #   the first non-LAN, network-up interface and
                               #   pin it in the DB (vpn_share_interface)
   route_table: 200            # iproute2 table the policy rule points at
   rule_pref: 1000             # ip rule preference (below local/main)
+  tun2socks: true             # auto-provision the tun2socks bridge when the
+                              #   routing manager finds NO kernel TUN (a
+                              #   userspace netstack like v2rayN never creates
+                              #   one): quota/tun2socks.py downloads the
+                              #   pinned + sha256-verified binary (one-time),
+                              #   spawns it against the VPN client's local
+                              #   SOCKS listener, and stops it when the share
+                              #   is off. false = you run your OWN kernel-TUN
+                              #   client (a second tun would confuse the
+                              #   detector)
+  socks_proxy: 127.0.0.1:10808  # fallback SOCKS endpoint for the bridge;
+                              #   auto-detection prefers the VPN client's
+                              #   actual listener (ss -tlnp match)
+  tun_interface: tun0         # device tun2socks creates; tun_ip/tun_gw are
+  tun_ip: 10.0.0.1            #   the addresses it assigns itself
+  tun_gw: 10.0.0.2
+  binary: /usr/local/bin/tun2socks  # install path for the downloaded binary
+  download_url: ""            # pin override; empty = built from the pinned
+                              #   RELEASE_TAG + architecture (v2.7.0)
+  download_sha256: ""         # pin override; empty = built-in per-arch table.
+                              #   A binary without a pinned checksum is NEVER
+                              #   installed (supply chain)
 ```
 
 > **Speed shaping is switched on in the dashboard, not in this YAML.**
@@ -882,7 +1089,7 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/dashboard` | full bundle + users + devices + usage snapshot |
-| GET/POST/PATCH/DELETE | `/api/users` & `/api/users/{id}` | list / create / update / delete users (allowance, block, speed caps) |
+| GET/POST/PATCH/DELETE | `/api/users` & `/api/users/{id}` | list / create / update / delete users (allowance, block, speed caps; `exempt_quota: true` lifts the quota gate — the user is never quota-blocked, manual admin cuts still apply) |
 | POST | `/api/users/{id}/topup` | add GB to a user's allowance, clears their quota block |
 | GET/POST/PATCH/DELETE | `/api/devices` & `/api/devices/{id}` | list / create / update / delete devices (user, quota, bypass, speed caps) |
 | POST | `/api/devices/{id}/topup` | add GB to a device, clears its quota block |
@@ -899,10 +1106,12 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | PATCH | `/api/users/{id}/dns` · `/api/devices/{id}/dns` | set/clear a per-user or per-device upstream DNS-server override (`{"dns_server": "1.1.1.1"}`, `""` clears it) |
 | GET/POST | `/api/bundle` | read / update bundle (`total_gb`, `reset_day`, or `add_gb` to recharge mid-month). A POST makes the dashboard the bundle owner (`bundle_source=dashboard`) |
 | POST | `/api/reset-month` | force an early period roll-over |
-| GET/POST | `/api/guest` | guest mode: auto-register new devices with their own small allowance |
-| GET/POST | `/api/network` | speed-shaping settings: `enabled`, `total_down_mbps`, `total_up_mbps`, `aqm` — plus `vpn_share: {enabled, interface, status?}` from the DB (status = the cached applied state, present only when a manager is wired — `vpn_share.enabled: false` in config.yaml means boot without one) |
-| GET/POST | `/api/wan` | strong-mode topology: `GET` live status (topology/source/pending/ppp0), `POST {"topology": "lan"\|"wan", "pppoe_user", "pppoe_password", "wan_if"}` APPLIES the topology live — rewrites config.yaml + the DB together, runs `scripts/topology.sh` (NIC + dnsmasq + PPPoE dial) and schedules a restart (`restart_scheduled`, `script_output`). Creds travel to the applier via the environment, never argv. On an applier failure config.yaml + the DB are ROLLED BACK to the previous state (no restart) |
+| GET/POST | `/api/guest` | guest mode: auto-register new devices with their own small allowance; also the **guest-limit** cap (`limit`, default 2 — stops MAC-spoofing spam), a default **guest speed limit** (`speed_limit_mbps`, 0 = unlimited — the tc shaper applies it as every guest account's aggregate ceiling, `min` with an explicit user cap) and the **STOP NEW CONNECTIONS** gate (`stop_new`) that blocks brand-new devices while letting registered ones join |
+| GET/POST | `/api/network` | speed-shaping settings: `enabled`, `total_down_mbps`, `total_up_mbps`, `aqm` — plus `vpn_share: {enabled, interface, status?}` from the DB (status = the cached applied state, present only when a manager is wired — `vpn_share.enabled: false` in config.yaml means boot without one) and `decline_random_macs` (a brand-new device with a randomized/locally-administered MAC is registered + immediately admin-blocked; the POST accepts a one-shot `decline_random_macs_existing: true` to sweep devices already joined) |
+| GET/POST | `/api/wan` | strong-mode topology: `GET` live status (topology/source/pending/ppp0 + the auto-renew `renew_enabled`/`renew_minutes`/`renew_last` schedule + saved creds), `POST {"topology": "lan"\|"wan", "pppoe_user", "pppoe_password", "wan_if"}` APPLIES the topology live — rewrites config.yaml + the DB together, runs `scripts/topology.sh` (NIC + dnsmasq + PPPoE dial) and schedules a restart (`restart_scheduled`, `script_output`). Creds travel to the applier via the environment, never argv. On an applier failure config.yaml + the DB are ROLLED BACK to the previous state (no restart) |
 | POST | `/api/wan/test` | test the PPPoE credentials WITHOUT changing anything: dials a throwaway `ppp200` link via `scripts/test_pppoe.sh` with `{"pppoe_user", "pppoe_password", "wan_if"}` and reports `status` (success/auth-failed/no-pppoe-server/link-down/error), the negotiated local/peer IPs, `internet` (ping check), and `detail` — never touches config.yaml, the DB, `ppp0`, routing or DNS |
+| POST | `/api/wan/renew` | renew the WAN public IP NOW (the WAN-tab Restart button): restarts the `quota-wan-ppp` PPPoE dial via the gateway's wired `wan_renew` callback → the ISP hands the new session a fresh public IP. Returns `{restarted, state: active\|inactive\|unknown, detail}`. **409** while ppp0 is down ("nothing to renew into") or WAN mode isn't active; **503** when no callback is wired (degraded boot); 500 on a raising callback. Internet drops for a few seconds while ppp0 re-dials |
+| POST | `/api/wan/renew-config` | set the auto-renew schedule: `{"enabled", "minutes"}` — `minutes` is **clamped to a 5-minute floor** (no upper bound, every renewal drops internet briefly), stored under `wan_ip_renew_enabled`/`wan_ip_renew_minutes`/`wan_ip_renew_last`; returns `{enabled, minutes, last}` |
 | GET | `/api/milestone` | **public** — the requesting device's user's consumption + per-device breakdown (resolved by source IP via its DHCP lease; `recognized: false` for a lease-less IP). Pairs with the `/milestone` page |
 | POST | `/api/milestone/notify` | **public** — acknowledge a crossed milestone (`{"user_id", "milestone": 50\|75\|100}`); sets the flag once per period |
 | GET | `/api/report` | **source-IP gated** (client subnet + `report.allowed_ips`, else 403) — read-only consumption report: exact bundle bytes, per-user + per-device bytes, events tail, log tail, WAN status. No session cookie needed |
@@ -955,12 +1164,16 @@ QuotaManager/
 │   │                         #   shaping settings (get/set)
 │   ├── nftables.py           # NftablesEngine (Linux): kernel counters + block set
 │   │                         #   + ARP gateway-lock deny rules (known_ips set);
-│   │                         #   set_vpn_relay: suspends the box's OWN gateway
-│   │                         #   metering while VPN share relays the household
+│   │                         #   gw_allowed: the box egress that survives a
+│   │                         #   Gateway cut while VPN share relays the household
 │   ├── vpnshare.py           # VpnShareManager: "VPN share" policy routing —
 │   │                         #   client subnet -> dedicated route table whose
 │   │                         #   default points at the box's TUN, LAN routes
 │   │                         #   kept local, idempotent reconcile + self-heal
+│   ├── tun2socks.py          # Tun2socksManager: auto-provisions the tun2socks
+│   │                         #   bridge for userspace VPN clients (v2rayN) —
+│   │                         #   pinned+sha256-verified download, SOCKS proxy
+│   │                         #   auto-detect, spawn/kill child, honest status
 │   ├── shaping.py            # TcShaper (Linux): per-device + per-user speed caps,
 │   │                         #   low-latency fq_codel queues (HTB), two-tree design
 │   ├── arp_scan.py           # rogue static-IP detection: raw-socket ARP probe of
@@ -974,6 +1187,7 @@ QuotaManager/
 │   │                         #   resolve_domain_status (History-tab filter badges) —
 │   │                         #   generated dnsmasq config, no new service
 │   ├── topology.py           # WAN-topology detection: is ppp0 up (for the WAN tab)?
+│   │                         #   restart_pppoe() = public-IP renewal (v24)
 │   ├── netmgr.py             # TopologyManager: the WAN tab's live LAN/WAN switch
 │   ├── vendor.py             # MAC OUI -> manufacturer (IEEE registry, lazy load)
 │   ├── oui.txt               # bundled IEEE MA-L/MA-M/MA-S database (53.5k prefixes)
@@ -987,9 +1201,9 @@ QuotaManager/
 │   │                         #   one-time 50/75/100% milestone acknowledge
 │   ├── report.html           # source-IP-gated read-only consumption report
 │   └── assets/
-│       ├── styles.css        # dark purple glassmorphism; responsive + touch-first
-│       │                     #   (topbar tabs -> swipeable strip, cards stack,
-│       │                     #   modals scroll) on phones
+│       ├── styles.css        # obsidian-glass cobalt theme (sidebar, masonry);
+│       │                     #   responsive + touch-first (nav -> swipeable
+│       │                     #   strip, cards stack, modals scroll) on phones
 │       └── app.js            # WS client, dashboard render, user-grouped device cards
 └── tests/
     ├── test_quota_service.py # period math, per-user allowance math, block fan-out
@@ -1011,6 +1225,9 @@ QuotaManager/
     ├── test_topology.py      # detect_ppp / check_internet probes (fake `ip`)
     ├── test_vpnshare.py      # VpnShareManager vs a fake `ip`: rule/route program,
     │                         #   peer.parse, pin, reconcile, teardown
+    ├── test_tun2socks.py     # Tun2socksManager vs fakes: download+verify, proxy
+    │                         #   auto-detect, spawn argv, respawn/download gates,
+    │                         #   stop-on-off, arch + checksum refusal
     ├── test_dns_rules.py     # hosts/ABP parsing, wildcard scopes, rendering
     └── test_run_wiring.py    # run.py wiring + live boot + bundle reconcile +
                               #   dnsmasq lease sync + live-counter regression

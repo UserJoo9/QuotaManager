@@ -109,6 +109,13 @@ class EngineConfig:
     #: user. Off => the box's traffic is uncounted (its quota block, if any,
     #: still applies via the gateway chains).
     count_gateway: bool = True
+    #: Explicit VPN-server IPs that must stay reachable when the box's own
+    #: internet is cut (Gateway OFF) while "VPN share" relays the household.
+    #: Normally the relay's endpoints are AUTO-learned from the VPN client's
+    #: established ``ss`` sockets — this is the manual override for a VPN
+    #: client the auto-learn step can't identify (or a fixed server you want
+    #: always allowed). Values are IPv4/CIDR; empty (default) disables.
+    gateway_allow_ips: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -137,6 +144,14 @@ class ShapingConfig:
     client_subnet: str = ""
     #: ifb device used for the upload (ingress-redirect) tree.
     ifb: str = "ifb0"
+    #: LAN link rate (Mbps). The HTB root + a LAN pass-through class are capped
+    #: here while internet traffic keeps its WAN caps: client<->uplink-subnet
+    #: traffic (NAS, router admin, LAN transfers) rides the pass-through at full
+    #: LAN speed instead of being throttled by the WAN line rate. The uplink
+    #: subnet is resolved the same way as the nftables engine (explicit
+    #: ``engine.uplink_subnet`` wins, else derived from the dhcp block). ``0``
+    #: falls back to the direction total (no LAN headroom).
+    lan_rate_mbps: float = 1000.0
 
 
 @dataclass
@@ -216,6 +231,32 @@ class VpnShareConfig:
     #: Must not collide with the main (32766) or local (0) tables.
     route_table: int = 200
     rule_pref: int = 1000
+    #: Auto-provision the tun2socks bridge when VPN share is on but no
+    #: kernel TUN interface exists (userspace-netstack clients like v2rayN
+    #: never create one). ``quota/tun2socks.py`` downloads the pinned,
+    #: sha256-verified binary (one-time), spawns it against the VPN
+    #: client's local SOCKS proxy, and stops it when VPN share is off.
+    #: Disable only when you run your OWN kernel-TUN client (sing-box /
+    #: xray / WireGuard) — a second tun would confuse the tunnel detector.
+    tun2socks: bool = True
+    #: Fallback SOCKS proxy the bridge targets. Auto-detection prefers the
+    #: VPN client's actual LOCAL listener (``ss -tlnp`` matching
+    #: v2ray/sing-box/xray) and falls back to this value.
+    socks_proxy: str = "127.0.0.1:10808"
+    #: tun device tun2socks creates + addresses it assigns itself
+    #: (``-device`` / ``-tun-ip`` / ``-tun-gw``). VpnShareManager's tunnel
+    #: detector prefers ``tun*`` names, so these defaults are picked up
+    #: automatically.
+    tun_interface: str = "tun0"
+    tun_ip: str = "10.0.0.1"
+    tun_gw: str = "10.0.0.2"
+    #: Install path for the downloaded binary.
+    binary: str = "/usr/local/bin/tun2socks"
+    #: Pin the release asset. Empty URL = auto-built from the pinned
+    #: RELEASE_TAG + architecture; empty sha256 = the built-in per-arch
+    #: table. An unverified (no sha256) binary is NEVER installed.
+    download_url: str = ""
+    download_sha256: str = ""
 
 
 @dataclass

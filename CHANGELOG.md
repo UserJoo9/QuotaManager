@@ -6,6 +6,409 @@ The version is the single source of truth in `quota/version.py`; a release tag
 
 ## [Unreleased]
 
+### Added
+
+- **Network tab: speed shaping is now split into WAN and LAN sections**
+  (`web/index.html` + `web/assets/app.js` + `quota/service.py` +
+  `api/schemas.py` + `api/app.py` + `run.py` + `quota/shaping.py`): the speed
+  settings are separated into **WAN — internet** (the real line down/up rates,
+  `set-total-down` / `set-total-up`) and **LAN — internal transfers**
+  (`set-lan-rate`, the LAN pass-through rate; 0 = the 1000 Mbps default), each
+  with its own label + help text, so the LAN pass-through rate is a
+  first-class, UI-editable, DB-persisted setting instead of a config-only key.
+  `NetworkUpdate.lan_rate_mbps` (optional, partial POSTs leave it untouched);
+  `QuotaService.set_shaping(lan_rate_mbps=…)` persists `shaping_lan_rate_mbps`;
+  `run.py` feeds it into `shaper.update_state(lan_rate_mbps=…)` on every tick
+  and the API's immediate re-sync, overriding the boot-time
+  `shaping.lan_rate_mbps` config value — an edit rebuilds the `1:99`
+  pass-through at the new rate immediately. The live Network & Bundle
+  overview card gains a **LAN (pass-through)** stat (`#np-lan`). app.js
+  v=50→51.
+- **Speed shaping: LAN traffic is no longer throttled** (`quota/shaping.py` +
+  `core/config.py` + config.yaml): the Network-tab "Speed limits & latency"
+  controls now shape **internet (WAN)** traffic only — client<->uplink-subnet
+  traffic (NAS, router admin, LAN transfers) rides a **prio-0 pass-through
+  class `1:99`** under each HTB root at the **full LAN link rate**, so LAN
+  transfers never pay the WAN cap. The root `1:1` caps at
+  `shaping.lan_rate_mbps` (default 1000) — headroom only the pass-through can
+  use; the default `1:2` + aggregate `1:100` + device leaves all stay capped
+  at the WAN line rate, so bufferbloat control is unchanged. The uplink subnet
+  resolves exactly like the nftables engine (`engine.uplink_subnet` wins, else
+  derived from the dhcp block — the LAN snapshot, else the box's own NIC
+  addresses). The LAN filters
+  run at `prio 1`, ahead of every `prio 2` device filter; both directions are
+  covered (ifb0 upload tree: `ip dst <uplink>`; egress download tree:
+  `ip src <uplink>` for LAN downloads to clients AND `ip dst <uplink>` for
+  re-injected LAN uploads, so they aren't re-capped by the default class).
+  All priorities are deliberately non-zero: `tc` treats an explicit
+  `prio 0` filter as "no priority" and auto-assigns it AFTER every real
+  priority, so the pass-through would silently lose to the device caps (the
+  live-box "LAN still throttled" bug — the pass-through existed but its
+  filters sorted behind the `prio 1` device filters).
+  `fq_codel` rides the pass-through leaf too; `netmgr.render_config` carries
+  `lan_rate_mbps` through WAN/LAN applies.
+- **Remember the last visited sidebar tab** (`web/assets/app.js`): `switchPanel`
+  persists the active panel (`quota_active_panel`, localStorage) and init
+  restores it after login — a page refresh returns to the tab you were on
+  (Management / Network / WAN / Admin / History / DNS), falling back to the
+  default Management page if the saved panel no longer exists. app.js v=49→50.
+- **Per-user "exempt from quota"** (user modal + `POST /api/users` +
+  `PATCH /api/users/{id}`): an `exempt_quota` flag on a user lifts the
+  usage-vs-allowance quota gate — an exempt user is **never** quota-blocked,
+  however much they use (the dashboard + report resolve through the new
+  `QuotaService.user_quota_blocked()`, the single choke point shared by
+  `_user_quota_map`). Manual admin cuts (user/device level) still apply; the
+  per-device `bypass` is redundant for an exempt user's devices, so the device
+  modal disables it (`#d-bypass-exempt-note`). The user card shows a
+  "unlimited" badge; the device-modal + DNS-picker user dropdowns tag exempt
+  users "— unlimited". New `exempt_quota` column (idempotent ALTER migration),
+  `User.exempt_quota`, wire key in `_dashboard_payload`/`_report_payload`;
+  `UserCreate`/`UserUpdate.exempt_quota`. app.js v=46→47, styles.css v=47→48.
+- **Decline random MACs** (Network tab → Connection & security): a toggle that
+  refuses brand-new devices whose MAC is **randomized** (locally-administered
+  bit — `0x02` in the first byte, the exact bit OSes set for privacy MACs, so
+  the real vendor OUI is gone and the device is anonymous/unidentifiable). A
+  first-seen randomized MAC is still registered (visible + counted) but
+  **immediately admin-blocked** with a `warning` event — the same gate pattern
+  as STOP NEW CONNECTIONS. A **"Also cut random-MAC devices already joined"**
+  checkbox runs a one-shot sweep that admin-blocks every existing randomized
+  device (real-OUI devices are never touched); blocked ones stay cut until an
+  admin acts. `QuotaService.is_random_mac()` (pure helper) +
+  `decline_random_macs()`/`set_decline_random_macs(enabled, also_existing)`
+  (setting keys `decline_random_macs` / `decline_random_macs_existing`, the
+  one-shot flag always resets); `run.py._persist_lease` new gate branch (after
+  stop-new, before the guest branch); `NetworkUpdate.decline_random_macs` +
+  `.decline_random_macs_existing`; `GET/POST /api/network` carry the switch.
+  UI: `#decline-random-toggle` + `#decline-random-existing` + `#decline-random-msg`.
+- **Privacy eye** (sidebar quick-action): an eye toggle (localStorage pref,
+  default on) that masks on-screen sensitive details — MAC addresses in the
+  device rows, rogue rows and the device modal (`aa:bb:cc:••:••:••` via
+  `macText()`) and stops the WAN tab from prefilling the saved PPPoE
+  credentials (**username and password** — the username prefill is gated on
+  `privacyHide` exactly like the password, so a masked panel shows neither).
+  The masking is **two-way**: while the eye is on, `refreshWan` actively
+  CLEARS both credential fields (not merely skips the prefill), so a value
+  revealed and then re-hidden vanishes immediately instead of lingering in the
+  DOM until a refresh. Only display is masked; the edit fields keep their real
+  values, and the eye re-renders in place (device/rogue lists + the open
+  device modal + a WAN refetch). `#privacy-eye`,
+  `macText()`/`togglePrivacy()`/`setPrivacyButton()`. app.js v=47→49.
+- **Default guest speed limit** (Network & Quota tab, `POST /api/guest`): a
+  **Guest speed limit (Mbps)** field caps the **aggregate** bandwidth of every
+  guest account (their whole allowance set, not per-device) — the tc shaper
+  applies it as each guest user's ceiling, `min`'d with any explicit user cap,
+  `0` = unlimited. It applies to guests already registered (like the guest
+  quota) and rides the existing `_sync_shaping` pipeline, so it needs no new
+  kernel mechanics. `QuotaService.guest_speed_limit_mbps()` /
+  `set_guest_speed_limit()` (setting key `guest_speed_limit_mbps`, clamps ≥ 0);
+  `GuestUpdate.speed_limit_mbps`; the value is returned by `GET/POST
+  /api/guest`; app.js v=44→45.
+- **WAN public-IP renewal — restart the PPPoE dial from the dashboard** (WAN
+  tab, `quota/topology.py` + `run.py` + `api`): the box dials the line itself,
+  so a **Restart PPPoE — renew public IP** button (`POST /api/wan/renew`)
+  restarts the `quota-wan-ppp` systemd unit — the ISP hands the new session a
+  fresh public IP (the same effect as restarting the router, without touching
+  the box). Internet drops for a few seconds while ppp0 re-dials. An
+  **auto-renew schedule** (`POST /api/wan/renew-config`, `enabled` +
+  `minutes`) re-dials periodically — interval clamped to a **5-minute floor**
+  (no upper bound; default 15), so a typo can't hammer the line. The schedule
+  only runs in WAN mode **with ppp0 actually UP** (a down dial means the
+  internet isn't working — renewing into a dead line is pointless), and the
+  button + schedule are disabled while ppp0 is down (WAN-tab note explains
+  why). The last-renewal timestamp (`wan_ip_renew_last`) is persisted, so a
+  gateway restart mid-schedule never re-renews immediately (the `dnslog_state`
+  resume pattern). `quota/topology.py` gains `restart_pppoe()` (best-effort,
+  never raises); settings keys live on `QuotaService`
+  (`wan_ip_renew_enabled` / `wan_ip_renew_minutes` / `wan_ip_renew_last`);
+  the renew config + last-renewed time ride `_wan_status()` → the WS snapshot
+  + `GET /api/wan` (no extra query for the WAN tab). Renewals log a `warn`
+  event. UI: Restart button + auto-renew block (`#wan-restart-btn`,
+  `#wan-renew-toggle`/`#wan-renew-minutes`/`#wan-renew-save`,
+  `#wan-renew-last`, `#wan-renew-disabled-note`), app.js v=43→44.
+- **Sidebar collapse toggle removed** (v24 cleanup): the fixed sidebar is now
+  always full-width — the ☰ toggle, `#app.sidebar-collapsed` rules and the
+  `sidebar-toggle` JS binding are gone (styles.css v=44→45).
+- **Guest limit + "STOP NEW CONNECTIONS" gates** (Bundle settings tab,
+  `POST /api/guest`): a max guest-account cap (default **2**, `guest_limit`)
+  stops a MAC-changing device from minting a fresh guest allowance forever —
+  once the cap is reached, a brand-new device is still registered as a guest
+  (visible + counted) but **immediately admin-blocked** (kernel drop) with a
+  `warning` event. The **STOP NEW CONNECTIONS** toggle (`stop_new_connections`)
+  refuses every brand-new device: a first-seen MAC is registered and cut on
+  sight, while already-registered devices keep joining normally. Both gates
+  take effect on the next dnsmasq lease sync (~15 s) and are enforced through
+  the existing per-device admin-block path (`BLOCK_ADMIN`), so a refused device
+  shows as "Blocked" in the dashboard until an admin unblocks or deletes it.
+  New `count_guest_users()` in `quota/db.py`; service getters/setters; app.js
+  v=39→40.
+
+### Changed
+
+- **Network & Quota tab renamed to "Network"** (v27) — the sidebar + nav label
+  reads just **Network** now (the panel still holds the bundle config, guest
+  controls and connection toggles). test_web_ui pins updated.
+- **Admin page polish (v27)** — the **System Info & About** card drops the
+  "Application" row (keeps the Version row + description), and the **System
+  Logs** console now actually scrolls: `.admin-layout` uses a fixed
+  `height: calc(100vh - 98px)` (+ a 480 px floor) and `.admin-logs-card .logs`
+  is `flex: 1 1 0; min-height: 0; overflow-y: auto` — the old
+  `min-height: calc(100vh - 98px)` on the wrapper was the reason the viewer
+  never grew beyond one screen.
+- **Bundle ring interior is opaque (v27)** — `.ring::before` uses `var(--bg)`
+  instead of a translucent `rgba(7,8,10,0.55)`, so the conic gauge reads clean
+  over the glass panels instead of showing the content behind it.
+- **DNS pickers show the owning user (v27)** — the DNS-tab rule target + import
+  device dropdowns label each device with its user
+  (`Name (User)`); the user scope lists stay name-only.
+- **Logs merged into the Admin page (v26)** — the dedicated **Logs** sidebar
+  tab is gone; the sidebar is now Management / Network & Quota / WAN / Admin /
+  History / DNS. The Admin page is restructured into a 2-column top grid —
+  **Security & Credentials** (change-password) + **System Info & About**
+  (app, version) — with the **full System Logs console embedded below**,
+  full-width: the level filter (ALL/INFO/WARNING/ERROR), search, **Refresh**
+  and **Export** toolbar are unchanged, and the viewer is a scrollable
+  monospace terminal that flex-fills the remaining viewport height
+  (`min-height: calc(100vh - 98px)`), keeping the level accents (INFO
+  cobalt, WARNING amber, ERROR crimson). Entering the Admin tab loads the
+  logs; the WS refresh hook now checks `panel-admin` visibility. All element
+  ids survive (the JS contract is untouched). Cache-busts: styles.css
+  v=46→47, app.js v=45→46.
+- **Bundle settings merged into the Network tab (v25)** — the separate
+  "Bundle settings" sidebar link is gone. One **Network & Quota** page now
+  holds the bundle configuration (total/reset-day + recharge + reset-month),
+  the guest-mode controls (mode toggle, quota, **speed limit**, max-accounts
+  + STOP NEW CONNECTIONS) and the Connection & security toggles (shaping with
+  its sub-fields + AQM, VPN share) in a 2-column layout (≈65% config /
+  ≈35% single live **Network & Bundle overview** card: bundle gauge + progress
+  bar + shaping/VPN/devices preview). All element ids survive (the JS contract
+  is untouched). Cache-busts: styles.css v=45→46, app.js v=44→45.
+- **Dashboard redesigned — obsidian glass, "$1M enterprise" theme (v23)** —
+  the matte charcoal look is gone. Midnight-obsidian base (`#07080A` →
+  `#0D0E12`) with ambient cobalt radial glows plus an **ultra-subtle drifting
+  particle canvas** (`#bg-particles`, ~11 dust nodes at 1–2.5 px radii and
+  `0.15–0.25` opacity so they float behind every card without cluttering
+  text/gauges; DPR-aware, pauses on hidden tab, disabled for
+  `prefers-reduced-motion`). Electric Cobalt Blue (`#3B82F6` / `#2563EB`)
+  replaces every green: status dots, primary buttons (gradient + soft glow),
+  rings, toggles, focus rings, active nav. Panels are **heavy frosted
+  obsidian glass** (`rgba(13,16,23,0.65)` + `backdrop-filter: blur(20px)`,
+  14 px radii, crisp 1 px `rgba(255,255,255,0.08)` borders) across the
+  sidebar, cards, modals and the status pill; the bundle ring is a gradient
+  conic gauge and data bars use a cobalt `linear-gradient`, both with a soft
+  blue ambient glow (`0 0 15px rgba(59,130,246,0.25)`). **Sidebar**: brand
+  icon-badge + refined logo hierarchy, vertical SVG nav with a subtle hover
+  glide, and a clean footer = status pill + quick-action row (**admin profile
+  avatar/user section removed**; `#logout-btn` is now an icon button). Main
+  canvas `max-width: 1600px`. Typography: SF Pro / Inter stack with tight
+  tracking for headings, monospace (`ui-monospace`) for IPs/MACs/metrics
+  (ring, stat values, device usage, live split); transitions on the
+  `cubic-bezier(0.16,1,0.3,1)` spring. Cache-busts: styles.css v=41→43,
+  app.js v=40→42 (index + milestone/report).
+- **Dashboard redesigned — developer-grade dark matte theme (v22)** — the
+  purple "AI-gradient" glassmorphism is gone. Pitch-black sidebar + deep
+  charcoal (`#0B0C0E`) content on solid card surfaces (`#121418`/`#18181B`)
+  with fine `#27272A` borders; flat fills (zero gradient/glow/blur) and solid
+  muted status colors (emerald `#10B981` online/active, muted crimson
+  `#DC2626` blocked/errors, slate idle, blue/teal upload/download). The top
+  bar is now a **fixed collapsible left sidebar** (☰ toggle → 64 px icon rail)
+  with vertical nav + inline SVG icons, an internet-status pill and Admin
+  profile in the footer; the **Users & Devices list is a 2-column masonry**
+  (CSS `columns`, `break-inside: avoid`) so an expanded accordion card
+  lengthens its column instead of leaving a grid hole. 4–6 px radii,
+  `:focus-visible` emerald rings, solid conic bundle-ring arc, solid bar
+  fills, flat buttons. Cache-busts: styles.css v=40→41, app.js v=38→39.
+- **VPN share prefers the real kernel tunnel; tun2socks is only the fallback** —
+  `_sync_vpn_share` previously reconciled the tun2socks bridge FIRST and made
+  it authoritative, so even with a real kernel TUN present (xray/sing-box/
+  WireGuard) the bridge spawned a redundant tun0 and hijacked the route. Now
+  the routing manager is reconciled FIRST — any kernel tunnel wins with no
+  config edits and no bridge download. The bridge engages only when the
+  routing finds no tunnel (userspace v2rayN), stays running only while its OWN
+  device carries the subnet, and is stopped when a different real tunnel
+  routes the traffic. `vpn_share.interface`/`tun2socks` overrides are no
+  longer needed for kernel-TUN clients (defaults `""`/`true` are correct for
+  both).
+- **Tunnel auto-detect ranks named tunnel devices by link type, not just
+  name** (`quota/vpnshare.py`): the rank regex now matches the `tun`/`utun`/
+  `wg`/`vpn` substring anywhere in the name, so kernel-TUN clients that name
+  their device differently (xray's `xray_tun`, sing-box) rank alongside the
+  classic `tun0`/`wg0` — and a junk ARPHRD_NONE leftover can't out-rank a real
+  tunnel. (Also fixes a latent inversion where the generic group sorted
+  before the named one.)
+
+### Fixed
+
+- **Client→box LAN traffic was throttled by the WAN upload cap — the RustDisk
+  case** (`quota/shaping.py`): the client-subnet ingress redirect sends every
+  client packet into `ifb0` (including traffic destined for the box itself),
+  but the LAN pass-through only matched `ip dst <uplink subnet>` — so a file
+  transfer to the gateway's OWN IP (`192.168.2.1`, e.g. RustDisk to the box)
+  matched nothing and fell to the default class, capped at `total_up` ("WAN
+  upload 2 → very slow; 0 → very fast"). The box's own addresses are now
+  always added to the pass-through (`_find_own_addresses` parses the kernel's
+  `ip -o -4 addr show dev <iface>`): `ip dst <own>` on the upload tree
+  (client→box) and `ip src <own>` on the egress tree (box→client responses).
+  The pass-through class now programs whenever there is an uplink subnet **or**
+  the box has own addresses, so a NIC with only the client alias still passes
+  client→box traffic. `_state_signature` includes own addresses.
+- **LAN pass-through filters silently sorted BEHIND the device caps — the
+  prio-0 fix never landed** (`quota/shaping.py` + `tests/test_shaping.py`):
+  the live box proved `tc filter add … prio 0` is treated as "no priority"
+  and auto-assigned to `pref 49151/49152` — AFTER every real priority — so the
+  `1:99` pass-through filters lost to the `prio 1` device filters and LAN
+  traffic was still throttled by the WAN caps even though the code looked
+  correct (the arbiter: a manual `tc filter add … prio 0` on a dummy
+  interface renders as `pref 49152`). All filter priorities are now
+  non-zero: the LAN pass-through runs at `prio 1` (ahead) and device filters
+  at `prio 2`, so `tc` honors the ordering and a LAN-cross packet always
+  reaches `1:99`. `test_shaping.py` pins the new prios.
+- **A 0 (unlimited) WAN upstream/downstream silently disabled ALL speed shaping**
+  (`quota/shaping.py`): `update_state` tore the whole tc tree down unless
+  **both** totals were > 0, so "0 = unlimited" for one direction killed the
+  caps on the other too (the live-box report: WAN up = 0 → LAN transfers
+  uncapped, but also the WAN download caps stopped applying). Each direction is
+  now built independently — the down tree only when `total_down > 0`, the
+  ingress redirect + upload tree only when `total_up > 0` — so a 0 means
+  *that direction* is unlimited and the other keeps its caps + its LAN
+  pass-through.
+- **LAN pass-through rate silently degraded to the WAN cap when
+  `shaping.lan_rate_mbps` was unset/0** (`quota/shaping.py` + setup script): on
+  a box whose config.yaml lacks the `lan_rate_mbps` key (setup-generated
+  configs did not write it) and whose `core/config.py` predates the field, the
+  pass-through class `1:99` WAS programmed but at **the WAN total** — so LAN
+  transfers inherited the Network-tab caps (the live-box report: "upload set to
+  2.5, LAN up&down throttled too"). `_tree_cmds` no longer falls back to the
+  line total: it uses the documented **1000 Mbps default** (with a `warning`
+  log naming the key), so the pass-through is always wider than the WAN line.
+  The setup script now writes `shaping.lan_rate_mbps: 1000` into the generated
+  config.yaml so fresh installs are self-describing.
+- **LAN pass-through silently did not program on a box with an unresolvable
+  uplink subnet** (`quota/nftables.py` + `quota/shaping.py`): the Network-tab
+  speed limits still throttled LAN traffic because the `1:99` class was never
+  created — `resolve_local_networks` only fell back to the LAN snapshot
+  (`uplink_ip` + `lan_cidr`) in WAN mode, so **LAN mode with an empty
+  `router_ip` (a live box report: `router_ip: ''` + `uplink_subnet: ''`)
+  derived nothing**, and a stale `core/config.py` that drops the snapshot keys
+  made it worse. The LAN branch now falls back to the snapshot exactly like the
+  WAN branch, and the shaper gains a **last-resort derivation from the box's
+  own NIC addresses** (`ip -o -4 addr show dev <iface>` → the directly-
+  connected subnet that is not the client subnet) — so the pass-through
+  programs even when the config carries no uplink info at all. The shaper's
+  `start()` log now states the resolved uplink subnet + pass-through state
+  (`tc shaper ready: … uplink 192.168.1.0/24 (LAN pass-through on)`) for
+  on-box diagnosis.
+- **VPN-share whitelist survived only while the tunnel was UP — a blip killed
+  the relay for good** (`run.py` `_sync_vpn_share`): the `gw_allowed`
+  whitelist (the box's ONLY egress under a Gateway OFF cut) was cleared
+  whenever `status.state != "on"` — i.e. it tracked the *tunnel*, not the
+  *switch*. A momentary tunnel drop (VPN client reconnecting) then removed the
+  box's route to the VPN server, so it could never re-dial and the household
+  tunnel died permanently. The whitelist is now gated on the SWITCH: it stays
+  learned/sticky while `vpn_share_enabled` is on (re-dial always possible) and
+  only the switch OFF clears it.
+- **VPN share refused to route into a tunnel that exists but has no IPv4**
+  (`quota/vpnshare.py`): a stale pin to a junk ARPHRD_NONE device that merely
+  *exists* in sysfs (the live-box "evice" — it routes nothing) was honored and
+  the whole client subnet was blackholed. `reconcile()` now drops a pin whose
+  device is gone OR carries no IPv4 (re-detecting instead), and `apply()`
+  itself refuses to route into an address-less device (waiting up to 2 s for a
+  freshly spawned tun2socks to gain its address) — the subnet can never be
+  routed into a device that isn't actually a live tunnel.
+
+- **VPN-share switch reverted to OFF on refresh** — flipping the Network-tab
+  switch and refreshing the page silently undid it, because the toggle had no
+  change listener: nothing persisted until the panel's separate **Save**
+  button was clicked. The switch now saves **immediately on change** (partial
+  POST with only `vpn_share`, so it never clobbers the shaping totals — the
+  same auto-save pattern as the guest-mode toggle).
+- **VPN-share status stuck on "Waiting for the gateway to apply…"** — the live
+  status only re-rendered when the Network tab re-fetched `/api/network`, so
+  after the toggle applied it never advanced on its own. The WS snapshot (5 s)
+  now carries the `vpn_share` switch + kernel state (`_dashboard_payload` →
+  `_vpn_share_payload`), and `render()` calls `renderVpnShare` so the status
+  moves to "Sharing through…" without a manual refresh.
+- **"archive has no tun2socks binary" — the automatic bridge failed to install**
+  — tun2socks v2.7.0 ships its goreleaser zip with the binary named
+  `tun2socks-<os>-<arch>` (e.g. `tun2socks-linux-amd64`), but the extractor
+  looked for a bare `tun2socks` member and bailed. It now accepts any
+  `tun2socks*` member. (v2rayN's "TUN mode" is a userspace netstack — it never
+  creates a kernel `tun0`, so the detector correctly routes to this automatic
+  bridge; the download just needed to land.)
+- **tun2socks "just exited" immediately after the download** — the spawned
+  bridge kept dying because the argv passed **`-tun-ip`/`-tun-gw`**, flags
+  tun2socks **v2 removed** (v2.7.0's CLI is `-device`/`-proxy`/`-interface`/
+  `-tun-pre-up`/`-tun-post-up`/…). An undefined flag makes Go's `flag` package
+  print an error and `os.Exit(2)`, so the process died on every spawn. The argv
+  now passes only `-device`/`-proxy`; the address is applied separately by
+  `_configure_interface` (`ip addr add <tun_ip>/24 dev <iface>` + `ip link set
+  up`), since v2 creates the TUN and brings the link UP itself but assigns no
+  address.
+- **"Device for nexthop is not up" when routing into the bridge** — the routing
+  manager refused to add `default dev tun0` because the link wasn't up at that
+  instant (tun2socks hadn't created it yet, or the single best-effort
+  `ip link set up` had already failed). Two layers now fix it: `_configure_interface`
+  retries `ip link set dev <iface> up` until the device actually exists and is
+  up (5 s window) before stamping the address, and the **routing manager itself
+  self-heals** (`quota/vpnshare.py`): `apply()` ensures the tunnel link is UP
+  right before programming the default route and retries the add (with the
+  `scope link` fallback) across 3 attempts, so a settling tunnel can't abort
+  VPN share. On final failure the message now carries the interface's REAL
+  state from `ip -o link show` (missing / down / unaddressed) instead of the
+  kernel's bare "not up". (+4 tests: link-up-before-route order, non-fatal
+  bring-up failure, retry-after-settle, real-state error message.)
+- **VPN share blackholed every device when a stale/junk TUN device existed**
+  (live-box report: "Sharing through evice — but the internet stopped in all
+  devices"): the auto-detector can find a leftover hand-created TUN (type
+  ARPHRD_NONE) that nothing reads, route the whole client subnet into it, and
+  silently drop every packet. The routing is now **pinned to the tun2socks
+  bridge's device while the bridge runs** — a stale pin or junk tunnel can
+  never divert the subnet again (`run.py _sync_vpn_share`; the first reconcile
+  already passes the bridge interface, and the persist comparison uses the
+  original DB pin). Wiring test updated to assert the authoritative-bridge
+  pinning.
+- **tun2socks bridged into a DEAD SOCKS endpoint (silent blackhole, live-box
+  report)**: `ss -tlnp` matched no VPN listener (v2rayN had no SOCKS inbound),
+  so the fallback `127.0.0.1:10808` was used WITHOUT verifying anything listens
+  there — tun2socks spawned, reported "running", and dropped every device
+  packet. `Tun2socksManager.reconcile` now PROBES the fallback endpoint
+  (`socket.create_connection`, 1 s — the proxy accepts TCP before any SOCKS
+  handshake) and reports an honest `no-proxy` status ("no VPN SOCKS proxy
+  listening on 127.0.0.1:10808 — enable the SOCKS inbound in the VPN client")
+  instead of spawning a blackhole. A proxy found live via `ss` skips the probe.
+  Injectable `proxy_probe` keeps tests off the network (+4 tests: dead-fallback
+  never spawns, live-fallback still spawns, detected-proxy skips probe, honest
+  message).
+
+### Added
+
+- **tun2socks auto-provisioner** — VPN share now works with VPN clients that
+  use a userspace netstack (v2rayN): no kernel TUN ever appears, so there was
+  nothing to route into. When the routing manager finds no tunnel, the new
+  `quota/tun2socks.py` **downloads the pinned, sha256-verified tun2socks
+  binary itself** (one-time, from the v2.7.0 GitHub release, per-arch
+  checksums enforced — an unverified or unknown-arch binary is never
+  installed), auto-detects the VPN client's local SOCKS listener (`ss -tlnp`,
+  v2ray/sing-box/xray; `vpn_share.socks_proxy` fallback, default
+  `127.0.0.1:10808`), spawns the bridge (`tun0`, `-tun-ip 10.0.0.1`) and
+  re-runs the routing — all automatic, nothing to install by hand. The child
+  is stopped when VPN share turns off; a missing proxy / failed download /
+  crashed child each surface an honest Network-tab message instead of
+  blackholing the subnet. Config: `vpn_share.tun2socks: false` disables it
+  (you run your own kernel-TUN client — a second tun would confuse the tunnel
+  detector).
+
+- **Gateway OFF + VPN share coexist** — you can now cut the box's OWN internet
+  (Gateway OFF in Management) while "VPN share" keeps the household online: the
+  box keeps ONLY its connection(s) to the VPN server reachable, so the tunnel
+  the relay rides survives the cut. The whitelist (`gw_allowed` set in
+  `quota/nftables.py`) is **auto-learned** every ~15 s from the VPN client's
+  established sockets (`ss` match: v2ray/sing-box/xray/tun2socks), kept sticky
+  so the client can re-dial, with an `engine.gateway_allow_ips` override for
+  clients the auto-learn can't identify; loopback stays exempt so the dashboard
+  and the tun2socks↔VPN-client hop keep working. Replaces the old unconditional
+  relay suspension (`set_vpn_relay`) — the box is genuinely cut now, not
+  silently unblocked, and the Network-tab VPN panel says so in plain language.
+
 ## [0.1.3] — 2026-08-12
 
 ### Added

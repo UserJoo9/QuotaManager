@@ -2,6 +2,11 @@
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 
+<table>
+  <tr>
+    <td width="300" align="center"><img src="docs/logo/favicon.png" width="280" alt="Quota Manager logo"></td>
+    <td>
+
 Split your metered internet bundle fairly across every person in the house. Each
 **user** gets an allowance (fixed GB, or an equal share of what's left), their
 devices all share it, and the moment the allowance runs out **every device they
@@ -18,9 +23,13 @@ gateway:
   flag keeps one device online)
 - Caps any device's or user's **internet speed** and keeps gaming ping low while
   others download
-- Serves a **dark-purple glassmorphism dashboard** you can open from any phone on
+- Serves a **dark obsidian-glass dashboard** you can open from any phone on
   the LAN — the whole UI (dashboard, the household milestone page, and the
   consumption report) is phone-friendly and touch-first
+
+    </td>
+  </tr>
+</table>
 
 ```
 ┌──────────────┐   Ethernet    ┌───────────────────────────────────────────┐
@@ -38,12 +47,19 @@ gateway:
 **For developers** — how the app actually works (architecture, config, API,
 tests, release process): [Structure_README.md](Structure_README.md).
 
+## Screenshot
+
+![Quota Manager dashboard](docs/screenshots/dashboard.png)
+
+*Placeholder — put a screenshot of the main dashboard at
+`docs/screenshots/dashboard.png`.*
+
 ---
 
 ## Table of contents
 
+- [Screenshot](#screenshot)
 - [Installation](#installation)
-- [After install — the router](#after-install--the-router)
 - [Using the dashboard](#using-the-dashboard)
 - [Strong (WAN) mode](#strong-wan-mode)
 - [VPN share (route the household through a VPN)](#vpn-share-route-the-household-through-a-vpn)
@@ -231,14 +247,19 @@ See [Structure_README.md](Structure_README.md) → *Running from source*.
 
 | Tab | What it does |
 |---|---|
-| **Management** | the bundle ring (used / remaining / days left) and a card per **user** — allowance, usage bar, block toggle, top-up, edit, delete — with their devices listed underneath (name, MAC, manufacturer, its own quota bar + up/down split) |
-| **Bundle settings** | change `total_gb` / `reset_day`, **Bundle recharged** (add mid-month GB, e.g. an ISP top-up), **Guest mode** (auto-register new devices with a small allowance), **Reset month now** |
-| **Network** | speed shaping: the master switch, your **real line down/up rates**, low-latency toggle — plus **VPN share** (route every device's internet through the VPN the laptop runs, see below) |
+| **Management** | the bundle ring (used / remaining / days left) and a card per **user** — allowance, usage bar, block toggle, top-up, edit, delete — with their devices listed underneath (name, MAC, manufacturer, its own quota bar + up/down split). A user can be flagged **Exempt from quota** (never quota-blocked, however much they use — manual blocks still work) |
+| **Network** | everything about the bundle and the internet path in one place: change `total_gb` / `reset_day`, **Bundle recharged** (add mid-month GB, e.g. an ISP top-up), **Guest mode** (auto-register new devices with a small allowance + a default **guest speed limit** and a **guest limit** — max guest accounts, stops MAC-spoofing spam — plus a **STOP NEW CONNECTIONS** gate), **Reset month now**, the shaping master switch with your **real line down/up rates** + low-latency toggle (caps shape **internet only** — LAN traffic passes through at full speed), **VPN share** (route every device's internet through the VPN the laptop runs, see below), a **Decline random MACs** gate, and a live bundle/network overview |
 | **WAN** | optional "strong" mode where the laptop dials the PPPoE line itself (see below) |
+| **Admin** | security & credentials (change the dashboard password) and **System Info & About** (app, installed version), with the **System Logs** console embedded full-width below — level filter (ALL / INFO / WARNING / ERROR), search, refresh and export, in a scrollable terminal view |
 | **DNS** | domain filtering (block / allow / redirect a domain for a user, a device, or everyone; blocklist presets; per-client DNS servers) |
 | **History** | what each device is actually visiting: pick a device + a look-back window → its **top domains** (with share %), an **hourly activity** list, and the **most recent queries** (minute buckets) |
-| **Admin** | change password, see the installed version |
-| **System logs** | the app's log tail, with filters, search, refresh and export |
+
+The sidebar footer's **eye** toggle masks on-screen sensitive details — MAC
+addresses (device rows, rogue rows, the device modal) and the saved PPPoE
+credentials (the username AND password fields are cleared while it is on and
+re-prefilled from the DB when turned off) — so the dashboard can be shown
+without giving away device identities. The preference is remembered; only the
+display is masked, nothing is ever lost.
 
 **On a phone?** The whole UI is built for it. The tab bar becomes a swipeable
 strip, the bundle ring shrinks and the cards stack to one column, and every
@@ -248,6 +269,34 @@ milestone page and the consumption report — nothing needs a desktop.
 **Speed limits per device/user** — set them in the Network tab first (switch ON
 and enter your real down/up Mbps), then open a user's or device's **edit** modal
 and set `limit down` / `limit up` (`0` = unlimited). Limits apply within seconds.
+A default **Guest speed limit** (Network tab → Guest mode) caps the
+aggregate bandwidth of every guest account the same way — set `0` (default) to
+leave guests unlimited.
+
+**Speed limits shape the internet, not your LAN** — the caps above apply to
+**WAN** traffic only. The Network tab's speed section is split into two: **WAN —
+internet** (your real down/up rates) and **LAN — internal transfers**
+(`set-lan-rate`, the LAN pass-through rate, `0` = the 1000 Mbps default).
+Client↔uplink-subnet traffic (the NAS, the router admin page, LAN transfers)
+is never throttled by the line rate: it rides a dedicated pass-through class at
+the **full LAN link rate** while the WAN cap, the low-latency queues and the
+"min(device, user)" maths stay byte-for-byte unchanged. A LAN-rate edit applies
+immediately and survives restarts (it is a dashboard setting, not a config
+file).
+
+**Decline random MACs** (Network tab → Connection & security) — phones and
+laptops that rotate their MAC for privacy carry **no vendor OUI** (the address
+is locally-administered), so the box can't identify or budget them. While the
+switch is on, a brand-new device with a randomized MAC is registered (visible +
+counted) but **immediately cut** until an admin unblocks it. The **"Also cut
+random-MAC devices already joined"** checkbox runs a one-shot sweep over the
+devices already on the network (real-OUI devices are never touched).
+
+**Exempt from quota** — a user's **edit** modal has an "Exempt from quota
+(unlimited usage)" checkbox: an exempt user is never quota-blocked, however
+much they use, while manual blocks still work. The user card shows a
+"unlimited" badge. Handy for the box's own VPN relay or an always-on server —
+set it and forget it.
 
 **Browsing history per device** — the **History** tab shows the exact domains a
 device resolves (top domains, activity by the hour, recent queries). It's
@@ -324,6 +373,17 @@ leave WAN mode: put the router back in routed/NAT mode, then **Revert to LAN**.
 The one always-hands-on step is the physical router rewiring — no panel can
 move the cable.
 
+**Renewing the public IP (same as restarting the router).** On most Egyptian
+lines the ISP hands a fresh public IP to every new PPPoE session — and since
+the box dials the line itself, a renewal is now a dashboard action instead of a
+router restart. The WAN tab has a **Restart PPPoE — renew public IP** button
+(internet drops for a few seconds while the session re-dials) and an
+**auto-renew** schedule (`Renew every (min 5)`, default off/15 min) that does
+it on a timer — useful when a long-lived IP starts getting throttled or when a
+service needs a fresh address. Both are disabled while ppp0 is down (a renewal
+needs a working line); the *Last renewed* line shows when it last ran, and the
+schedule survives gateway restarts.
+
 **Cases to be aware of:**
 
 - **Applied WAN before the router is actually bridged/AP** — internet is cut
@@ -334,6 +394,9 @@ move the cable.
   (`Restart=always`), so this usually clears itself.
 - **Wrong credentials** — the Test button reports `auth-failed` before you
   Apply, so you catch it early.
+- **A renewal (manual or auto) drops internet for a few seconds** while the
+  PPPoE session re-dials — the auto-renew minimum of 5 minutes exists so a typo
+  can't hammer the line; a *manual* restart is always your call.
 - **The box's own internet is still metered** — the Gateway user /
   `count_gateway` behaviour (see *Known limits*) applies in both topologies.
 
@@ -344,8 +407,8 @@ The architecture behind this is in
 
 ## VPN share (route the household through a VPN)
 
-If you run a VPN client on the gateway laptop (sing-box, xray, WireGuard or
-tun2socks, in **TUN mode**), the Network tab's **VPN share** switch sends every
+If you run a VPN client on the gateway laptop (sing-box, xray, WireGuard —
+or **v2rayN**, see below), the Network tab's **VPN share** switch sends every
 device's internet through that tunnel — the whole household appears at the VPN
 provider's IP.
 
@@ -357,21 +420,41 @@ remembered, so a reboot or a restart of the VPN client re-applies the same one;
 anything left over from a crash or tunnel restart is cleaned up by the next
 15 s tick.
 
+**v2rayN and other userspace clients (no install needed):** v2rayN's "TUN
+mode" is a userspace netstack — a kernel tunnel device never appears, so the
+routing engine has nothing to route into. VPN share handles this
+automatically: the box **downloads and runs `tun2socks` itself** (one-time,
+from the pinned v2.7.0 GitHub release, sha256-verified), auto-detects
+v2rayN's local SOCKS listener (default `127.0.0.1:10808`) and bridges it to a
+real `tun0` — just flip the switch, nothing to install by hand. **A real
+kernel tunnel (xray/sing-box/WireGuard) is always preferred and needs no
+config edits** — the tun2socks bridge only engages as a fallback when no
+kernel tunnel exists, so the same default config works for every VPN client.
+The Network tab shows honest progress/failure messages (e.g. "no VPN SOCKS
+proxy found — start the VPN client first") instead of silently retrying.
+
 **How it works under the hood:** one `ip rule` diverts the client subnet into a
 dedicated route table whose default route points at the tunnel — cheaper and
 more robust than rewriting the masquerade. The traffic rides the box's own
 network stack twice (client → tunnel → line), so while VPN share is ON the
-box's OWN gateway metering is suspended (the relay volume would otherwise be
-counted twice against the protected Gateway user — and a quota-cut Gateway
-would kill the household's VPN). The feature is off by default
+relay is never double-charged to the protected Gateway user. **You can even
+cut the Gateway's own internet (Gateway OFF) and the household tunnel
+survives**: the box keeps ONLY its connection(s) to the VPN server reachable
+(learned automatically from the VPN client's sockets every ~15 s, plus any
+`engine.gateway_allow_ips` override), so the box itself is offline while every
+device still exits at the VPN provider's IP. The feature is off by default
 (`vpn_share.enabled: false` means the manager isn't even built).
 
 **What to know:**
 
-- **The tunnel must be up first.** Flip the switch, then start the VPN client
-  (or start the client, then flip). The rule only lands when the tunnel device
-  actually exists — a missing tunnel is never routed into (that would blackhole
-  the subnet).
+- **The tunnel (or the VPN client) must be up first.** Flip the switch, then
+  start the VPN client (or start the client, then flip). With a kernel-TUN
+  client the rule only lands when the tunnel device actually exists *and*
+  carries an IP address; with v2rayN the bridge starts once v2rayN's SOCKS
+  listener answers — a missing or address-less tunnel is never routed into
+  (that would blackhole the subnet). A momentarily dropped tunnel is harmless:
+  the box keeps its route to the VPN server (so it can re-dial) and clients
+  fall back to the direct line until the tunnel returns.
 - **IPv4 only, like everything else here.** VPN providers' IPv4 TUNs are
   what's routed; there's no IPv6 relay.
 - **All devices share the tunnel's bandwidth and fate.** If the VPN drops,
@@ -443,6 +526,7 @@ stopped) — it holds every device, allowance and month of usage.
 | No internet with VPN share ON | the VPN client / tunnel isn't running | Start the VPN client first (TUN mode) — the rule only lands once the tunnel exists; check it's the interface shown in the Network tab |
 | A domain isn't blocked/redirected | dnsmasq never got the rule, or the client bypasses the box's DNS | DNS tab → the rule's scope matches the device; `tail /var/log/quota-dnsmasq.log`; DoH/DoT clients bypass DNS-layer filtering by design |
 | No internet after applying WAN mode | `ppp0` down — wrong credentials, or router not bridged/AP yet | WAN tab: check the ppp0 state + auto-diagnosis; press **Apply now** again; the router must be in bridge/modem (single NIC) or AP (two NIC) mode |
+| Restart PPPoE / auto-renew is greyed out | ppp0 is down — a renewal needs a live PPPoE line | Check the ppp0 state first (WAN tab); the internet must be working before a renewal can run |
 | Device never appears in the dashboard | dnsmasq lease path wrong | Confirm `dhcp.lease_file` matches dnsmasq's actual lease file |
 | History tab shows "No browsing history recorded" | dnsmasq isn't logging queries (`conf-dir=` commented → every `/etc/dnsmasq.d/` fragment ignored), or the app predates the parser fix | Re-run the setup script (it enables `conf-dir`); `tail /var/log/quota-dnsmasq.log` to confirm queries are logged; make sure the app parses the `log-queries=extra` ip/port line shape |
 | Dashboard works but nothing is counted | engine disabled, or traffic isn't routed through the laptop | Check the log; verify devices' gateway = the laptop |
@@ -478,8 +562,10 @@ stopped) — it holds every device, allowance and month of usage.
   (bridge/AP mode) is always manual — no panel can move the cable. A PPPoE
   outage means no internet until the line redials (the service does that
   automatically).
-- **VPN share relies on the laptop's VPN client.** It must run in TUN mode and
-  the tunnel must be up — the household's internet is blackholed (deliberately,
+- **VPN share relies on the laptop's VPN client.** It must run in TUN mode
+  (kernel tunnel) or as a userspace client with a local SOCKS listener
+  (v2rayN — the box auto-bridges it with a downloaded tun2socks) and the
+  client must be up — the household's internet is blackholed (deliberately,
   never silently re-routed around the quota) if the tunnel drops. The relay
   doubles the volume crossing the box's own network stack, so buying the VPN
   typically costs you your ISP bundle's data cap spend plus the VPN provider's

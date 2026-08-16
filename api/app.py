@@ -30,8 +30,8 @@ from api.schemas import (BundleUpdate, DeviceCreate, DeviceUpdate,
                          DnsServerUpdate, DomainRuleCreate, DomainRuleUpdate,
                          GuestUpdate, LoginRequest, MilestoneNotify,
                          NetworkUpdate, PasswordUpdate, SetupComplete,
-                         TopUpRequest, UserCreate, UserUpdate, WanTest,
-                         WanUpdate)
+                         TopUpRequest, UserCreate, UserUpdate, WanRenewConfig,
+                         WanTest, WanUpdate)
 from core import timeutil
 from quota import db as _db
 from quota import dns_rules as _dns_rules
@@ -70,7 +70,7 @@ def _normalize_domains(raw_domains: set[str]) -> tuple[list[str], int]:
 def _read_log_tail(path: str | Path | None, limit: int = 300) -> dict[str, Any]:
     """Tail of the gateway's rotating log file, newest lines first.
 
-    The frontend "System logs" tab is fed from here. Missing/unreadable file
+    The frontend "System Logs" console (on the Admin page) is fed from here. Missing/unreadable file
     (e.g. before the gateway has written anything) degrades to an empty tail —
     never an error page. ``limit`` is clamped to 2000.
     """
@@ -132,6 +132,7 @@ def create_app(
     dns_apply: Optional[Callable[[], object]] = None,
     vpn_apply: Optional[Callable[[], object]] = None,
     vpn_status_getter: Optional[Callable[[], dict]] = None,
+    wan_renew: Optional[Callable[[], object]] = None,
 ) -> FastAPI:
     app = FastAPI(title="Quota Manager", version=__version__,
                   docs_url="/api/docs", openapi_url="/api/openapi.json")
@@ -276,6 +277,16 @@ def create_app(
 
     # -- dashboard --------------------------------------------------------------
 
+    async def _vpn_share_payload() -> dict[str, Any]:
+        """Switch + live kernel state for the WS snapshot (mirrors /api/network)."""
+        cfg = await service.get_vpn_config()
+        if vpn_status_getter is not None:
+            try:
+                cfg["status"] = vpn_status_getter()
+            except Exception:  # noqa: BLE001 — a status probe must never 500 the panel
+                cfg["status"] = {"state": "error", "message": "status probe failed"}
+        return cfg
+
     async def _dashboard_payload() -> dict[str, Any]:
         bundle = await database.get_bundle()
         users = await database.list_users()
@@ -295,7 +306,7 @@ def create_app(
             # quota_blocked_for special-cases protected users: an allowance of
             # 0 cuts the box IMMEDIATELY (the engine's `allowance > 0` guard
             # would otherwise treat 0 as "unmetered").
-            quota_blocked = service.quota_blocked_for(u, allowance, used_gb)
+            quota_blocked = service.user_quota_blocked(u, allowance, used_gb)
             admin_blocked = u.block_state == _db.BLOCK_ADMIN
             state = (_db.BLOCK_ADMIN if admin_blocked
                      else (_db.BLOCK_QUOTA if quota_blocked else _db.BLOCK_OK))
@@ -306,6 +317,8 @@ def create_app(
                 # protected users (the Gateway user) are permanent: editable but
                 # never deletable — the UI hides the delete control.
                 "protected": bool(u.protected),
+                # exempt users are never quota-blocked (admin cuts still apply)
+                "exempt_quota": bool(u.exempt_quota),
                 # per-user aggregate speed caps (Mbps, 0 = unlimited)
                 "limit_down_mbps": float(u.limit_down_mbps or 0.0),
                 "limit_up_mbps": float(u.limit_up_mbps or 0.0),
@@ -375,6 +388,12 @@ def create_app(
                     getattr(live, "engine_available", True)),
             },
             "wan": live.wan_status,
+            # The VPN-share switch + live kernel state ride the WS snapshot so
+            # the Network-tab status stays current (the toggle auto-saves, but
+            # the "Waiting for the gateway to apply…" text must advance to the
+            # applied state on its own — it can't wait for a manual refresh).
+            # status is None in tests / degraded boot, matching /api/network.
+            "vpn_share": await _vpn_share_payload(),
             # Top-level internet reachability (probed every 15 s tick) so the
             # top-bar indicator can read it without digging into wan_status;
             # None = not probed yet (pre-first-tick).
@@ -473,7 +492,7 @@ def create_app(
             usage = usage_by_user.get(u.id, {"up": 0, "down": 0})
             used_gb = (usage["up"] + usage["down"]) / GB
             allowance = allowances.get(u.id, 0.0)
-            quota_blocked = service.quota_blocked_for(u, allowance, used_gb)
+            quota_blocked = service.user_quota_blocked(u, allowance, used_gb)
             admin_blocked = u.block_state == _db.BLOCK_ADMIN
             user_rows.append({
                 "id": u.id,
@@ -481,6 +500,7 @@ def create_app(
                 "quota_mode": u.quota_mode,
                 "protected": bool(u.protected),
                 "guest": bool(u.guest),
+                "exempt_quota": bool(u.exempt_quota),
                 "allowance_gb": round(allowance, 3),
                 "used_gb": round(used_gb, 3),
                 "used_bytes": int(usage.get("up", 0) + usage.get("down", 0)),
@@ -737,6 +757,47 @@ def create_app(
             log.error("PPPoE test failed: %s", exc)
             raise HTTPException(500, f"PPPoE test failed: {exc}")
 
+    @app.post("/api/wan/renew", dependencies=[Depends(_require_auth)])
+    async def renew_wan() -> dict[str, Any]:
+        """Renew the WAN public IP NOW (the WAN-tab Restart button).
+
+        Restarts the box's PPPoE dial (``quota-wan-ppp``), which tears the
+        session down and re-dials — on a metered Egyptian line the ISP assigns
+        a fresh public IP to the new session, the same effect as restarting
+        the router. Internet drops for a few seconds while ppp0 comes back up,
+        and the auto-renew schedule's countdown restarts from now.
+
+        Rejects 409 while ppp0 is down (the internet isn't working — nothing
+        to renew into) or when WAN mode isn't active (no PPPoE line), and 503
+        when no renew callback is wired (degraded boot / tests without a
+        gateway).
+        """
+        if wan_renew is None:
+            raise HTTPException(503, "no WAN renew callback wired (degraded boot)")
+        st = dict(holder.get().wan_status or {})
+        if st.get("topology") != "wan":
+            raise HTTPException(409, "WAN mode is not active — there is no "
+                                     "PPPoE line to renew")
+        if st.get("ppp0") != "up":
+            raise HTTPException(409, "ppp0 is down — the internet isn't "
+                                     "working, nothing to renew")
+        try:
+            result = await wan_renew()
+        except Exception as exc:  # noqa: BLE001
+            log.error("WAN renew failed: %s", exc)
+            raise HTTPException(500, f"WAN renew failed: {exc}")
+        return {"restarted": bool(result.get("restarted")),
+                "state": result.get("state", "unknown"),
+                "detail": result.get("detail", "")}
+
+    @app.post("/api/wan/renew-config", dependencies=[Depends(_require_auth)])
+    async def set_wan_renew(body: WanRenewConfig) -> dict[str, Any]:
+        """Set the WAN auto-renew schedule: ``enabled`` arms the periodic
+        PPPoE re-dial and ``minutes`` is its interval (clamped to a 5-minute
+        floor — every renewal drops internet briefly). Returns the stored
+        config (``{enabled, minutes, last}``)."""
+        return await service.set_wan_renew_config(body.enabled, body.minutes)
+
     @app.get("/api/devices", dependencies=[Depends(_require_auth)])
     async def list_devices() -> list[dict[str, Any]]:
         return (await _dashboard_payload())["devices"]
@@ -842,7 +903,8 @@ def create_app(
         user = await database.create_user(
             body.name, body.quota_mode, body.fixed_gb,
             limit_down_mbps=body.limit_down_mbps or 0.0,
-            limit_up_mbps=body.limit_up_mbps or 0.0)
+            limit_up_mbps=body.limit_up_mbps or 0.0,
+            exempt_quota=bool(body.exempt_quota or False))
         await service.recompute_allowances()
         await database.add_event(
             f"User added: {body.name or 'unnamed'}", "info", user_id=user.id)
@@ -856,7 +918,8 @@ def create_app(
             raise HTTPException(404, "user not found")
         fields: dict[str, Any] = {}
         for key in ("name", "quota_mode", "fixed_gb",
-                    "limit_down_mbps", "limit_up_mbps", "history_days"):
+                    "limit_down_mbps", "limit_up_mbps", "history_days",
+                    "exempt_quota"):
             value = getattr(body, key)
             if value is not None:
                 fields[key] = value
@@ -1138,7 +1201,7 @@ def create_app(
 
     @app.get("/api/logs", dependencies=[Depends(_require_auth)])
     async def logs(limit: int = 300) -> dict[str, Any]:
-        """Tail of the gateway log file (newest first) for the System logs tab."""
+        """Tail of the gateway log file (newest first) for the Admin-page System Logs console."""
         return _read_log_tail(log_path, limit)
 
     @app.get("/api/bundle", dependencies=[Depends(_require_auth)])
@@ -1226,7 +1289,10 @@ def create_app(
     @app.get("/api/guest", dependencies=[Depends(_require_auth)])
     async def get_guest() -> dict[str, Any]:
         return {"enabled": await service.is_guest_mode(),
-                "quota_gb": await service.guest_quota_gb()}
+                "quota_gb": await service.guest_quota_gb(),
+                "limit": await service.guest_limit(),
+                "speed_limit_mbps": await service.guest_speed_limit_mbps(),
+                "stop_new": await service.stop_new_connections()}
 
     @app.post("/api/guest", dependencies=[Depends(_require_auth)])
     async def set_guest(body: GuestUpdate) -> dict[str, Any]:
@@ -1234,8 +1300,17 @@ def create_app(
             await service.set_guest_mode(body.enabled)
         if body.quota_gb is not None:
             await service.set_guest_quota(body.quota_gb)
+        if body.limit is not None:
+            await service.set_guest_limit(body.limit)
+        if body.speed_limit_mbps is not None:
+            await service.set_guest_speed_limit(body.speed_limit_mbps)
+        if body.stop_new is not None:
+            await service.set_stop_new_connections(body.stop_new)
         return {"enabled": await service.is_guest_mode(),
-                "quota_gb": await service.guest_quota_gb()}
+                "quota_gb": await service.guest_quota_gb(),
+                "limit": await service.guest_limit(),
+                "speed_limit_mbps": await service.guest_speed_limit_mbps(),
+                "stop_new": await service.stop_new_connections()}
 
     # -- speed shaping (Network tab) ------------------------------------------
 
@@ -1253,6 +1328,7 @@ def create_app(
             except Exception:  # noqa: BLE001 — a status probe must never 500 the panel
                 result["vpn_share"]["status"] = {"state": "error",
                                                  "message": "status probe failed"}
+        result["decline_random_macs"] = await service.decline_random_macs()
         return result
 
     @app.post("/api/network", dependencies=[Depends(_require_auth)])
@@ -1261,7 +1337,8 @@ def create_app(
             enabled=body.enabled,
             total_down_mbps=body.total_down_mbps,
             total_up_mbps=body.total_up_mbps,
-            aqm=body.aqm)
+            aqm=body.aqm,
+            lan_rate_mbps=body.lan_rate_mbps)
         # Apply to the kernel NOW — no 15 s wait for the maintenance tick, so a
         # saved Network-tab change is enforced immediately (no page refresh).
         _schedule_shaping_sync()
@@ -1271,6 +1348,13 @@ def create_app(
         if body.vpn_share is not None:
             await service.set_vpn_share(body.vpn_share)
             _schedule_vpn_apply()
+        # Random-MAC gate: persist the switch; the optional one-shot sweep
+        # ("also for old devices already joined") cuts existing randomized
+        # devices in the same call.
+        if body.decline_random_macs is not None:
+            await service.set_decline_random_macs(
+                body.decline_random_macs,
+                also_existing=bool(body.decline_random_macs_existing))
         result["vpn_share"] = await service.get_vpn_config()
         if vpn_status_getter is not None:
             try:
@@ -1278,6 +1362,7 @@ def create_app(
             except Exception:  # noqa: BLE001
                 result["vpn_share"]["status"] = {"state": "error",
                                                  "message": "status probe failed"}
+        result["decline_random_macs"] = await service.decline_random_macs()
         return result
 
     # -- auth -----------------------------------------------------------------

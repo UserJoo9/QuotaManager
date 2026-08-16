@@ -4,10 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quota Manager</title>
-<link rel="stylesheet" href="/assets/styles.css?v=39">
+ <link rel="stylesheet" href="/assets/styles.css?v=48">
 </head>
 <body>
   <div class="bg-glow"></div>
+  <canvas id="bg-particles" aria-hidden="true"></canvas>
 
   <!-- LOGIN SCREEN -->
   <div id="login-screen" class="screen hidden">
@@ -25,28 +26,55 @@
 
   <!-- MAIN DASHBOARD -->
   <div id="app" class="screen hidden">
-    <header class="topbar glass">
-      <div class="brand">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-badge" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="M3.3 7.4 12 12l8.7-4.6"/><path d="M12 22V12"/></svg>
+        </span>
         <h1 class="logo">Quota<span>Manager</span></h1>
       </div>
-      <nav class="topnav">
-        <button class="nav-tab active" data-panel="management">Management</button>
-        <button class="nav-tab" data-panel="bundle">Bundle settings</button>
-        <button class="nav-tab" data-panel="network">Network</button>
-        <button class="nav-tab" data-panel="wan">WAN</button>
-        <button class="nav-tab" data-panel="admin">Admin</button>
-        <button class="nav-tab" data-panel="logs">Logs</button>
-        <button class="nav-tab" data-panel="history">History</button>
-        <button class="nav-tab" data-panel="dns">DNS</button>
+      <nav class="side-nav" aria-label="Sections">
+        <button class="nav-tab active" data-panel="management">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span>
+          <span class="nav-label">Management</span>
+        </button>
+        <button class="nav-tab" data-panel="network">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>
+          <span class="nav-label">Network</span>
+        </button>
+        <button class="nav-tab" data-panel="wan">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15 15 0 0 1 0 20 15 15 0 0 1 0-20z"/></svg></span>
+          <span class="nav-label">WAN</span>
+        </button>
+        <button class="nav-tab" data-panel="admin">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span>
+          <span class="nav-label">Admin</span>
+        </button>
+        <button class="nav-tab" data-panel="history">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
+          <span class="nav-label">History</span>
+        </button>
+        <button class="nav-tab" data-panel="dns">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg></span>
+          <span class="nav-label">DNS</span>
+        </button>
       </nav>
-      <div class="topbar-right">
+      <div class="sidebar-footer">
         <span id="net-status" class="net-status" title="Checking internet connection…">
           <span class="dot off"></span>
           <span class="net-label">Checking…</span>
         </span>
-        <button id="logout-btn" class="btn ghost small">Log out</button>
+        <div class="sidebar-quick">
+          <span class="quick-label">Actions</span>
+          <button id="privacy-eye" class="icon-btn" aria-label="Hide sensitive details" title="Hide MAC addresses + PPPoE credentials">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+          <button id="logout-btn" class="icon-btn" aria-label="Log out" title="Log out">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          </button>
+        </div>
       </div>
-    </header>
+    </aside>
 
     <main class="content">
       <!-- MANAGEMENT: users & devices + bundle stats (first tab only) -->
@@ -115,49 +143,188 @@
         </section>
       </section>
 
-      <!-- BUNDLE SETTINGS -->
-      <section id="panel-bundle" class="nav-panel hidden">
-        <div class="two-col">
-        <div class="glass card settings-card">
-          <div id="bundle-source-banner" class="banner hidden"></div>
-          <h3>Bundle settings</h3>
-          <form id="settings-form">
-            <label for="set-total">Bundle size (GB)</label>
-            <input type="number" id="set-total" min="1" step="any" value="140">
-            <label for="set-reset-day">Reset day of month <span class="muted small">(0 = manual)</span></label>
-            <input type="number" id="set-reset-day" min="0" max="28" value="1">
-            <button type="submit" class="btn primary small">Save</button>
-          </form>
-          <hr class="sep">
-          <h3>Bundle recharged</h3>
-          <p class="muted small">Bought more data mid-month? Add it here — every auto
-            user's share is recalculated without resetting the period.</p>
-          <div class="recharge-row">
-            <input type="number" id="set-recharge" min="0.1" step="any" placeholder="Added GB">
-            <button id="recharge-btn" class="btn primary small">Add</button>
+      <!-- NETWORK & QUOTA: bundle + guest + connection toggles -->
+      <section id="panel-network" class="nav-panel hidden">
+        <div class="netquota-layout">
+        <!-- LEFT COLUMN: configuration cards -->
+        <div class="netquota-config">
+
+          <!-- BUNDLE CONFIGURATION -->
+          <div class="glass card settings-card">
+            <div id="bundle-source-banner" class="banner hidden"></div>
+            <h3>Bundle configuration</h3>
+            <p class="muted small">Your monthly internet allowance and when the quota
+              period rolls over. Edit anytime — the dashboard takes ownership of the
+              bundle after your first save.</p>
+            <form id="settings-form">
+              <div class="settings-grid">
+                <div class="field">
+                  <label for="set-total">Bundle size (GB)</label>
+                  <input type="number" id="set-total" min="1" step="any" value="140">
+                </div>
+                <div class="field">
+                  <label for="set-reset-day">Reset day of month <span class="muted small">(0 = manual)</span></label>
+                  <input type="number" id="set-reset-day" min="0" max="28" value="1">
+                </div>
+              </div>
+              <div class="btn-row">
+                <button type="submit" class="btn primary small">Save bundle</button>
+              </div>
+            </form>
+            <hr class="sep">
+            <h3>Bundle recharged</h3>
+            <p class="muted small">Bought more data mid-month? Add it here — every auto
+              user's share is recalculated without resetting the period.</p>
+            <div class="recharge-row">
+              <input type="number" id="set-recharge" min="0.1" step="any" placeholder="Added GB">
+              <button id="recharge-btn" class="btn primary small">Add</button>
+            </div>
+            <hr class="sep">
+            <button id="reset-month-btn" class="btn warning small">Reset month now</button>
           </div>
-          <hr class="sep">
-          <h3>Guest mode</h3>
-          <div class="guest-head">
-            <span class="muted small">Every new device that joins the network becomes
-              a guest with its own small allowance. Guests survive disconnects and
-              are deleted when the month resets.</span>
-            <label class="switch" title="Register new devices as guests">
-              <input type="checkbox" id="guest-mode-toggle">
-              <span class="slider"></span>
-            </label>
+
+          <!-- GUEST MODE CONTROL -->
+          <div class="glass card settings-card">
+            <div class="guest-head">
+              <div>
+                <h3>Guest mode</h3>
+                <p class="muted small">Every new device that joins the network becomes
+                  a guest with its own small allowance. Guests survive disconnects and
+                  are deleted when the month resets.</p>
+              </div>
+              <label class="switch" title="Register new devices as guests">
+                <input type="checkbox" id="guest-mode-toggle">
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="settings-grid">
+              <div class="field">
+                <label for="guest-quota">Guest quota (GB)</label>
+                <input type="number" id="guest-quota" min="0.1" step="any" value="1" title="Guest allowance in GB">
+                <button id="guest-quota-btn" class="btn primary small">Set</button>
+              </div>
+              <div class="field">
+                <label for="guest-speed-limit">Guest speed limit (Mbps)</label>
+                <input type="number" id="guest-speed-limit" min="0" step="any" value="0" title="0 = unlimited; the default cap for every guest's aggregate bandwidth">
+                <button id="guest-speed-btn" class="btn primary small">Set</button>
+              </div>
+              <div class="field">
+                <label for="guest-limit">Max guest accounts</label>
+                <input type="number" id="guest-limit" min="1" step="1" value="2" title="Max guest accounts (stops MAC-spoofing spam)">
+                <button id="guest-limit-btn" class="btn ghost small">Set</button>
+              </div>
+            </div>
           </div>
-          <div class="recharge-row">
-            <input type="number" id="guest-quota" min="0.1" step="any" value="1" title="Guest allowance in GB">
-            <button id="guest-quota-btn" class="btn primary small">Set guest quota (GB)</button>
+
+          <!-- CONNECTION & SECURITY -->
+          <div class="glass card settings-card">
+            <h3>Connection &amp; security</h3>
+            <div class="toggle-row">
+              <div class="toggle-info">
+                <span class="toggle-title">Stop new connections</span>
+                <p class="toggle-help">While on, a brand-new device is blocked on first
+                  sight. Already-registered devices join normally.</p>
+              </div>
+              <label class="switch" title="Refuse brand-new devices">
+                <input type="checkbox" id="stop-new-toggle">
+                <span class="slider"></span>
+              </label>
+            </div>
+            <hr class="sep">
+            <div class="toggle-row">
+              <div class="toggle-info">
+                <span class="toggle-title">Decline random MACs</span>
+                <p class="toggle-help">Randomized (privacy) MAC addresses — the
+                  kind phones and laptops rotate — carry no vendor OUI, so the
+                  box can't identify or budget them. While on, a brand-new
+                  device with a random MAC is blocked on first sight (it stays
+                  visible + counted).</p>
+              </div>
+              <label class="switch" title="Refuse brand-new devices with randomized MACs">
+                <input type="checkbox" id="decline-random-toggle">
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="toggle-sub">
+              <label class="check" title="One-time sweep: cut every device that already joined with a randomized MAC">
+                <input type="checkbox" id="decline-random-existing">
+                <span>Also cut random-MAC devices already joined</span>
+              </label>
+              <p id="decline-random-msg" class="muted small hidden"></p>
+            </div>
+            <hr class="sep">
+            <div class="toggle-row">
+              <div class="toggle-info">
+                <span class="toggle-title">Speed limits &amp; latency (bufferbloat control)</span>
+                <p class="toggle-help">Master switch for speed shaping. Off = no limits
+                  and no low-latency queues. Caps every device's internet speed (set in
+                  the device/user modals) and keeps game ping low while others upload
+                  or download. Only applies on the Linux gateway.</p>
+              </div>
+              <label class="switch" title="Enable per-device / per-user speed limits">
+                <input type="checkbox" id="shaping-toggle">
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="toggle-sub">
+              <p class="muted small"><strong>WAN — internet</strong></p>
+              <p class="muted small">Real line speed — set these to the DOWNLOAD /
+                UPLOAD rate your ISP gives you (e.g. 100 / 20 Mbps). The queue then
+                forms at the gateway where it can keep pings low under load — that's
+                what stops bufferbloat.</p>
+              <div class="recharge-row">
+                <input type="number" id="set-total-down" min="0" step="any" placeholder="WAN down Mbps">
+                <input type="number" id="set-total-up" min="0" step="any" placeholder="WAN up Mbps">
+              </div>
+              <p class="muted small"><strong>LAN — internal transfers</strong></p>
+              <p class="muted small">Traffic between clients and your local network
+                (NAS, router admin, LAN transfers) is <em>not</em> internet — the WAN
+                caps above must never throttle it. This is the LAN link rate the
+                pass-through allows (0 = 1000 Mbps default).</p>
+              <div class="recharge-row">
+                <input type="number" id="set-lan-rate" min="0" step="any" placeholder="LAN Mbps">
+              </div>
+              <div class="toggle-row">
+                <div class="toggle-info">
+                  <span class="toggle-title">Low-latency queues (fq_codel)</span>
+                  <p class="toggle-help">On = pings stay low even when a user saturates
+                    their speed.</p>
+                </div>
+                <label class="switch" title="Bufferbloat avoidance">
+                  <input type="checkbox" id="aqm-toggle">
+                  <span class="slider"></span>
+                </label>
+              </div>
+              <button id="shaping-save-btn" class="btn primary small">Save speed settings</button>
+            </div>
+            <hr class="sep">
+            <div class="toggle-row">
+              <div class="toggle-info">
+                <span class="toggle-title">VPN share (TUN mode)</span>
+                <p class="toggle-help">Routes <strong>every device's</strong> internet
+                  through the box's VPN connection — one VPN for the whole household.
+                  Start the VPN client on the gateway in <strong>TUN mode</strong>
+                  (sing-box / xray / WireGuard / tun2socks over any SOCKS/HTTP proxy)
+                  and flip this on: the box auto-detects the tunnel and policy-routes
+                  the client subnet into it. Quota counting, blocks, and speed caps
+                  keep applying — the bytes just exit at the VPN provider's IP. While
+                  ON, you can cut the Gateway's own internet — the box keeps ONLY its
+                  connection to the VPN server open automatically.</p>
+              </div>
+              <label class="switch" title="Share the box's VPN across all devices">
+                <input type="checkbox" id="vpn-toggle">
+                <span class="slider"></span>
+              </label>
+            </div>
+            <p id="vpn-status" class="vpn-status muted small">Checking…</p>
+            <p id="vpn-gw-hint" class="vpn-status muted small hidden"></p>
+            <p id="vpn-ts-hint" class="vpn-status muted small hidden"></p>
           </div>
-          <hr class="sep">
-          <button id="reset-month-btn" class="btn warning small">Reset month now</button>
         </div>
 
-        <!-- LIVE BUNDLE PREVIEW (right column) -->
-        <div class="glass card preview-card">
-          <h3>Live bundle</h3>
+        <!-- RIGHT COLUMN: unified live overview -->
+        <div class="glass card preview-card netquota-overview">
+          <h3>Live Network &amp; Bundle overview</h3>
           <div class="stat">
             <span class="stat-label">Remaining</span>
             <span id="bundle-preview-remaining" class="stat-value purple">0 GB</span>
@@ -181,66 +348,27 @@
             </div>
             <div class="bar-track"><div class="bar-fill" id="bundle-preview-fill" style="width:0%"></div></div>
           </div>
-        </div>
-        </div>
-      </section>
-
-      <!-- NETWORK: speed limits + latency -->
-      <section id="panel-network" class="nav-panel hidden">
-        <div class="two-col">
-        <div class="glass card settings-card">
-          <h3>Speed limits &amp; latency</h3>
-          <p class="muted small">Caps every device's internet speed (set in the
-            device/user modals) and keeps game ping low while others upload or
-            download. Only applies on the Linux gateway.</p>
-          <div class="guest-head">
-            <span class="muted small">Master switch for speed shaping. Off = no
-              limits and no low-latency queues.</span>
-            <label class="switch" title="Enable per-device / per-user speed limits">
-              <input type="checkbox" id="shaping-toggle">
-              <span class="slider"></span>
-            </label>
-          </div>
           <hr class="sep">
-          <h3>Your real line speed</h3>
-          <p class="muted small">Set these to the REAL download / upload rate your
-            ISP gives you (e.g. 100 / 20 Mbps). The queue then forms at the gateway
-            where it can keep pings low under load — that's what stops bufferbloat.</p>
-          <div class="recharge-row">
-            <input type="number" id="set-total-down" min="0" step="any" placeholder="Down Mbps">
-            <input type="number" id="set-total-up" min="0" step="any" placeholder="Up Mbps">
-          </div>
-          <div class="guest-head">
-            <span class="muted small">Low-latency queues (fq_codel). On = pings
-              stay low even when a user saturates their speed.</span>
-            <label class="switch" title="Bufferbloat avoidance">
-              <input type="checkbox" id="aqm-toggle">
-              <span class="slider"></span>
-            </label>
-          </div>
-          <button id="shaping-save-btn" class="btn primary small">Save</button>
-        </div>
-
-        <!-- SHAPING PREVIEW (right column) -->
-        <div class="glass card preview-card">
-          <h3>Shaping preview</h3>
           <div class="stat">
-            <span class="stat-label">Status</span>
+            <span class="stat-label">Shaping</span>
             <span id="np-status" class="stat-value off">Off</span>
           </div>
           <div class="stat">
-            <span class="stat-label">Total down</span>
+            <span class="stat-label">Line down</span>
             <span id="np-down" class="stat-value">—</span>
           </div>
           <div class="stat">
-            <span class="stat-label">Total up</span>
+            <span class="stat-label">Line up</span>
             <span id="np-up" class="stat-value">—</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">LAN (pass-through)</span>
+            <span id="np-lan" class="stat-value">—</span>
           </div>
           <div class="stat">
             <span class="stat-label">Low-latency queues</span>
             <span id="np-aqm" class="stat-value">Off</span>
           </div>
-          <hr class="sep">
           <div class="stat">
             <span class="stat-label">Devices with caps</span>
             <span id="np-capped" class="stat-value">0</span>
@@ -252,30 +380,6 @@
             <span id="np-vpn" class="stat-value off">Off</span>
           </div>
         </div>
-        </div>
-
-        <!-- VPN SHARE: route the whole client subnet through the box's tunnel -->
-        <div class="glass card settings-card" style="margin-top:18px">
-          <h3>VPN share</h3>
-          <p class="muted small">Routes <strong>every device's</strong> internet
-            through the box's VPN connection — one VPN for the whole household.
-            Start the VPN client on the gateway in <strong>TUN mode</strong>
-            (sing-box / xray / WireGuard / tun2socks over any SOCKS/HTTP proxy)
-            and flip this on: the box auto-detects the tunnel and policy-routes
-            the client subnet into it. Quota counting, blocks, and speed caps
-            keep applying — the bytes just exit at the VPN provider's IP.</p>
-          <div class="guest-head">
-            <span class="muted small">While ON, the box's own metering is
-              suspended (it is relaying the household's traffic — charging it
-              again to the Gateway user would double-count and a quota-cut
-              would kill everyone's VPN). DNS queries still use dnsmasq's
-              normal upstream.</span>
-            <label class="switch" title="Share the box's VPN across all devices">
-              <input type="checkbox" id="vpn-toggle">
-              <span class="slider"></span>
-            </label>
-          </div>
-          <p id="vpn-status" class="vpn-status muted small">Checking…</p>
         </div>
       </section>
 
@@ -381,8 +485,37 @@
             <span class="stat-label">Public IP</span>
             <span id="wan-ppp-ip" class="stat-value">—</span>
           </div>
+          <div class="stat">
+            <span class="stat-label">Last renewed</span>
+            <span id="wan-renew-last" class="stat-value">—</span>
+          </div>
+          <div class="btn-row" style="margin-top:4px">
+            <button id="wan-restart-btn" class="btn" type="button" disabled
+                    title="Restarts the PPPoE dial — internet drops for a few seconds while ppp0 re-dials. On most Egyptian lines the ISP hands the new session a fresh public IP.">Restart PPPoE — renew public IP</button>
+          </div>
+          <p id="wan-renew-disabled-note" class="muted small hidden">ppp0 is down —
+            renew is disabled (restarting the dial needs a working line).</p>
           <hr class="sep">
-          <p class="muted small">ppp0 state is read live on the gateway every 60 s.
+          <div class="renew-row">
+            <div class="guest-head">
+              <span class="muted small"><strong>Auto-renew</strong> — the gateway
+                restarts the PPPoE dial on a schedule so the ISP hands out a fresh
+                public IP. Internet drops briefly each time (press <strong>Save</strong>
+                to apply).</span>
+              <label class="switch" title="Auto-renew the WAN public IP on a schedule">
+                <input type="checkbox" id="wan-renew-toggle" disabled>
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="btn-row">
+              <label for="wan-renew-minutes" class="muted small" style="flex:0 0 auto;margin:0 8px 0 0">Renew every (min 5):</label>
+              <input id="wan-renew-minutes" type="number" min="5" step="1" value="15" disabled>
+              <button id="wan-renew-save" class="btn small" type="button" disabled>Save</button>
+            </div>
+            <div id="wan-renew-msg" class="test-msg"></div>
+          </div>
+          <hr class="sep">
+          <p class="muted small">ppp0 state is read live on the gateway every 15 s.
             In LAN mode it reads n/a — ppp0 only exists when the box dials the
             line itself. Internet reachability shows in the top bar.</p>
           <div id="wan-apply-msg" class="muted small apply-msg"></div>
@@ -390,51 +523,52 @@
         </div>
       </section>
 
-      <!-- ADMIN -->
+      <!-- ADMIN: security & credentials + system info in a top 2-column grid,
+           with the full System Logs console embedded below (full width). -->
       <section id="panel-admin" class="nav-panel hidden">
-        <div class="two-col">
-        <div class="glass card admin-card">
-          <h3>Admin</h3>
-          <a id="password-link" class="link">Change password</a>
-        </div>
+        <div class="admin-layout">
 
-        <!-- ABOUT -->
-        <div class="glass card preview-card">
-          <h3>About</h3>
-          <div class="about-row">
-            <span class="muted">Application</span>
-            <span class="about-value">Quota Manager</span>
-          </div>
-          <div class="about-row">
-            <span class="muted">Version</span>
-            <span id="app-version" class="about-value">—</span>
-          </div>
-          <hr class="sep">
-          <p class="muted small">Metered-internet quota gateway. Split your monthly
-            allowance fairly between users and devices, cap speeds, and keep game
-            ping low under load.</p>
-        </div>
-        </div>
-      </section>
+          <div class="admin-grid">
+            <!-- SECURITY & CREDENTIALS -->
+            <div class="glass card">
+              <h3>Security &amp; Credentials</h3>
+              <p class="muted small">Change the dashboard password used to sign in.</p>
+              <a id="password-link" class="link">Change password</a>
+            </div>
 
-      <!-- SYSTEM LOGS -->
-      <section id="panel-logs" class="nav-panel hidden">
-        <div class="glass card logs-card">
-          <div class="logs-head">
-            <h3>System logs</h3>
-            <div class="logs-toolbar">
-              <div class="filter-group" id="log-filters" role="group" aria-label="Log level filter">
-                <button type="button" class="filter-btn active" data-level="ALL" aria-pressed="true">ALL</button>
-                <button type="button" class="filter-btn" data-level="INFO" aria-pressed="false">INFO</button>
-                <button type="button" class="filter-btn" data-level="WARNING" aria-pressed="false">WARNING</button>
-                <button type="button" class="filter-btn" data-level="ERROR" aria-pressed="false">ERROR</button>
+            <!-- SYSTEM INFO & ABOUT -->
+            <div class="glass card">
+              <h3>System Info &amp; About</h3>
+              <div class="about-row">
+                <span class="muted">Version</span>
+                <span id="app-version" class="about-value">—</span>
               </div>
-              <input type="search" id="log-search" placeholder="Search logs…" aria-label="Search logs">
-              <button type="button" id="log-refresh" class="btn ghost small" title="Reload logs">⟳ Refresh</button>
-              <button type="button" id="log-download" class="btn primary small" title="Download the filtered logs">⬇ Export</button>
+              <hr class="sep">
+              <p class="muted small">Metered-internet quota gateway. Split your monthly
+                allowance fairly between users and devices, cap speeds, and keep game
+                ping low under load.</p>
             </div>
           </div>
-          <pre id="logs-view" class="logs"></pre>
+
+          <!-- SYSTEM LOGS -->
+          <div class="glass card logs-card admin-logs-card">
+            <div class="logs-head">
+              <h3>System Logs</h3>
+              <div class="logs-toolbar">
+                <div class="filter-group" id="log-filters" role="group" aria-label="Log level filter">
+                  <button type="button" class="filter-btn active" data-level="ALL" aria-pressed="true">ALL</button>
+                  <button type="button" class="filter-btn" data-level="INFO" aria-pressed="false">INFO</button>
+                  <button type="button" class="filter-btn" data-level="WARNING" aria-pressed="false">WARNING</button>
+                  <button type="button" class="filter-btn" data-level="ERROR" aria-pressed="false">ERROR</button>
+                </div>
+                <input type="search" id="log-search" placeholder="Search logs…" aria-label="Search logs">
+                <button type="button" id="log-refresh" class="btn ghost small" title="Reload logs">⟳ Refresh</button>
+                <button type="button" id="log-download" class="btn primary small" title="Download the filtered logs">⬇ Export</button>
+              </div>
+            </div>
+            <pre id="logs-view" class="logs"></pre>
+          </div>
+
         </div>
       </section>
 
@@ -595,6 +729,8 @@
             <input type="checkbox" id="d-bypass">
             <span>Exempt from user quota</span>
           </label>
+          <p class="muted small hidden" id="d-bypass-exempt-note">This device's user is
+            exempt from quota — the per-device bypass is unnecessary.</p>
         </div>
         <div id="d-speed-wrap" class="hidden">
           <label>Speed limit (Mbps, 0 = unlimited)</label>
@@ -658,6 +794,10 @@
         <input type="number" id="u-history-days" min="0" max="365" step="1" placeholder="7">
         <label for="u-dns-server">Upstream DNS server (blank = inherit)</label>
         <input id="u-dns-server" placeholder="e.g. 1.1.1.1">
+        <label class="check" title="Never quota-block this user, however much they use. Manual admin cuts still apply.">
+          <input type="checkbox" id="u-exempt">
+          <span>Exempt from quota (unlimited usage)</span>
+        </label>
         <div class="modal-actions">
           <button type="button" id="user-modal-cancel" class="btn ghost">Cancel</button>
           <button type="submit" id="user-modal-submit" class="btn primary">Add</button>
@@ -708,6 +848,6 @@
     </div>
   </div>
 
-  <script src="/assets/app.js?v=34"></script>
+    <script src="/assets/app.js?v=51"></script>
 </body>
 </html>

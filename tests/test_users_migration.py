@@ -261,6 +261,24 @@ def test_delete_guest_device_suppresses_mac(tmp_path):
         run(d.close())
 
 
+def test_count_guest_users(tmp_path):
+    """count_guest_users tallies guest accounts (feeds the guest-limit gate)."""
+    path = tmp_path / "count.db"
+    d = _db.Database(path)
+    run(d.connect())
+    try:
+        assert run(d.count_guest_users()) == 0
+        run(d.create_user(name="", quota_mode=_db.QUOTA_FIXED,
+                          fixed_gb=1.0, guest=True))
+        run(d.create_user(name="", quota_mode=_db.QUOTA_FIXED,
+                          fixed_gb=1.0, guest=True))
+        run(d.create_user(name="Dad", quota_mode=_db.QUOTA_FIXED,
+                          fixed_gb=20.0))
+        assert run(d.count_guest_users()) == 2   # normal users don't count
+    finally:
+        run(d.close())
+
+
 def test_delete_guest_users_does_not_suppress(tmp_path):
     """The month-reset path (delete_guest_users) NEVER writes suppression rows
     — a returning guest after a reset re-registers fresh."""

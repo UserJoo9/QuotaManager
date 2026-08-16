@@ -13,10 +13,15 @@ from quota.shaping import TcShaper, _derive_client_subnet, _effective
 
 def make_cfg(iface: str = "eth0", client_subnet: str = "192.168.2.0/24",
              gateway_ip: str = "192.168.2.1", ifb: str = "ifb0") -> Config:
-    """A Config whose shaping block is fully specified (no auto-detect)."""
+    """A Config whose shaping block is fully specified (no auto-detect).
+
+    ``router_ip`` is cleared so the base tests shape a pure WAN tree — no
+    uplink subnet, no LAN pass-through. The pass-through tests set it.
+    """
     cfg = Config()
     cfg.dhcp.gateway_ip = gateway_ip
     cfg.dhcp.subnet = "255.255.255.0"
+    cfg.dhcp.router_ip = ""
     cfg.shaping.interface = iface
     cfg.shaping.client_subnet = client_subnet
     cfg.shaping.ifb = ifb
@@ -113,10 +118,11 @@ def test_full_build_emits_expected_tree():
                     "htb", "default", "2")
     assert fake.has("tc", "qdisc", "add", "dev", "ifb0", "root", "handle", "1:",
                     "htb", "default", "2")
-    # class ids: root 1:1, default 1:2, download aggregate 1:100, user 1:0x301,
-    # device leaf 1:0x8001 (devid 1)
+    # class ids: root 1:1 (capped at the LAN link rate — the headroom the LAN
+    # pass-through class needs; the WAN caps live on the classes below it),
+    # default 1:2, download aggregate 1:100, user 1:0x301, device leaf 1:0x8001
     assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:", "classid",
-                    "1:1", "htb", "rate", "100mbit")
+                    "1:1", "htb", "rate", "1000mbit")
     assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1", "classid",
                     "1:2", "htb", "rate", "100mbit", "ceil", "100mbit")
     assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1", "classid",
@@ -134,10 +140,10 @@ def test_full_build_emits_expected_tree():
                     "handle", "0x8001:", "fq_codel")
     # per-device filters: dst on eth0 (download), src on ifb0 (upload)
     assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
-                    "protocol", "ip", "prio", "1", "u32", "match", "ip", "dst",
+                    "protocol", "ip", "prio", "2", "u32", "match", "ip", "dst",
                     "192.168.2.100", "flowid", "1:0x8001")
     assert fake.has("tc", "filter", "add", "dev", "ifb0", "parent", "1:",
-                    "protocol", "ip", "prio", "1", "u32", "match", "ip", "src",
+                    "protocol", "ip", "prio", "2", "u32", "match", "ip", "src",
                     "192.168.2.100", "flowid", "1:0x8001")
     # per-device caps on the upload tree use the device UP cap (5mbit)
     assert fake.has("tc", "class", "add", "dev", "ifb0", "parent", "1:0x301",
@@ -153,6 +159,8 @@ def test_unlimited_device_goes_to_default_class():
         True, 100.0, 20.0, True)
     # no user class / device leaf / filter: only 1:1, 1:2, 1:100 on EACH tree
     assert fake.count("tc", "class", "add") == 6  # 3 per tree (eth0 + ifb0)
+    assert not fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
+                        "classid", "1:99")  # no uplink subnet -> no pass-through
     assert not fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:0x301",
                         "classid", "1:0x8002")
     assert not fake.has("tc", "class", "add", "dev", "ifb0", "parent", "1:0x301",
@@ -179,7 +187,7 @@ def test_device_up_cap_honored_when_down_unlimited():
                     "classid", "1:0x8001", "htb", "rate", "5mbit",
                     "ceil", "5mbit")
     assert fake.has("tc", "filter", "add", "dev", "ifb0", "parent", "1:",
-                    "protocol", "ip", "prio", "1", "u32", "match", "ip", "src",
+                    "protocol", "ip", "prio", "2", "u32", "match", "ip", "src",
                     "192.168.2.100", "flowid", "1:0x8001")
     # download tree (eth0): the device has no DOWN cap -> default class only
     assert not fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:0x301",
@@ -233,10 +241,11 @@ def test_every_class_has_tight_burst():
     assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:0x301",
                     "classid", "1:0x8001", "htb", "rate", "2mbit",
                     "ceil", "2mbit", "burst", "12500", "cburst", "12500")
-    # 100 Mbps root/default/aggregate -> 12.5 MB/s / 20 = 625 KB
+    # 100 Mbps root/default/aggregate -> 12.5 MB/s / 20 = 625 KB; the ROOT
+    # caps at the LAN link rate (default 1000 Mbps -> 125 MB/s / 20 = 6.25 MB)
     assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:",
-                    "classid", "1:1", "htb", "rate", "100mbit",
-                    "burst", "625000", "cburst", "625000")
+                    "classid", "1:1", "htb", "rate", "1000mbit",
+                    "burst", "6250000", "cburst", "6250000")
 
 
 def test_aqm_off_no_fq_codel():
@@ -252,9 +261,9 @@ def test_aqm_off_no_fq_codel():
 
 
 def test_disabled_or_zero_totals_teardown_only():
+    # disabled, or BOTH direction totals zero (nothing to cap) -> teardown.
     for kwargs in ({"enabled": False},
-                   {"total_down": 0.0},
-                   {"total_up": 0.0}):
+                   {"total_down": 0.0, "total_up": 0.0}):
         fake = FakeTc()
         shaper = TcShaper(make_cfg(), run_command=fake)
         shaper.start()
@@ -402,3 +411,349 @@ def test_auto_detect_interface():
 
     assert _find_interface_for("192.168.2.1", ip_addr) == "eth0"
     assert _find_interface_for("192.168.9.9", ip_addr) == ""
+
+
+# ---------------------------------------------------------------------------
+# LAN pass-through: client<->uplink-subnet traffic runs unshaped at LAN speed
+# ---------------------------------------------------------------------------
+
+def test_lan_traffic_gets_pass_through_class():
+    """Client<->uplink-subnet traffic (NAS, router admin, LAN transfers) is NOT
+    internet: a prio-1 ``1:99`` class under the root carries it at the LAN link
+    rate (not the WAN cap) in BOTH trees, ahead of every prio-2 device filter.
+    The uplink subnet resolves from the dhcp block (router_ip + mask), exactly
+    like the nftables engine's local-network exclusions."""
+    fake = FakeTc()
+    cfg = make_cfg()
+    cfg.dhcp.router_ip = "192.168.1.1"
+    shaper = TcShaper(cfg, run_command=fake)
+    shaper.start()
+    shaper.update_state(
+        [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
+        True, 100.0, 20.0, True)
+    # the pass-through class exists on both trees at the LAN link rate
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
+                    "classid", "1:99", "htb", "rate", "1000mbit",
+                    "ceil", "1000mbit")
+    assert fake.has("tc", "class", "add", "dev", "ifb0", "parent", "1:1",
+                    "classid", "1:99", "htb", "rate", "1000mbit",
+                    "ceil", "1000mbit")
+    # upload tree (ifb0, pre-NAT src = client): LAN-cross = dst in the uplink
+    assert fake.has("tc", "filter", "add", "dev", "ifb0", "parent", "1:",
+                    "protocol", "ip", "prio", "1", "u32", "match", "ip", "dst",
+                    "192.168.1.0/24", "flowid", "1:99")
+    # download tree (egress): LAN-cross = src in the uplink (LAN downloads to
+    # clients) OR dst in the uplink (re-injected LAN uploads already shaped at
+    # ifb0 — never re-capped by the default class on their way out)
+    assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
+                    "protocol", "ip", "prio", "1", "u32", "match", "ip", "src",
+                    "192.168.1.0/24", "flowid", "1:99")
+    assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
+                    "protocol", "ip", "prio", "1", "u32", "match", "ip", "dst",
+                    "192.168.1.0/24", "flowid", "1:99")
+    # the device filters still run at prio 2 — the LAN pass-through (prio 1)
+    # always wins for a LAN-cross packet (tc ignores a ``prio 0`` filter, so
+    # all priorities are deliberately non-zero)
+    assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
+                    "protocol", "ip", "prio", "2", "u32", "match", "ip", "dst",
+                    "192.168.2.100", "flowid", "1:0x8001")
+    # the root caps at the LAN link rate so 1:99 can exceed the WAN line
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:",
+                    "classid", "1:1", "htb", "rate", "1000mbit")
+    # fq_codel on the pass-through leaf too (the "every leaf" contract)
+    assert fake.has("tc", "qdisc", "add", "dev", "eth0", "parent", "1:99",
+                    "handle", "0x99:", "fq_codel")
+
+
+def test_lan_pass_through_respects_explicit_uplink_subnet():
+    """engine.uplink_subnet wins (resolve_local_networks' rule) — a topology
+    with an unusual uplink subnet still gets the pass-through."""
+    fake = FakeTc()
+    cfg = make_cfg()
+    cfg.dhcp.router_ip = "192.168.1.1"
+    cfg.engine.uplink_subnet = "10.10.10.0/24"
+    shaper = TcShaper(cfg, run_command=fake)
+    shaper.start()
+    shaper.update_state(
+        [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
+        True, 100.0, 20.0, True)
+    assert fake.has("tc", "filter", "add", "dev", "ifb0", "parent", "1:",
+                    "protocol", "ip", "prio", "1", "u32", "match", "ip", "dst",
+                    "10.10.10.0/24", "flowid", "1:99")
+    assert not fake.has("tc", "filter", "add", "dev", "ifb0", "parent", "1:",
+                        "protocol", "ip", "prio", "1", "u32", "match", "ip",
+                        "dst", "192.168.1.0/24", "flowid", "1:99")
+
+
+def test_lan_rate_is_configurable():
+    """shaping.lan_rate_mbps sets the root + pass-through headroom."""
+    fake = FakeTc()
+    cfg = make_cfg()
+    cfg.dhcp.router_ip = "192.168.1.1"
+    cfg.shaping.lan_rate_mbps = 2500
+    shaper = TcShaper(cfg, run_command=fake)
+    shaper.start()
+    shaper.update_state(
+        [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
+        True, 100.0, 20.0, True)
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:",
+                    "classid", "1:1", "htb", "rate", "2500mbit")
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
+                    "classid", "1:99", "htb", "rate", "2500mbit",
+                    "ceil", "2500mbit")
+
+
+def test_live_lan_rate_overrides_boot_config():
+    """update_state's lan_rate_mbps (the DB setting, Network tab) supersedes
+    the boot-time config value — an edit rebuilds the tree at the new rate."""
+    fake = FakeTc()
+    cfg = make_cfg()
+    cfg.dhcp.router_ip = "192.168.1.1"
+    cfg.shaping.lan_rate_mbps = 1000
+    shaper = TcShaper(cfg, run_command=fake)
+    shaper.start()
+    shaper.update_state(
+        [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
+        True, 100.0, 20.0, True)
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
+                    "classid", "1:99", "htb", "rate", "1000mbit",
+                    "ceil", "1000mbit")
+    # live edit: rebuild at the new LAN rate (signature includes the rate)
+    shaper.update_state(
+        [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
+        True, 100.0, 20.0, True, lan_rate_mbps=250)
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
+                    "classid", "1:99", "htb", "rate", "250mbit",
+                    "ceil", "250mbit")
+
+
+def test_unlimited_upload_still_shapes_downloads():
+    """WAN up = 0 means UNLIMITED uploads — it must NOT tear down the download
+    tree (the old code removed everything when either total was 0, so a "0"
+    upload silently disabled the download caps too). Only the up tree is
+    skipped; the down tree + its LAN pass-through stay programmed."""
+    fake = FakeTc()
+    cfg = make_cfg()
+    cfg.dhcp.router_ip = "192.168.1.1"
+    shaper = TcShaper(cfg, run_command=fake)
+    shaper.start()
+    shaper.update_state(
+        [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
+        True, 100.0, 0.0, True)
+    # download tree on eth0 built + LAN pass-through present
+    assert fake.has("tc", "qdisc", "add", "dev", "eth0", "root", "handle", "1:",
+                    "htb", "default", "2")
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
+                    "classid", "1:2", "htb", "rate", "100mbit",
+                    "ceil", "100mbit")
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
+                    "classid", "1:99", "htb", "rate", "1000mbit",
+                    "ceil", "1000mbit")
+    assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
+                    "protocol", "ip", "prio", "1", "u32", "match", "ip", "src",
+                    "192.168.1.0/24", "flowid", "1:99")
+    # upload tree must NOT exist (no redirect, no ifb0 qdisc)
+    assert not fake.has("tc", "qdisc", "add", "dev", "eth0", "handle", "ffff:",
+                        "ingress")
+    assert not fake.has("tc", "qdisc", "add", "dev", "ifb0", "root")
+
+
+def test_unlimited_download_still_shapes_uploads():
+    """WAN down = 0 (unlimited downloads) keeps the upload tree + its LAN
+    pass-through programmed; only the eth0 egress root tree is skipped."""
+    fake = FakeTc()
+    cfg = make_cfg()
+    cfg.dhcp.router_ip = "192.168.1.1"
+    shaper = TcShaper(cfg, run_command=fake)
+    shaper.start()
+    shaper.update_state(
+        [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
+        True, 0.0, 20.0, True)
+    # upload tree present: redirect + ifb0 root + ifb0 LAN pass-through filter
+    assert fake.has("tc", "qdisc", "add", "dev", "eth0", "handle", "ffff:",
+                    "ingress")
+    assert fake.has("tc", "qdisc", "add", "dev", "ifb0", "root", "handle", "1:",
+                    "htb", "default", "2")
+    assert fake.has("tc", "class", "add", "dev", "ifb0", "parent", "1:1",
+                    "classid", "1:99", "htb", "rate", "1000mbit",
+                    "ceil", "1000mbit")
+    assert fake.has("tc", "filter", "add", "dev", "ifb0", "parent", "1:",
+                    "protocol", "ip", "prio", "1", "u32", "match", "ip", "dst",
+                    "192.168.1.0/24", "flowid", "1:99")
+    # download tree must NOT exist
+    assert not fake.has("tc", "qdisc", "add", "dev", "eth0", "root")
+
+
+def test_lan_rate_zero_falls_back_to_default_not_wan_total():
+    """A stale config/loader leaving lan_rate_mbps at 0 must NOT degrade the
+    pass-through to the WAN cap (that throttles LAN traffic to the line limit —
+    the live-box bug). The root + 1:99 fall back to the 1000 Mbps default."""
+    fake = FakeTc()
+    cfg = make_cfg()
+    cfg.dhcp.router_ip = "192.168.1.1"
+    cfg.shaping.lan_rate_mbps = 0
+    shaper = TcShaper(cfg, run_command=fake)
+    shaper.start()
+    shaper.update_state(
+        [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
+        True, 100.0, 2.5, True)
+    # root + pass-through at 1000mbit, NEVER at the 2.5 WAN upload cap
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:",
+                    "classid", "1:1", "htb", "rate", "1000mbit")
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
+                    "classid", "1:99", "htb", "rate", "1000mbit",
+                    "ceil", "1000mbit")
+    assert not any(argv == ["tc", "class", "add", "dev", "eth0", "parent",
+                            "1:1", "classid", "1:99", "htb", "rate", "2.5mbit"]
+                   for argv in fake.calls)
+    assert not any(argv == ["tc", "class", "add", "dev", "ifb0", "parent",
+                            "1:1", "classid", "1:99", "htb", "rate", "2.5mbit"]
+                   for argv in fake.calls)
+    # every WAN leaf stays capped at its line cap — only the pass-through is wide
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
+                    "classid", "1:2", "htb", "rate", "100mbit",
+                    "ceil", "100mbit")     # download tree, total_down=100
+    assert fake.has("tc", "class", "add", "dev", "ifb0", "parent", "1:1",
+                    "classid", "1:2", "htb", "rate", "2.5mbit",
+                    "ceil", "2.5mbit")     # upload tree, total_up=2.5
+
+
+class _UplinkFromIfaces(FakeTc):
+    """The live-box case: the config cannot resolve the uplink subnet (empty
+    engine.uplink_subnet + empty router_ip + empty LAN snapshot keys), but the
+    box's OWN NIC carries the uplink alias — the shaper must derive the
+    pass-through subnet from ``ip addr`` instead."""
+
+    def __call__(self, argv):  # noqa: D102
+        self.calls.append(argv)
+        if argv == ["ip", "-o", "-4", "addr", "show", "dev", "eth0"]:
+            return 0, ("2: eth0    inet 192.168.1.110/24 brd 192.168.1.255 "
+                       "scope global eth0\n"
+                       "2: eth0    inet 192.168.2.1/24 brd 192.168.2.255 "
+                       "scope global eth0\n")
+        return 0, ""
+
+
+def test_uplink_subnet_falls_back_to_nic_addresses():
+    """With every config key empty, the pass-through still programs from the
+    box's own directly-connected subnets (uplink = the non-client one)."""
+    fake = _UplinkFromIfaces()
+    cfg = make_cfg()                     # router_ip = "", snapshot keys empty
+    cfg.dhcp.router_ip = ""
+    cfg.dhcp.uplink_ip = ""
+    shaper = TcShaper(cfg, run_command=fake)
+    shaper.start()
+    assert shaper.uplink_subnet == "192.168.1.0/24"
+    shaper.update_state(
+        [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
+        True, 100.0, 20.0, True)
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
+                    "classid", "1:99", "htb", "rate", "1000mbit",
+                    "ceil", "1000mbit")
+    assert fake.has("tc", "filter", "add", "dev", "ifb0", "parent", "1:",
+                    "protocol", "ip", "prio", "1", "u32", "match", "ip", "dst",
+                    "192.168.1.0/24", "flowid", "1:99")
+
+
+def test_uplink_fallback_leaves_passthrough_off_when_client_subnet_only():
+    """A NIC carrying ONLY the client subnet has no LAN-cross traffic to pass
+    through — no 1:99 (and no crash on the ip probe)."""
+    fake = FakeTc()
+    cfg = make_cfg()
+    cfg.dhcp.router_ip = ""
+    shaper = TcShaper(cfg, run_command=fake)
+    shaper.start()
+    assert shaper.uplink_subnet == ""
+    shaper.update_state(
+        [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
+        True, 100.0, 20.0, True)
+    assert not fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
+                        "classid", "1:99")
+    assert not fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
+                        "protocol", "ip", "prio", "1")
+
+
+class _OwnAddrIfaces(FakeTc):
+    """The box's NIC carries ONLY its own client-subnet address (192.168.2.1)
+    — no uplink alias. The LAN pass-through must still exempt client->box /
+    box->client traffic (the RustDisk case: sending a file to the gateway's
+    own IP at 192.168.2.1 must run at LAN speed, not the WAN upload cap)."""
+
+    def __call__(self, argv):  # noqa: D102
+        self.calls.append(argv)
+        if argv == ["ip", "-o", "-4", "addr", "show", "dev", "eth0"]:
+            return 0, ("2: eth0    inet 192.168.2.1/24 brd 192.168.2.255 "
+                       "scope global eth0\n")
+        return 0, ""
+
+
+def test_client_to_box_traffic_passes_through():
+    """Client->box uploads (RustDisk to 192.168.2.1) are LAN, not internet: the
+    ingress redirect catches every client-subnet packet into ifb0, so the box's
+    OWN address must be a pass-through target on the upload tree (ip dst), and
+    box->client responses on the egress tree (ip src) — otherwise both fall to
+    the default class and are throttled by the WAN caps."""
+    fake = _OwnAddrIfaces()
+    cfg = make_cfg()
+    shaper = TcShaper(cfg, run_command=fake)
+    shaper.start()
+    assert shaper.uplink_subnet == ""          # no uplink to resolve
+    assert shaper.own_addresses == ["192.168.2.1"]
+    shaper.update_state(
+        [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
+        True, 100.0, 20.0, True)
+    # pass-through class exists even though there is no uplink subnet
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
+                    "classid", "1:99", "htb", "rate", "1000mbit",
+                    "ceil", "1000mbit")
+    assert fake.has("tc", "class", "add", "dev", "ifb0", "parent", "1:1",
+                    "classid", "1:99", "htb", "rate", "1000mbit",
+                    "ceil", "1000mbit")
+    # upload tree (ifb0, pre-NAT src = client): client->box lands in 1:99
+    assert fake.has("tc", "filter", "add", "dev", "ifb0", "parent", "1:",
+                    "protocol", "ip", "prio", "1", "u32", "match", "ip", "dst",
+                    "192.168.2.1", "flowid", "1:99")
+    # download tree (egress): box->client responses land in 1:99
+    assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
+                    "protocol", "ip", "prio", "1", "u32", "match", "ip", "src",
+                    "192.168.2.1", "flowid", "1:99")
+    # and they never reach the device leaves (prio 1 beats prio 2)
+    assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
+                    "protocol", "ip", "prio", "2", "u32", "match", "ip", "dst",
+                    "192.168.2.100", "flowid", "1:0x8001")
+
+
+def test_own_addresses_join_uplink_subnet_pass_through():
+    """A NIC with BOTH an uplink alias and its own address passes BOTH through:
+    the uplink-subnet filters AND ip dst/src matching the box's own addresses
+    are programmed together on each tree."""
+    fake = _UplinkFromIfaces()     # 192.168.1.110 (uplink) + 192.168.2.1
+    cfg = make_cfg()
+    cfg.dhcp.router_ip = "192.168.1.1"
+    shaper = TcShaper(cfg, run_command=fake)
+    shaper.start()
+    assert shaper.uplink_subnet == "192.168.1.0/24"
+    assert shaper.own_addresses == ["192.168.1.110", "192.168.2.1"]
+    shaper.update_state(
+        [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
+        True, 100.0, 20.0, True)
+    # upload tree: both the uplink subnet and the box's own address pass
+    assert fake.has("tc", "filter", "add", "dev", "ifb0", "parent", "1:",
+                    "protocol", "ip", "prio", "1", "u32", "match", "ip", "dst",
+                    "192.168.1.0/24", "flowid", "1:99")
+    assert fake.has("tc", "filter", "add", "dev", "ifb0", "parent", "1:",
+                    "protocol", "ip", "prio", "1", "u32", "match", "ip", "dst",
+                    "192.168.2.1", "flowid", "1:99")
+    assert fake.has("tc", "filter", "add", "dev", "ifb0", "parent", "1:",
+                    "protocol", "ip", "prio", "1", "u32", "match", "ip", "dst",
+                    "192.168.1.110", "flowid", "1:99")
+    # download tree: box->client responses pass alongside the uplink src/dst
+    assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
+                    "protocol", "ip", "prio", "1", "u32", "match", "ip", "src",
+                    "192.168.1.0/24", "flowid", "1:99")
+    assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
+                    "protocol", "ip", "prio", "1", "u32", "match", "ip", "dst",
+                    "192.168.1.0/24", "flowid", "1:99")
+    assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
+                    "protocol", "ip", "prio", "1", "u32", "match", "ip", "src",
+                    "192.168.2.1", "flowid", "1:99")

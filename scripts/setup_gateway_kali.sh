@@ -807,6 +807,9 @@ shaping:
   enabled: true
   interface: $LAN_IF
   client_subnet: $CLIENT_NET
+  # LAN (client <-> router-LAN) traffic rides a pass-through class at this
+  # rate; only internet-bound bytes are shaped at the line cap below.
+  lan_rate_mbps: 1000
   ifb: ifb0
 # Per-device browsing history (dnsmasq query-log tailer, quota/dnslog.py).
 # enabled: false stops the app reading the log entirely (DNS/DHCP unaffected).
