@@ -26,6 +26,8 @@ htmlcov/
 # ---- Runtime data (never commit — contains admin password hash + usage) ----
 data/
 logs/
+leases/
+dnsmasq.d/
 *.db
 *.sqlite3
 *.db-wal

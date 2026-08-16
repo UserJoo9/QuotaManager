@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - '**'
+    tags-ignore:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    name: Lint & Unit Tests (Python 3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'requirements-linux.txt'
+
+      - name: Install system dependencies (nftables, iproute2, dnsmasq)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nftables iproute2 dnsmasq arp-scan
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-linux.txt
+
+      - name: Run linter (pyflakes)
+        run: |
+          pyflakes api core quota tests run.py
+
+      - name: Run test suite (pytest)
+        env:
+          PYTHONPATH: .
+        run: |
+          pytest -v
+
+  docker-build-test:
+    name: Docker Build & Container Verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: lint-and-test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: quota-manager:ci-test
+
+      - name: Run container unit tests
+        run: |
+          docker run --rm --privileged -e PYTHONPATH=/app -e QUOTA_AUTO_GATEWAY=0 -v "${PWD}/tests:/app/tests:ro" quota-manager:ci-test pytest --ignore=tests/test_packaging.py --ignore=tests/test_ci.py -v
+
+      - name: Test container startup & HTTP response
+        run: |
+          # Skip gateway network init — CI has no physical LAN interface
+          export QUOTA_AUTO_GATEWAY=0
+          docker compose up -d
+
+          # Wait for the service to bind and initialize
+          sleep 5
+
+          # Smoke test: verify web dashboard responds with HTTP 200
+          # (Note: In CI this tests HTTP daemon binding & API initialization; full
+          # gateway NAT/DHCP requires physical multihomed Ethernet routing).
+          curl --fail -sS -I http://127.0.0.1:8080/ || (docker compose logs && exit 1)
+
+          # Clean up
+          docker compose down

@@ -1,0 +1,63 @@
+# ---- Version control ----
+.git
+.github
+.gitignore
+.gitattributes
+
+# ---- Python caches & build artifacts ----
+__pycache__
+*.py[cod]
+*$py.class
+*.egg-info
+build
+dist
+
+# ---- Virtual environments ----
+.venv
+venv
+env
+
+# ---- Test & lint caches ----
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+tests/
+
+# ---- Runtime data (host-mounted, never baked in) ----
+data/
+logs/
+leases/
+dnsmasq.d/
+*.db
+*.sqlite3
+*.db-wal
+*.db-shm
+*.log
+
+# ---- Documentation (not needed at runtime) ----
+CLAUDE.md
+Structure_README.md
+README.md
+CHANGELOG.md
+DOCKER_DEPLOYMENT.md
+
+# ---- Docker & packaging (not needed inside the image) ----
+Dockerfile
+docker-compose.yml
+.dockerignore
+.env*
+packaging/
+*.deb
+*.gpg
+
+# ---- OS & IDE junk ----
+.DS_Store
+Thumbs.db
+.vscode
+.idea
+
+# ---- Secrets & misc ----
+TASKS.md
+quota-manager-secret.asc

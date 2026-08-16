@@ -100,8 +100,9 @@ is also a great way to try Quota Manager before committing any hardware.
 
 ### 1. Install the package
 
-**Easiest — install from the apt repository** (one-time key + repo setup, then
-upgrades via `apt update && apt upgrade`):
+#### Method A — apt repository (Debian / Kali)
+
+**Easiest for bare-metal installs** (one-time key + repo setup, then upgrades via `apt update && apt upgrade`):
 
 ```bash
 sudo install -d /etc/apt/keyrings
@@ -117,8 +118,49 @@ The repository is signed with the key above and re-published automatically on
 every release, so upgrades are just `sudo apt-get update && sudo apt-get
 upgrade`.
 
-**Alternative — install a downloaded `.deb`.** Download the latest
-`quota-manager_<version>_all.deb` from the
+---
+
+#### Method B — Docker / Dockge (Any Linux machine / Server)
+
+Run Quota Manager containerized on any Linux machine, mini-PC, or home server.
+The multi-arch image (`amd64` / `arm64`) includes all runtime dependencies
+(`nftables`, `dnsmasq`, `iproute2`, Python).
+
+**Docker Compose (`docker-compose.yml`):**
+
+```yaml
+services:
+  quota-manager:
+    image: ghcr.io/userjoo9/quotamanager:latest
+    container_name: quota-manager
+    network_mode: host
+    privileged: true
+    restart: unless-stopped
+    environment:
+      - TZ=Africa/Cairo
+      - QUOTA_CONFIG=/app/config.yaml
+      - QUOTA_PORT=8080
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - /opt/quota-manager/config.yaml:/app/config.yaml:rw
+      - /opt/quota-manager/data:/var/lib/quota-gateway:rw
+      - /opt/quota-manager/logs:/var/log/quota-gateway:rw
+      - /opt/quota-manager/dnsmasq.d:/etc/dnsmasq.d:rw
+      - /opt/quota-manager/leases:/var/lib/misc:rw
+```
+
+```bash
+# Start container
+docker compose up -d
+```
+
+> 📖 **Full Docker & Dockge Guide:** see [DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md) for network details, environment variables, and security considerations.
+
+---
+
+#### Method C — downloaded `.deb`
+
+Download the latest `quota-manager_<version>_all.deb` from the
 [Releases](https://github.com/UserJoo9/QuotaManager/releases) page, then:
 
 ```bash
@@ -492,6 +534,8 @@ it automatically — it's there when you want it, and every other source gets a
 
 ## Upgrading / removing
 
+### apt installs (Method A / C)
+
 ```bash
 # Upgrade (apt repository): your config + database survive
 sudo apt-get update
@@ -507,8 +551,22 @@ sudo apt remove quota-manager
 sudo apt purge quota-manager
 ```
 
-**Back up** `/var/lib/quota-gateway/quota.db` occasionally (while the app is
-stopped) — it holds every device, allowance and month of usage.
+### Docker installs (Method B)
+
+```bash
+# Upgrade pre-built image
+docker compose pull && docker compose up -d
+
+# Stop container
+docker compose down
+
+# View logs
+docker compose logs -f
+```
+
+**Back up** your database occasionally (while the service is stopped) — it holds every device, allowance, and history:
+- **apt installs:** `/var/lib/quota-gateway/quota.db`
+- **Docker installs:** `./data/quota.db` (or your host mount path)
 
 ---
 
