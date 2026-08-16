@@ -406,6 +406,29 @@ kernel counts and drops.
 _Pending work lives in TASKS.md; orphans + debt are tracked in
 [LEGACY_DEBT_AND_RISKS] below. Version history (newest first):_
 
+Checked 2026-08-16 (**v0.2.0 released** — the whole v19–v28.4 bundle shipped as a
+      minor version bump):
+- [x] **version bumped `0.1.3` → `0.2.0`** (`quota/version.py`, the single source
+      of truth) and tagged **`v0.2.0`**. The release carries every previously
+      uncommitted feature from v19–v28.4 (the entries below): the WAN/LAN
+      topology manager with live dashboard switch (`quota/netmgr.py` +
+      `scripts/topology.sh`), VPN share + `gw_allowed` whitelist + tun2socks
+      auto-provisioner, DNS filtering + per-client DNS servers, per-device
+      browsing history, the Network & Quota overhaul with the guest-limit /
+      STOP NEW CONNECTIONS / decline-random-MACs / exempt-from-quota / privacy
+      eye gates, and the LAN pass-through shaping fixes (prio-1/prio-2 + the
+      box's own addresses). The release description is auto-composed from the
+      `[0.2.0] — 2026-08-16` CHANGELOG section as usual; the `apt-repo.yml`
+      `workflow_run` publishes the `.deb` to the signed apt repo on `gh-pages`
+      (https://UserJoo9.github.io/QuotaManager/), so `apt-get update && apt-get
+      install quota-manager` upgrades to v0.2.0.
+- [x] **docs synced**: CHANGELOG `[Unreleased]` renamed → `[0.2.0] — 2026-08-16`
+      (+ a fresh empty `[Unreleased]` placeholder); README + README_AR `.deb`
+      example → `quota-manager_0.2.0_all.deb`; Structure_README version refs →
+      0.2.0 (bump example + apt-repo backfill); the earlier entries below were
+      uncommitted work now released in v0.2.0 (their "uncommitted" markers are
+      superseded history).
+
 Checked 2026-08-15 (**v28 WAN-only shaping + tab persistence, uncommitted**):
       the user's "shape the internet, not the LAN" + "return to the same tab
       after refresh" asks:

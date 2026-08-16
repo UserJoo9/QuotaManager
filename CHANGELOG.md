@@ -6,6 +6,8 @@ The version is the single source of truth in `quota/version.py`; a release tag
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-08-16
+
 ### Added
 
 - **Network tab: speed shaping is now split into WAN and LAN sections**

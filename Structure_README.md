@@ -1301,7 +1301,7 @@ The `.deb` is built **only by GitHub Actions** and published to **GitHub
 Releases** — there is no local build step.
 
 1. **Bump the version** — edit `quota/version.py`
-   (`__version__ = "0.1.3"` → next semver) and add a `CHANGELOG.md` entry if you
+   (`__version__ = "0.2.0"` → next semver) and add a `CHANGELOG.md` entry if you
    want one.
 2. **Commit + push**:
 
@@ -1362,5 +1362,5 @@ populated and signed by `apt-repo.yml`. Setting it up the first time:
 3. **Backfill the current release** so the repo isn't empty (the release + its
    `.deb` already exist in GitHub Releases):
    ```bash
-   gh workflow run apt-repo.yml --ref main -f version=0.1.3
+   gh workflow run apt-repo.yml --ref main -f version=0.2.0
    ```

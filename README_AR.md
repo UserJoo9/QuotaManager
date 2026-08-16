@@ -118,7 +118,7 @@ sudo apt-get install quota-manager
 من صفحة [الإصدارات](https://github.com/UserJoo9/QuotaManager/releases)، ثم:
 
 ```bash
-sudo apt install ./quota-manager_0.1.3_all.deb
+sudo apt install ./quota-manager_0.2.0_all.deb
 ```
 
 > **جهاز Kali/Debian جديد؟ شغّل `sudo apt-get update` أولًا.** التثبيت الجديد

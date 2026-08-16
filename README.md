@@ -122,7 +122,7 @@ upgrade`.
 [Releases](https://github.com/UserJoo9/QuotaManager/releases) page, then:
 
 ```bash
-sudo apt install ./quota-manager_0.1.3_all.deb
+sudo apt install ./quota-manager_0.2.0_all.deb
 ```
 
 > **Fresh Kali/Debian box? Run `sudo apt-get update` first.** A brand-new
