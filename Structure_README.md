@@ -1301,13 +1301,13 @@ The `.deb` is built **only by GitHub Actions** and published to **GitHub
 Releases** — there is no local build step.
 
 1. **Bump the version** — edit `quota/version.py`
-   (`__version__ = "0.2.0"` → next semver) and add a `CHANGELOG.md` entry if you
+   (`__version__ = "0.2.1"` → next semver) and add a `CHANGELOG.md` entry if you
    want one.
 2. **Commit + push**:
 
 ```bash
 git add quota/version.py CHANGELOG.md
-git commit -m "Bump version to 0.2.0"
+git commit -m "Bump version to 0.2.1"
 git push origin main
 ```
 
@@ -1315,13 +1315,13 @@ git push origin main
    loudly otherwise):
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.2.1
+git push origin v0.2.1
 ```
 
 The `release` workflow (`.github/workflows/release.yml`) builds
-`quota-manager_0.2.0_all.deb` and uploads it to a GitHub Release named
-`v0.2.0`. GitHub Releases are immutable, so each version needs a **new** tag.
+`quota-manager_0.2.1_all.deb` and uploads it to a GitHub Release named
+`v0.2.1`. GitHub Releases are immutable, so each version needs a **new** tag.
 The release description is auto-composed from the `CHANGELOG.md` section for
 the released version (plus the install note), so keep the CHANGELOG current —
 it IS the release notes.
@@ -1362,5 +1362,5 @@ populated and signed by `apt-repo.yml`. Setting it up the first time:
 3. **Backfill the current release** so the repo isn't empty (the release + its
    `.deb` already exist in GitHub Releases):
    ```bash
-   gh workflow run apt-repo.yml --ref main -f version=0.2.0
+   gh workflow run apt-repo.yml --ref main -f version=0.2.1
    ```
