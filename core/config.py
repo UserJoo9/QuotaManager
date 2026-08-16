@@ -330,6 +330,22 @@ def _as_dataclass(dc: Any, data: dict[str, Any] | None) -> Any:
     return type(dc)(**kwargs)  # type: ignore[call-arg]
 
 
+def resolve_config_path(path: str | os.PathLike[str] | None = None) -> Path:
+    """Resolve a config path string or directory to an existing or target config file.
+
+    If given a directory (common with Docker volume mounts when the host path did
+    not exist prior to container boot), search inside for ``config.yaml`` or ``config.yml``.
+    """
+    raw_path = path or os.environ.get("QUOTA_CONFIG") or DEFAULT_CONFIG_PATH
+    cfg_path = Path(raw_path)
+    if cfg_path.is_dir():
+        for candidate in (cfg_path / "config.yaml", cfg_path / "config.yml"):
+            if candidate.is_file():
+                return candidate
+        return cfg_path / "config.yaml"
+    return cfg_path
+
+
 def load_config(path: str | os.PathLike[str] | None = None) -> Config:
     """Load config from ``path`` (default ``config.yaml`` next to the project).
 
@@ -339,8 +355,8 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
     the admin had no idea until devices were blocked or never counted. On the
     gateway, fail loud at boot instead of running with invented settings.
     """
-    cfg_path = Path(path or os.environ.get("QUOTA_CONFIG") or DEFAULT_CONFIG_PATH)
-    if not cfg_path.exists():
+    cfg_path = resolve_config_path(path)
+    if not cfg_path.is_file():
         raise FileNotFoundError(
             f"config file not found: {cfg_path}. Copy config.yaml to that "
             "path, or point QUOTA_CONFIG at it.")
@@ -357,3 +373,4 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         else:
             setattr(cfg, section, value)
     return cfg
+

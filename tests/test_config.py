@@ -205,3 +205,29 @@ def test_history_config_disable_via_yaml():
         p.write_text("bogus_section:\n  x: 1\n", encoding="utf-8")
         loaded = cfg_mod.load_config(p)
     assert loaded.history.enabled is True
+
+
+def test_resolve_config_path_and_directory_mounts():
+    """When a directory is passed or mounted, resolve_config_path finds config.yaml."""
+    import tempfile
+    from pathlib import Path
+    import pytest
+
+    with tempfile.TemporaryDirectory() as td:
+        dir_path = Path(td)
+        cfg_file = dir_path / "config.yaml"
+        cfg_file.write_text("bundle:\n  total_gb: 250\n", encoding="utf-8")
+
+        # Passing directory directly resolves to config.yaml inside
+        resolved = cfg_mod.resolve_config_path(dir_path)
+        assert resolved == cfg_file
+
+        loaded = cfg_mod.load_config(dir_path)
+        assert loaded.bundle.total_gb == 250.0
+
+    # If directory has no config.yaml, load_config fails loudly with FileNotFoundError
+    with tempfile.TemporaryDirectory() as td:
+        empty_dir = Path(td)
+        with pytest.raises(FileNotFoundError):
+            cfg_mod.load_config(empty_dir)
+
