@@ -411,6 +411,18 @@ kernel counts and drops.
 _Orphans + debt are tracked in [LEGACY_DEBT_AND_RISKS] below. Version history
 (newest first) — full detail in the git history / CHANGELOG.md; these are the
 headlines + the gotchas to remember:_
+- **2026-08-17** — **v0.2.1 changelog made user-friendly end-to-end**: the
+  release notes / popup showed the LONG technical CHANGELOG text. Two sources
+  feed the popup and BOTH now carry the brief text: (1) raw
+  `CHANGELOG.md` on main (rewritten brief, commit `8331cb0`) and (2) the
+  **GitHub release body** — `check_now`'s fallback (`quota/updater.py`)
+  serves the release body whenever the raw fetch fails, and a box that can't
+  reach `raw.githubusercontent.com` (common) got the IMMUTABLE v0.2.1 body
+  with the old 11 KB technical changelog. Fixed by `gh release edit v0.2.1`
+  → brief body (GitHub-side, no code); a box re-check ("Check now") picks it
+  up even WITHOUT the regex fix. Gotcha: the release body is immutable at
+  tag time — a later CHANGELOG rewrite never reaches a box stuck on the
+  fallback, so keep the release body and main's CHANGELOG section in sync.
 - **2026-08-17** — **Show-details changelog bug fixed**: `parse_changelog` only
   matched BARE `## [version]` headers — the real CHANGELOG writes
   `## [0.2.1] — 2026-08-17` (date suffix), so the popup said "New versions
