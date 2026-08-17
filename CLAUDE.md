@@ -411,7 +411,16 @@ kernel counts and drops.
 _Orphans + debt are tracked in [LEGACY_DEBT_AND_RISKS] below. Version history
 (newest first) — full detail in the git history / CHANGELOG.md; these are the
 headlines + the gotchas to remember:_
-- **2026-08-17** — **Admin-tab self-update checks (uncommitted)**: the box
+- **2026-08-17** — **v0.2.1 released + pushed**: the whole uncommitted batch
+  below (self-update, period_type/end_of_month + period-math fix, disabled
+  onboarding lock, DHCP-level refusals, guest-limit apply-to-existing,
+  random-MAC vendor-OUI sweep fix, ARP-RTT WiFi/LAN labels, LED=presence,
+  audit-fix batch, MAC whitelist/blacklist + phantom-device fix + exempt-quota
+  fix) shipped as **v0.2.1** (commit `cf0146f`, tag `v0.2.1` pushed). README.md /
+  README_AR.md / Structure_README.md updated; CHANGELOG.md `[0.2.1]` section
+  written (it IS the release notes). Full suite 571 passed + pyflakes + node
+  clean. Release workflow builds the .deb; apt repo auto-republishes.
+- **2026-08-17** — **Admin-tab self-update checks (uncommitted → v0.2.1)**: the box
   compares its own version (`quota/version.py`) to the latest GitHub release
   (`updates.repo`, default UserJoo9/QuotaManager) every `updates.interval_hours`
   (24) and, on a newer version, shows an update banner with a **Show details**
