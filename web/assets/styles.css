@@ -519,7 +519,7 @@ select option { background: var(--bg-2); }
 .rogue-mac .device-vendor { margin-left: 0; font-style: italic; }
 
 /* pill tags — subtle glass chips */
-.bypass-tag, .guest-tag, .gateway-tag, .speed-tag, .status-tag, .hist-device-badge {
+.bypass-tag, .guest-tag, .gateway-tag, .speed-tag, .status-tag, .hist-device-badge, .iface-tag {
   font-family: inherit;
   font-size: 0.62rem;
   font-weight: 700;
@@ -535,6 +535,7 @@ select option { background: var(--bg-2); }
 .guest-tag { color: var(--warn); background: rgba(217, 119, 6, 0.08); border: 1px solid rgba(217, 119, 6, 0.4); }
 .gateway-tag { color: #F472B6; background: rgba(244, 114, 182, 0.08); border: 1px solid rgba(244, 114, 182, 0.4); }
 .speed-tag { color: var(--down); background: rgba(34, 211, 238, 0.08); border: 1px solid rgba(34, 211, 238, 0.4); }
+.iface-tag { color: var(--text-dim); background: rgba(148, 163, 184, 0.10); border: 1px solid rgba(148, 163, 184, 0.35); }
 .status-tag { margin-left: 6px; }
 .status-tag.quota { color: var(--warn); background: rgba(217, 119, 6, 0.08); border: 1px solid rgba(217, 119, 6, 0.4); }
 .status-tag.admin_off { color: var(--danger); background: rgba(220, 38, 38, 0.08); border: 1px solid rgba(220, 38, 38, 0.4); }
@@ -1014,6 +1015,38 @@ select option { background: var(--bg-2); }
 .about-value { font-weight: 600; }
 .stat-value.ok { color: var(--ok); }
 .stat-value.off { color: var(--text-dim); }
+
+/* ---------- update-available notification banner (top-center toast) ---------- */
+.update-banner {
+  position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+  z-index: 45; display: flex; align-items: center; gap: 14px;
+  max-width: min(560px, calc(100vw - 24px));
+  padding: 12px 16px; border-radius: var(--radius-lg);
+  background: linear-gradient(135deg, rgba(13, 16, 23, 0.92), rgba(20, 26, 38, 0.92));
+  border: 1px solid var(--accent);
+  box-shadow: var(--shadow-lg);
+}
+.update-banner-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.update-banner-text strong { font-size: 0.9rem; }
+.update-banner-text .muted { margin: 0; }
+.update-banner-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+
+/* ---------- software-updates card (Admin tab) ---------- */
+.updates-card { grid-column: 1 / -1; }
+.updates-grid { display: grid; grid-template-columns: repeat(2, 1fr); column-gap: 24px; }
+.updates-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.updates-card .check { margin-top: 10px; }
+@media (max-width: 560px) { .updates-grid { grid-template-columns: 1fr; } }
+
+/* ---------- changelog popup (the "Show details" modal) ---------- */
+.changelog-card { max-width: 560px; }
+.changelog-scroll {
+  max-height: 60vh; overflow-y: auto; margin-top: 12px;
+  display: flex; flex-direction: column; gap: 14px;
+  padding-right: 6px;
+}
+.changelog-scroll h4 { margin: 0 0 4px 0; font-size: 0.92rem; color: var(--accent-2); }
+.changelog-scroll p { margin: 0; font-size: 0.82rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 
 /* VPN share (Network tab): the status line under the switch */
 .vpn-status.ok { color: var(--ok); }

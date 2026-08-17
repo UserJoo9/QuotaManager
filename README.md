@@ -164,7 +164,7 @@ Download the latest `quota-manager_<version>_all.deb` from the
 [Releases](https://github.com/UserJoo9/QuotaManager/releases) page, then:
 
 ```bash
-sudo apt install ./quota-manager_0.2.0_all.deb
+sudo apt install ./quota-manager_0.2.1_all.deb
 ```
 
 > **Fresh Kali/Debian box? Run `sudo apt-get update` first.** A brand-new
@@ -190,7 +190,14 @@ one-time **welcome panel** appears with two required fields —
 - **Reset day of the month** — the day your ISP resets the bundle (`0` = no
   auto-reset; you recharge from the dashboard instead)
 
-It also lets you change the admin password in the same step. Both values can be
+plus a **bundle type** selector:
+
+- **Renew day** (default) — the bundle resets on your configured reset day
+- **End of month** — the ISP's *month-end bill*: the same configured day drives
+  the reset (many ISPs close the month on the 25th/28th), and day `0` falls
+  back to the calendar end (the 1st)
+
+It also lets you change the admin password in the same step. All values can be
 changed later in the dashboard's **Bundle settings** card.
 
 Prefer editing config instead? The same two numbers live under `bundle` in
@@ -205,6 +212,7 @@ sudo nano /etc/quota-gateway/config.yaml
 bundle:
   total_gb: 140.0        # your real monthly bundle, GB
   reset_day: 1           # day of month your ISP resets; 0 = no auto-reset
+  period_type: renew_day # renew_day | end_of_month (the ISP's month-end bill)
 timezone: ""             # optional IANA zone, e.g. Africa/Cairo
 ```
 
@@ -246,7 +254,10 @@ Default password is **`admin`** — **change it immediately** (Admin tab).
 > `http://192.168.1.110:8080` instead.
 
 **Done.** New devices appear in the dashboard automatically the first time they
-join. Set each person's allowance from **Add user** and you're running.
+join — but as a safety lock they join **disabled**: a brand-new device's user
+gets **0 GB and no share of the bundle**, so the device is cut off until you
+open its user/device edit modal and assign **Shared** (auto) or **Fixed** GB.
+Set each person's allowance from **Add user** and you're running.
 
 ### The gateway's addresses (LAN mode)
 
@@ -286,10 +297,10 @@ See [Structure_README.md](Structure_README.md) → *Running from source*.
 
 | Tab | What it does |
 |---|---|
-| **Management** | the bundle ring (used / remaining / days left) and a card per **user** — allowance, usage bar, block toggle, top-up, edit, delete — with their devices listed underneath (name, MAC, manufacturer, its own quota bar + up/down split). A user can be flagged **Exempt from quota** (never quota-blocked, however much they use — manual blocks still work) |
-| **Network** | everything about the bundle and the internet path in one place: change `total_gb` / `reset_day`, **Bundle recharged** (add mid-month GB, e.g. an ISP top-up), **Guest mode** (auto-register new devices with a small allowance + a default **guest speed limit** and a **guest limit** — max guest accounts, stops MAC-spoofing spam — plus a **STOP NEW CONNECTIONS** gate), **Reset month now**, the shaping master switch with your **real line down/up rates** + low-latency toggle (caps shape **internet only** — LAN traffic passes through at full speed), **VPN share** (route every device's internet through the VPN the laptop runs, see below), a **Decline random MACs** gate, a **MAC whitelist / blacklist** (whitelisted MACs are never quota-blocked; blacklisted MACs are always blocked — the blacklist wins over the whitelist, `bypass` and manual states; edits apply instantly, no reboot; **deleting a device or user blacklists its MACs permanently** — a deleted device never re-registers while still connected, stays kernel-blocked even without a device row, and comes back only when you remove its MAC from the deny list), and a live bundle/network overview |
+| **Management** | the bundle ring (used / remaining / days left) and a card per **user** — allowance, usage bar, block toggle, top-up, edit, delete — with their devices listed underneath (name, MAC, manufacturer, its own quota bar + up/down split). Each device card also shows **how it's connected**: a **WiFi / LAN** chip (how the device reaches the *router* — the box answers every client's ARP and times the reply; wired answers in well under a millisecond, WiFi pays airtime — plus the box-side NIC tag) and a **presence LED** that goes grey when the device stops answering (asleep / off / on another network), even if it still holds a DHCP lease. A user can be flagged **Exempt from quota** (never quota-blocked, however much they use — manual blocks still work) |
+| **Network** | everything about the bundle and the internet path in one place: change `total_gb` / `reset_day`, **Bundle recharged** (add mid-month GB, e.g. an ISP top-up), **Guest mode** (auto-register new devices with a small allowance + a default **guest speed limit** and a **guest limit** — max guest accounts, stops MAC-spoofing spam; lowering the cap also cuts existing over-cap guests — plus a **STOP NEW CONNECTIONS** gate that makes dnsmasq *refuse* brand-new devices), **Reset month now**, the shaping master switch with your **real line down/up rates** + low-latency toggle (caps shape **internet only** — LAN traffic passes through at full speed), **VPN share** (route every device's internet through the VPN the laptop runs, see below), a **Decline random MACs** gate, a **MAC whitelist / blacklist** (whitelisted MACs are never quota-blocked; blacklisted MACs are always blocked — the blacklist wins over the whitelist, `bypass` and manual states; edits apply instantly, no reboot; **deleting a device or user blacklists its MACs permanently** — a deleted device never re-registers while still connected, stays kernel-blocked even without a device row, and comes back only when you remove its MAC from the deny list), and a live bundle/network overview |
 | **WAN** | optional "strong" mode where the laptop dials the PPPoE line itself (see below) |
-| **Admin** | security & credentials (change the dashboard password) and **System Info & About** (app, installed version), with the **System Logs** console embedded full-width below — level filter (ALL / INFO / WARNING / ERROR), search, refresh and export, in a scrollable terminal view |
+| **Admin** | security & credentials (change the dashboard password), **Software updates** (check for a newer release, see what changed, install it from the dashboard — see below) and **System Info & About** (app, installed version), with the **System Logs** console embedded full-width below — level filter (ALL / INFO / WARNING / ERROR), search, refresh and export, in a scrollable terminal view |
 | **DNS** | domain filtering (block / allow / redirect a domain for a user, a device, or everyone; blocklist presets; per-client DNS servers) |
 | **History** | what each device is actually visiting: pick a device + a look-back window → its **top domains** (with share %), an **hourly activity** list, and the **most recent queries** (minute buckets) |
 
@@ -326,10 +337,19 @@ file).
 **Decline random MACs** (Network tab → Connection & security) — phones and
 laptops that rotate their MAC for privacy carry **no vendor OUI** (the address
 is locally-administered), so the box can't identify or budget them. While the
-switch is on, a brand-new device with a randomized MAC is registered (visible +
-counted) but **immediately cut** until an admin unblocks it. The **"Also cut
-random-MAC devices already joined"** checkbox runs a one-shot sweep over the
-devices already on the network (real-OUI devices are never touched).
+switch is on, a brand-new device with a randomized MAC is **refused at the DHCP
+level** — dnsmasq simply never hands it an address, so no device row is even
+created. The **"Also cut random-MAC devices already joined"** checkbox runs a
+one-shot sweep over the devices already on the network (real-OUI devices are
+never touched — the sweep only cuts addresses whose OUI is *not* in the
+bundled IEEE registry, so genuine legacy products with locally-administered
+MACs are safe).
+
+**STOP NEW CONNECTIONS** (same section) works the same way: while it's on,
+dnsmasq refuses brand-new devices outright instead of letting them join and
+immediately blocking them. Guests and already-registered devices are
+unaffected; turning the gate off clears the refusal list and everyone can join
+again.
 
 **Exempt from quota** — a user's **edit** modal has an "Exempt from quota
 (unlimited usage)" checkbox: an exempt user is never quota-blocked, however
@@ -532,6 +552,28 @@ it automatically — it's there when you want it, and every other source gets a
 
 ---
 
+## Software updates
+
+The Admin tab's **Software updates** card checks the GitHub releases page for
+the box (by default every 24 h; disable with the "Check automatically" toggle
+or `updates.enabled: false` in `config.yaml`). When a newer version exists a
+banner appears across the top of the dashboard — click **Show details** for a
+scrollable list of every new version's changelog (a box that's far behind lists
+all the intermediate versions). The banner shows once per version.
+
+From the same card you can check now (Check for updates), and **install the
+update from the dashboard** — the box downloads the `.deb` and runs the
+install behind the scenes (it stays online throughout; the gateway service
+restarts once as part of the upgrade, so internet drops for a few seconds).
+"Auto-install" does the same automatically whenever a check finds a newer
+version. Your config and database are preserved on upgrade (see below).
+
+> The check needs the box to reach `api.github.com`. If it shows "Couldn't
+> reach GitHub" (e.g. a timeout), it retries automatically at the next
+> interval — verify the box has internet (WAN tab) first.
+
+---
+
 ## Upgrading / removing
 
 ### apt installs (Method A / C)
@@ -588,6 +630,7 @@ docker compose logs -f
 | Dashboard only reachable from the laptop | `web.host` is `127.0.0.1` | Set `web.host: 0.0.0.0` |
 | Forgot the admin password | — | Stop the app, delete the `admin_password` setting from the DB, restart |
 | Bundle shows old values / YAML edit ignored | the bundle was edited in the dashboard (it owns the value now) | Edit from the dashboard, or clear the `bundle_source` setting in the DB |
+| Software updates card says "Couldn't reach GitHub" | the box can't reach `api.github.com` (no internet, DNS, or GitHub blocked) | Verify the WAN/internet dot; `curl -m 20 https://api.github.com/repos/UserJoo9/QuotaManager/releases/latest` on the box; the check retries automatically next interval |
 | Speed limits don't apply | Network tab never configured (switch off or rates still 0) | Network tab → toggle ON → set your **real** down/up Mbps → Save. A device's own cap is in its edit modal |
 | No speed shaping at all | `tc` missing, no `ifb` module, or not root | `apt-get install iproute2`; `modprobe ifb numifbs=1`; run the service as root; re-run the setup script |
 | Internet died after a reboot | gateway service not enabled, or rules not persisted | `sudo systemctl enable --now quota-gateway`; re-run the setup script (idempotent) |
@@ -632,10 +675,15 @@ docker compose logs -f
   (clients are unaffected). The 1.0 GB is silently deducted from every
   auto-share bundle the first time the period opens after an upgrade; set
   `count_gateway: false` to skip the counters.
-- **Deleting a guest doesn't cut it mid-session.** A device you delete from the
-  dashboard stays online (it keeps its DHCP lease and its internet) until it
-  disconnects — while connected it is simply not counted, controlled, or shown.
-  It re-registers (or not, per guest mode) the next time it joins.
+- **Deleting a device or user is permanent until you say otherwise.** A device
+  you delete is blacklisted (see the Network tab) and stays **kernel-blocked
+  even while connected** — it keeps its DHCP lease but has no internet, no
+  row in the dashboard, and no usage is counted for it. Remove its MAC from the
+  deny list to let it back in (it re-registers on the next lease tick).
+- **Update checks need the box to reach GitHub.** The self-update check dials
+  `api.github.com`; a box without internet (or that can't reach GitHub) shows
+  a "Couldn't reach GitHub" status and retries at the next interval. The check
+  never affects internet, DNS or quota for devices.
 - **The household milestone page (`/milestone`) is public** — no login, by
   design. It only ever shows the *requesting device's own user* (resolved by
   its source IP); it never reveals other users' data.

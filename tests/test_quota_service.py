@@ -49,10 +49,36 @@ def test_period_bounds_reset_day_1():
 
 
 def test_period_bounds_reset_day_28_clamps_short_month():
-    now = _dt.datetime(2026, 2, 25, tzinfo=TZ)  # Feb 2026 = 28 days
+    now = _dt.datetime(2026, 2, 28, tzinfo=TZ)  # ON the Feb 2026 (28-day) boundary
     start, end = timeutil.period_bounds(now, 28)
     assert start == _dt.datetime(2026, 2, 28, tzinfo=TZ)
     assert end == _dt.datetime(2026, 3, 28, tzinfo=TZ)
+
+
+def test_period_bounds_reset_day_after_today_spans_previous_month():
+    # Today is the 16th, reset day 25: the current period runs from the LAST
+    # month's 25th to THIS month's 25th — the grid must never skip the current
+    # month (days-left read 40 + a premature roll before the fix).
+    now = _dt.datetime(2026, 8, 16, tzinfo=TZ)
+    start, end = timeutil.period_bounds(now, 25)
+    assert start == _dt.datetime(2026, 7, 25, tzinfo=TZ)
+    assert end == _dt.datetime(2026, 8, 25, tzinfo=TZ)
+    assert timeutil.days_remaining(now, 25) == 9  # Aug 16 -> Aug 25
+
+
+def test_period_bounds_reset_day_after_today_january_wraps():
+    now = _dt.datetime(2026, 1, 10, tzinfo=TZ)
+    start, end = timeutil.period_bounds(now, 25)
+    assert start == _dt.datetime(2025, 12, 25, tzinfo=TZ)
+    assert end == _dt.datetime(2026, 1, 25, tzinfo=TZ)
+
+
+def test_period_bounds_reset_day_on_boundary_starts_today():
+    now = _dt.datetime(2026, 8, 25, 0, 5, tzinfo=TZ)
+    start, end = timeutil.period_bounds(now, 25)
+    assert start == _dt.datetime(2026, 8, 25, tzinfo=TZ)
+    assert end == _dt.datetime(2026, 9, 25, tzinfo=TZ)
+    assert timeutil.days_remaining(now, 25) == 31  # Aug 25 -> Sep 25
 
 
 def test_period_bounds_december_rollover():
@@ -400,6 +426,77 @@ def test_exempt_user_never_quota_blocked_in_snapshot_state(database):
     run(scenario())
 
 
+def test_allowances_disabled_user_gets_zero_and_claims_no_share(database):
+    """A DISABLED user (fresh auto-registered device awaiting the admin's
+    shared/fixed assignment) takes NO allowance — not an auto share, nothing
+    off the fixed total — until the admin assigns a rule."""
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        await d.set_bundle(_db.Bundle(total_gb=100.0, reset_day=1))
+        auto = await d.create_user("A", _db.QUOTA_AUTO)
+        dis = await d.create_user("D", _db.QUOTA_DISABLED, 0.0)
+        allowances = await svc.compute_allowances()
+        assert allowances[dis.id] == 0.0
+        # the disabled user claims nothing: A gets the full remainder
+        # (100 - 1.0 seeded Gateway fixed user)
+        assert allowances[auto.id] == 99.0
+        # once the admin assigns shared, the pool re-splits normally
+        await d.update_user(dis.id, quota_mode=_db.QUOTA_AUTO)
+        allowances = await svc.compute_allowances()
+        assert allowances[dis.id] == 49.5
+        assert allowances[auto.id] == 49.5
+        await d.close()
+    run(scenario())
+
+
+def test_user_quota_blocked_disabled_always_cut(database):
+    """The onboarding lock is unconditional: a disabled user is quota-blocked
+    at ANY usage/allowance — a top-up can't unlock it, the exemption flag
+    can't lift it (the admin's positive shared/fixed assignment is the only
+    way out)."""
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        dis = await d.create_user("D", _db.QUOTA_DISABLED, 0.0)
+        assert svc.user_quota_blocked(dis, 0.0, 0.0) is True
+        assert svc.user_quota_blocked(dis, 5.0, 0.0) is True  # top-up can't unlock
+        await d.update_user(dis.id, exempt_quota=True)
+        dis = await d.get_user(dis.id)
+        assert svc.user_quota_blocked(dis, 0.0, 0.0) is True  # exemption loses
+        # assigning the rule ends the lock: shared/fixed behave as before
+        await d.update_user(dis.id, quota_mode=_db.QUOTA_AUTO, exempt_quota=False)
+        dis = await d.get_user(dis.id)
+        assert svc.user_quota_blocked(dis, 5.0, 0.0) is False
+        assert svc.user_quota_blocked(dis, 5.0, 6.0) is True
+        await d.close()
+    run(scenario())
+
+
+def test_disabled_user_device_cut_in_enforcement_map(database):
+    """snapshot_state (the engine's blocked-set source) must kernel-cut a
+    disabled user's device even with zero usage — the disabled state is a
+    hard block, not a no-allowance "unmetered" corner."""
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        await d.set_bundle(_db.Bundle(total_gb=10.0, reset_day=1))
+        u = await d.create_user("New", _db.QUOTA_DISABLED, 0.0)
+        await d.upsert_device("AA:AA:AA:AA:AA:07", "p1", user_id=u.id)
+        await svc.open_period()
+        snap = await svc.snapshot_state()
+        assert snap["aa:aa:aa:aa:aa:07"]["blocked"] is True, \
+            "disabled user's device must be cut (0 usage, 0 allowance)"
+
+        # the admin assigns shared -> the device comes online (usage under share)
+        await d.update_user(u.id, quota_mode=_db.QUOTA_AUTO)
+        await svc.recompute_allowances()
+        snap = await svc.snapshot_state()
+        assert snap["aa:aa:aa:aa:aa:07"]["blocked"] is False
+        await d.close()
+    run(scenario())
+
+
 def test_mac_lists_round_trip_and_normalization(database):
     """set/get mac lists: lowercasing, dedupe, sorting; only the provided
     list is replaced."""
@@ -436,7 +533,7 @@ def test_mac_deny_list_always_blocks_even_when_user_ok(database):
         svc = QuotaService(d, timezone="Africa/Cairo")
         await d.set_bundle(_db.Bundle(total_gb=10.0, reset_day=1))
         u = await d.create_user("A", _db.QUOTA_AUTO)
-        d1 = await d.upsert_device("AA:AA:AA:AA:AA:01", "p1", user_id=u.id)
+        await d.upsert_device("AA:AA:AA:AA:AA:01", "p1", user_id=u.id)
         await svc.open_period()
 
         assert (await svc.snapshot_state())["aa:aa:aa:aa:aa:01"]["blocked"] is False
@@ -448,6 +545,68 @@ def test_mac_deny_list_always_blocks_even_when_user_ok(database):
         # removing the entry restores instantly (no device row was touched)
         await svc.set_mac_list("deny", [])
         assert (await svc.snapshot_state())["aa:aa:aa:aa:aa:01"]["blocked"] is False
+        await d.close()
+    run(scenario())
+
+
+def test_stop_new_refused_macs_rowless_block_in_snapshot(database):
+    """A STOP-NEW-refused MAC with a live lease but NO device row gets a
+    row-less BLOCK_ADMIN entry in the enforcement map (the kernel keeps
+    dropping its just-issued lease until it expires); clearing the refuse
+    list restores it. Mirrors the deny-list row-less pass."""
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        await d.set_bundle(_db.Bundle(total_gb=10.0, reset_day=1))
+        await svc.open_period()
+        await d.upsert_lease("AA:BB:CC:DD:EE:99", "192.168.2.199", 1)
+
+        assert (await svc.snapshot_state()).get("aa:bb:cc:dd:ee:99") is None, \
+            "no row-less block before the MAC is refused"
+        assert await svc.add_refused_mac("AA:BB:CC:DD:EE:99") is True
+        assert await svc.add_refused_mac("AA:BB:CC:DD:EE:99") is False, \
+            "re-adding a refused MAC must be idempotent"
+        snap = await svc.snapshot_state()
+        entry = snap.get("aa:bb:cc:dd:ee:99")
+        assert entry is not None and entry["blocked"] is True, \
+            "the lingering lease of a refused MAC must be kernel-cut"
+        assert entry["block_state"] == _db.BLOCK_ADMIN
+
+        await svc.clear_refused_macs()
+        assert not await svc.refused_macs()
+        assert (await svc.snapshot_state()).get("aa:bb:cc:dd:ee:99") is None, \
+            "clearing the refuse list must lift the row-less block"
+        await d.close()
+    run(scenario())
+
+
+def test_decline_random_refused_macs_rowless_block_in_snapshot(database):
+    """A Decline-random-refused MAC with a live lease but NO device row gets
+    a row-less BLOCK_ADMIN entry in the enforcement map (the kernel keeps
+    dropping its just-issued lease until it expires); clearing the refuse
+    list restores it. Mirrors the STOP-NEW row-less pass."""
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        await d.set_bundle(_db.Bundle(total_gb=10.0, reset_day=1))
+        await svc.open_period()
+        await d.upsert_lease("02:42:AC:11:00:99", "192.168.2.199", 1)
+
+        assert (await svc.snapshot_state()).get("02:42:ac:11:00:99") is None, \
+            "no row-less block before the MAC is refused"
+        assert await svc.add_refused_random_mac("02:42:AC:11:00:99") is True
+        assert await svc.add_refused_random_mac("02:42:AC:11:00:99") is False, \
+            "re-adding a refused MAC must be idempotent"
+        snap = await svc.snapshot_state()
+        entry = snap.get("02:42:ac:11:00:99")
+        assert entry is not None and entry["blocked"] is True, \
+            "the lingering lease of a refused MAC must be kernel-cut"
+        assert entry["block_state"] == _db.BLOCK_ADMIN
+
+        await svc.clear_refused_random_macs()
+        assert not await svc.refused_random_macs()
+        assert (await svc.snapshot_state()).get("02:42:ac:11:00:99") is None, \
+            "clearing the refuse list must lift the row-less block"
         await d.close()
     run(scenario())
 
@@ -601,6 +760,120 @@ def test_reset_month_not_undone_by_ensure_period(database):
         await svc.ensure_period()
         b = await d.get_bundle()
         assert b.period_start == "2026-09-01"
+        await d.close()
+    run(scenario())
+
+
+def test_changing_reset_day_mid_month_does_not_roll_or_zero_usage(database):
+    """Changing the reset day from 1 to 25 while today is the 16th must NOT
+    skip the current month: the period stays open until the new period_end
+    (Aug 25), the recorded usage keeps counting, and days left is 9. The old
+    boundary heuristic read days-left=40 and rolled immediately, dropping the
+    current month's usage from the period."""
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo",
+                           clock=make_clock(_dt.datetime(2026, 8, 2, tzinfo=TZ)))
+        await d.set_bundle(_db.Bundle(total_gb=50.0, reset_day=1))
+        await svc.ensure_period()                       # opened Aug 1
+        dev = await d.upsert_device("AA:AA:AA:AA:AA:01", "A", _db.QUOTA_AUTO)
+        await d.add_usage(dev.id, "2026-08-05", 5_000_000_000, 0)
+
+        # the admin changes the reset day to 25 while today is the 16th
+        svc._clock = make_clock(_dt.datetime(2026, 8, 16, tzinfo=TZ))
+        b = await d.get_bundle()
+        b.reset_day = 25
+        await d.set_bundle(b)
+        await svc.recompute_allowances()                # re-anchors period_end, no roll
+        bundle = await d.get_bundle()
+        assert bundle.period_start == "2026-08-01"      # current month NOT skipped
+        assert bundle.period_end == "2026-08-25"
+        assert timeutil.days_remaining(
+            _dt.datetime(2026, 8, 16, tzinfo=TZ), 25) == 9
+        assert (await d.get_period_usage())[dev.id]["up"] == 5_000_000_000
+
+        # the maintenance loop must not roll it away either
+        await svc.ensure_period()
+        bundle = await d.get_bundle()
+        assert bundle.period_start == "2026-08-01"
+        assert (await d.get_period_usage())[dev.id]["up"] == 5_000_000_000
+
+        # only once the new boundary passes does the roll finally happen
+        svc._clock = make_clock(_dt.datetime(2026, 8, 25, 0, 5, tzinfo=TZ))
+        await svc.ensure_period()
+        assert (await d.get_bundle()).period_start == "2026-08-25"
+        await d.close()
+    run(scenario())
+
+
+def test_ensure_period_reset_day_25_steady_state_never_rolls_mid_month(database):
+    """With reset_day=25 in steady state, days 1-24 of the NEXT month belong
+    to the same period — the maintenance loop must not re-roll the period
+    every day before the boundary."""
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo",
+                           clock=make_clock(_dt.datetime(2026, 8, 25, tzinfo=TZ)))
+        await d.set_bundle(_db.Bundle(total_gb=50.0, reset_day=25))
+        await svc.ensure_period()                       # opened Aug 25
+        assert (await d.get_bundle()).period_start == "2026-08-25"
+        for day in (1, 5, 16, 24):
+            svc._clock = make_clock(_dt.datetime(2026, 9, day, tzinfo=TZ))
+            await svc.ensure_period()
+            assert (await d.get_bundle()).period_start == "2026-08-25", \
+                f"day {day} rolled the period early"
+        svc._clock = make_clock(_dt.datetime(2026, 9, 25, 0, 5, tzinfo=TZ))
+        await svc.ensure_period()
+        assert (await d.get_bundle()).period_start == "2026-09-25"
+        await d.close()
+    run(scenario())
+
+
+def test_period_type_end_of_month_honors_configured_day(database):
+    """end_of_month: the ISP's month-end day (25th here) drives the reset —
+    the day input stays flexible. Never rolls mid-month; rolls on the day."""
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo",
+                           clock=make_clock(_dt.datetime(2026, 8, 16, tzinfo=TZ)))
+        await d.set_bundle(_db.Bundle(total_gb=50.0, reset_day=25,
+                                      period_type="end_of_month"))
+        assert (await d.get_bundle()).effective_reset_day == 25
+        await svc.ensure_period()
+        b = await d.get_bundle()
+        assert b.period_start == "2026-07-25"           # month-end day 25
+        assert b.period_end == "2026-08-25"
+        assert timeutil.days_remaining(
+            _dt.datetime(2026, 8, 16, tzinfo=TZ), 25) == 9
+        svc._clock = make_clock(_dt.datetime(2026, 8, 24, 23, 0, tzinfo=TZ))
+        await svc.ensure_period()
+        assert (await d.get_bundle()).period_start == "2026-07-25"
+        svc._clock = make_clock(_dt.datetime(2026, 8, 25, 0, 5, tzinfo=TZ))
+        await svc.ensure_period()
+        b = await d.get_bundle()
+        assert b.period_start == "2026-08-25"
+        assert b.period_end == "2026-09-25"
+        await d.close()
+    run(scenario())
+
+
+def test_period_type_end_of_month_day_zero_uses_calendar_month(database):
+    """end_of_month with no configured day (0) falls back to the calendar end:
+    the period runs 1st -> 1st and resets automatically."""
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo",
+                           clock=make_clock(_dt.datetime(2026, 8, 16, tzinfo=TZ)))
+        await d.set_bundle(_db.Bundle(total_gb=50.0, reset_day=0,
+                                      period_type="end_of_month"))
+        assert (await d.get_bundle()).effective_reset_day == 1
+        await svc.ensure_period()
+        b = await d.get_bundle()
+        assert b.period_start == "2026-08-01"
+        assert b.period_end == "2026-09-01"
+        svc._clock = make_clock(_dt.datetime(2026, 9, 1, 0, 5, tzinfo=TZ))
+        await svc.ensure_period()
+        assert (await d.get_bundle()).period_start == "2026-09-01"
         await d.close()
     run(scenario())
 
@@ -802,6 +1075,12 @@ def test_decline_random_macs_settings_and_is_random_mac(database):
         assert svc.is_random_mac("aa:bb:cc:dd:ee:ff") is True    # 0xaa & 0x02
         assert svc.is_random_mac("00:11:22:33:44:55") is False   # real OUI
         assert svc.is_random_mac("3c:7c:3f:aa:bb:cc") is False   # global only
+        # a locally-administered MAC whose OUI IS a registered vendor prefix
+        # is a real legacy product (3COM / DEC / Olivetti), never a randomize —
+        # the sweep must NOT cut it.
+        assert svc.is_random_mac("02:c0:8c:11:22:33") is False
+        assert svc.is_random_mac("aa:00:00:12:34:56") is False
+        assert svc.is_random_mac("02:aa:3c:01:02:03") is False
         assert svc.is_random_mac("") is False
         assert svc.is_random_mac("garbage") is False
 
@@ -817,15 +1096,21 @@ def test_decline_random_macs_settings_and_is_random_mac(database):
         cut = await d.create_user("Cut", _db.QUOTA_FIXED, 10.0)
         real_dev = await d.upsert_device("3c:7c:3f:aa:bb:cc", name="real",
                                          user_id=keep.id)
+        legacy_dev = await d.upsert_device(
+            "02:c0:8c:11:22:33", name="legacy-3com", user_id=keep.id)
         rand_dev = await d.upsert_device("02:42:ac:11:00:02", name="rand",
                                          user_id=cut.id)
         assert rand_dev.block_state == _db.BLOCK_OK
         assert real_dev.block_state == _db.BLOCK_OK
+        assert legacy_dev.block_state == _db.BLOCK_OK
         await svc.set_decline_random_macs(True, also_existing=True)
         assert (await d.get_device(rand_dev.id)).block_state == _db.BLOCK_ADMIN, (
             "already-joined randomized device must be cut by the sweep")
         assert (await d.get_device(real_dev.id)).block_state == _db.BLOCK_OK, (
             "a real-OUI device is never touched by the sweep")
+        assert (await d.get_device(legacy_dev.id)).block_state == _db.BLOCK_OK, (
+            "a registered legacy OUI (locally administered but a real product) "
+            "is never touched by the sweep")
         # the gate itself stays on after the sweep
         assert await svc.decline_random_macs() is True
         await d.close()
@@ -1142,6 +1427,33 @@ def test_gateway_usage_counts_inside_quota_math(database):
         await svc.evaluate_blocks()
         # 0.4 GB used of 1.0 -> box not quota-blocked yet
         assert svc.quota_blocked_for(gw_user, 1.0, 0.4) is False
+        await d.close()
+    run(scenario())
+
+
+def test_evaluate_blocks_never_persists_quota_flag_on_gateway(database):
+    """The box's own cut is user-resolved at render/enforcement time — a
+    persisted ``quota`` block_state on the GATEWAY_MAC device row would
+    desync the Gateway card's toggle (the v0.2.1 cosmetic fix)."""
+    async def scenario():
+        d = await database()
+        svc = QuotaService(d, timezone="Africa/Cairo")
+        await d.set_bundle(_db.Bundle(total_gb=50.0, reset_day=1))
+        await svc.open_period()
+        gw_user = next(u for u in await d.list_users()
+                       if getattr(u, "protected", False))
+        # drive the Gateway user over its allowance -> resolved blocked
+        await d.update_user(gw_user.id, fixed_gb=0.5)
+        await svc.recompute_allowances()  # refresh the allowance snapshot
+        box = await d.get_device(mac=GATEWAY_MAC)
+        await d.add_usage(box.id, "2026-08-01", int(0.9 * GB), 0)
+        await svc.evaluate_blocks()
+        refreshed = await d.get_device(mac=GATEWAY_MAC)
+        assert refreshed.block_state == _db.BLOCK_OK, \
+            "the box's quota cut must NOT be persisted onto its device row"
+        # ... while the enforcement map (snapshot_state) still cuts it
+        snap = await svc.snapshot_state()
+        assert snap[GATEWAY_MAC]["blocked"] is True
         await d.close()
     run(scenario())
 

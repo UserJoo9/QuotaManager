@@ -60,7 +60,7 @@ import time
 from ipaddress import ip_address, ip_network
 from typing import Any, Callable
 
-from quota.engine import EngineCounters, EngineSnapshot
+from quota.engine import EngineCounters, EngineSnapshot, GATEWAY_MAC
 
 log = logging.getLogger("quota.nftables")
 
@@ -262,6 +262,10 @@ class NftablesEngine:
         self._blocked: dict[str, bool] = {}
         #: IPs most recently programmed into the kernel `blocked` set.
         self._last_blocked_ips: list[str] = []
+        #: MACs most recently programmed into the kernel `blocked_macs` set
+        #: (lease-less / static-IP devices are cut by ethernet address — see
+        #: :meth:`_sync_blocked_macs`).
+        self._last_blocked_macs: list[str] = []
         #: IPs whose counter rules exist in the kernel.
         self._installed: set[str] = set()
         #: last-seen kernel byte totals per IP (for delta computation).
@@ -292,12 +296,18 @@ class NftablesEngine:
         self._installed = set()
         self._last = {}
         self._last_blocked_ips = []
+        self._last_blocked_macs = []
         self._run(["add", "table", f"{FAMILY} {self.table}"])
         self._run(["flush", "table", f"{FAMILY} {self.table}"])
         self._run(["add", "chain", f"{FAMILY} {self.table} forward",
                    "{ type filter hook forward priority 0; policy accept; }"])
         self._run(["add", "set", f"{FAMILY} {self.table} blocked",
                    "{ type ipv4_addr; }"])
+        # MAC-keyed blocked set: drops devices whose IP is not in the lease
+        # file (static-IP / lease-less quota-blocked devices). Matched by
+        # ethernet address on both directions; LAN-excluded like the IP set.
+        self._run(["add", "set", f"{FAMILY} {self.table} blocked_macs",
+                   "{ type ether_addr; }"])
         # ARP gateway-lock (opt-in): the deny rule must be added FIRST in the
         # forward chain, before the blocked drops + counters, so an intercepted
         # bypasser's packets are dropped before any counter can see them.
@@ -312,6 +322,18 @@ class NftablesEngine:
                             self._local_networks) + " drop"
         self._run(["add", "rule", f"{FAMILY} {self.table} forward", saddr_drop])
         self._run(["add", "rule", f"{FAMILY} {self.table} forward", daddr_drop])
+        # MAC-based drops: the same cut for devices the IP set cannot see
+        # (lease-less / static-IP). LAN traffic stays excluded both ways, so a
+        # MAC-cut device keeps its LAN access (printer, NAS) exactly like an
+        # IP-cut one.
+        mac_saddr_drop = _match("ether saddr @blocked_macs", "ip daddr",
+                                self._local_networks) + " drop"
+        mac_daddr_drop = _match("ether daddr @blocked_macs", "ip saddr",
+                                self._local_networks) + " drop"
+        self._run(["add", "rule", f"{FAMILY} {self.table} forward",
+                   mac_saddr_drop])
+        self._run(["add", "rule", f"{FAMILY} {self.table} forward",
+                   mac_daddr_drop])
         # The box's own internet: input/output hooks with q_gw_up/q_gw_down
         # counters (count_gateway) + a gw_blocked set the admin toggles. Runs
         # BEFORE the counter reset below so a carried-over q_gw_* total is
@@ -370,6 +392,18 @@ class NftablesEngine:
         # authoritative.
         blocked_ips = sorted(
             ip for ip, mac in ip_to_mac.items() if blocked.get(mac))
+        self._sync_blocked_ips(blocked_ips)
+        # MAC-based drops are the SECOND enforcement channel, keyed by the
+        # device's ethernet address instead of its lease: they cut devices
+        # whose IP never entered ``ip_to_mac`` — a lease-less quota-blocked
+        # device (DHCP never assigned / lease pruned) or a static-IP device
+        # that routes through the box with no lease row. The IP set above
+        # cannot see those; the ether set can (its traffic still crosses the
+        # forward chain with its real saddr/daddr).
+        self._sync_blocked_macs(blocked)
+
+    def _sync_blocked_ips(self, blocked_ips: list[str]) -> None:
+        """Program the kernel ``blocked`` set for leased, quota-blocked IPs."""
         if blocked_ips and blocked_ips == self._last_blocked_ips:
             return
         self._last_blocked_ips = None  # not yet committed; retry next tick if a step fails
@@ -383,6 +417,31 @@ class NftablesEngine:
                     break
             if ok:
                 self._last_blocked_ips = blocked_ips
+
+    def _sync_blocked_macs(self, blocked: dict[str, bool]) -> None:
+        """Program the kernel ``blocked_macs`` set for every blocked device.
+
+        The set is ``ether_addr``-typed; the forward chain's drop rules match
+        ``ether saddr/daddr @blocked_macs`` (both directions, LAN-excluded).
+        The box's own sentinel MAC is never programmed (its packets never
+        cross the forward chain). Cache-gated exactly like the IP set: a
+        same-set re-flush every tick would open a short unblock window.
+        """
+        blocked_macs = sorted(m for m, b in blocked.items()
+                              if b and m != GATEWAY_MAC)
+        if blocked_macs and blocked_macs == self._last_blocked_macs:
+            return
+        self._last_blocked_macs = None  # not yet committed; retry next tick
+        if self._run(["flush", "set", f"{FAMILY} {self.table} blocked_macs"]):
+            ok = True
+            for mac in blocked_macs:
+                if not self._run(["add", "element",
+                                  f"{FAMILY} {self.table} blocked_macs",
+                                  f"{{ {mac} }}"]):
+                    ok = False
+                    break
+            if ok:
+                self._last_blocked_macs = blocked_macs
 
     def _sync_known_ips(self, ip_to_mac: dict[str, str]) -> None:
         """Keep the kernel ``known_ips`` set == the currently leased client IPs.

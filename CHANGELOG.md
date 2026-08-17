@@ -6,8 +6,93 @@ The version is the single source of truth in `quota/version.py`; a release tag
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-08-17
+
 ### Added
 
+- **Self-update checks in the Admin tab** (`quota/updater.py` NEW + `run.py` +
+  `api/app.py` + `api/schemas.py` + `web/index.html` + `web/assets/app.js` +
+  `web/assets/styles.css`): the box compares its own version
+  (`quota/version.py`) against the latest GitHub release
+  (`updates.repo`, default `UserJoo9/QuotaManager`) every
+  `updates.interval_hours` (default 24) and, when a newer version exists,
+  surfaces an update banner with a **Show details** popup listing the new
+  versions' changelog (parsed from the repo's `CHANGELOG.md` sections newer
+  than the running version, newest first; a very old box shows every
+  intermediate version in a scroll frame — `parse_changelog` skips
+  `[Unreleased]`). The banner shows once per version (`localStorage`
+  `quota_update_banner`). State persists in the `updates_state` settings row
+  (checked_at, latest_version, error, changelog, last_install) so a restart
+  neither re-fires the notification nor re-checks within the interval. The
+  Admin-tab Software Updates card (`#updates-card`) exposes current/latest
+  versions, last-check time, status/error, `#upd-enabled` (check
+  automatically) + `#upd-auto` (auto-install) toggles, and `#upd-install`
+  (Install now). **Auto-install** downloads the release's `.deb` and runs
+  `apt-get install` under a **transient systemd unit** (`systemd-run
+  --unit=quota-update-install`, apt-get fallback when systemd-run is absent)
+  because the package's `prerm` stops the `quota-gateway` service — a plain
+  child `apt-get` would die with the cgroup mid-install. `run.py` builds the
+  updater only when `updates.enabled` is true (master switch, config.yaml;
+  hermetic tests keep it off so the first tick never dials GitHub) and the
+  maintenance tick calls `maybe_check` behind a try/except so a network
+  failure never stalls a tick. **The "Check automatically" toggle is the
+  master switch**: a disabled box never dials GitHub (even a forced check
+  refuses), the card shows "Checks are OFF — toggle ON to check for updates"
+  instead of a stale error/last-check, and re-enabling clears the last error
+  so the card starts clean (`Updater.set_enabled`). Endpoints:
+  `GET/POST /api/updates`,
+  `POST /api/updates/check`, `POST /api/updates/install` — all 404 when the
+  updater isn't wired (degraded boot); the WS snapshot carries the `update`
+  key. Tests: `tests/test_updater.py` NEW (14) + `test_config.py` (updates
+  block) + `test_api.py` (unwired 404 + round-trip) + `test_run_wiring.py`
+  (config gate + toggle honored in a tick).
+- **Bundle type selector (`bundle.period_type`)** (`core/timeutil.py` +
+  `quota/db.py` + `run.py` + `api/app.py` + `web/index.html` +
+  `web/assets/app.js`): `renew_day` (default, resets on the configured
+  `reset_day`) or `end_of_month` — the ISP's **month-end bill**: the
+  configured day drives the reset too (many ISPs close on the 25th/28th), and
+  day 0 falls back to the calendar end (the 1st). Day range widened 0-31.
+  `timeutil.period_bounds` returns the period **containing now** (before this
+  month's reset day the current period began last month); `ensure_period`
+  rolls only when the recorded `period_end` has passed, never by comparing
+  `period_start` against the grid — a mid-month reset-day change
+  re-anchors `period_end` (`recompute_allowances`) without rolling or zeroing
+  the recorded usage. Dashboard bundle panel + Welcome selector; reset-day
+  input stays editable in both modes.
+- **Disabled onboarding lock for new devices** (`quota/db.py` +
+  `quota/service.py` + `run.py` + `web/index.html` + `web/assets/app.js`): a
+  brand-new DHCP device's auto-created user is `quota_mode="disabled"` (0 GB,
+  claims NO share of the bundle, always quota-blocked even with 0 usage) until
+  the admin assigns shared (auto) or fixed in the user/device modal. New
+  "Disabled" option in both selects; the device modal's mode write propagates
+  to the user. Guests are unaffected; STOP-NEW / random-MAC devices are
+  refused at DHCP (no user minted at all).
+- **STOP NEW CONNECTIONS + Decline random MACs refuse at the DHCP level**
+  (`run.py` + `quota/service.py` + `scripts/setup_gateway_kali.sh`): the gates
+  no longer register a brand-new device and admin-block it — dnsmasq
+  refuses the MAC outright via an app-owned fragment
+  (`dhcp.ignore_file`, one `dhcp-host=<mac>,ignore` line per refused MAC;
+  `dnsmasq --test` gate + restart), so there is no device row at all. Refused
+  lists are persisted (DB settings, each gate's off clears only its own),
+  unioned into the fragment, and kept in sync per-tick + on immediate API
+  apply. The just-issued lease stays kernel-cut via the row-less deny pass.
+  Fragment unwritable → graceful fallback to the legacy registered +
+  admin-blocked path. Guest mode unchanged.
+- **Router-side WiFi/LAN access labels (ARP-RTT classifier)**
+  (`quota/latency_probe.py` NEW, ON by default, any hardware): the box
+  raw-ARPs every leased client and times the replies — wired answers in
+  well under a millisecond, WiFi pays airtime (≥1 ms) — so the
+  FASTEST sample decides `WiFi`/`LAN`. Raw AF_PACKET backend with a `ping`
+  parse fallback; a consecutive-sweep streak guard prevents flapping; a
+  leased-but-silent device keeps its previous label and its card LED goes
+  grey (`connected` = answered the latest sweep, not just leased). Optional
+  monitor-mode probe (`quota/wifi_probe.py`, OFF by default, needs a spare
+  monitor-capable card) adds the exact SSID; a manual per-device pin
+  (`POST /api/devices/{id}/access`) always wins the display.
+- **Guest-limit cap applies to existing guests too** (`quota/service.py`):
+  lowering "Max guest accounts" now also admin-blocks the NEWEST over-cap
+  guest users' devices immediately (oldest stay); raising it never
+  un-blocks.
 - **MAC whitelist / blacklist in the Network tab** (`quota/db.py` +
   `quota/service.py` + `api/app.py` + `api/schemas.py` + `web/index.html` +
   `web/assets/app.js` + `web/assets/styles.css`): a `mac_lists` table
@@ -24,13 +109,7 @@ The version is the single source of truth in `quota/version.py`; a release tag
   dashboard Network tab gains a "MAC whitelist / blacklist" block
   (`#mac-allow-list` / `#mac-deny-list` textareas + `#mac-lists-btn`), the
   WS-snapshot clobber guard (`macListsDirty`), and a `.mac-lists-grid` 2-column
-  layout (1 column under 900 px). app.js **v=51→52**, styles.css **v=48→49**.
-- **Exempt-from-quota enforcement fix** (`quota/service.py`): the kernel
-  enforcement map (`snapshot_state`) called `quota_blocked_for`, which ignores
-  `users.exempt_quota`, while the dashboard payload and `evaluate_blocks` use
-  `user_quota_blocked` �?" an exempt over-quota user showed "unlimited" in the
-  UI but was still cut at the kernel. `snapshot_state` now uses
-  `user_quota_blocked`, so the UI, `/report` and the nftables drop set agree.
+  layout (1 column under 900 px).
 - **Deleting a device or user now blacklists its MACs — the phantom-device
   fix** (`quota/db.py` + `quota/service.py` + `run.py` + `api/app.py`): a
   manual `DELETE /api/devices/{id}` / `DELETE /api/users/{id}` writes every
@@ -49,8 +128,43 @@ The version is the single source of truth in `quota/version.py`; a release tag
   next lease tick. The month-reset path (`delete_guest_users`) never
   blacklists. Delete events now say "MAC blacklisted".
 
+### Changed
+
+- **Audit-fix batch (2026-08-16)**: perf — nft/tc/ppp/lease/log reads
+  moved off the event loop (`asyncio.to_thread`), the WS payload is built once
+  per 5 s tick and shared across sockets, and the unbounded `events` table is
+  pruned (30-day cap, hourly gate). Security — PBKDF2-SHA256 now 600k
+  iterations with legacy-hash auto-rehash on login, a 10-fail/300-s login rate
+  limit per source IP (HTTP 429), and `/api/milestone/notify` is now
+  IP-ownership-gated. Dead code removed: orphaned `/api/usage*` /
+  `/api/events` routes + `add_topup`/`has_bundle`/`is_blocked`/
+  `is_admin_blocked`/`get_usage_series`. WiFi/LAN **source-interface tag**
+  (`devices.source_interface` from `ip -j neigh`, `network.interface_tags`
+  label map, `.iface-tag` card chip).
+
 ### Fixed
 
+- **reset-day mid-month skip + consumption zeroing** (`core/timeutil.py` +
+  `quota/service.py`): `period_bounds` now returns the period CONTAINING now
+  (before this month's reset day the period began last month) — previously
+  reset day 25 with today the 16th read days-left 40 and the maintenance loop
+  rolled the period immediately, dropping the current month's usage. A
+  mid-month reset-day change re-anchors `period_end` without rolling or
+  zeroing the recorded usage.
+- **Exempt-from-quota enforcement fix** (`quota/service.py`): the kernel
+  enforcement map (`snapshot_state`) called `quota_blocked_for`, which ignores
+  `users.exempt_quota`, while the dashboard payload and `evaluate_blocks` use
+  `user_quota_blocked` — an exempt over-quota user showed "unlimited" in the
+  UI but was still cut at the kernel. `snapshot_state` now uses
+  `user_quota_blocked`, so the UI, `/report` and the nftables drop set agree.
+- **"Also cut existing random-MAC devices" sweep no longer cuts real products**
+  (`quota/service.py`): the one-shot sweep keyed off the locally-administered
+  bit ALONE — some genuine legacy products ship locally-administered MACs
+  whose OUI IS a registered IEEE vendor prefix (3COM 02:c0:8c, DEC aa:00:00,
+  Olivetti 02:aa:3c). `is_random_mac` now requires BOTH the local bit AND an
+  empty vendor lookup (`vendor_for(mac) == ""`) — a privacy-randomized MAC
+  carries a random OUI that never appears in `quota/oui.txt`. Covers the sweep
+  AND the DHCP-level decline-random refusal.
 - **MAC lists could hold a MAC in only one list** (`quota/db.py`): the
   `mac_lists` table had `mac TEXT PRIMARY KEY`, so `INSERT OR IGNORE` silently
   dropped a deny entry for a MAC already in the allow list (and vice versa) —

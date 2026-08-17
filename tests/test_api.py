@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from api.app import create_app
 from core.config import ReportConfig
 from quota import db as _db
-from quota.engine import EngineSnapshot, RogueHost, SnapshotHolder
+from quota.engine import GATEWAY_MAC, EngineSnapshot, RogueHost, SnapshotHolder
 from quota.service import GB, QuotaService
 
 TZ = ZoneInfo("Africa/Cairo")
@@ -56,6 +56,45 @@ def test_wrong_password(client):
     c, _, _ = client
     r = c.post("/api/login", json={"password": "nope"})
     assert r.status_code == 401
+
+
+def test_login_rate_limit(client):
+    """> LOGIN_MAX_FAILURES failed attempts from one source IP -> 429 until the
+    window rolls (in-memory limiter; a LAN box's brute-force surface)."""
+    c, _, _ = client
+    for i in range(10):
+        r = c.post("/api/login", json={"password": f"wrong-{i}"})
+        assert r.status_code == 401
+    r = c.post("/api/login", json={"password": "wrong-11"})
+    assert r.status_code == 429
+    # the correct password is also throttled mid-window (no guessing funnel)
+    r = c.post("/api/login", json={"password": "admin"})
+    assert r.status_code == 429
+
+
+def test_legacy_password_hash_verified_and_rehashed(client):
+    """Pre-v0.2.1 hashes were PBKDF2 at 200k in the 2-part format — they must
+    still verify, and a successful login must upgrade the stored hash to the
+    600k 3-part format."""
+    import hashlib
+    import secrets
+    from api.app import PBKDF2_ITERATIONS, _hash_password
+
+    c, db, _ = client
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", b"admin", salt, 200_000)
+    legacy = f"{salt.hex()}${dk.hex()}"
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(
+        db.set_setting("admin_password", legacy))
+
+    assert c.post("/api/login", json={"password": "admin"}).status_code == 200
+    stored = asyncio.get_event_loop().run_until_complete(
+        db.get_setting("admin_password", ""))
+    parts = stored.split("$")
+    assert len(parts) == 3, "legacy hash must be upgraded to the 3-part format"
+    assert int(parts[1]) == PBKDF2_ITERATIONS
+    assert _hash_password("admin", iterations=PBKDF2_ITERATIONS).count("$") == 2
 
 
 def test_device_crud_and_dashboard(client):
@@ -209,23 +248,115 @@ def test_topup_clears_block(client):
     assert r.json()["blocked_count"] == 0
 
 
-def test_usage_series(client):
-    c, db, _ = client
+def test_orphaned_usage_endpoints_removed(client):
+    """GET /api/usage, /api/usage/{id} and /api/events were dead routes (no
+    UI/JS consumer) — removed in the v0.2.1 cleanup. Assert they 404 so a
+    future re-introduction is a deliberate act."""
+    c, _, _ = client
     _login(c)
-    r = c.post("/api/devices", json={"mac": "aa:bb:cc:dd:ee:02",
-                                     "name": "TV", "quota_mode": "fixed",
-                                     "fixed_gb": 5})
-    dev_id = r.json()["id"]
-    import asyncio
-    asyncio.get_event_loop().run_until_complete(
-        db.add_usage(dev_id, "2026-08-01", 100, 200))
-    asyncio.get_event_loop().run_until_complete(
-        db.add_usage(dev_id, "2026-08-02", 300, 0))
+    assert c.get("/api/usage").status_code == 404
+    assert c.get("/api/usage/1").status_code == 404
+    assert c.get("/api/events").status_code == 404
 
-    r = c.get(f"/api/usage/{dev_id}")
-    series = r.json()
-    assert len(series) == 2
-    assert series[0]["up"] == 100 and series[0]["down"] == 200
+
+def test_dashboard_shaping_and_interface_label(tmp_path):
+    """The WS/dashboard payload carries the live shaping state (Network
+    preview's "applying…") and per-device WiFi/LAN labels from the neigh
+    collector + config interface_tags."""
+    database = _db.Database(tmp_path / "api2.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+
+    async def _init():
+        await database.connect()
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(_init())
+
+    app = create_app(
+        database, service, SnapshotHolder(),
+        interface_tags={"eth0": "LAN", "wlan0": "WiFi"},
+        shaping_state_getter=lambda: {"available": True, "applied": False})
+    try:
+        with TestClient(app) as c:
+            _login(c)
+            r = c.post("/api/devices", json={"mac": "aa:bb:cc:dd:ee:09",
+                                             "quota_mode": "auto"})
+            dev_id = r.json()["id"]
+            async def _tag():
+                await database.update_device(dev_id, source_interface="wlan0")
+            asyncio.get_event_loop().run_until_complete(_tag())
+            dash = c.get("/api/dashboard").json()
+            assert dash["shaping"] == {"available": True, "applied": False}
+            dev = next(d for d in dash["devices"] if d["id"] == dev_id)
+            assert dev["source_interface"] == "wlan0"
+            assert dev["interface_label"] == "WiFi"
+
+            # unmapped NICs get NO box-side label — every client arrives on
+            # the same wired NIC, so a guessed "LAN"/"eth0" would lie about
+            # WiFi devices; the router-side access probe owns that verdict.
+            async def _tag2():
+                await database.update_device(dev_id, source_interface="eth1")
+            asyncio.get_event_loop().run_until_complete(_tag2())
+            dash2 = c.get("/api/dashboard").json()
+            dev2 = next(d for d in dash2["devices"] if d["id"] == dev_id)
+            assert dev2["interface_label"] == ""
+            async def _tag3():
+                await database.update_device(dev_id, source_interface="eth0")
+            asyncio.get_event_loop().run_until_complete(_tag3())
+            dash3 = c.get("/api/dashboard").json()
+            dev3 = next(d for d in dash3["devices"] if d["id"] == dev_id)
+            assert dev3["interface_label"] == "LAN"  # mapped tag wins
+    finally:
+        asyncio.get_event_loop().run_until_complete(database.close())
+
+
+def test_milestone_notify_requires_owner(tmp_path):
+    """/api/milestone/notify is session-less but must only let a device
+    acknowledge ITS OWN user's milestones (resolved by source IP) — a sibling
+    must not clear another user's pills. Unknown sources are denied too."""
+    database = _db.Database(tmp_path / "api3.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+
+    async def _init():
+        await database.connect()
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(_init())
+
+    # A dedicated client whose source IP we control (starlette's default test
+    # client reports "testclient" — the gate must see a real lease IP).
+    app = create_app(database, service, SnapshotHolder())
+    try:
+        with TestClient(app, client=("127.0.0.1", 50000)) as c:
+            _login(c)
+            r = c.post("/api/devices", json={"mac": "aa:bb:cc:dd:ee:02",
+                                             "name": "TV", "quota_mode": "fixed",
+                                             "fixed_gb": 5})
+            other_user = r.json()["user_id"]
+            import asyncio
+            gw_dev = asyncio.get_event_loop().run_until_complete(
+                database.get_device(mac=GATEWAY_MAC))
+            gw_user = asyncio.get_event_loop().run_until_complete(
+                database.get_user(gw_dev.user_id))
+
+            def _notify(user_id):
+                # 127.0.0.1 has no lease row yet -> 403 for any user, proving the
+                # IP-ownership gate runs before the write
+                return c.post("/api/milestone/notify",
+                              json={"user_id": user_id, "milestone": 50})
+
+            assert _notify(other_user).status_code == 403
+            assert _notify(gw_user.id).status_code == 403
+
+            # Happy path: the requesting IP holds a lease owned by the user.
+            async def _lease():
+                await database.set_lease("aa:bb:cc:dd:ee:02", "127.0.0.1")
+                await service.milestone_state()  # computes milestone flags on demand
+            asyncio.get_event_loop().run_until_complete(_lease())
+            assert _notify(other_user).status_code == 200
+            assert _notify(gw_user.id).status_code == 403
+    finally:
+        # a failed assertion above must still release the aiosqlite worker
+        # thread, or the pytest process never exits
+        asyncio.get_event_loop().run_until_complete(database.close())
 
 
 def test_bundle_recharge_grows_total(client):
@@ -296,6 +427,37 @@ def test_bundle_reset_day_0_disables_auto_reset(client):
     dash = c.get("/api/dashboard").json()
     assert dash["bundle"]["days_left"] == -1
     assert dash["bundle"]["period_end"] == ""
+
+
+def test_bundle_period_type_round_trip(client):
+    """The bundle type ('renew_day' / 'end_of_month') is stored, returned, and
+    drives the effective reset day — end_of_month honors the configured day too
+    (many ISPs close the month on the 25th/28th), so it's kept, not ignored."""
+    c, _, _ = client
+    _login(c)
+    # default
+    b = c.get("/api/bundle").json()
+    assert b["period_type"] == "renew_day"
+    # switch to an end-of-month bill with the ISP's month-end day
+    r = c.post("/api/bundle", json={"period_type": "end_of_month",
+                                    "reset_day": 25})
+    assert r.status_code == 200, r.text
+    b = c.get("/api/bundle").json()
+    assert b["period_type"] == "end_of_month"
+    assert b["reset_day"] == 25  # the day is kept, not forced to 1
+    dash = c.get("/api/dashboard").json()
+    assert dash["bundle"]["period_type"] == "end_of_month"
+    assert dash["bundle"]["reset_day"] == 25
+    assert dash["bundle"]["days_left"] >= 0  # automatic monthly reset, not -1
+    # invalid type rejected
+    assert c.post("/api/bundle", json={"period_type": "weekly"}).status_code == 400
+    # back to renew-day
+    r = c.post("/api/bundle", json={"period_type": "renew_day",
+                                    "reset_day": 0})
+    assert r.status_code == 200, r.text
+    b = c.get("/api/bundle").json()
+    assert b["period_type"] == "renew_day"
+    assert b["reset_day"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -651,6 +813,80 @@ def test_guest_quota_updates_existing_guest(client):
     assert guest["allowance_gb"] == 3.0   # existing guest updated immediately
     by_mac = {d["mac"]: d for d in dash["devices"]}
     assert by_mac["aa:bb:cc:dd:ee:91"]["guest"] is True
+
+
+def test_connected_follows_arp_responders(tmp_path):
+    """With the ARP probe running, a leased device is "connected" only if it
+    ALSO answered the latest sweep — a lease alone lags reality by up to
+    LEASE_HOURS (asleep/off/another-network devices must go grey)."""
+    import asyncio
+    database = _db.Database(tmp_path / "api-arp.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+
+    responders = {"192.168.2.50"}
+    asyncio.get_event_loop().run_until_complete(database.connect())
+    app = create_app(
+        database, service, holder,
+        active_ips_getter=lambda: set(responders))
+    try:
+        with TestClient(app) as c:
+            _login(c)
+            async def _seed():
+                g = await database.create_user(
+                    name="", quota_mode=_db.QUOTA_FIXED,
+                    fixed_gb=1.0, guest=True)
+                await database.upsert_device(
+                    "aa:bb:cc:dd:ee:94", name="Phone", user_id=g.id)
+                await database.set_lease("aa:bb:cc:dd:ee:94", "192.168.2.50")
+                await database.upsert_device(
+                    "aa:bb:cc:dd:ee:95", name="Tablet", user_id=g.id)
+                await database.set_lease("aa:bb:cc:dd:ee:95", "192.168.2.51")
+            asyncio.get_event_loop().run_until_complete(_seed())
+
+            dash = c.get("/api/dashboard").json()
+            by_mac = {d["mac"]: d for d in dash["devices"]}
+            # answering the sweep => blue LED; leased-but-silent => grey
+            assert by_mac["aa:bb:cc:dd:ee:94"]["connected"] is True
+            assert by_mac["aa:bb:cc:dd:ee:95"]["connected"] is False
+
+            # the phone stops answering (asleep) => grey on the next payload
+            responders.clear()
+            dash2 = c.get("/api/dashboard").json()
+            by_mac2 = {d["mac"]: d for d in dash2["devices"]}
+            assert by_mac2["aa:bb:cc:dd:ee:94"]["connected"] is False
+    finally:
+        asyncio.get_event_loop().run_until_complete(database.close())
+
+
+def test_disabled_user_surfaces_in_dashboard(client):
+    """A disabled user (a new device's onboarding lock) shows quota_mode=
+    disabled, 0 GB, blocked — the admin sees at a glance which users still
+    need a shared/fixed assignment."""
+    c, db, _ = client
+    _login(c)
+    import asyncio
+    async def _seed():
+        u = await db.create_user("New", _db.QUOTA_DISABLED, 0.0)
+        await db.upsert_device("aa:bb:cc:dd:ee:99", name="New Phone",
+                               user_id=u.id)
+    asyncio.get_event_loop().run_until_complete(_seed())
+
+    dash = c.get("/api/dashboard").json()
+    user = next(u for u in dash["users"] if u["name"] == "New")
+    assert user["quota_mode"] == "disabled"
+    assert user["allowance_gb"] == 0.0
+    assert user["blocked"] is True
+    dev = next(d for d in dash["devices"] if d["mac"] == "aa:bb:cc:dd:ee:99")
+    assert dev["block_state"] == "quota"
+    # assigning shared via the API (what the modal does) unblocks the user
+    r = c.patch(f"/api/users/{user['id']}",
+                json={"quota_mode": _db.QUOTA_AUTO, "fixed_gb": None})
+    assert r.status_code == 200, r.text
+    dash2 = c.get("/api/dashboard").json()
+    user2 = next(u for u in dash2["users"] if u["id"] == user["id"])
+    assert user2["quota_mode"] == "auto"
+    assert user2["blocked"] is False
 
 
 def test_guest_and_connected_flags_in_views(client):
@@ -1852,6 +2088,34 @@ def test_history_endpoint_requires_auth(client):
     assert c.get("/api/history/1").status_code == 401
 
 
+def test_wifi_ssids_endpoint_requires_auth(client):
+    """The SSID picker for the access-label field is admin-only (it leaks the
+    household's network names)."""
+    c, _, _ = client
+    assert c.get("/api/wifi/ssids").status_code == 401
+
+
+def test_wifi_ssids_unconfigured_defaults_to_empty(tmp_path):
+    """Without an injected probe getter the endpoint reports the feature as
+    not configured — the UI chip just falls back, no 500."""
+    database = _db.Database(tmp_path / "ssids.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+
+    async def _init():
+        await database.connect()
+    asyncio.get_event_loop().run_until_complete(_init())
+
+    app = create_app(database, service, SnapshotHolder())
+    try:
+        with TestClient(app) as c:
+            _login(c)
+            assert c.get("/api/wifi/ssids").json() == {
+                "available": False, "error": "not configured",
+                "ssids": [], "ssid_by_mac": {}, "wireless_macs": []}
+    finally:
+        asyncio.get_event_loop().run_until_complete(database.close())
+
+
 def test_history_returns_top_domains_and_activity(client):
     c, database, service = client
     _login(c)
@@ -1958,3 +2222,89 @@ def test_history_device_0_is_all(client):
     data = r.json()
     assert data["device_id"] == "all"
     assert data["total_queries"] == 3
+
+
+# -- software updates (Admin tab) ----------------------------------------------
+
+def test_updates_unwired_404_and_snapshot_none(client):
+    """Without an updater wired (tests / degraded boot) the endpoints 404 and
+    the snapshot carries update=None — the UI hides the card gracefully."""
+    c, _, _ = client
+    _login(c)
+    assert c.get("/api/updates").status_code == 404
+    assert c.post("/api/updates/check").status_code == 404
+    assert c.get("/api/dashboard").json()["update"] is None
+
+
+def test_updates_round_trip(tmp_path):
+    """The Admin-tab update flow: settings toggle, force-check finds a newer
+    release, the changelog rides the state, and the install path runs."""
+    from quota.updater import Updater
+
+    RELEASE = {
+        "tag_name": "v0.3.1",
+        "assets": [{"name": "quota-manager_0.3.1_all.deb",
+                    "browser_download_url": "https://example/deb"}],
+    }
+    CHANGELOG = (
+        "# Changelog\n\n## [0.3.1]\n### Fixed\n- the bug.\n\n"
+        "## [0.2.0]\n### Added\n- old stuff.\n"
+    )
+
+    database = _db.Database(tmp_path / "upd.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    asyncio.get_event_loop().run_until_complete(database.connect())
+
+    installed = []
+    up = Updater(
+        database, current_version="0.2.0",
+        fetch_json=lambda url, timeout=20: RELEASE,
+        fetch_text=lambda url, timeout=20: CHANGELOG,
+        download=lambda url, dest, timeout=120: None,
+        run_command=lambda argv, timeout=15: installed.append(argv) or (0, ""))
+    app = create_app(database, service, holder, updater=up)
+    try:
+        with TestClient(app) as c:
+            _login(c)
+            # current state, default switches
+            st = c.get("/api/updates").json()
+            assert st["current_version"] == "0.2.0"
+            assert st["available"] is False
+            assert st["enabled"] is True
+            assert st["auto_install"] is False
+            # settings round-trip (partial saves keep the other field)
+            r = c.post("/api/updates", json={"auto_install": True})
+            assert r.status_code == 200, r.text
+            assert r.json()["auto_install"] is True
+            assert c.post("/api/updates", json={"enabled": False}
+                          ).json()["enabled"] is False
+            # back on + auto-install off so the check below does NOT race the
+            # background install (that path is covered in test_updater.py)
+            assert c.post("/api/updates", json={"enabled": True,
+                                                "auto_install": False}
+                          ).status_code == 200
+            # force a check -> newer release + changelog
+            r = c.post("/api/updates/check")
+            assert r.status_code == 200, r.text
+            st = r.json()
+            assert st["available"] is True
+            assert st["latest_version"] == "0.3.1"
+            assert [x["version"] for x in st["changelog"]] == ["0.3.1"]
+            # the snapshot carries the same availability
+            assert c.get("/api/dashboard").json()["update"]["available"] is True
+            # manual install: the endpoint runs the download + systemd-run path
+            r = c.post("/api/updates/install")
+            assert r.status_code == 200, r.text
+            assert r.json()["ok"] is True
+            import time as _t
+            for _ in range(50):
+                if installed:
+                    break
+                _t.sleep(0.02)
+            assert installed and installed[0][0] == "systemd-run"
+            st = c.get("/api/updates").json()
+            assert st["available"] is False  # latest cleared after install
+            assert st["last_install"]
+    finally:
+        asyncio.get_event_loop().run_until_complete(database.close())

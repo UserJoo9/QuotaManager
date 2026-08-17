@@ -7,6 +7,6 @@ fastapi==0.141.1
 uvicorn[standard]==0.52.1
 aiosqlite==0.22.1
 PyYAML==6.0.3
-pytest==8.3.5          # dev/tests only
-httpx==0.28.1          # fastapi TestClient
+pytest==9.1.1           # dev/tests only
+httpx==0.28.1           # fastapi TestClient
 pyflakes>=3.2,<4       # lint (README Tests section)

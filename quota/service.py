@@ -32,6 +32,7 @@ from typing import Any, Optional
 
 from core import timeutil
 from quota import db as _db
+from quota.vendor import vendor_for
 
 log = logging.getLogger("quota.service")
 
@@ -85,16 +86,23 @@ class QuotaService:
 
         allowances: dict[int, float] = {}
         for u in users:
-            base = u.fixed_gb if u.quota_mode == _db.QUOTA_FIXED else auto_share
-            base = base if base is not None else 0.0
+            # A disabled user is the onboarding lock for a new auto-registered
+            # device: it claims NO share (and nothing off the fixed total)
+            # until the admin assigns shared or fixed.
+            if u.quota_mode == _db.QUOTA_DISABLED:
+                base = 0.0
+            elif u.quota_mode == _db.QUOTA_FIXED:
+                base = u.fixed_gb or 0.0
+            else:
+                base = auto_share
             allowances[u.id] = round(base + (u.topup_gb or 0.0), 3)
         return allowances
 
     def _next_period_end(self, bundle: _db.Bundle, now: _dt.datetime) -> str:
         """ISO end date of the current period ('' when there is no reset)."""
-        if bundle.reset_day <= 0:
+        if bundle.effective_reset_day <= 0:
             return ""  # no automatic reset — period stays open until admin acts
-        return timeutil.period_bounds(now, bundle.reset_day)[1].date().isoformat()
+        return timeutil.period_bounds(now, bundle.effective_reset_day)[1].date().isoformat()
 
     async def open_period(self) -> None:
         """Open a fresh period: recompute allowances and set ``period_start`` to now.
@@ -106,6 +114,7 @@ class QuotaService:
         """
         bundle = await self.db.get_bundle()
         now = self._now()
+        effective = bundle.effective_reset_day
         # A top-up is a grant for the CURRENT period — clear it on roll-over so
         # the new month recomputes from the fixed/auto shares only.
         await self.db.clear_topups()
@@ -114,11 +123,11 @@ class QuotaService:
         # Milestone notices (50/75/100%) are period-scoped: a fresh period
         # re-arms them so each threshold is surfaced again in the new month.
         await self.db.reset_milestone_flags()
-        start, end = timeutil.period_bounds(now, bundle.reset_day)
+        start, end = timeutil.period_bounds(now, effective)
         bundle.allowances = await self.compute_allowances()
-        # reset_day<=0 -> period_bounds returns "today"; period_end stays "".
+        # effective<=0 -> period_bounds returns "today"; period_end stays "".
         bundle.period_start = start.date().isoformat()
-        bundle.period_end = end.date().isoformat() if bundle.reset_day > 0 else ""
+        bundle.period_end = end.date().isoformat() if effective > 0 else ""
         await self.db.set_bundle(bundle)
         log.info("quota period opened: %s -> %s (%d allowances)",
                  bundle.period_start, bundle.period_end or "manual",
@@ -141,25 +150,41 @@ class QuotaService:
     async def ensure_period(self) -> None:
         """Roll the period if stale, open if missing.
 
-        ``reset_day <= 0`` disables the automatic roll: the period is opened
-        once (on first boot) and afterwards only advances via an explicit
-        admin action (:meth:`reset_month`).
+        ``reset_day <= 0`` (with period type ``renew_day``) disables the
+        automatic roll: the period is opened once (on first boot) and
+        afterwards only advances via an explicit admin action
+        (:meth:`reset_month`).
 
         With a monthly boundary the roll triggers when the recorded
-        ``period_start`` is *before* the current boundary — a mid-month manual
-        reset leaves ``period_start`` after the boundary, so it stands until
-        the next natural boundary passes.
+        ``period_end`` has actually passed — NOT by comparing ``period_start``
+        against the reset-day grid. A mid-month admin edit that moves the
+        reset day re-anchors ``period_end`` (see ``recompute_allowances``)
+        without rolling, so changing the renew day never skips the current
+        month or zeroes the recorded usage; the manual-reset period (started
+        mid-month) stands until its own end passes.
         """
         bundle = await self.db.get_bundle()
         now = self._now()
-        if bundle.reset_day <= 0:
+        effective = bundle.effective_reset_day
+        if effective <= 0:
             if not bundle.period_start:
                 await self.open_period()
             return
-        start, _ = timeutil.period_bounds(now, bundle.reset_day)
-        if bundle.period_start >= start.date().isoformat():
+        if not bundle.period_start:
+            await self.open_period()
             return
-        await self.open_period()
+        if bundle.period_end:
+            end = _dt.datetime.combine(
+                _dt.date.fromisoformat(bundle.period_end), _dt.time.min,
+                tzinfo=now.tzinfo)
+            if now >= end:
+                await self.open_period()
+            return
+        # Legacy DB carrying a period_start but no recorded end: fall back to
+        # the boundary heuristic so an unrollable state still corrects itself.
+        start, _ = timeutil.period_bounds(now, effective)
+        if bundle.period_start < start.date().isoformat():
+            await self.open_period()
 
     async def recharge(self, add_gb: float) -> dict[str, Any]:
         """Add GB to the current bundle (ISP re-charge) and recompute quotas.
@@ -205,10 +230,15 @@ class QuotaService:
                            used_gb: float) -> bool:
         """Is the user quota-blocked, honouring the quota-exemption flag?
 
-        An exempt user is NEVER quota-blocked, whatever their usage — the
-        exemption lifts the usage-vs-allowance gate only; a manual admin cut
-        (user/device level) still resolves through ``resolve_device_state``.
+        A DISABLED user (a fresh auto-registered device awaiting the admin's
+        shared/fixed assignment) is ALWAYS quota-blocked — 0 GB, regardless of
+        usage, top-ups or the exemption flag. An exempt user is never
+        quota-blocked, whatever their usage — the exemption lifts the
+        usage-vs-allowance gate only; a manual admin cut (user/device level)
+        still resolves through ``resolve_device_state``.
         """
+        if user is not None and user.quota_mode == _db.QUOTA_DISABLED:
+            return True
         if user is not None and user.exempt_quota:
             return False
         return QuotaService.quota_blocked_for(user, allowance, used_gb)
@@ -285,6 +315,11 @@ class QuotaService:
             user = users.get(dev.user_id)
             if user is None:
                 continue  # orphaned device (should not happen post-migration)
+            if dev.mac == _db.GATEWAY_MAC:
+                # The box's own row: its cut is user-resolved at
+                # render/enforcement time, never persisted as 'quota' — a
+                # persisted flag would desync the Gateway card's toggle.
+                continue
             if dev.block_state == _db.BLOCK_ADMIN:
                 continue  # per-device manual override stays until lifted
             if user.block_state == _db.BLOCK_ADMIN:
@@ -346,6 +381,13 @@ class QuotaService:
         # packets: add a row-less entry with the leased IP so run.py's
         # ip_to_mac + blocked maps reach the engine's @blocked set. No usage
         # rows ever accrue for it (run.py skips row-less MACs when draining).
+        # STOP-NEW + Decline-random refused MACs join the same pass: those
+        # gates refuse brand-new MACs at the DHCP level (no device row), but
+        # the lease just handed out before the box learned the MAC must be cut
+        # until it expires.
+        deny_set = (set(await self.db.get_mac_list("deny"))
+                    | await self.refused_macs()
+                    | await self.refused_random_macs())
         for mac, ip in leases.items():
             if mac in out or mac not in deny_set:
                 continue
@@ -454,6 +496,31 @@ class QuotaService:
     GUEST_LIMIT_KEY = "guest_limit"
     GUEST_SPEED_KEY = "guest_speed_limit_mbps"
     STOP_NEW_KEY = "stop_new_connections"
+    #: MACs refused by the STOP-NEW gate, comma-joined. Persisted so the
+    #: DHCP-ignore fragment and the row-less kernel block survive a restart;
+    #: cleared when the gate is turned off (everyone may join again).
+    STOP_NEW_REFUSED_KEY = "stop_new_refused_macs"
+
+    async def refused_macs(self) -> set[str]:
+        """MACs currently refused by the STOP-NEW gate. Empty when the gate
+        is off (the gate-off path clears the list)."""
+        raw = await self.db.get_setting(self.STOP_NEW_REFUSED_KEY, "")
+        return {m.strip().lower() for m in raw.split(",") if m.strip()}
+
+    async def add_refused_mac(self, mac: str) -> bool:
+        """Persist a refused MAC (idempotent). True when newly added."""
+        refused = await self.refused_macs()
+        if mac.lower() in refused:
+            return False
+        refused.add(mac.lower())
+        await self.db.set_setting(
+            self.STOP_NEW_REFUSED_KEY, ",".join(sorted(refused)))
+        return True
+
+    async def clear_refused_macs(self) -> None:
+        """Drop every refused MAC (gate turned off: everyone may join again)."""
+        if await self.refused_macs():
+            await self.db.set_setting(self.STOP_NEW_REFUSED_KEY, "")
 
     async def is_guest_mode(self) -> bool:
         """True when newly connected devices auto-register as guests."""
@@ -485,11 +552,26 @@ class QuotaService:
             return 2
 
     async def set_guest_limit(self, n: int) -> None:
-        """Raise/lower the guest-account cap. Existing guests are untouched;
-        the limit gates brand-new guest registrations."""
+        """Raise/lower the guest-account cap.
+
+        Lowering the cap ALSO cuts guests already over it: the newest over-cap
+        guest accounts are admin-blocked immediately (oldest ``n`` stay), so
+        "set to 1" actually leaves one guest online even if several joined
+        earlier. Raising the cap never un-blocks anyone — unblocking is the
+        admin's call."""
         n = max(1, int(n))
         await self.db.set_setting(self.GUEST_LIMIT_KEY, str(n))
         await self.db.add_event(f"Guest limit set to {n}", "warn")
+        guests = sorted(
+            (u for u in await self.db.list_users() if u.guest),
+            key=lambda u: u.created_at)
+        for u in guests[n:]:
+            for dev in await self.db.list_devices(user_id=u.id):
+                if dev.block_state != _db.BLOCK_ADMIN:
+                    await self.db.set_device_state(dev.id, _db.BLOCK_ADMIN)
+                    await self.db.add_event(
+                        f"GUEST cut: {dev.mac} — guest limit lowered to {n}",
+                        "warn", dev.id)
 
     async def guest_speed_limit_mbps(self) -> float:
         """Default speed cap (Mbps) applied to every guest account's AGGREGATE
@@ -538,17 +620,23 @@ class QuotaService:
         MAC for privacy always set the locally-administered bit, so a MAC whose
         first byte has ``0x02`` set is almost certainly a randomized address —
         the real vendor OUI is gone, which is exactly why vendor lookups come
-        up empty for them.
+        up empty for them. The local bit alone is a heuristic, though: some
+        genuine legacy products ship locally-administered MACs whose OUI IS a
+        registered vendor prefix (3COM 02:c0:8c, DEC aa:00:00, Olivetti
+        02:aa:3c...). A privacy-randomized MAC carries a random OUI that never
+        appears in the registry, so a known vendor prefix means a real device,
+        never a randomize — only local-bit MACs with NO vendor are refused.
         """
         try:
             first = int(mac.replace(":", "").replace("-", "")[:2], 16)
         except (ValueError, IndexError):
             return False
-        return bool(first & 0x02)
+        return bool(first & 0x02) and vendor_for(mac) == ""
 
     async def decline_random_macs(self) -> bool:
-        """True when brand-new devices with a randomized MAC are refused
-        (registered + immediately admin-blocked on first sight)."""
+        """True when brand-new devices with a randomized MAC are refused at
+        the DHCP level (no IP, no device row — the lease already handed out
+        is kernel-cut row-less until it expires)."""
         return (await self.db.get_setting(self.DECLINE_RANDOM_KEY, "0")) == "1"
 
     async def set_decline_random_macs(self, enabled: bool,
@@ -583,6 +671,33 @@ class QuotaService:
                     "warn")
         # one-shot flag always resets; it only ever rides alongside a set
         await self.db.set_setting(self.DECLINE_RANDOM_EXISTING_KEY, "0")
+
+    #: MACs refused by the Decline-random gate, comma-joined. Persisted so
+    #: the DHCP-ignore fragment + the row-less kernel block survive a
+    #: restart; cleared when the gate is turned off (real-address devices
+    #: may rejoin). Separate from the STOP-NEW list so each gate's off never
+    #: clears the other gate's refusals.
+    DECLINE_RANDOM_REFUSED_KEY = "decline_random_refused_macs"
+
+    async def refused_random_macs(self) -> set[str]:
+        """MACs currently refused by the Decline-random gate."""
+        raw = await self.db.get_setting(self.DECLINE_RANDOM_REFUSED_KEY, "")
+        return {m.strip().lower() for m in raw.split(",") if m.strip()}
+
+    async def add_refused_random_mac(self, mac: str) -> bool:
+        """Persist a refused random MAC (idempotent). True when newly added."""
+        refused = await self.refused_random_macs()
+        if mac.lower() in refused:
+            return False
+        refused.add(mac.lower())
+        await self.db.set_setting(
+            self.DECLINE_RANDOM_REFUSED_KEY, ",".join(sorted(refused)))
+        return True
+
+    async def clear_refused_random_macs(self) -> None:
+        """Drop every refused random MAC (gate turned off)."""
+        if await self.refused_random_macs():
+            await self.db.set_setting(self.DECLINE_RANDOM_REFUSED_KEY, "")
 
     async def set_guest_quota(self, gb: float) -> None:
         """Change the guest allowance. Applied to EVERY existing guest right

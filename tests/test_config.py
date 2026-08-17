@@ -9,6 +9,69 @@ from __future__ import annotations
 from core import config as cfg_mod
 
 
+def test_latency_probe_defaults_on_and_loads():
+    """The ARP-RTT WiFi/LAN classifier is ON by default (works on any
+    hardware — no monitor-capable card needed) with sane, tuneable knobs; a
+    config-file value lands on the dataclass fields."""
+    cfg = cfg_mod.Config()
+    assert cfg.network.latency_probe.enabled is True
+    assert cfg.network.latency_probe.samples == 6
+    assert cfg.network.latency_probe.min_samples == 2
+    assert cfg.network.latency_probe.threshold_ms == 1.0
+    assert cfg.network.latency_probe.min_consistent == 2
+    assert cfg.network.latency_probe.interval_s == 30.0
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "config.yaml"
+        p.write_text(
+            "network:\n"
+            "  latency_probe:\n"
+            "    enabled: false\n"
+            "    threshold_ms: 0.7\n", encoding="utf-8")
+        loaded = cfg_mod.load_config(p)
+    assert loaded.network.latency_probe.enabled is False
+    assert loaded.network.latency_probe.threshold_ms == 0.7
+    assert loaded.network.latency_probe.samples == 6  # untouched keys default
+
+
+def test_wifi_probe_defaults_off_and_loads():
+    """The passive WiFi/LAN probe (router-side SSID label) is OFF by default —
+    it needs a spare monitor-mode card and airmon-ng/airodump-ng. A config-file
+    value lands on the dataclass fields."""
+    cfg = cfg_mod.Config()
+    assert cfg.network.wifi_probe.enabled is False
+    assert cfg.network.wifi_probe.interface == ""
+    assert cfg.network.wifi_probe.poll_interval == 5.0
+    assert cfg.network.wifi_probe.sighted_ttl == 600.0
+    assert cfg.network.wifi_probe.lan_after_seconds == 300.0
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "config.yaml"
+        p.write_text(
+            "network:\n"
+            "  wifi_probe:\n"
+            "    enabled: true\n"
+            "    interface: wlan0\n"
+            "    lan_after_seconds: 60\n", encoding="utf-8")
+        loaded = cfg_mod.load_config(p)
+    assert loaded.network.wifi_probe.enabled is True
+    assert loaded.network.wifi_probe.interface == "wlan0"
+    assert loaded.network.wifi_probe.lan_after_seconds == 60.0
+    # defaults survive on a file that only sets enabled
+    import tempfile as tf2
+    from pathlib import Path as P2
+    with tf2.TemporaryDirectory() as td:
+        p = P2(td) / "config.yaml"
+        p.write_text("network:\n  wifi_probe:\n    enabled: true\n",
+                     encoding="utf-8")
+        loaded2 = cfg_mod.load_config(p)
+    assert loaded2.network.wifi_probe.interface == ""
+    assert loaded2.network.wifi_probe.sighted_ttl == 600.0
+    assert loaded2.network.wifi_probe.lan_after_seconds == 300.0
+
+
 def test_shaping_lan_rate_mbps_defaults_to_lan_speed():
     """The shaping root + LAN pass-through cap at the LAN link rate (1 Gbps by
     default) so client<->uplink-subnet traffic is never throttled by the WAN
@@ -136,6 +199,8 @@ def test_default_config_is_linux_gateway():
     cfg = cfg_mod.Config()
     assert cfg.dhcp.gateway_ip == "192.168.1.2"
     assert cfg.dhcp.lease_file == "/var/lib/misc/dnsmasq.leases"
+    assert cfg.dhcp.ignore_file == "/etc/dnsmasq.d/quota-ignore.conf"
+    assert cfg.dhcp.reload_dnsmasq is True
     assert cfg.engine.backend == "nftables"
     assert cfg.engine.table == "quota_gateway"
 
@@ -205,6 +270,38 @@ def test_history_config_disable_via_yaml():
         p.write_text("bogus_section:\n  x: 1\n", encoding="utf-8")
         loaded = cfg_mod.load_config(p)
     assert loaded.history.enabled is True
+
+
+def test_updates_config_defaults_and_loads():
+    """Self-update checks default ON with the app's own repo + a 24 h cadence,
+    and a config-file value lands on the dataclass fields."""
+    cfg = cfg_mod.Config()
+    assert cfg.updates.enabled is True
+    assert cfg.updates.repo == "UserJoo9/QuotaManager"
+    assert cfg.updates.interval_hours == 24
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "config.yaml"
+        p.write_text("updates:\n  enabled: false\n  interval_hours: 6\n",
+                     encoding="utf-8")
+        loaded = cfg_mod.load_config(p)
+    assert loaded.updates.enabled is False
+    assert loaded.updates.interval_hours == 6
+    # untouched keys keep their defaults
+    assert loaded.updates.repo == "UserJoo9/QuotaManager"
+
+
+def test_updates_config_disable_via_yaml():
+    """``updates.enabled: false`` reaches the dataclass so the Gateway builds no
+    updater (endpoints 404, the snapshot carries update: None)."""
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "config.yaml"
+        p.write_text("updates:\n  enabled: false\n", encoding="utf-8")
+        loaded = cfg_mod.load_config(p)
+    assert loaded.updates.enabled is False
 
 
 def test_resolve_config_path_and_directory_mounts():

@@ -26,6 +26,17 @@
 
   <!-- MAIN DASHBOARD -->
   <div id="app" class="screen hidden">
+    <!-- UPDATE-AVAILABLE NOTIFICATION (top-center toast) -->
+    <div id="update-banner" class="update-banner hidden" role="status">
+      <div class="update-banner-text">
+        <strong id="update-banner-title">Update available</strong>
+        <span id="update-banner-sub" class="muted small"></span>
+      </div>
+      <div class="update-banner-actions">
+        <button type="button" id="update-banner-details" class="btn primary small">Show details</button>
+        <button type="button" id="update-banner-dismiss" class="btn ghost small" title="Dismiss">✕</button>
+      </div>
+    </div>
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-brand">
         <span class="brand-badge" aria-hidden="true">
@@ -163,8 +174,15 @@
                   <input type="number" id="set-total" min="1" step="any" value="140">
                 </div>
                 <div class="field">
-                  <label for="set-reset-day">Reset day of month <span class="muted small">(0 = manual)</span></label>
-                  <input type="number" id="set-reset-day" min="0" max="28" value="1">
+                  <label for="set-period-type">Bundle type</label>
+                  <select id="set-period-type">
+                    <option value="renew_day">Next renew day</option>
+                    <option value="end_of_month">End-of-month bill</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="set-reset-day">Reset day of month <span class="muted small" id="reset-day-hint">(0 = manual)</span></label>
+                  <input type="number" id="set-reset-day" min="0" max="31" value="1">
                 </div>
               </div>
               <div class="btn-row">
@@ -237,8 +255,9 @@
                 <p class="toggle-help">Randomized (privacy) MAC addresses — the
                   kind phones and laptops rotate — carry no vendor OUI, so the
                   box can't identify or budget them. While on, a brand-new
-                  device with a random MAC is blocked on first sight (it stays
-                  visible + counted).</p>
+                  device with a random MAC is refused at the DHCP level: it
+                  never gets an IP to join. Real devices (known vendor MACs)
+                  are never gated.</p>
               </div>
               <label class="switch" title="Refuse brand-new devices with randomized MACs">
                 <input type="checkbox" id="decline-random-toggle">
@@ -574,6 +593,46 @@
                 allowance fairly between users and devices, cap speeds, and keep game
                 ping low under load.</p>
             </div>
+
+            <!-- SOFTWARE UPDATES -->
+            <div class="glass card updates-card">
+              <h3>Software updates</h3>
+              <p class="muted small">Checks the GitHub repo for a newer release every
+                24&nbsp;h and notifies the dashboard when one is available.</p>
+              <div class="updates-grid">
+                <div class="about-row">
+                  <span class="muted">Current</span>
+                  <span id="upd-current" class="about-value">—</span>
+                </div>
+                <div class="about-row">
+                  <span class="muted">Latest</span>
+                  <span id="upd-latest" class="about-value">—</span>
+                </div>
+                <div class="about-row">
+                  <span class="muted">Last check</span>
+                  <span id="upd-checked" class="about-value">—</span>
+                </div>
+                <div class="about-row">
+                  <span class="muted">Status</span>
+                  <span id="upd-status" class="about-value">—</span>
+                </div>
+              </div>
+              <div class="updates-actions">
+                <button type="button" id="upd-check" class="btn ghost small">Check now</button>
+                <button type="button" id="upd-install" class="btn primary small hidden">Install</button>
+                <button type="button" id="upd-details" class="btn ghost small hidden">Show details</button>
+              </div>
+              <hr class="sep">
+              <label class="check" title="Check GitHub for a newer release every 24 h and notify the dashboard.">
+                <input type="checkbox" id="upd-enabled" checked>
+                <span>Check for updates automatically (every 24 h)</span>
+              </label>
+              <label class="check" title="When an update is found, download + install it automatically (the gateway restarts into the new version).">
+                <input type="checkbox" id="upd-auto">
+                <span>Auto-install when an update is available</span>
+              </label>
+              <p id="upd-error" class="muted small hidden"></p>
+            </div>
           </div>
 
           <!-- SYSTEM LOGS -->
@@ -742,6 +801,7 @@
         <div id="d-quota-wrap">
           <label for="d-mode">Quota</label>
           <select id="d-mode">
+            <option value="disabled">Disabled — admin assigns (0 GB)</option>
             <option value="auto">Auto (share of remainder)</option>
             <option value="fixed">Fixed GB</option>
           </select>
@@ -778,6 +838,13 @@
         </div>
         <label for="d-dns-server">Upstream DNS server (blank = inherit)</label>
         <input id="d-dns-server" placeholder="e.g. 1.1.1.1">
+        <label for="d-access">Access (blank = auto-learn from the air)</label>
+        <input id="d-access" list="d-access-list" maxlength="80"
+               placeholder="e.g. WiFi · MyNet, LAN1">
+        <datalist id="d-access-list"></datalist>
+        <p class="muted small">The box's radio probe hears which router SSID a
+          device is really on ("WiFi · &lt;name&gt;") or marks it "LAN". Type
+          a label to pin it (e.g. LAN2); blank = auto.</p>
         <div class="modal-actions">
           <button type="button" id="modal-cancel" class="btn ghost">Cancel</button>
           <button type="submit" id="modal-submit" class="btn primary">Add</button>
@@ -796,6 +863,7 @@
         <input id="u-name" placeholder="e.g. Youssef">
         <label for="u-mode">Quota</label>
         <select id="u-mode">
+          <option value="disabled">Disabled — admin assigns (0 GB)</option>
           <option value="auto">Auto (share of remainder)</option>
           <option value="fixed">Fixed GB</option>
         </select>
@@ -849,6 +917,18 @@
     </div>
   </div>
 
+  <!-- CHANGELOG MODAL (the "Show details" popup) -->
+  <div id="changelog-modal" class="modal hidden">
+    <div class="glass card modal-card changelog-card">
+      <h3>What's new</h3>
+      <p class="muted small" id="changelog-sub"></p>
+      <div id="changelog-body" class="changelog-scroll"></div>
+      <div class="modal-actions">
+        <button type="button" id="changelog-close" class="btn primary">Close</button>
+      </div>
+    </div>
+  </div>
+
   <!-- FIRST-RUN WELCOME PANEL -->
   <div id="welcome-overlay" class="welcome-overlay hidden">
     <div class="glass card welcome-card">
@@ -859,8 +939,13 @@
       <form id="welcome-form">
         <label for="setup-total">Internet bundle this month (GB)</label>
         <input type="number" id="setup-total" min="1" step="any" required>
-        <label for="setup-reset-day">Reset day of the month (0 = never)</label>
-        <input type="number" id="setup-reset-day" min="0" max="28" step="1" required>
+        <label for="setup-period-type">Bundle type</label>
+        <select id="setup-period-type">
+          <option value="renew_day">Next renew day</option>
+          <option value="end_of_month">End-of-month bill</option>
+        </select>
+        <label for="setup-reset-day">Reset day of the month <span id="setup-reset-day-hint">(0 = never)</span></label>
+        <input type="number" id="setup-reset-day" min="0" max="31" step="1" required>
         <label for="setup-cur-pw">Current admin password</label>
         <input type="password" id="setup-cur-pw" autocomplete="current-password">
         <label for="setup-new-pw">New password (optional — leave blank to keep it)</label>

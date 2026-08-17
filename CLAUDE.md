@@ -56,6 +56,32 @@ silently let downloads bypass the box).
    when `reset_day=0`) → syncs device bindings from the dnsmasq lease file →
    drains counter deltas into `usage_daily` → re-evaluates block states →
    pushes fresh ip→mac / blocked maps into the engine + snapshot holder.
+   Every ~15 s it also learns each leased device's **source NIC** from
+   `ip -j neigh` (`devices.source_interface`, text `ip neigh` fallback;
+   IPv4-only, FAILED rows skipped, last-known NIC kept on disconnect) — the
+   dashboard maps it through `network.interface_tags` into the WiFi/LAN chip
+   on the device card. Every tick it also resolves the **router-side** access
+   label: the box raw-ARPs every leased client and times the replies
+   (`quota/latency_probe.py`, ON by default, ANY hardware — no monitor card
+   needed): wired answers in well under a millisecond, WiFi pays airtime
+   (≥1 ms), so the fastest sample decides `WiFi`/`LAN`; raw AF_PACKET backend
+   with a `ping` parse fallback; requests go out in **interleaved send/drain
+   rounds** so a power-save device (sleeping phone / NIC-sleeping PC) that
+   wakes seconds later still gets its replies sampled (a send-everything-then-
+   listen sweep closes the receive window before it wakes); a consecutive-sweep
+   streak guard (`min_consistent`) prevents flapping and a device that stops
+   replying keeps its previous label; the sweep's responder set also drives
+   the device-card LED — a leased device that stops answering (asleep/off/
+   another network) goes grey, since a DHCP lease alone lags reality by up to
+   `LEASE_HOURS`. When the box HAS a monitor-capable card, the
+   passive probe (`quota/wifi_probe.py`, airmon-ng + airodump-ng on a
+   dedicated thread, OFF by default) takes precedence and adds the exact
+   SSID: a leased device heard on a known BSSID is labeled `WiFi · <SSID>`,
+   heard-but-unknown `WiFi`, leased-but-never-heard past `lan_after_seconds`
+   `LAN` (grace in memory, no flap; the rogue ARP scan elicits the
+   sightings). The manual per-device pin (`devices.access_override`,
+   `POST /api/devices/{id}/access`) always wins the display while the auto
+   label keeps tracking reality.
    Every 60 s a **rogue LAN scan** (`quota/arp_scan.py`) raw-ARP-probes both
    subnets; active hosts NOT in the lease file surface in the snapshot's
    `rogue` list (+ `warning` event) — a static-IP bypasser is otherwise
@@ -154,19 +180,41 @@ admin cut is lossless, clearing it restores all devices. Precedence:
 per-device admin cut always wins. A `bypass` keeps one device online despite
 its user's quota block. Enforcement stays per-MAC/per-IP — the engine's
 `blocked` set still drops at line rate; only the *decision* is per-user. New
-DHCP devices auto-create their own user (one device ⇒ one user); legacy
-device-only DBs are migrated in place by `db.connect()` (idempotent ALTERs +
-backfill).
+DHCP devices auto-create their own user (one device ⇒ one user) in the
+**DISABLED onboarding lock** (`users.quota_mode="disabled"`, 0 GB): it claims
+NO share of the bundle and is always quota-blocked (the admin's positive
+shared/fixed assignment in the user/device modal is the only way online —
+guests are unaffected; STOP NEW CONNECTIONS and Decline-random MACs refuse
+new MACs at the DHCP level instead — no row at all, see the gate entries).
+Legacy device-only DBs
+are migrated in place by `db.connect()` (idempotent ALTERs + backfill).
 
 **Bundle source (fixed)**: `config.yaml` is the default source of truth for
-`bundle.total_gb` / `bundle.reset_day`, re-applied on every startup
-(`run.py: _seed_bundle_from_cfg`). Once the admin edits the bundle or recharges
-via the dashboard (`POST /api/bundle`), a `bundle_source` setting is set to
-`dashboard` and config.yaml stops overriding it — a UI edit survives a restart.
+`bundle.total_gb` / `bundle.reset_day` / `bundle.period_type`, re-applied on
+every startup (`run.py: _seed_bundle_from_cfg`). Once the admin edits the
+bundle or recharges via the dashboard (`POST /api/bundle`), a `bundle_source`
+setting is set to `dashboard` and config.yaml stops overriding it — a UI edit
+survives a restart.
 
-**No-auto-reset (`reset_day=0`)**: the period opens once and never rolls by
-itself; the bundle grows only via "Bundle recharged" (`service.recharge`,
-keeps `period_start`) and a new month starts only via "Reset month now".
+**Bundle type (`bundle.period_type`)**: `renew_day` (default) resets on the
+configured `reset_day` (0 = never auto-reset); `end_of_month` is the ISP's
+**month-end bill** — the configured day drives the reset too (many ISPs close
+the month on the 25th/28th), and day 0 falls back to the calendar end (1st of
+next month) — all via `Bundle.effective_reset_day` (day range 0-31). The
+dashboard/Welcome bundle panel has the selector; the reset-day input stays
+editable in both modes (its 0-hint text adapts).
+
+**No-auto-reset (`reset_day=0`, renew-day type only)**: the period opens once
+and never rolls by itself; the bundle grows only via "Bundle recharged"
+(`service.recharge`, keeps `period_start`) and a new month starts only via
+"Reset month now".
+
+**Period math (fixed 2026-08-17)**: `timeutil.period_bounds` returns the
+period **containing now** — before this month's reset day the current period
+began last month on the reset day. `ensure_period` rolls when the recorded
+`period_end` has passed, never by comparing `period_start` against the grid —
+a mid-month reset-day change re-anchors `period_end` (via
+`recompute_allowances`) without rolling or zeroing the recorded usage.
 
 **Electric-cut fallback (optional)**: the router can keep a small
 non-overlapping DHCP pool (gateway = router) on the uplink subnet
@@ -215,7 +263,11 @@ QuotaManager/
 │   ├── postinst              # venv + setup_gateway_kali.sh (QUOTA_NO_APT=1) + start
 │   └── prerm                 # stop + disable quota-gateway on remove/upgrade
 ├── config.yaml               # Linux gateway settings (dnsmasq + nftables)
-├── run.py                    # Gateway wiring: engine + maintenance + uvicorn
+├── run.py                    # Gateway wiring: engine + maintenance + uvicorn;
+│                             #   source-interface collector (ip -j neigh → tag)
+│                             #   + router-side WiFi/LAN label resolution
+│                             #   (ARP-RTT classifier + optional monitor probe
+│                             #   → devices)
 ├── requirements-linux.txt    # Linux deps (fastapi, uvicorn, aiosqlite, PyYAML + test deps)
 ├── scripts/
 │   ├── setup_gateway_kali.sh # Linux: sysctl, client-subnet NAT, dnsmasq,
@@ -236,6 +288,9 @@ QuotaManager/
 │   │                         #   table + devices.user_id/bypass + idempotent
 │   │                         #   migration (legacy devices → own user);
 │   │                         #   speed caps: devices/users limit_down/up_mbps;
+│   │                         #   devices.source_interface (box-NIC WiFi/LAN tag)
+│   │                         #   + access_interface/access_override (router-side
+│   │                         #   WiFi SSID / LAN pin, override wins the display);
 │   │                         #   dns_history table + per-user history_days;
 │   │                         #   mac_lists (whitelist/blacklist)
 │   ├── engine.py             # shared snapshot types (Linux): EngineCounters,
@@ -272,6 +327,15 @@ QuotaManager/
 │   ├── arp_lock.py           # ARP gateway-lock responder: claims the router's
 │   │                         #   IP on the client subnet so bypassers' frames
 │   │                         #   arrive at the box (raw-socket thread)
+│   ├── latency_probe.py      # WiFi/LAN classification by ARP round-trip time
+│   │                         #   (ON by default, ANY hardware): the fastest
+│   │                         #   reply sample decides; ping-parse fallback;
+│   │                         #   feeds devices.access_interface WiFi/LAN
+│   ├── wifi_probe.py         # router-side WiFi/LAN label probe: passive
+│   │                         #   monitor-mode sniffing (airmon-ng + airodump-ng
+│   │                         #   on a dedicated thread) -> per-device SSID /
+│   │                         #   LAN labels, OFF by default, only with a
+│   │                         #   monitor-capable card
 │   ├── dnslog.py             # DNS browsing history: dnsmasq query-log parser
 │   │                         #   + DnslogTailer thread (dedicated thread,
 │   │                         #   bounded queue, rotation-safe) -> dns_history
@@ -282,6 +346,13 @@ QuotaManager/
 │   ├── topology.py           # WAN-topology detection: detect_ppp() reports
 │   │                         #   whether ppp0 is up + its address pair (WAN tab);
 │   │                         #   restart_pppoe() = public-IP renewal (v24)
+│   ├── updater.py            # GitHub self-update checks (NEW): version
+│   │                         #   compare (quota/version.py), CHANGELOG.md parse
+│   │                         #   (newest-first, Unreleased skipped), 24 h gate +
+│   │                         #   persisted updates_state, optional auto-install
+│   │                         #   of the .deb under a transient systemd unit
+│   │                         #   (prerm stops quota-gateway — a child apt-get
+│   │                         #   would die with the cgroup)
 │   ├── netmgr.py             # TopologyManager (v19/19.1): the dashboard WAN
 │   │                         #   tab's live LAN/WAN switch — config.yaml + DB
 │   │                         #   written together, runs scripts/topology.sh,
@@ -293,6 +364,7 @@ QuotaManager/
 ├── api/
 │   ├── app.py                # FastAPI factory: REST + /ws + static mount +
 │   │                         #   /milestone (public, own-user) + /report (IP-gated)
+│   │                         #   + access-label pin + SSID picker routes
 │   └── schemas.py            # pydantic request models
 ├── web/
 │   ├── index.html            # login + dashboard + modals
@@ -319,9 +391,13 @@ QuotaManager/
     ├── test_nftables.py      # NftablesEngine vs a fake `nft` binary
     ├── test_arp_scan.py      # rogue static-IP detection (fake raw sockets)
     ├── test_arp_lock.py      # ARP gateway-lock responder (fake frames)
+    ├── test_latency_probe.py # ARP-RTT classifier math + sweep wiring (fakes)
+    ├── test_wifi_probe.py    # airodump CSV parse + probe snapshot + thread smoke
     ├── test_dnslog.py        # dnsmasq query-log parser + tailer + dns_history DB
     ├── test_netmgr.py        # TopologyManager WAN/LAN apply + rollback + PPPoE test
     ├── test_topology.py      # detect_ppp / check_internet probes
+    ├── test_updater.py       # version math + CHANGELOG parse + GitHub check +
+    │                         #   systemd-run/apt install (fakes, no network)
     ├── test_users_migration.py # legacy device-only DB → users backfill
     └── test_run_wiring.py    # run.py wiring + live boot + bundle reconcile +
                               #   dnsmasq lease sync + live-counter regression
@@ -332,10 +408,186 @@ the packet hot path). On Linux the hot path has **no Python at all** — the
 kernel counts and drops.
 
 ## [ORPHANS & PENDING]
-_Pending work lives in TASKS.md; orphans + debt are tracked in
-[LEGACY_DEBT_AND_RISKS] below. Version history (newest first) — full detail in
-the git history / CHANGELOG.md; these are the headlines + the gotchas to
-remember:_
+_Orphans + debt are tracked in [LEGACY_DEBT_AND_RISKS] below. Version history
+(newest first) — full detail in the git history / CHANGELOG.md; these are the
+headlines + the gotchas to remember:_
+- **2026-08-17** — **Admin-tab self-update checks (uncommitted)**: the box
+  compares its own version (`quota/version.py`) to the latest GitHub release
+  (`updates.repo`, default UserJoo9/QuotaManager) every `updates.interval_hours`
+  (24) and, on a newer version, shows an update banner with a **Show details**
+  popup listing every newer CHANGELOG.md section (newest-first, Unreleased
+  skipped) in a scroll frame — a far-behind box lists all intermediate
+  versions. NEW `quota/updater.py` (`Updater`, stdlib fetch/run injectables for
+  tests): `maybe_check` (24 h gate + `updates_enabled` DB setting) from the
+  maintenance tick behind a try/except; persisted `updates_state` (checked_at/
+  latest/error/changelog/last_install) so restarts never re-notify/re-check;
+  auto-install downloads the `.deb` and runs `apt-get install` under a
+  **transient systemd unit** (`systemd-run --unit=quota-update-install`) because
+  the .deb's `prerm` stops quota-gateway — a child apt-get would die with the
+  cgroup (plain apt-get fallback when systemd-run is absent). API:
+  `GET/POST /api/updates`, `/api/updates/check`, `/api/updates/install`, all
+  404 when unwired; snapshot `update` key. **Config gate `updates.enabled`
+  (default true) is the hermetic-tests master switch** — `_cfg` turns it off
+  so the first tick never dials GitHub; when off `gw.updater is None` (endpoints
+  404, snapshot update:None). **The dashboard "Check automatically" toggle is
+  the per-box master**: `check_now` refuses to fetch when it's off, the card
+  shows "Checks are OFF — toggle ON to check for updates" (never a stale
+  error/last-check), and re-enabling clears the last error (`set_enabled`).
+  Banner shows once per version (localStorage
+  `quota_update_banner`). Tests: `test_updater.py` NEW (14) + config + API +
+  wiring — **571 passed**, pyflakes clean, JS-OK. Not pushed (no-GitHub-push
+  rule).
+- **2026-08-17** — **reset-day mid-month skip + consumption zeroing fixed;
+  bundle type selector added (uncommitted)**: `timeutil.period_bounds` now
+  returns the period CONTAINING now (before this month's reset day the period
+  began last month) — previously reset day 25 with today the 16th read
+  days-left 40 and the maintenance loop rolled the period immediately,
+  dropping the current month's usage from the period. `ensure_period` now
+  rolls only when the recorded `period_end` has passed (never by comparing
+  `period_start` against the grid), so a mid-month reset-day change re-anchors
+  `period_end` (`recompute_allowances`) without rolling/zeroing usage. New
+  `bundle.period_type` (`renew_day` = current, `end_of_month` = the ISP's
+  month-end bill: the configured day drives the reset too — many ISPs close on
+  the 25th/28th — and day 0 falls back to the calendar end, the 1st; day range
+  widened 0-31): DB column + idempotent ALTER, config.yaml `bundle.period_type`,
+  BundleConfig, run.py `_seed_bundle_from_cfg`, netmgr snapshot, schemas +
+  `_apply_bundle_values` (400 on a bad value), dashboard/report payloads,
+  dashboard + Welcome selects (reset-day stays editable in both modes, its
+  0-hint adapts). Tests: period_bounds
+  containing-period cases (incl. January wrap), `test_changing_reset_day_mid_month_does_not_roll_or_zero_usage`,
+  `test_ensure_period_reset_day_25_steady_state_never_rolls_mid_month`,
+  end-of-month honoring the configured day + day-0 calendar-end fallback, API
+  period_type round-trip, config-YAML period_type seeding — 552 passed,
+  pyflakes clean. Not pushed (no-GitHub-push rule).
+- **2026-08-17** — **guest-limit cap now applies to existing guests too
+  (uncommitted)**: `set_guest_limit` previously only gated brand-new guest
+  registrations — "Max guest accounts = 1" left guests that joined EARLIER
+  online (verified: the fresh-case gate already worked, `count_guest_users()
+  > limit` → BLOCK_ADMIN). Now lowering the cap also admin-blocks the NEWEST
+  over-cap guest users' devices immediately (oldest `n` stay — sorted by
+  `users.created_at`); raising it never un-blocks. Mirrors
+  `set_guest_quota`'s apply-to-existing pattern. Tests: new
+  `test_lowering_guest_limit_cuts_existing_over_cap` + existing guest suite
+  — 544 passed. Not pushed (no-GitHub-push rule).
+- **2026-08-17** — **"Also cut existing random-MAC devices" sweep no longer
+  cuts real products (uncommitted)**: the one-shot sweep (and the brand-new
+  DHCP refusal) keyed off the locally-administered bit ALONE — but some
+  genuine legacy products ship locally-administered MACs whose OUI IS a
+  registered IEEE vendor prefix (3COM 02:c0:8c, DEC aa:00:00, Olivetti
+  02:aa:3c — 18 such MA-L prefixes in the bundled registry). Those got
+  classified "random" and cut. `QuotaService.is_random_mac` now requires BOTH
+  the local bit AND an empty vendor lookup (`vendor_for(mac) == ""`) — a
+  privacy-randomized MAC carries a random OUI that never appears in
+  `quota/oui.txt`, so a known vendor prefix means a real device, never a
+  randomize. Covers the sweep AND `_persist_lease`'s decline-random refusal
+  (same helper). Tests: is_random_mac cases for the legacy OUIs + a
+  sweep-survives legacy device — 543 passed. Not pushed (no-GitHub-push
+  rule).
+- **2026-08-17** — **Decline random MACs now refuses at the DHCP level too
+  (uncommitted)**: the random-MAC gate no longer registers a randomized
+  (privacy) MAC as an "unsigned user" and admin-blocks it — it shares the
+  STOP-NEW refusal path: the MAC joins the persisted
+  `decline_random_refused_macs` setting (its OWN list — each gate's off
+  clears only its own refusals) and the same app-owned dnsmasq fragment
+  (one `dhcp-host=<mac>,ignore` line per refused MAC, both gates' sets
+  unioned into one file), so dnsmasq never hands it an IP and no device row
+  is minted. Real (globally-unique) MACs never reach the branch. The
+  just-issued lease is kernel-cut via `snapshot_state`'s row-less pass
+  (refused lists unioned with the deny list). Gate off → own list +
+  fragment cleared; per-tick reconcile (step 6b) + an API immediate apply
+  (`decline_random_sync` callback on `/api/network {decline_random_macs}`)
+  keep them in sync. Unwritable fragment → graceful fallback to the legacy
+  registered + admin-blocked path. The one-shot `also_existing` sweep
+  (admin-cut existing randomized devices) is unchanged. `run.py`:
+  `_sync_stop_new_ignore` generalized to `_sync_refuse_fragment` +
+  `_refuse_fragment_sync`; `_apply_decline_random_now` mirrors
+  `_apply_stop_new_now`. Tests: rewired gate test (refusal, fragment,
+  row-less cut, real-OUI untouched, gate-off clear) + fallback test +
+  service row-less test — 543 passed. Not pushed (no-GitHub-push rule).
+- **2026-08-17** — **STOP NEW CONNECTIONS now refuses at the DHCP level
+  (uncommitted)**: the gate no longer hands a brand-new device an IP and
+  admin-blocks it — dnsmasq refuses the MAC outright, so there is no
+  "unsigned user" row at all. run.py's `_persist_lease` writes the MAC to a
+  persisted refuse list (DB setting `stop_new_refused_macs`) and to an
+  app-owned dnsmasq fragment (`dhcp.ignore_file`,
+  `/etc/dnsmasq.d/quota-ignore.conf`, one `dhcp-host=<mac>,ignore` line
+  each; restart via `_reload_dnsmasq` — `dnsmasq --test` gate +
+  `systemctl restart`, same pattern as DnsRuleManager), then returns WITHOUT
+  registering the device. The just-issued lease stays kernel-cut via
+  `snapshot_state`'s row-less pass (refused MACs are unioned into the
+  deny-list pass) until it expires. Gate off → refuse list + fragment
+  cleared (everyone joins again); a per-tick reconcile (`_sync_refuse_fragment`,
+  step 6b) + an API immediate apply (`stop_new_sync` callback on
+  `/api/guest {stop_new}`) keep them in sync. Fragment unwritable (no root
+  / no dnsmasq dir) → graceful fallback to the legacy registered +
+  admin-blocked path so the device stays controlled. `dhcp.enable: false`
+  skips the fragment entirely (no dnsmasq on the box; the row-less block
+  still applies). Decline-random now refuses at DHCP the same way (see the
+  entry above); guest gate unchanged (still mint + admin-block). Tests:
+  rewired gate test (refusal, fragment, row-less cut,
+  gate-off clear) + fallback test + service refuse-list test + config
+  defaults — 541 passed. Not pushed (no-GitHub-push rule).
+- **2026-08-17** — **disabled onboarding lock for new devices (uncommitted)**:
+  a brand-new DHCP device no longer auto-shares the bundle — its auto-created
+  user is `quota_mode="disabled"` (0 GB, claims NO share, always quota-blocked
+  even with 0 usage: `compute_allowances` special-cases it, `user_quota_blocked`
+  short-circuits it) until the admin assigns shared (auto) or fixed in the
+  user/device modal (new "Disabled" option in both selects; the device modal's
+  mode write propagates to the user). STOP-NEW-CONNECTIONS and Decline-random
+  devices are refused at DHCP entirely (see the entries above — no user is
+  minted); guest mode is unaffected (still mints, admin-cut at the cap).
+  Legacy tests
+  enshrining auto-share-on-join were rewritten to the new contract. Tests:
+  service allowance/block/enforcement-map tests + run.py `_persist_lease` test
+  + API dashboard test — 539 passed. Not pushed (no-GitHub-push rule).
+- **2026-08-17** — **LED = ARP presence, not lease (uncommitted)**: `connected`
+  now requires the device to have answered the latest latency sweep
+  (`_latency_active_ips`, fresh ≤3×interval) — a leased-but-silent device
+  (asleep/off/another network) goes grey, since dnsmasq keeps the lease for
+  LEASE_HOURS after a disconnect. Falls back to lease-based when the probe
+  isn't running or data is stale. 534 passed at that point.
+- **2026-08-17** — **router-side WiFi/LAN access labels, v2 = ARP-RTT
+  classification (uncommitted)**: the monitor-mode sniffing plan hit reality —
+  the live box's WiFi module has NO monitor mode, so it could never hear the
+  air. Replaced with `quota/latency_probe.py` (ON by default, any hardware,
+  any router firmware): the box raw-ARPs every leased client and times the
+  replies — wired answers in well under a millisecond, WiFi pays airtime
+  (≥1 ms), so the FASTEST sample (least affected by local scheduling noise)
+  decides `WiFi`/`LAN`. Raw AF_PACKET backend (root) with a `ping` time=
+  parse fallback and graceful keep-previous-label degradation; a
+  consecutive-sweep streak guard (`min_consistent`) prevents flapping; the
+  monitor probe, when a capable card EXISTS, still takes precedence (it also
+  knows the exact SSID — `quota/wifi_probe.py` is kept for that). Run.py
+  `_maybe_latency_tick` on its own cadence (`interval_s`), off-loop. First
+  user-visible labels ~1 min after boot (2 agreeing sweeps × 30 s).
+  Misclassification knob: `network.latency_probe.threshold_ms` (a fast 5G
+  device can read LAN → lower it). Tests: `tests/test_latency_probe.py` +
+  config defaults — 532 passed. Not pushed (no-GitHub-push rule).
+- **2026-08-17** — **router-side WiFi/LAN access labels (uncommitted)**: the
+  user's question "WiFi or LAN?" means the ROUTER's attachment point (which
+  SSID / which LAN port) — the box's own NIC tag always says eth0. DHCP can't
+  see it (the router bridges clients L2), so the box passively **sniffs the
+  air** from a spare monitor-mode card (`quota/wifi_probe.py`, airmon-ng +
+  airodump-ng, dedicated thread — firmware-agnostic): every leased device
+  heard on a known BSSID is labeled `WiFi · <SSID>`, heard-but-unknown `WiFi`,
+  leased-but-never-heard past `lan_after_seconds` `LAN` (grace tracked in
+  memory, no flap). The existing rogue ARP scan elicits the air sightings.
+  Manual per-device pin (`POST /api/devices/{id}/access`, override always
+  wins the display; the auto label keeps updating in the background) covers
+  exact port numbers like `LAN1`; `GET /api/wifi/ssids` feeds the modal
+  picker. OFF by default (`network.wifi_probe.enabled: false`; probe card must
+  be spare — the uplink is wired). Tests: `tests/test_wifi_probe.py` (+ API/
+  config/migration coverage) — 522 passed. Not pushed (no-GitHub-push rule).
+- **2026-08-16** — **audit-fix batch + interface tags (uncommitted)**: perf
+  fixes (off-loop `nft`/`tc`/`pppd`/lease/log reads; WS payload built once per
+  tick; `prune_events` hourly cap on the unbounded events table), security
+  (PBKDF2 600k + legacy-hash auto-rehash, 10-fail/300s login rate limit,
+  `/api/milestone/notify` now IP-ownership-gated), dead code removed (orphaned
+  `/api/usage*`/`/api/events` routes + `add_topup`/`has_bundle`/`is_blocked`/
+  `is_admin_blocked`/`get_usage_series`), GATEWAY_MAC row never persists a
+  `quota` flag in `evaluate_blocks`, and the WiFi/LAN **source-interface tag**
+  feature (`ip -j neigh` → `devices.source_interface`, `network.interface_tags`
+  label map, `.iface-tag` card chip). Not pushed (user's no-GitHub-push rule).
 - **2026-08-16** — phantom-device fix (uncommitted): deleting a device/user now
   writes its MACs to the **permanent deny list** (`mac_lists`); a deny-listed
   MAC with a live lease but no device row is still kernel-blocked via a
@@ -432,55 +684,63 @@ remember:_
   restart-resurrection fix + speed shaping (v11).
 
 ## [LEGACY_DEBT_AND_RISKS] (deep audits 2026-08-08 + 2026-08-10 — pre-breaking-change baseline)
-_Not yet fixed — the inventory the refactor phase should address before
-TASKS.md's breaking changes land. Line numbers from the audits._
+_Not yet fixed — the inventory the refactor phase should address before the
+breaking changes land. Line numbers from the audits. Items marked ✔ fixed by
+the 2026-08-16 audit-fix batch._
 
 **Dead code (zero production callers):**
-- `quota/db.py`: `add_topup` (:430), `has_bundle` (:665), `Device.is_admin_blocked`
-  (:105), `Device.is_blocked` (:75), `get_device_by_ip` (:377); `get_ip_for_mac`
-  (:632) + `set_lease` (:652) are test-only.
-- Orphaned endpoints (no UI/JS consumer): `GET /api/usage`, `GET /api/usage/{id}`,
-  `GET /api/events` (+ the `events` table's ~25 write sites — the Activity tab
-  is gone); `get_usage` / `get_usage_series` are test-only.
+- `quota/db.py`: `get_device_by_ip` (:377); `get_ip_for_mac` (:632) + `set_lease`
+  (:652) are test-only. **✔ removed 2026-08-16**: `add_topup` (:430),
+  `has_bundle` (:665), `Device.is_admin_blocked` (:105), `Device.is_blocked`
+  (:75), `get_usage_series`.
+- Orphaned endpoints (no UI/JS consumer): **✔ removed 2026-08-16** —
+  `GET /api/usage`, `GET /api/usage/{id}`, `GET /api/events` (+ the `events`
+  table's ~25 write sites — the Activity tab is gone); `get_usage` is test-only.
 
 **Known open defects (root-cause located, NOT fixed):**
 - **Per-device block can silently not cut a lease-less device** — kernel
   `@blocked` is keyed by IP from lease rows; a lease-less device gets `ip=""`
   → never blocked. Only cover is the ARP-lock `known_ips` deny (OFF by
-  default, forced OFF in WAN). Matches TASKS.md's "per-device block not
-  working".
-- `/api/milestone/notify` is unauthenticated + has no IP-ownership check (any
-  LAN host can clear/re-arm another user's milestone pills; display-integrity
-  only).
+  default, forced OFF in WAN). Matches "per-device block not working".
+- **✔ `/api/milestone/notify` IP-ownership gate (2026-08-16)**: the endpoint
+  now requires the requester's source IP to own the device whose user the
+  milestone belongs to (else 403).
 - `/report` is default-ON for the whole client subnet (rogue static-IP device
   reads full household usage + log tail with no session; gate itself is
   sound — documented "trusted LAN" assumption).
-- `evaluate_blocks` persists `block_state='quota'` onto the GATEWAY_MAC row
-  when the protected user goes over (cosmetic).
-- Network-tab preview staleness: the WS payload carries no shaping key;
-  `_reshaping_now` no-ops before the first tick.
+- **✔ GATEWAY_MAC quota flag (2026-08-16)**: `evaluate_blocks` skips the
+  box's row entirely — the cut is user-resolved, never persisted.
+- **✔ Network-tab preview staleness (2026-08-16)**: the WS payload now carries
+  a `shaping` key (`{available, applied}`) and `_reshaping_now` falls back to
+  the shaper's live state before the first tick; app.js shows "Applying…".
 
 **Performance risks (static audits; no telemetry exists to quantify):**
-- `TcShaper.update_state` runs ~70-115+ sequential `tc` subprocesses ON the
-  event loop on any tree change ≈ 1.5-5 s (a Network-tab save freezes the
-  loop); `engine.update_state`/`set_gateway_blocked` run `nft` on-loop (~80 at
-  first boot); `detect_ppp` runs `ip` on-loop per WAN tick;
-  `_read_log_tail` reads the WHOLE log on-loop (`/api/logs` + `/report`);
-  `/report` does `list_leases()` PER DEVICE. **REFUTED**: `check_internet` /
+- **✔ off-loop engine/shaper/ppp/lease/log reads (2026-08-16)**: `shaper
+  .update_state` (inside `_shaping_lock`), `engine.update_state`/
+  `set_gateway_blocked`, both `detect_ppp` call sites, the dnsmasq lease-file
+  read, `_read_log_tail` (`/api/logs` + `/report`) and `/report`'s per-device
+  `list_leases()` are all `asyncio.to_thread`'d; `_maintenance_loop` logs a
+  warning when a tick exceeds 1 s. **REFUTED**: `check_internet` /
   `check_internet_dns` ARE `asyncio.to_thread`'d — off-loop.
 - DB: ~30+ commits/tick (no batching), `get_period_usage_by_user` ×2/tick,
-  `get_bundle` ~×5/tick; the `events` table is UNBOUNDED (no prune — the only
-  real disk-growth risk).
-- WS: payload built N+1 times per 5 s; each client gets 2 snapshots/5 s;
-  app.js does a full `innerHTML` rebuild per push.
+  `get_bundle` ~×5/tick. **✔ events table (2026-08-16)**: `prune_events` drops
+  rows older than 30 days on an hourly gate — the unbounded-growth risk is
+  gone.
+- WS: **✔ payload built once per 5 s tick and shared across all sockets
+  (2026-08-16)**; each client still gets 2 snapshots/5 s; app.js does a full
+  `innerHTML` rebuild per push.
 
 **Security (low severity for a LAN admin box, but honest):**
-- PBKDF2-SHA256 at 200k iterations (OWASP 2023+ recommends 600k); cookie
-  `httponly` + `samesite=lax` but no `secure=True`; no login rate-limiting.
+- **✔ PBKDF2-SHA256 600k (2026-08-16)**: new hashes use 600k iterations
+  (`salt$iters$dk`); legacy 200k hashes verify and auto-rehash on login.
+- **✔ login rate limit (2026-08-16)**: 10 failed attempts / 300 s / source IP
+  → HTTP 429, per-app in-memory limiter. Cookie still `httponly` +
+  `samesite=lax` but no `secure=True`.
 - Deps all current (Aug 2026), no applicable CVEs; starlette 1.4.1 is above
   the 2026 advisories (BadHost etc.) but re-pin when a newer starlette ships;
-  dev-only pytest 8.3.5 / httpx 0.28.1 are outdated (pytest 9.1.1 / httpx 0.29
-  current); starlette's testclient warns it will deprecate httpx.
+  dev-only pytest is now **9.1.1** (bumped 2026-08-16; httpx 0.28.1 is the
+  current latest — the audit's "httpx 0.29" never existed); starlette's
+  testclient warns it will deprecate httpx.
 
 **Simplicity debt:**
 - 3 sources of truth for bundle & topology (config.yaml + DB + ownership
@@ -537,6 +797,12 @@ TASKS.md's breaking changes land. Line numbers from the audits._
   real line down/up — only then does the queue form where `fq_codel` can keep
   pings low under load. `tc` rates are approximate; the single-NIC egress tree
   shares bandwidth between uplink traffic and client downloads.
+- **The ARP-RTT WiFi/LAN label is statistical, not measured**: a fast 5G
+  device can read LAN (lower `threshold_ms`), a loaded 2.4 GHz network can
+  spike both classes, and ICMP-blocking clients are unclassified without
+  root (raw ARP). The streak guard kills flapping, the label only drives the
+  display chip — quota enforcement never depends on it. Only a
+  monitor-capable card (wifi_probe) gives the exact SSID.
 - **The box's own internet is metered by default** (`engine.count_gateway`,
   default ON): box traffic is counted + charged to the protected Gateway user
   (fixed 1.0 GB), and that 1.0 GB is silently deducted from every auto-share

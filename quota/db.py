@@ -40,6 +40,8 @@ from quota.engine import GATEWAY_MAC
 
 QUOTA_FIXED = "fixed"
 QUOTA_AUTO = "auto"
+QUOTA_DISABLED = "disabled"  # onboarding lock: 0 GB until the admin assigns
+                             # shared (auto) or fixed; always quota-blocked
 
 BLOCK_OK = "ok"          # allowed, within quota
 BLOCK_QUOTA = "quota"    # exceeded monthly allowance
@@ -88,10 +90,20 @@ class Device:
     #: Rendered as a tag-restricted dnsmasq `server=` line — see
     #: quota/dns_rules.py.
     dns_server: str = ""
-
-    @property
-    def is_blocked(self) -> bool:
-        return self.block_state != BLOCK_OK
+    #: Which NIC the device was last seen on (``ip neigh`` dev — e.g. "eth0",
+    #: "wlan0"). Auto-learned by run.py each maintenance tick; empty when
+    #: ``ip`` is unavailable (non-Linux / degraded boot). Drives the device
+    #: card's WiFi/LAN tag (labels come from config.yaml's ``network.
+    #: interface_tags``).
+    source_interface: str = ""
+    #: Router-side access label auto-learned by the WiFi probe
+    #: (quota/wifi_probe.py + run.py): "WiFi · <SSID>" when the box's monitor
+    #: card hears the device on the air, "LAN" once a leased device has been
+    #: quiet past the grace period. Empty = not yet classified.
+    access_interface: str = ""
+    #: Manual pin: what the admin typed in the device modal ("WiFi · MyNet",
+    #: "LAN1", ...). Wins over the auto label; empty = let the probe decide.
+    access_override: str = ""
 
 
 @dataclass
@@ -136,10 +148,6 @@ class User:
     #: this user that has no override of its own (empty = no override).
     dns_server: str = ""
 
-    @property
-    def is_admin_blocked(self) -> bool:
-        return self.block_state == BLOCK_ADMIN
-
 
 @dataclass
 class DomainRule:
@@ -174,10 +182,25 @@ class Lease:
 class Bundle:
     total_gb: float = 140.0
     reset_day: int = 1
+    #: How the monthly period is bounded: ``"renew_day"`` (the configured
+    #: ``reset_day`` — the ISP's expected renew day) or ``"end_of_month"``
+    #: (a calendar-month bill: the period runs 1st -> 1st and the configured
+    #: ``reset_day`` is ignored).
+    period_type: str = "renew_day"
     # Snapshot of allowances computed at period start (json dict user_id->gb).
     allowances: dict[int, float] = field(default_factory=dict)
     period_start: str = ""   # ISO date of current period start
     period_end: str = ""     # ISO date of next reset
+
+    @property
+    def effective_reset_day(self) -> int:
+        """The reset day actually driving the period grid. An end-of-month
+        bill lets the ISP's month-end day win too (some close on the 25th or
+        28th, not the calendar end): a configured day drives the reset as-is,
+        and 0 falls back to the calendar end (1st of the next month)."""
+        if self.period_type == "end_of_month":
+            return self.reset_day if self.reset_day > 0 else 1
+        return self.reset_day
 
 
 SCHEMA = """
@@ -192,7 +215,10 @@ CREATE TABLE IF NOT EXISTS devices (
     topup_gb         REAL NOT NULL DEFAULT 0,
     limit_down_mbps  REAL NOT NULL DEFAULT 0,
     limit_up_mbps    REAL NOT NULL DEFAULT 0,
-    dns_server       TEXT NOT NULL DEFAULT ''
+    dns_server       TEXT NOT NULL DEFAULT '',
+    source_interface TEXT NOT NULL DEFAULT '',
+    access_interface TEXT NOT NULL DEFAULT '',
+    access_override  TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS leases (
@@ -206,6 +232,7 @@ CREATE TABLE IF NOT EXISTS bundle_config (
     id           INTEGER PRIMARY KEY CHECK (id = 1),
     total_gb     REAL NOT NULL,
     reset_day    INTEGER NOT NULL,
+    period_type  TEXT NOT NULL DEFAULT 'renew_day',
     allowances   TEXT NOT NULL DEFAULT '{}',
     period_start TEXT NOT NULL DEFAULT '',
     period_end   TEXT NOT NULL DEFAULT ''
@@ -451,6 +478,37 @@ class Database:
                 await self._conn.commit()
             except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
                 pass
+        # Per-device source-interface tag (WiFi/LAN): which NIC the device was
+        # last seen on, auto-learned from the kernel neighbor table. ALTER
+        # no-ops when already present (fresh SCHEMA includes it).
+        try:
+            await self._conn.execute(
+                "ALTER TABLE devices ADD COLUMN source_interface "
+                "TEXT NOT NULL DEFAULT ''")
+            await self._conn.commit()
+        except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
+            pass
+        # Router-side access label (WiFi probe auto-learn + manual override).
+        # ALTER no-ops when already present (fresh SCHEMA includes both).
+        for column in ("access_interface", "access_override"):
+            try:
+                await self._conn.execute(
+                    f"ALTER TABLE devices ADD COLUMN {column} "
+                    "TEXT NOT NULL DEFAULT ''")
+                await self._conn.commit()
+            except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
+                pass
+        # Bundle period type: 'renew_day' (configured reset_day) or
+        # 'end_of_month' (calendar-month bill — resets on the 1st whatever the
+        # configured day says). ALTER no-ops when already present (fresh
+        # SCHEMA includes it).
+        try:
+            await self._conn.execute(
+                "ALTER TABLE bundle_config ADD COLUMN period_type "
+                "TEXT NOT NULL DEFAULT 'renew_day'")
+            await self._conn.commit()
+        except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
+            pass
         await self._migrate_domain_rules_scope_key()
         await self._backfill_users()
         await self._seed_gateway()
@@ -627,7 +685,8 @@ class Database:
     async def update_device(self, device_id: int, **fields: Any) -> Device | None:
         allowed = {"name", "quota_mode", "fixed_gb", "block_state",
                    "user_id", "bypass", "limit_down_mbps", "limit_up_mbps",
-                   "dns_server"}
+                   "dns_server", "source_interface", "access_interface",
+                   "access_override"}
         sets, args = [], []
         for key, value in fields.items():
             if key in allowed:
@@ -666,13 +725,6 @@ class Database:
 
     async def set_device_state(self, device_id: int, state: str) -> None:
         await self.update_device(device_id, block_state=state)
-
-    async def add_topup(self, device_id: int, extra_gb: float) -> None:
-        """Accumulate a per-device top-up (survives allowance recomputes)."""
-        await self.conn.execute(
-            "UPDATE devices SET topup_gb = topup_gb + ? WHERE id=?",
-            (extra_gb, device_id))
-        await self.conn.commit()
 
     async def clear_topups(self) -> None:
         """Reset all top-ups when a new quota period opens."""
@@ -930,11 +982,6 @@ class Database:
 
     # -- bundle config ------------------------------------------------------
 
-    async def has_bundle(self) -> bool:
-        """True if a ``bundle_config`` row exists (seeded/edited before)."""
-        row = await self._fetch_one("SELECT 1 FROM bundle_config WHERE id=1")
-        return row is not None
-
     async def get_bundle(self) -> Bundle:
         row = await self._fetch_one("SELECT * FROM bundle_config WHERE id=1")
         if row is None:
@@ -955,6 +1002,7 @@ class Database:
         return Bundle(
             total_gb=float(row["total_gb"]),
             reset_day=int(row["reset_day"]),
+            period_type=row["period_type"] or "renew_day",
             allowances=allowances,
             period_start=row["period_start"] or "",
             period_end=row["period_end"] or "",
@@ -962,12 +1010,13 @@ class Database:
 
     async def set_bundle(self, bundle: Bundle) -> None:
         await self.conn.execute(
-            """INSERT INTO bundle_config (id, total_gb, reset_day, allowances, period_start, period_end)
-               VALUES (1, ?, ?, ?, ?, ?)
+            """INSERT INTO bundle_config (id, total_gb, reset_day, period_type, allowances, period_start, period_end)
+               VALUES (1, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET total_gb=excluded.total_gb,
-                 reset_day=excluded.reset_day, allowances=excluded.allowances,
+                 reset_day=excluded.reset_day, period_type=excluded.period_type,
+                 allowances=excluded.allowances,
                  period_start=excluded.period_start, period_end=excluded.period_end""",
-            (bundle.total_gb, bundle.reset_day,
+            (bundle.total_gb, bundle.reset_day, bundle.period_type,
              json.dumps(bundle.allowances), bundle.period_start, bundle.period_end),
         )
         await self.conn.commit()
@@ -999,20 +1048,6 @@ class Database:
         up = sum(r["up_bytes"] for r in rows)
         down = sum(r["down_bytes"] for r in rows)
         return {"up_bytes": up, "down_bytes": down, "total_bytes": up + down}
-
-    async def get_usage_series(self, device_id: int | None,
-                               since_date: str) -> list[dict[str, Any]]:
-        """Daily series for the UI chart."""
-        if device_id is None:
-            rows = await self.conn.execute_fetchall(
-                "SELECT date, SUM(up_bytes) up, SUM(down_bytes) down FROM usage_daily "
-                "WHERE date>=? GROUP BY date ORDER BY date", (since_date,))
-        else:
-            rows = await self.conn.execute_fetchall(
-                "SELECT date, up_bytes up, down_bytes down FROM usage_daily "
-                "WHERE device_id=? AND date>=? ORDER BY date",
-                (device_id, since_date))
-        return [{"date": r["date"], "up": r["up"], "down": r["down"]} for r in rows]
 
     async def get_period_usage(self) -> dict[int, dict[str, int]]:
         """Aggregate usage since period_start, keyed by device_id."""
@@ -1154,6 +1189,18 @@ class Database:
         rows = await self.conn.execute_fetchall(
             "SELECT * FROM events ORDER BY ts DESC LIMIT ?", (limit,))
         return [dict(r) for r in rows]
+
+    async def prune_events(self, before_ts: float) -> int:
+        """Delete audit rows older than ``before_ts`` (unix seconds).
+
+        The events table is append-only and otherwise UNBOUNDED — the only
+        real disk-growth risk on a gateway that runs for months. Called on the
+        maintenance tick's hourly gate. Returns the rowcount removed.
+        """
+        cur = await self.conn.execute(
+            "DELETE FROM events WHERE ts < ?", (before_ts,))
+        await self.conn.commit()
+        return cur.rowcount
 
     # -- domain rules (DNS filtering) ----------------------------------------
 
@@ -1329,6 +1376,9 @@ def _row_to_device(row: Any) -> Device:
         limit_down_mbps=float(row["limit_down_mbps"] or 0.0),
         limit_up_mbps=float(row["limit_up_mbps"] or 0.0),
         dns_server=row["dns_server"] or "",
+        source_interface=row["source_interface"] or "",
+        access_interface=row["access_interface"] or "",
+        access_override=row["access_override"] or "",
     )
 
 

@@ -11,6 +11,11 @@
 bundle:
   total_gb: 200.0        # <- change to your monthly bundle
   reset_day: 0           # day of month the ISP resets; 0 = never auto-reset
+  # 'renew_day' = reset on reset_day above (the ISP's expected renew day,
+  #   0 = never auto-reset);
+  # 'end_of_month' = the ISP's month-end bill — reset_day drives it too
+  #   (many ISPs close the month on the 25th/28th); 0 = calendar end (the 1st).
+  period_type: renew_day
 
 db_path: /var/lib/quota-gateway/quota.db
 log_file: /var/log/quota-gateway/quota.log
@@ -32,6 +37,13 @@ dhcp:
   pool_end: 192.168.2.200     # last address handed to devices
   lease_hours: 24
   lease_file: /var/lib/misc/dnsmasq.leases
+  # App-owned dnsmasq fragment refusing DHCP to "STOP NEW CONNECTIONS" MACs
+  # (one `dhcp-host=<mac>,ignore` line each). Written by run.py, emptied when
+  # the gate is turned off; the setup script never touches it.
+  ignore_file: /etc/dnsmasq.d/quota-ignore.conf
+  # True restarts dnsmasq whenever the fragment changes; False writes the
+  # file but skips the reload (batch several edits first).
+  reload_dnsmasq: true
   # --- LAN-reality snapshot (kept in BOTH topologies so the dashboard WAN-tab
   # "Revert to LAN" restores exactly what was there, instead of guessing).
   # WAN mode erases router_ip / dns_servers from the ACTIVE keys above; these
@@ -213,3 +225,51 @@ dns_filter:
   rules_file: quota-domains.conf
   reload_dnsmasq: true
   preset_cache_dir: data/dns_presets
+
+# Per-device WiFi/LAN access tags (dashboard device cards). Three layers:
+#   1. interface_tags — the box-side NIC each client arrives on (ip -j neigh;
+#      useful when the box itself has multiple client-facing NICs).
+#   2. latency_probe (ON by default) — the ROUTER-side answer that works on ANY
+#      hardware: the box ARPs every leased client and times the replies. Wired
+#      answers in well under a millisecond, WiFi pays airtime (1 ms and up), so
+#      the fastest sample decides "WiFi" vs "LAN". No monitor mode needed; the
+#      raw-socket ARP backend falls back to `ping`, then to keeping the
+#      previous label. Set threshold_ms lower if a 5G device reads "LAN".
+#   3. wifi_probe (OFF by default) — only when the box HAS a monitor-capable
+#      WiFi card: passive air sniffing (airmon-ng + airodump-ng, Kali staples)
+#      labels every device "WiFi · <SSID>" (the real network name) or "LAN";
+#      it takes precedence over latency_probe and the interface must be a card
+#      NOT used for anything else.
+#   interface_tags: {eth0: "LAN", wlan0: "WiFi"}   # unknown NICs show raw name
+network:
+  interface_tags:
+    eth0: "LAN"
+    wlan0: "WiFi"
+  latency_probe:
+    enabled: true           # ARP-RTT WiFi/LAN classification (any hardware)
+    samples: 6              # ARP requests per device per sweep
+    min_samples: 2          # replies required before classifying at all
+                            # (low on purpose: sleepy phones answer ~2/6)
+    threshold_ms: 1.0       # fastest RTT at/above this => "WiFi"
+    min_consistent: 2       # agreeing sweeps before the label flips (no flap)
+    interval_s: 30          # sweep cadence
+    timeout_s: 0.5          # per-sweep receive timeout
+  wifi_probe:
+    enabled: false          # ON only with a monitor-capable spare WiFi card
+    interface: ""           # e.g. wlan0; empty = auto-detect the first wlan*
+    poll_interval: 5        # CSV re-read cadence (seconds)
+    sighted_ttl: 600        # a heard device stays "WiFi" this long while idle
+    lan_after_seconds: 300  # leased + never heard for this long => "LAN"
+
+# Self-update checks (Admin tab): the box compares its own version
+# (quota/version.py) against the latest GitHub release every 24 h and
+# notifies when an update exists ("Show details" = the new changelog).
+# The Admin-tab "check automatically" / "auto-install" toggles live in the DB;
+# this block is the master switch + where the releases live.
+#   enabled: true           # false = whole subsystem off (endpoints 404)
+#   repo: UserJoo9/QuotaManager  # GitHub owner/repo (releases + CHANGELOG.md)
+#   interval_hours: 24      # release-check cadence
+updates:
+  enabled: true
+  repo: UserJoo9/QuotaManager
+  interval_hours: 24

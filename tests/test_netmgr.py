@@ -209,11 +209,13 @@ def test_render_config_preserves_other_values():
         cfg = _cfg(Path(td))
         cfg.bundle.total_gb = 77.0
         cfg.bundle.reset_day = 0
+        cfg.bundle.period_type = "end_of_month"
         cfg.dhcp.pool_start = "192.168.2.50"
         manager = TopologyManager(cfg, _db.Database(cfg.db_path))
         lan = manager.lan_values()
         data = yaml.safe_load(manager.render_config("lan", lan))
-        assert data["bundle"] == {"total_gb": 77.0, "reset_day": 0}
+        assert data["bundle"] == {"total_gb": 77.0, "reset_day": 0,
+                                  "period_type": "end_of_month"}
         assert data["dhcp"]["pool_start"] == "192.168.2.50"
         assert data["web"]["port"] == 0
         assert data["shaping"]["interface"] == "eth0"

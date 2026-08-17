@@ -133,7 +133,7 @@ def test_recharge_ui_elements_present(client):
     assert "set-recharge" in r.text
     assert 'id="recharge-btn"' in r.text
     # reset-day input now accepts 0 (manual)
-    assert 'id="set-reset-day" min="0" max="28"' in r.text
+    assert 'id="set-reset-day" min="0" max="31"' in r.text
 
     r = client.get("/assets/app.js")
     assert "submitRecharge" in r.text

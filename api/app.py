@@ -17,6 +17,7 @@ import ipaddress
 import logging
 import os
 import secrets
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -25,14 +26,15 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
-from api.schemas import (BundleUpdate, DeviceCreate, DeviceUpdate,
-                         DnsImportRequest, DnsPresetEnable, DnsQuickRule,
+from api.schemas import (BundleUpdate, DeviceAccessUpdate, DeviceCreate,
+                         DeviceUpdate, DnsImportRequest, DnsPresetEnable,
+                         DnsQuickRule,
                          DnsServerUpdate, DomainRuleCreate, DomainRuleUpdate,
                          GuestUpdate, LoginRequest, MacListsUpdate,
                          MilestoneNotify,
                          NetworkUpdate, PasswordUpdate, SetupComplete,
-                         TopUpRequest, UserCreate, UserUpdate, WanRenewConfig,
-                         WanTest, WanUpdate)
+                         TopUpRequest, UpdateSettings, UserCreate, UserUpdate,
+                         WanRenewConfig, WanTest, WanUpdate)
 from core import timeutil
 from quota import db as _db
 from quota import dns_rules as _dns_rules
@@ -93,20 +95,84 @@ def _read_log_tail(path: str | Path | None, limit: int = 300) -> dict[str, Any]:
 # Auth helpers (PBKDF2 via stdlib)
 # ---------------------------------------------------------------------------
 
-def _hash_password(password: str, salt: bytes | None = None) -> str:
+#: PBKDF2-HMAC-SHA256 work factor for NEW password hashes (OWASP 2023+
+#: recommends >= 600k; 200k was the pre-v0.2.1 default). The stored hash
+#: records its own iteration count, so old hashes keep verifying at their
+#: original cost and are re-hashed on the next successful login.
+PBKDF2_ITERATIONS = 600_000
+
+#: login throttling: max failed attempts per source IP within the window,
+#: then HTTP 429 for the rest of the window. In-memory (a LAN admin box);
+#: the session cookie and PBKDF2 already gate the account itself.
+LOGIN_MAX_FAILURES = 10
+LOGIN_WINDOW_SEC = 300.0
+
+
+def _hash_password(password: str, salt: bytes | None = None,
+                   iterations: int = PBKDF2_ITERATIONS) -> str:
     salt = salt or secrets.token_bytes(16)
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 200_000)
-    return f"{salt.hex()}${dk.hex()}"
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
+    return f"{salt.hex()}${iterations}${dk.hex()}"
 
 
-def _verify_password(password: str, stored: str) -> bool:
+def _verify_password(password: str, stored: str) -> tuple[bool, bool]:
+    """Verify ``password`` against a stored hash.
+
+    Returns (valid, needs_rehash). Stored formats:
+      ``salt$iterations$dk``  — current; the recorded iteration count is used
+      ``salt$dk``             — legacy pre-v0.2.1 (200k); valid at 200k, but
+                                the caller should re-hash at the new default
+    """
     try:
-        salt_hex, dk_hex = stored.split("$")
+        parts = stored.split("$")
+        if len(parts) == 3:
+            salt_hex, iters, dk_hex = parts
+            iterations = int(iters)
+        elif len(parts) == 2:
+            salt_hex, dk_hex = parts
+            iterations = 200_000
+        else:
+            return False, False
         salt = bytes.fromhex(salt_hex)
-        dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 200_000)
-        return hmac.compare_digest(dk.hex(), dk_hex)
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
+        valid = hmac.compare_digest(dk.hex(), dk_hex)
+        return valid, valid and iterations < PBKDF2_ITERATIONS
     except (ValueError, AttributeError):
-        return False
+        return False, False
+
+
+class _LoginRateLimiter:
+    """In-memory per-IP failed-login throttle.
+
+    Tracks failed attempts + the window start; when the attempt budget is
+    exhausted within the window every further attempt from that IP is denied
+    (429) until the window rolls. Successes reset the budget (a wrong-password
+    guesser hammering the LAN box is the threat; a legitimate user typing the
+    right password is not).
+    """
+
+    def __init__(self) -> None:
+        self._fails: dict[str, int] = {}
+        self._window_start: dict[str, float] = {}
+
+    def check(self, ip: str) -> bool:
+        """May this IP attempt a login now? (True = allowed.)"""
+        if ip not in self._fails:
+            return True
+        if time.monotonic() - self._window_start.get(ip, 0.0) > LOGIN_WINDOW_SEC:
+            del self._fails[ip]
+            self._window_start.pop(ip, None)
+            return True
+        return self._fails[ip] < LOGIN_MAX_FAILURES
+
+    def fail(self, ip: str) -> None:
+        if ip not in self._window_start:
+            self._window_start[ip] = time.monotonic()
+        self._fails[ip] = self._fails.get(ip, 0) + 1
+
+    def success(self, ip: str) -> None:
+        self._fails.pop(ip, None)
+        self._window_start.pop(ip, None)
 
 
 async def _ensure_admin_password(db: _db.Database) -> None:
@@ -134,9 +200,19 @@ def create_app(
     vpn_apply: Optional[Callable[[], object]] = None,
     vpn_status_getter: Optional[Callable[[], dict]] = None,
     wan_renew: Optional[Callable[[], object]] = None,
+    interface_tags: Optional[dict[str, str]] = None,
+    shaping_state_getter: Optional[Callable[[], dict]] = None,
+    wifi_probe_getter: Optional[Callable[[], dict]] = None,
+    active_ips_getter: Optional[Callable[[], Optional[set[str]]]] = None,
+    stop_new_sync: Optional[Callable[[], object]] = None,
+    decline_random_sync: Optional[Callable[[], object]] = None,
+    updater: object | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Quota Manager", version=__version__,
                   docs_url="/api/docs", openapi_url="/api/openapi.json")
+    #: NIC name -> human label for the per-device WiFi/LAN tag (config.yaml
+    #: network.interface_tags); an unknown NIC falls back to its raw name.
+    _interface_tags: dict[str, str] = interface_tags or {}
 
     def _now() -> _dt.datetime:
         return now_provider() if now_provider else _dt.datetime.now().astimezone()
@@ -175,6 +251,32 @@ def create_app(
             return
         try:
             asyncio.create_task(vpn_apply())
+        except RuntimeError:  # no running event loop (should not happen in a route)
+            pass
+
+    def _schedule_stop_new_sync() -> None:
+        """Apply a STOP-NEW-CONNECTIONS toggle to dnsmasq right away (no 15 s
+        tick wait): write/clear the DHCP-refusal fragment + restart dnsmasq.
+        Fire-and-forget, same pattern as ``_schedule_dns_apply``;
+        ``stop_new_sync`` is run.py's callback and is a no-op when unset
+        (tests / degraded boot)."""
+        if stop_new_sync is None:
+            return
+        try:
+            asyncio.create_task(stop_new_sync())
+        except RuntimeError:  # no running event loop (should not happen in a route)
+            pass
+
+    def _schedule_decline_random_sync() -> None:
+        """Apply a Decline-random-MACs toggle to dnsmasq right away (no 15 s
+        tick wait): write/clear the DHCP-refusal fragment + restart dnsmasq.
+        Fire-and-forget, same pattern as ``_schedule_stop_new_sync``;
+        ``decline_random_sync`` is run.py's callback and is a no-op when
+        unset (tests / degraded boot)."""
+        if decline_random_sync is None:
+            return
+        try:
+            asyncio.create_task(decline_random_sync())
         except RuntimeError:  # no running event loop (should not happen in a route)
             pass
 
@@ -224,7 +326,8 @@ def create_app(
     def _device_view(dev: _db.Device, user: _db.User | None,
                      uv: dict[str, Any], leases: dict[str, str],
                      live: EngineSnapshot, state: str,
-                     dusage: dict[str, int] | None = None) -> dict[str, Any]:
+                     dusage: dict[str, int] | None = None,
+                     active_ips: Optional[set[str]] = None) -> dict[str, Any]:
         """Device card. allowance/used/percent are the USER's aggregates (all of
         a user's devices report the same), ``state`` is the resolved block state
         (service.resolve_device_state) so a user cut reaches every device.
@@ -249,9 +352,14 @@ def create_app(
             "user_id": dev.user_id,
             "user_name": user.name if user else "",
             "ip": leases.get(dev.mac, ""),
-            # currently has a live DHCP lease? (dnsmasq prunes leases on
-            # disconnect)
-            "connected": dev.mac in leases,
+            # connected NOW? The DHCP lease alone lags reality (dnsmasq keeps
+            # leases for the whole LEASE_HOURS after a disconnect), so when the
+            # gateway's ARP probe is running the device must ALSO have answered
+            # its latest sweep — otherwise the LED goes grey despite the lease.
+            "connected": (
+                dev.mac in leases
+                and (active_ips is None
+                     or (leases.get(dev.mac) or "") in active_ips)),
             # owning user is a guest account (guest-mode auto-registration)
             "guest": bool(user.guest) if user else False,
             "quota_mode": uv["quota_mode"] if uv else dev.quota_mode,
@@ -262,6 +370,23 @@ def create_app(
             "limit_up_mbps": float(dev.limit_up_mbps or 0.0),
             # per-device upstream DNS-server override (empty = inherit)
             "dns_server": dev.dns_server or "",
+            # which NIC the device was last seen on (ip neigh) + its display
+            # label — the WiFi/LAN chip on the device card. Empty interface =
+            # unknown/offline (no tag rendered). The box-side label comes
+            # ONLY from an explicit network.interface_tags mapping — never a
+            # guess: every client arrives on the same wired NIC (eth0), so an
+            # unmapped name says nothing about WiFi vs LAN (that verdict
+            # belongs to the router-side access_interface probe).
+            "source_interface": dev.source_interface or "",
+            "interface_label": _interface_tags.get(dev.source_interface) or "",
+            # ROUTER-side access label: "WiFi · <SSID>" / "LAN" learned from
+            # the passive radio probe (quota.wifi_probe.py), or the admin's
+            # manual pin. The manual override always wins; ``access_interface``
+            # below is the DISPLAY label (override || auto), while the raw
+            # auto value stays in dev.access_interface for the UI.
+            "access_override": dev.access_override or "",
+            "access_interface": (
+                dev.access_override or dev.access_interface or ""),
             "allowance_gb": allowance,
             "used_gb": used_gb,
             "live_up": live_c.up,
@@ -295,6 +420,7 @@ def create_app(
         usage_by_user = await database.get_period_usage_by_user()
         usage_by_device = await database.get_period_usage()
         leases = {l.mac: l.ip for l in await database.list_leases()}
+        active_ips = active_ips_getter() if active_ips_getter else None
         allowances = bundle.allowances
         live = holder.get()
 
@@ -353,7 +479,8 @@ def create_app(
                 deny_listed=d.mac in deny_set)
             dev_view = _device_view(
                 d, user, uv, leases, live, state,
-                usage_by_device.get(d.id, {"up": 0, "down": 0}))
+                usage_by_device.get(d.id, {"up": 0, "down": 0}),
+                active_ips)
             devices_view.append(dev_view)
             if uv is not None:
                 uv["devices"].append(dev_view)
@@ -366,7 +493,7 @@ def create_app(
 
         total_used = sum((u["up"] + u["down"]) / GB
                          for u in usage_by_user.values())
-        days_left = timeutil.days_remaining(_now(), bundle.reset_day)
+        days_left = timeutil.days_remaining(_now(), bundle.effective_reset_day)
         return {
             "bundle_source": await database.get_setting("bundle_source", "config"),
             "bundle": {
@@ -374,6 +501,7 @@ def create_app(
                 "used_gb": round(total_used, 3),
                 "remaining_gb": round(max(0.0, bundle.total_gb - total_used), 3),
                 "reset_day": bundle.reset_day,
+                "period_type": bundle.period_type,
                 "period_start": bundle.period_start,
                 "period_end": bundle.period_end,
                 "days_left": days_left,
@@ -404,6 +532,12 @@ def create_app(
             # applied state on its own — it can't wait for a manual refresh).
             # status is None in tests / degraded boot, matching /api/network.
             "vpn_share": await _vpn_share_payload(),
+            # Live shaping engine state for the Network preview: whether tc is
+            # available and whether the kernel tree matches the last save
+            # ("applying…" while a rebuild is queued). None in tests / when
+            # the app was built without the run.py callback.
+            "shaping": (shaping_state_getter() if shaping_state_getter is not None
+                        else None),
             # Top-level internet reachability (probed every 15 s tick) so the
             # top-bar indicator can read it without digging into wan_status;
             # None = not probed yet (pre-first-tick).
@@ -412,6 +546,10 @@ def create_app(
             "total_users": len(users),
             "blocked_count": sum(1 for dv in devices_view if dv["blocked"]),
             "version": __version__,
+            # GitHub self-update state for the Admin-tab card + the
+            # "Update available" notification (None = not wired — tests /
+            # degraded boot; the JS treats it as "no updater").
+            "update": (await updater.state()) if updater is not None else None,
             "ts": _now().isoformat(),
         }
 
@@ -476,13 +614,23 @@ def create_app(
         return await _milestone_payload(request)
 
     @app.post("/api/milestone/notify", response_model=None)
-    async def milestone_notify(body: MilestoneNotify) -> dict[str, Any]:
+    async def milestone_notify(body: MilestoneNotify,
+                               request: Request) -> dict[str, Any]:
         """Mark a crossed milestone as notified (the page's acknowledge).
 
         No session required — a household device acknowledging its own usage
-        notice. Unknown/duplicate milestones are harmless: the service validates
-        the value and setting an already-notified flag is a no-op.
+        notice. The requester is resolved by source IP and must OWN the user
+        row it is acknowledging (a sibling device cannot clear another user's
+        milestone pills); unrecognized sources are denied. Unknown/duplicate
+        milestones are harmless: the service validates the value and setting
+        an already-notified flag is a no-op.
         """
+        host = request.client.host if request.client else ""
+        dev = await database.get_device_by_ip(host)
+        if dev is None or dev.user_id is None:
+            raise HTTPException(403, "unknown requester")
+        if dev.user_id != body.user_id:
+            raise HTTPException(403, "not your user")
         await service.mark_milestone_notified(body.user_id, body.milestone)
         return {"ok": True}
 
@@ -529,6 +677,9 @@ def create_app(
         by_uid = {u["id"]: u for u in user_rows}
 
         deny_set = set(await database.get_mac_list("deny"))
+        # One lease pass for the whole loop — querying the lease file per
+        # device (N+1 subprocess reads) made a large household's report slow.
+        leases = {l.mac: l.ip for l in await database.list_leases()}
         for d in devices:
             # Blacklisted MACs are hidden from the report too — the Network-tab
             # blacklist is the only place they appear.
@@ -542,8 +693,7 @@ def create_app(
                 "id": d.id,
                 "name": d.name,
                 "mac": d.mac,
-                "ip": next((l.ip for l in await database.list_leases()
-                            if l.mac == d.mac), ""),
+                "ip": leases.get(d.mac, ""),
                 "device_used_gb": round(dused_gb, 3),
                 "device_up_gb": round(dusage.get("up", 0) / GB, 3),
                 "device_down_gb": round(dusage.get("down", 0) / GB, 3),
@@ -562,12 +712,14 @@ def create_app(
                                       for u in usage_by_user.values())),
                 "remaining_gb": round(max(0.0, bundle.total_gb - total_used), 3),
                 "reset_day": bundle.reset_day,
+                "period_type": bundle.period_type,
                 "period_start": bundle.period_start,
                 "period_end": bundle.period_end,
             },
             "users": user_rows,
             "events": await database.list_events(50),
-            "logs": _read_log_tail(log_path, 200),
+            # whole-file read — off the event loop, see /api/logs
+            "logs": await asyncio.to_thread(_read_log_tail, log_path, 200),
             "wan": live.wan_status or {},
             "version": __version__,
         }
@@ -914,6 +1066,32 @@ def create_app(
             raise HTTPException(404, "device not found")
         return result
 
+    @app.post("/api/devices/{device_id}/access", dependencies=[Depends(_require_auth)])
+    async def set_device_access(device_id: int,
+                                body: DeviceAccessUpdate) -> dict[str, Any]:
+        """Pin (or clear) the router-side access label shown on the device
+        card: "WiFi · <SSID>", "LAN1", ... — whatever the admin types. The
+        passive probe's auto label (``access_interface``) keeps updating in
+        the background; the override just wins the display. Empty string
+        clears the pin."""
+        dev = await database.update_device(
+            device_id, access_override=body.override.strip())
+        if dev is None:
+            raise HTTPException(404, "device not found")
+        return {"id": device_id,
+                "access_override": dev.access_override,
+                "access_interface": dev.access_override or dev.access_interface}
+
+    @app.get("/api/wifi/ssids", dependencies=[Depends(_require_auth)])
+    async def get_wifi_ssids() -> dict[str, Any]:
+        """SSIDs the passive probe currently hears — the device modal's
+        access-label picker. Degrades to an empty list when the probe is off
+        or the box has no monitor card."""
+        if wifi_probe_getter is None:
+            return {"available": False, "ssids": [], "error": "not configured",
+                    "ssid_by_mac": {}, "wireless_macs": []}
+        return wifi_probe_getter()
+
     # -- users (a person owns devices; the quota lives on the user) ----------
 
     @app.get("/api/users", dependencies=[Depends(_require_auth)])
@@ -1208,36 +1386,24 @@ def create_app(
         await dns_apply()
         return {"applied": True}
 
-    @app.get("/api/usage/{device_id}", dependencies=[Depends(_require_auth)])
-    async def usage_series(device_id: int, since: str = "") -> list[dict[str, Any]]:
-        if not since:
-            since = (await database.get_bundle()).period_start or ""
-        return await database.get_usage_series(device_id, since)
-
-    @app.get("/api/usage", dependencies=[Depends(_require_auth)])
-    async def usage_all(since: str = "") -> list[dict[str, Any]]:
-        if not since:
-            since = (await database.get_bundle()).period_start or ""
-        return await database.get_usage_series(None, since)
-
-    @app.get("/api/events", dependencies=[Depends(_require_auth)])
-    async def events(limit: int = 30) -> list[dict[str, Any]]:
-        return await database.list_events(limit)
-
     @app.get("/api/logs", dependencies=[Depends(_require_auth)])
     async def logs(limit: int = 300) -> dict[str, Any]:
-        """Tail of the gateway log file (newest first) for the Admin-page System Logs console."""
-        return _read_log_tail(log_path, limit)
+        """Tail of the gateway log file (newest first) for the Admin-page
+        System Logs console. The read is a whole-file scan — off the event
+        loop so a big log never stalls the API."""
+        return await asyncio.to_thread(_read_log_tail, log_path, limit)
 
     @app.get("/api/bundle", dependencies=[Depends(_require_auth)])
     async def get_bundle() -> dict[str, Any]:
         b = await database.get_bundle()
         return {"total_gb": b.total_gb, "reset_day": b.reset_day,
+                "period_type": b.period_type,
                 "period_start": b.period_start, "period_end": b.period_end,
                 "allowances": b.allowances}
 
     async def _apply_bundle_values(total_gb: float | None,
-                                   reset_day: int | None) -> None:
+                                   reset_day: int | None,
+                                   period_type: str | None = None) -> None:
         """Apply a bundle edit from the dashboard (both /api/bundle and the
         first-run welcome flow). Sets ``bundle_source=dashboard`` so config.yaml
         stops overriding these values on restart (see
@@ -1249,6 +1415,11 @@ def create_app(
             b.total_gb = total_gb
         if reset_day is not None:
             b.reset_day = reset_day
+        if period_type is not None:
+            if period_type not in ("renew_day", "end_of_month"):
+                raise HTTPException(
+                    400, "period_type must be 'renew_day' or 'end_of_month'")
+            b.period_type = period_type
         await database.set_bundle(b)
         await service.recompute_allowances()
         await database.add_event(
@@ -1271,10 +1442,13 @@ def create_app(
             result = await service.recharge(body.add_gb)
             b = await database.get_bundle()
             return {"total_gb": b.total_gb, "reset_day": b.reset_day,
+                    "period_type": b.period_type,
                     "added_gb": result["added_gb"]}
-        await _apply_bundle_values(body.total_gb, body.reset_day)
+        await _apply_bundle_values(body.total_gb, body.reset_day,
+                                   body.period_type)
         b = await database.get_bundle()
-        return {"total_gb": b.total_gb, "reset_day": b.reset_day}
+        return {"total_gb": b.total_gb, "reset_day": b.reset_day,
+                "period_type": b.period_type}
 
     @app.post("/api/reset-month", dependencies=[Depends(_require_auth)])
     async def reset_month() -> dict[str, Any]:
@@ -1288,7 +1462,8 @@ def create_app(
         """One-time welcome state: complete + the current bundle for prefill."""
         b = await database.get_bundle()
         return {"setup_complete": await service.is_setup_complete(),
-                "total_gb": b.total_gb, "reset_day": b.reset_day}
+                "total_gb": b.total_gb, "reset_day": b.reset_day,
+                "period_type": b.period_type}
 
     @app.post("/api/setup/complete", dependencies=[Depends(_require_auth)])
     async def complete_setup(body: SetupComplete) -> dict[str, Any]:
@@ -1296,15 +1471,18 @@ def create_app(
         # 401 (the client maps 401 to "session expired" and logs out).
         if body.new_password is not None:
             stored = await database.get_setting("admin_password")
-            if not _verify_password(body.current_password or "", stored):
+            valid, _ = _verify_password(body.current_password or "", stored)
+            if not valid:
                 raise HTTPException(400, "current password incorrect")
             await database.set_setting("admin_password",
                                        _hash_password(body.new_password))
             await database.add_event("Admin password changed", "warn")
         # Only apply the bundle when a value was given — a password-only save
         # must not take bundle ownership from config.yaml (see _apply_bundle_values).
-        if body.total_gb is not None or body.reset_day is not None:
-            await _apply_bundle_values(body.total_gb, body.reset_day)
+        if body.total_gb is not None or body.reset_day is not None \
+                or body.period_type is not None:
+            await _apply_bundle_values(body.total_gb, body.reset_day,
+                                       body.period_type)
         await service.mark_setup_complete()
         await database.add_event("First-run setup completed", "info")
         return {"ok": True}
@@ -1331,6 +1509,7 @@ def create_app(
             await service.set_guest_speed_limit(body.speed_limit_mbps)
         if body.stop_new is not None:
             await service.set_stop_new_connections(body.stop_new)
+            _schedule_stop_new_sync()
         return {"enabled": await service.is_guest_mode(),
                 "quota_gb": await service.guest_quota_gb(),
                 "limit": await service.guest_limit(),
@@ -1380,6 +1559,7 @@ def create_app(
             await service.set_decline_random_macs(
                 body.decline_random_macs,
                 also_existing=bool(body.decline_random_macs_existing))
+            _schedule_decline_random_sync()
         result["vpn_share"] = await service.get_vpn_config()
         if vpn_status_getter is not None:
             try:
@@ -1404,14 +1584,64 @@ def create_app(
             await service.set_mac_list("deny", body.deny)
         return await service.mac_lists()
 
+    # -- software updates (Admin tab) ------------------------------------------
+
+    def _updater_or_404():
+        if updater is None:
+            raise HTTPException(404, "update manager not wired")
+        return updater
+
+    @app.get("/api/updates", dependencies=[Depends(_require_auth)])
+    async def get_updates() -> dict[str, Any]:
+        """Current self-update state: version, latest, availability, the
+        per-version changelog, and the enabled/auto-install switches."""
+        return await _updater_or_404().state()
+
+    @app.post("/api/updates", dependencies=[Depends(_require_auth)])
+    async def set_updates(body: UpdateSettings) -> dict[str, Any]:
+        """Toggle the 24 h check and/or auto-install. A partial save leaves the
+        other setting untouched. Turning the check ON clears a stale last-error
+        so the card starts clean."""
+        u = _updater_or_404()
+        if body.enabled is not None:
+            await u.set_enabled(body.enabled)
+        if body.auto_install is not None:
+            await database.set_setting("updates_auto_install",
+                                       "1" if body.auto_install else "")
+        return await u.state()
+
+    @app.post("/api/updates/check", dependencies=[Depends(_require_auth)])
+    async def check_updates() -> dict[str, Any]:
+        """Force a GitHub release check now (no 24 h wait)."""
+        return await _updater_or_404().check_now()
+
+    @app.post("/api/updates/install", dependencies=[Depends(_require_auth)])
+    async def install_updates() -> dict[str, Any]:
+        """Download + install the latest .deb right away."""
+        return await _updater_or_404().install_latest()
+
     # -- auth -----------------------------------------------------------------
 
+    login_limiter = _LoginRateLimiter()
+
     @app.post("/api/login")
-    async def login(body: LoginRequest, response: Response) -> dict[str, Any]:
+    async def login(body: LoginRequest, request: Request,
+                    response: Response) -> dict[str, Any]:
         await _ensure_admin_password(database)
+        host = request.client.host if request.client else ""
+        if not login_limiter.check(host):
+            raise HTTPException(429, "too many failed logins — try again later")
         stored = await database.get_setting("admin_password")
-        if not _verify_password(body.password, stored):
+        valid, needs_rehash = _verify_password(body.password, stored)
+        if not valid:
+            login_limiter.fail(host)
             raise HTTPException(401, "invalid password")
+        login_limiter.success(host)
+        if needs_rehash:
+            # Legacy 200k hash verified — upgrade it to the current work
+            # factor so the stored secret keeps pace with the default.
+            await database.set_setting("admin_password",
+                                       _hash_password(body.password))
         token = secrets.token_hex(24)
         await database.set_setting("session_token", token)
         response.set_cookie(COOKIE_NAME, token, httponly=True,
@@ -1440,7 +1670,8 @@ def create_app(
         if not token or not stored_token or not hmac.compare_digest(token, stored_token):
             raise HTTPException(401, "not logged in")
         stored = await database.get_setting("admin_password")
-        if not _verify_password(body.current, stored):
+        valid, _ = _verify_password(body.current, stored)
+        if not valid:
             raise HTTPException(400, "current password incorrect")
         await database.set_setting("admin_password", _hash_password(body.new))
         await database.add_event("Admin password changed", "warn")
@@ -1462,17 +1693,19 @@ def create_app(
         await ws.accept()
         active_ws.add(ws)
         try:
+            # One snapshot on connect so the panel renders instantly; the
+            # periodic pushes come from the single shared _push_loop below
+            # (one payload build per 5 s for ALL sockets — N sockets never
+            # trigger N builds, each a ~30-query DB round-trip).
             await ws.send_json({"type": "snapshot", "data": await _dashboard_payload()})
             while True:
-                # server-push every 5s; client sends keepalives too
-                try:
-                    msg = await asyncio.wait_for(ws.receive_text(), timeout=5.0)
-                    if msg == "ping":
-                        await ws.send_json({"type": "pong"})
-                except asyncio.TimeoutError:
-                    pass
-                await ws.send_json({"type": "snapshot",
-                                    "data": await _dashboard_payload()})
+                # keepalive + disconnect detection; the payload push is the
+                # push loop's job
+                msg = await asyncio.wait_for(ws.receive_text(), timeout=10.0)
+                if msg == "ping":
+                    await ws.send_json({"type": "pong"})
+        except asyncio.TimeoutError:
+            pass  # nothing to read, push loop keeps the client fresh
         except (WebSocketDisconnect, Exception):  # noqa: BLE001
             pass
         finally:

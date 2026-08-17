@@ -271,7 +271,8 @@ class TopologyManager:
         active_arp = False if wan else bool(lan["gateway_arp_lock"])
         data: dict[str, object] = {
             "bundle": {"total_gb": cfg.bundle.total_gb,
-                       "reset_day": cfg.bundle.reset_day},
+                       "reset_day": cfg.bundle.reset_day,
+                       "period_type": cfg.bundle.period_type},
             "db_path": cfg.db_path,
             "log_file": cfg.log_file,
             "log_level": cfg.log_level,

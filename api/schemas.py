@@ -100,10 +100,23 @@ class TopUpRequest(BaseModel):
     extra_gb: float = Field(..., gt=0)
 
 
+class DeviceAccessUpdate(BaseModel):
+    """Manual router-side access label for a device card ("WiFi · MyNet",
+    "LAN1", ...). Empty string clears the pin — the passive WiFi probe's
+    auto label takes over again. Capped: it is written verbatim into the DB
+    and rendered in the UI (no newlines / silly lengths)."""
+
+    override: str = Field("", max_length=80)
+
+
 class BundleUpdate(BaseModel):
     total_gb: Optional[float] = Field(None, gt=0)
     #: 0 => never auto-reset (bundle is recharged manually mid-month).
-    reset_day: Optional[int] = Field(None, ge=0, le=28)
+    reset_day: Optional[int] = Field(None, ge=0, le=31)
+    #: "renew_day" = reset on the configured reset_day; "end_of_month" = the
+    #: ISP's month-end bill — the configured day drives the reset too (0 = the
+    #: calendar end, 1st of next month).
+    period_type: Optional[str] = None
     #: When set, adds GB to the current bundle without rolling the period.
     add_gb: Optional[float] = Field(None, gt=0)
     #: Escape hatch: "config" returns bundle ownership to config.yaml so it is
@@ -152,7 +165,9 @@ class SetupComplete(BaseModel):
     #: password-only save never takes bundle ownership from config.yaml.
     total_gb: Optional[float] = Field(None, gt=0)
     #: 0 => never auto-reset (bundle is recharged manually mid-month).
-    reset_day: Optional[int] = Field(None, ge=0, le=28)
+    reset_day: Optional[int] = Field(None, ge=0, le=31)
+    #: "renew_day" / "end_of_month" — see BundleUpdate.
+    period_type: Optional[str] = None
     #: Required to change the password (wrong value => HTTP 400).
     current_password: Optional[str] = None
     #: New admin password (4+ chars). Omit to keep the current one.
@@ -334,3 +349,16 @@ class WanRenewConfig(BaseModel):
 
     enabled: bool
     minutes: int
+
+
+class UpdateSettings(BaseModel):
+    """Self-update preferences (the dashboard Admin tab).
+
+    ``enabled`` arms the 24 h GitHub release check (the "update available"
+    notification); ``auto_install`` makes a found update download + install
+    itself without the admin pressing the button. Both persist in settings;
+    neither field is required (a partial save leaves the other untouched).
+    """
+
+    enabled: Optional[bool] = None
+    auto_install: Optional[bool] = None

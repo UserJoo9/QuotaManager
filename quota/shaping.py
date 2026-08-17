@@ -399,6 +399,22 @@ class TcShaper:
             return
         self._last_signature = sig
 
+    @property
+    def applied(self) -> bool:
+        """True when the kernel tree matches the state last fed to update_state.
+
+        The Network preview shows this: after a save the API schedules an
+        immediate re-sync; until the (off-loop) rebuild commits, ``applied``
+        is False and the panel can say "applying…" instead of silently showing
+        stale numbers. Off (or failed) trees count as applied only when they
+        were intentionally torn down.
+        """
+        if not self.available:
+            return False
+        if not (self._enabled and (self._total_down > 0 or self._total_up > 0)):
+            return self._last_signature is None
+        return self._last_signature == self._state_signature()
+
     # ---------------------------------------------------------------- internals
 
     def _state_signature(self) -> tuple[Any, ...]:

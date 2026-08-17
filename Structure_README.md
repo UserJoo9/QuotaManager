@@ -157,15 +157,27 @@ Every ~15 s (`run.py` → `Gateway._maintenance_tick`):
    `reset_day=0`.
 2. **Syncs device bindings** from dnsmasq's lease file — new devices
    auto-register into the dashboard. `_persist_lease` is the single admission
-   gate for a brand-new MAC and applies three gates in order: **STOP NEW
-   CONNECTIONS** (blocks every brand-new device while registered ones keep
-   joining), **Decline random MACs** (a device whose MAC has the
-   locally-administered bit set — i.e. no vendor OUI, so the box can't
-   identify or budget it — is registered but immediately cut; the same branch
-   powers the one-shot "also cut already joined" sweep via `is_random_mac`),
-   and the **guest limit** (over-cap guests are registered but cut). All three
-   ride the same registered-then-admin-blocked pattern, so refused devices are
-   visible in the dashboard and enforced at line rate on the next tick.
+   gate for a brand-new MAC and applies the gates in order: **STOP NEW
+   CONNECTIONS** and **Decline random MACs** now **refuse at the DHCP level**
+   — the refused MAC joins a persisted list (`stop_new_refused_macs` /
+   `decline_random_refused_macs` DB settings, each gate's off clears only its
+   own) and is written to an app-owned dnsmasq fragment
+   (`dhcp.ignore_file` → `/etc/dnsmasq.d/quota-ignore.conf`, one
+   `dhcp-host=<mac>,ignore` line each; `dnsmasq --test` gate + restart), so
+   dnsmasq never hands it an IP and **no device row is minted**. The just-issued
+   lease stays kernel-cut via `snapshot_state`'s row-less pass (refused lists
+   unioned with the deny list). A per-tick reconcile + an immediate API apply
+   keep the fragment in sync; an unwritable fragment (no root / no dnsmasq dir)
+   falls back gracefully to the legacy registered-then-admin-blocked path.
+   A randomized MAC is identified by `is_random_mac` = the locally-administered
+   bit AND an empty vendor lookup (`vendor_for(mac) == ""`) — a known IEEE OUI
+   means a real product, never a randomize. Remaining gates: the **guest
+   limit** (over-cap guests are registered but cut) and the **disabled
+   onboarding lock** (see the quota-model section — a brand-new device's
+   auto-created user joins `quota_mode="disabled"`, 0 GB, no share of the
+   bundle, always quota-blocked). Refused MACs are row-less (never visible in
+   the dashboard; the refused-list setting is the only record); registered
+   but cut devices are visible and enforced at line rate on the next tick.
 3. **Drains engine counter deltas** into `usage_daily`.
 4. **Re-evaluates block states** — each user's usage vs. their allowance, and
    fans the cut out to all of their devices (`resolve_device_state`).
@@ -219,6 +231,18 @@ bridge reports running; its status rides the cached `vpn_share.status.tun2socks`
 Relay-off clears the whitelist and kills the bridge child (a cut then blocks the
 box entirely). The `_vpn_lock` keeps the toggle and the tick from reconciling
 concurrently. See [VPN share](#vpn-share) below for the full design.
+
+**Self-update checks** (when `cfg.updates.enabled`, default on): the tick calls
+`Updater.maybe_check()` (`quota/updater.py`) — a 24 h gate (persisted
+`updates_state`) prevents re-checking; a successful check stores
+latest/changelog, a failure stores the error, and both survive restarts so the
+box never re-notifies. A newer version flips the dashboard's update banner.
+Auto-install (when enabled) downloads the `.deb` and runs `apt-get install`
+under a **transient systemd unit** (`systemd-run --unit=quota-update-install`)
+because the package's `prerm` stops the `quota-gateway` service — a plain child
+`apt-get` would die with the cgroup. The whole call is behind a try/except so a
+network failure never stalls a tick. See [Software updates](#software-updates)
+below.
 
 ---
 
@@ -293,17 +317,37 @@ the per-device `bypass` becomes redundant for an exempt user's devices, so the
 UI disables it. Migration is an idempotent `ALTER TABLE users ADD COLUMN
 exempt_quota` (default 0).
 
-New DHCP devices auto-create their own user (one device ⇒ one user); legacy
-device-only databases are migrated in place by `db.connect()` (idempotent
-ALTERs + backfill).
+New DHCP devices auto-create their own user (one device ⇒ one user) **inside
+the DISABLED onboarding lock** (`users.quota_mode="disabled"`, 0 GB): the new
+user claims **no share** of the bundle and is always quota-blocked — even with
+0 usage — until the admin assigns **shared** (auto) or **fixed** GB in the
+user/device modal. `compute_allowances` special-cases disabled users (they
+never dilute auto-share) and `user_quota_blocked` short-circuits them, so a
+fresh phone stays off the internet until deliberately provisioned. The two
+DHCP-refusal gates (STOP NEW / Decline random) skip row creation entirely (see
+the maintenance-loop section); guest mode is unaffected (still mints, then
+admin-cuts at the cap). Legacy device-only databases are migrated in place by
+`db.connect()` (idempotent ALTERs + backfill).
 
 ### Bundle source of truth
 
 `config.yaml` is the default source for `bundle.total_gb` / `bundle.reset_day`
-and is re-applied on **every** startup. Once the admin edits the bundle or
-recharges via the dashboard, a `bundle_source` setting flips to `dashboard` and
-config.yaml stops overriding it — so a UI edit or recharge survives a restart,
-and a YAML edit actually reaches the UI.
+/ `bundle.period_type` and is re-applied on **every** startup. Once the admin
+edits the bundle or recharges via the dashboard, a `bundle_source` setting
+flips to `dashboard` and config.yaml stops overriding it — so a UI edit or
+recharge survives a restart, and a YAML edit actually reaches the UI.
+
+**Bundle type** (`bundle.period_type`): `renew_day` (default) resets on the
+configured `reset_day`; `end_of_month` is the ISP's **month-end bill** — the
+configured day drives the reset too (many ISPs close the month on the
+25th/28th), and day 0 falls back to the calendar end (the 1st). Both roll via
+`Bundle.effective_reset_day` (day range 0-31). **Period math**: 
+`timeutil.period_bounds` returns the period **containing now** — before this
+month's reset day the current period began last month on the reset day, so a
+mid-month reset-day change re-anchors `period_end` (`recompute_allowances`)
+without rolling or zeroing the recorded usage; `ensure_period` rolls only when
+the recorded `period_end` has passed, never by comparing `period_start` against
+the grid.
 
 ### No-auto-reset (`reset_day: 0`)
 
@@ -746,6 +790,43 @@ keeps the VPN-server endpoints reachable under that cut.
 
 ---
 
+## Software updates
+
+`quota/updater.py` (NEW) gives the Admin tab a self-update check against the
+GitHub releases page (`updates.repo`, default `UserJoo9/QuotaManager`) — the
+same release pipeline that publishes the `.deb` (see the release section):
+
+- **`Updater.maybe_check()`** runs from the maintenance tick behind a
+  try/except (a network failure never stalls a tick) and gates itself on a
+  persisted 24 h window (`updates_state` settings row: checked_at,
+  latest_version, error, changelog, last_install). It compares the running
+  version (`quota/version.py`) against the latest GitHub release (stdlib
+  fetch/run injectables so tests never dial the network), and parses every
+  newer `CHANGELOG.md` section — newest first, `[Unreleased]` skipped — into
+  the "Show details" popup. A far-behind box lists every intermediate version.
+- **The dashboard toggle is the per-box master.** `Updater.set_enabled()` on
+  `POST /api/updates {enabled}` — a disabled box never dials GitHub (even a
+  forced `check_now` refuses), the card shows "Checks are OFF" instead of a
+  stale error/last-check, and re-enabling clears the last error. The
+  config.yaml `updates.enabled` flag is the whole-subsystem master (false =
+  `gw.updater` is None, endpoints 404, snapshot `update: None`).
+- **Auto-install** downloads the release `.deb` and runs `apt-get install`
+  under a **transient systemd unit** (`systemd-run --unit=quota-update-install`)
+  because the package's `prerm` stops the `quota-gateway` service — a plain
+  child `apt-get` would die with the cgroup. Falls back to a plain `apt-get`
+  when `systemd-run` is absent.
+- **API:** `GET/POST /api/updates` (state + toggles), `POST /api/updates/check`
+  (forced check), `POST /api/updates/install` — all 404 when unwired. The WS
+  snapshot carries an `update` key so the banner appears without a reload; the
+  dashboard banners once per version (`localStorage quota_update_banner`).
+
+Tests: `tests/test_updater.py` (version math, CHANGELOG parse, check gate,
+install under systemd-run/apt fakes). The release workflow's GitHub check and
+the parser both use the same version grammar — `quota/version.py` is the single
+source of truth for both the box and the `.deb`.
+
+---
+
 ## Key design decisions
 
 These are the non-obvious choices that keep the system correct and cheap:
@@ -973,6 +1054,9 @@ bundle:
   total_gb: 140.0             # your monthly ISP bundle, GB
   reset_day: 1                # day of month your ISP resets the bundle (1..28)
                               # 0 = never auto-reset (see "No-auto-reset mode")
+  period_type: renew_day      # renew_day (reset on reset_day) | end_of_month
+                              #   (the ISP's month-end bill — the same day
+                              #   drives the reset, 0 = calendar end)
 
 web:
   host: 0.0.0.0               # listen on all interfaces (reachable from the LAN)
@@ -1102,6 +1186,43 @@ vpn_share:
   download_sha256: ""         # pin override; empty = built-in per-arch table.
                               #   A binary without a pinned checksum is NEVER
                               #   installed (supply chain)
+
+network:
+  interface_tags: {eth0: "LAN", wlan0: "WiFi"}  # box-side NIC each client
+                              #   arrives on (ip -j neigh) -> the card chip;
+                              #   an unmapped NIC shows its raw name
+  latency_probe:
+    enabled: true             # ARP-RTT WiFi/LAN classification (ANY hardware):
+                              #   the box ARPs each leased client and times the
+                              #   replies — wired < 1 ms, WiFi pays airtime —
+                              #   the FASTEST sample decides WiFi/LAN. Raw
+                              #   AF_PACKET backend, `ping` fallback, previous
+                              #   label kept on silence. Threshold below only
+                              #   if a fast 5G device reads "LAN"
+    samples: 6                # ARP requests per device per sweep
+    min_samples: 2            # replies required before classifying at all
+    threshold_ms: 1.0         # fastest RTT at/above this => "WiFi"
+    min_consistent: 2         # agreeing sweeps before the label flips
+    interval_s: 30            # sweep cadence
+    timeout_s: 0.5            # per-sweep receive timeout
+  wifi_probe:
+    enabled: false            # passive air sniffing (airmon-ng + airodump-ng,
+                              #   Kali staples) — ONLY with a monitor-capable
+                              #   spare WiFi card; labels "WiFi · <SSID>" and
+                              #   takes precedence over latency_probe
+    interface: ""             # e.g. wlan0; empty = auto-detect the first wlan*
+    poll_interval: 5          # CSV re-read cadence (seconds)
+    sighted_ttl: 600          # a heard device stays "WiFi" this long while idle
+    lan_after_seconds: 300    # leased + never heard for this long => "LAN"
+
+updates:
+  enabled: true               # self-update checks (Admin tab). false = the
+                              #   whole subsystem is off (endpoints 404). The
+                              #   per-box "check automatically" / "auto-install"
+                              #   toggles are DB settings
+  repo: UserJoo9/QuotaManager # GitHub owner/repo: releases + CHANGELOG.md
+  interval_hours: 24          # release-check cadence (24 h gate persisted in
+                              #   updates_state, so restarts never re-notify)
 ```
 
 > **Speed shaping is switched on in the dashboard, not in this YAML.**
@@ -1136,9 +1257,12 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | PATCH | `/api/users/{id}/dns` · `/api/devices/{id}/dns` | set/clear a per-user or per-device upstream DNS-server override (`{"dns_server": "1.1.1.1"}`, `""` clears it) |
 | GET/POST | `/api/bundle` | read / update bundle (`total_gb`, `reset_day`, or `add_gb` to recharge mid-month). A POST makes the dashboard the bundle owner (`bundle_source=dashboard`) |
 | POST | `/api/reset-month` | force an early period roll-over |
-| GET/POST | `/api/guest` | guest mode: auto-register new devices with their own small allowance; also the **guest-limit** cap (`limit`, default 2 — stops MAC-spoofing spam), a default **guest speed limit** (`speed_limit_mbps`, 0 = unlimited — the tc shaper applies it as every guest account's aggregate ceiling, `min` with an explicit user cap) and the **STOP NEW CONNECTIONS** gate (`stop_new`) that blocks brand-new devices while letting registered ones join |
-| GET/POST | `/api/network` | speed-shaping settings: `enabled`, `total_down_mbps`, `total_up_mbps`, `aqm` — plus `vpn_share: {enabled, interface, status?}` from the DB (status = the cached applied state, present only when a manager is wired — `vpn_share.enabled: false` in config.yaml means boot without one) and `decline_random_macs` (a brand-new device with a randomized/locally-administered MAC is registered + immediately admin-blocked; the POST accepts a one-shot `decline_random_macs_existing: true` to sweep devices already joined) |
+| GET/POST | `/api/guest` | guest mode: auto-register new devices with their own small allowance; also the **guest-limit** cap (`limit`, default 2 — stops MAC-spoofing spam; **lowering it immediately admin-cuts the NEWEST over-cap guest users' devices**, oldest stay, raising never un-blocks), a default **guest speed limit** (`speed_limit_mbps`, 0 = unlimited — the tc shaper applies it as every guest account's aggregate ceiling, `min` with an explicit user cap) and the **STOP NEW CONNECTIONS** gate (`stop_new`) — dnsmasq *refuses* brand-new devices outright (app-owned `dhcp-host=<mac>,ignore` fragment, persisted refuse list, row-less kernel cut) while registered ones keep joining |
+| GET/POST | `/api/network` | speed-shaping settings: `enabled`, `total_down_mbps`, `total_up_mbps`, `aqm` — plus `vpn_share: {enabled, interface, status?}` from the DB (status = the cached applied state, present only when a manager is wired — `vpn_share.enabled: false` in config.yaml means boot without one) and `decline_random_macs` (a brand-new device with a randomized MAC is **refused at the DHCP level** — `dhcp-host=<mac>,ignore`, no device row; the POST accepts a one-shot `decline_random_macs_existing: true` to sweep devices already joined — only MACs with no vendor OUI, so legacy locally-administered products are never touched) |
 | GET/POST | `/api/mac-lists` | the operator MAC whitelist/blacklist: `{"allow": [...], "deny": [...]}` (each key optional, MACs lowercased/deduped/sorted on save, stored in the `mac_lists` table with a `(mac, kind)` key so a MAC can sit in BOTH lists). Enforcement is resolved, never persisted: `resolve_device_state` precedence = **deny list > user admin cut > device admin cut > allow list > quota (unless bypass) > ok** — a blacklisted MAC is always blocked even with `bypass` or an allow-list entry; a whitelisted MAC is never quota-blocked (manual cuts still win). Removing a MAC from a list restores it on the next 15 s tick. **Deletes write to the deny list**: `DELETE /api/users/{id}` / `DELETE /api/devices/{id}` blacklist every involved MAC permanently (see the quota-model section) |
+| GET/POST | `/api/updates` | self-update state + toggles: read `{enabled, auto_install, checked_at, latest_version, error, changelog, last_install}` / write `{enabled}` (`set_enabled` — a disabled box never dials GitHub, even a forced check refuses; re-enabling clears the last error). **404 when the updater isn't wired** (`updates.enabled: false` in config.yaml) |
+| POST | `/api/updates/check` | forced release check now (still refuses when checks are disabled); returns the latest version + new changelog sections. 404 when unwired |
+| POST | `/api/updates/install` | install the latest release's `.deb` (`systemd-run` transient unit so the package's `prerm` service-stop can't kill the child apt-get); returns install status. 404 when unwired |
 | GET/POST | `/api/wan` | strong-mode topology: `GET` live status (topology/source/pending/ppp0 + the auto-renew `renew_enabled`/`renew_minutes`/`renew_last` schedule + saved creds), `POST {"topology": "lan"\|"wan", "pppoe_user", "pppoe_password", "wan_if"}` APPLIES the topology live — rewrites config.yaml + the DB together, runs `scripts/topology.sh` (NIC + dnsmasq + PPPoE dial) and schedules a restart (`restart_scheduled`, `script_output`). Creds travel to the applier via the environment, never argv. On an applier failure config.yaml + the DB are ROLLED BACK to the previous state (no restart) |
 | POST | `/api/wan/test` | test the PPPoE credentials WITHOUT changing anything: dials a throwaway `ppp200` link via `scripts/test_pppoe.sh` with `{"pppoe_user", "pppoe_password", "wan_if"}` and reports `status` (success/auth-failed/no-pppoe-server/link-down/error), the negotiated local/peer IPs, `internet` (ping check), and `detail` — never touches config.yaml, the DB, `ppp0`, routing or DNS |
 | POST | `/api/wan/renew` | renew the WAN public IP NOW (the WAN-tab Restart button): restarts the `quota-wan-ppp` PPPoE dial via the gateway's wired `wan_renew` callback → the ISP hands the new session a fresh public IP. Returns `{restarted, state: active\|inactive\|unknown, detail}`. **409** while ppp0 is down ("nothing to renew into") or WAN mode isn't active; **503** when no callback is wired (degraded boot); 500 on a raising callback. Internet drops for a few seconds while ppp0 re-dials |
@@ -1211,6 +1335,14 @@ QuotaManager/
 │   │                         #   both LAN subnets -> hosts not leased by DHCP
 │   ├── arp_lock.py           # ARP gateway-lock responder: claims the router's IP
 │   │                         #   on the client subnet so bypassers' frames hit the box
+│   ├── latency_probe.py      # WiFi/LAN classification by ARP round-trip time (ON by
+│   │                         #   default, ANY hardware): the fastest reply sample
+│   │                         #   decides; ping-parse fallback; feeds
+│   │                         #   devices.access_interface WiFi/LAN
+│   ├── wifi_probe.py         # router-side WiFi/LAN label probe: passive monitor-mode
+│   │                         #   sniffing (airmon-ng + airodump-ng) -> per-device
+│   │                         #   SSID / LAN labels, OFF by default, needs a
+│   │                         #   monitor-capable spare card
 │   ├── dnslog.py             # DNS browsing history: dnsmasq query-log parser +
 │   │                         #   DnslogTailer thread (bounded queue) -> dns_history
 │   ├── dns_rules.py          # DnsRuleManager: domain blacklist/allow/redirect rules,
@@ -1219,6 +1351,9 @@ QuotaManager/
 │   │                         #   generated dnsmasq config, no new service
 │   ├── topology.py           # WAN-topology detection: is ppp0 up (for the WAN tab)?
 │   │                         #   restart_pppoe() = public-IP renewal (v24)
+│   ├── updater.py            # self-update checks (Admin tab): version compare vs the
+│   │                         #   latest GitHub release, CHANGELOG.md parse, 24 h gate,
+│   │                         #   persisted updates_state, optional .deb auto-install
 │   ├── netmgr.py             # TopologyManager: the WAN tab's live LAN/WAN switch
 │   ├── vendor.py             # MAC OUI -> manufacturer (IEEE registry, lazy load)
 │   ├── oui.txt               # bundled IEEE MA-L/MA-M/MA-S database (53.5k prefixes)
@@ -1260,6 +1395,10 @@ QuotaManager/
     │                         #   auto-detect, spawn argv, respawn/download gates,
     │                         #   stop-on-off, arch + checksum refusal
     ├── test_dns_rules.py     # hosts/ABP parsing, wildcard scopes, rendering
+    ├── test_latency_probe.py # ARP-RTT classifier math + sweep wiring (fakes)
+    ├── test_wifi_probe.py    # airodump CSV parse + probe snapshot + thread smoke
+    ├── test_updater.py       # version math + CHANGELOG parse + GitHub check +
+    │                         #   systemd-run/apt install (fakes, no network)
     └── test_run_wiring.py    # run.py wiring + live boot + bundle reconcile +
                               #   dnsmasq lease sync + live-counter regression
 ```
@@ -1319,6 +1458,14 @@ The suite covers:
   idempotence + self-heal, teardown.
 - **Domain filtering** — `quota/dns_rules.py`: hosts/ABP parsing, wildcard
   scopes, resolution order, the tag-scoped dnsmasq render + reload gate.
+- **The self-updater** — `quota/updater.py`: version compare grammar, the
+  CHANGELOG parser (newest-first, `[Unreleased]` skipped, far-behind lists all
+  intermediate versions), the 24 h gate + persisted state, check-disabled
+  refusal, and the `.deb` install under `systemd-run` / plain `apt-get` (all
+  fetch/run injectables, no network).
+- **The WiFi/LAN access labels** — `quota/latency_probe.py` (ARP-RTT classifier
+  math, min-sample + streak guards, ping fallback, sweep wiring) and
+  `quota/wifi_probe.py` (airodump CSV parse, probe snapshot, thread smoke).
 
 Everything that needs hardware/root (nftables, tc, DHCP, raw sockets, PPPoE) is
 simulated or disabled in tests, so the suite runs anywhere.
@@ -1331,13 +1478,13 @@ The `.deb` is built **only by GitHub Actions** and published to **GitHub
 Releases** — there is no local build step.
 
 1. **Bump the version** — edit `quota/version.py`
-   (`__version__ = "0.2.0"` → next semver) and add a `CHANGELOG.md` entry if you
+   (`__version__ = "0.2.1"` → next semver) and add a `CHANGELOG.md` entry if you
    want one.
 2. **Commit + push**:
 
 ```bash
 git add quota/version.py CHANGELOG.md
-git commit -m "Bump version to 0.2.0"
+git commit -m "Bump version to 0.2.1"
 git push origin main
 ```
 
@@ -1345,13 +1492,13 @@ git push origin main
    loudly otherwise):
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.2.1
+git push origin v0.2.1
 ```
 
 The `release` workflow (`.github/workflows/release.yml`) builds
-`quota-manager_0.2.0_all.deb` and uploads it to a GitHub Release named
-`v0.2.0`. GitHub Releases are immutable, so each version needs a **new** tag.
+`quota-manager_0.2.1_all.deb` and uploads it to a GitHub Release named
+`v0.2.1`. GitHub Releases are immutable, so each version needs a **new** tag.
 The release description is auto-composed from the `CHANGELOG.md` section for
 the released version (plus the install note), so keep the CHANGELOG current —
 it IS the release notes.
@@ -1392,5 +1539,5 @@ populated and signed by `apt-repo.yml`. Setting it up the first time:
 3. **Backfill the current release** so the repo isn't empty (the release + its
    `.deb` already exist in GitHub Releases):
    ```bash
-   gh workflow run apt-repo.yml --ref main -f version=0.2.0
+   gh workflow run apt-repo.yml --ref main -f version=0.2.1
    ```

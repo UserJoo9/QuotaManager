@@ -1,7 +1,7 @@
 """Month-boundary math for quota periods.
 
 The monthly bundle resets on a configurable day-of-month (``reset_day``,
-1-28). A *period* is the half-open range ``[start, end)`` with ``end`` being
+1-31). A *period* is the half-open range ``[start, end)`` with ``end`` being
 the next reset instant. Days remaining are counted on calendar days (the
 reset boundary at 00:00), which is what a user sees on a dashboard.
 
@@ -56,7 +56,16 @@ def period_bounds(now: _dt.datetime, reset_day: int) -> tuple[_dt.datetime, _dt.
     """
     if reset_day <= 0:
         return now, now + _dt.timedelta(days=1)
-    return _month_range(now.year, now.month, reset_day, now.tzinfo)
+    # The period containing `now` starts at the most recent reset instant AT
+    # OR BEFORE `now`. Before this month's reset day the current period began
+    # LAST month on the reset day — anchoring to this month's grid instead
+    # would skip the current month: with reset day 25 and today the 16th,
+    # days-left read 40 and the maintenance loop rolled the period early
+    # (zeroing the recorded usage) instead of counting down to the 25th.
+    year, month = now.year, now.month
+    if now.day < reset_day:
+        year, month = (year - 1, 12) if month == 1 else (year, month - 1)
+    return _month_range(year, month, reset_day, now.tzinfo)
 
 
 def next_reset(now: _dt.datetime, reset_day: int) -> _dt.datetime:

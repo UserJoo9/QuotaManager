@@ -45,6 +45,17 @@ class DhcpConfig:
     #: Path to dnsmasq's lease file — dnsmasq owns DHCP on the gateway and
     #: this file is the MAC<->IP binding source the maintenance loop reads.
     lease_file: str = "/var/lib/misc/dnsmasq.leases"
+    #: App-owned dnsmasq fragment refusing DHCP to "STOP NEW CONNECTIONS"
+    #: MACs (one ``dhcp-host=<mac>,ignore`` line each). Written by run.py,
+    #: survives re-runs, and is emptied when the gate is turned off — the
+    #: setup script never touches it (it only rewrites quota-gateway.conf).
+    ignore_file: str = "/etc/dnsmasq.d/quota-ignore.conf"
+    #: dnsmasq only picks up NEW ``dhcp-host=...ignore`` lines on a restart
+    #: (SIGHUP only re-reads hosts/lease files). True (default) restarts
+    #: dnsmasq whenever the fragment actually changed; False writes the file
+    #: but skips the reload, for an admin who wants to batch several edits
+    #: before a manual ``systemctl restart dnsmasq``.
+    reload_dnsmasq: bool = True
     #: --- LAN-reality snapshot (written by the setup script / the runtime
     #: topology apply in BOTH topologies, so the dashboard's WAN-tab Revert can
     #: restore exactly what was there before a WAN experiment). WAN mode erases
@@ -121,7 +132,9 @@ class EngineConfig:
 @dataclass
 class BundleConfig:
     total_gb: float = 140.0
-    reset_day: int = 1  # 1-28, day-of-month the ISP bundle resets
+    reset_day: int = 1  # 1-31, day-of-month the ISP bundle resets
+    #: "renew_day" (reset on reset_day) or "end_of_month" (calendar month).
+    period_type: str = "renew_day"
 
 
 @dataclass
@@ -299,6 +312,110 @@ class DnsFilterConfig:
 
 
 @dataclass
+class WifiProbeConfig:
+    """Passive WiFi/LAN access probe (quota/wifi_probe.py, OFF by default).
+
+    The router bridges clients L2, so the box's own NICs all show the same
+    uplink — the router-side "is this device on WiFi or wired" answer needs
+    the AIR. Enabled, the probe puts a spare WiFi NIC of the box into monitor
+    mode (airmon-ng + airodump-ng, both Kali staples) and passively hears
+    every client's frames: a leased device heard on the air is "WiFi · <SSID>"
+    (the real ESSID from the AP's beacons), one never heard past the grace
+    period is "LAN". The probe interface MUST be a card not used for anything
+    else (the uplink is the wired NIC in the gateway design).
+    """
+
+    enabled: bool = False
+    #: Monitor-capable WiFi NIC (e.g. "wlan0"). Empty => auto-detect the
+    #: first wlan* interface from ``iw dev``.
+    interface: str = ""
+    #: CSV re-read cadence (seconds).
+    poll_interval: float = 5.0
+    #: A station sighting stays "wireless" this long after its last frame
+    #: (associated-but-idle devices do not flap to LAN).
+    sighted_ttl: float = 600.0
+    #: A leased device never heard on the air for this long is labeled "LAN".
+    lan_after_seconds: float = 300.0
+
+
+@dataclass
+class LatencyProbeConfig:
+    """WiFi/LAN classification by ARP round-trip time (ON by default).
+
+    Works on ANY hardware — no monitor-mode WiFi card needed (monitor sniffing
+    is optional; see :class:`WifiProbeConfig`). The box ARPs each leased
+    client and times the replies: a wired device answers in well under a
+    millisecond, a WiFi device pays airtime on top (typically 1 ms and up).
+    ``min(rtts) >= threshold_ms`` => WiFi. Only the fastest sample counts —
+    local scheduling noise only ever inflates RTTs.
+
+    The raw-socket ARP backend (root) falls back to ``ping`` time= parsing,
+    then to "keep the previous label" when probing is impossible. When the
+    monitor-mode probe is available it takes precedence (it also knows the
+    exact SSID).
+    """
+
+    enabled: bool = True
+    #: ARP requests (or ping probes) per device per sweep.
+    samples: int = 6
+    #: Minimum replies before a device is classified at all. Keep it LOW:
+    #: a power-save device (sleeping phone) answers 2 of the 6 requests and
+    #: would otherwise sit UNKNOWN forever; with the streak guard, two
+    #: agreeing sub-ms min-samples cannot be a WiFi phone (airtime alone
+    #: exceeds the threshold).
+    min_samples: int = 2
+    #: Fastest RTT at/above which the device counts as WiFi (ms).
+    threshold_ms: float = 1.0
+    #: Consecutive agreeing sweeps required before the label flips (no flap).
+    min_consistent: int = 2
+    #: Sweep cadence (seconds).
+    interval_s: float = 30.0
+    #: Per-sweep receive timeout (seconds).
+    timeout_s: float = 0.5
+
+
+@dataclass
+class NetworkConfig:
+    """Per-device WiFi/LAN source-interface tags.
+
+    run.py learns each leased client's source NIC from the kernel neighbor
+    table (``ip -j neigh``) and stores it per device. ``interface_tags`` maps
+    a NIC name to a human label for the dashboard chip — e.g. ``{"eth0":
+    "LAN", "wlan0": "WiFi"}``. An interface without a label falls back to its
+    raw name; empty mapping shows the raw name everywhere.
+
+    ``wifi_probe`` (OFF by default) upgrades the chip from the box-side NIC
+    to the ROUTER-side access point: the box's monitor-mode WiFi card hears
+    which SSID each device is actually associated with (see
+    :class:`WifiProbeConfig`). It needs a monitor-capable card — when the box
+    lacks one, ``latency_probe`` (ON by default) answers WiFi-vs-LAN with
+    ARP round-trip times on any hardware (see :class:`LatencyProbeConfig`).
+    """
+
+    interface_tags: dict[str, str] = field(default_factory=dict)
+    wifi_probe: WifiProbeConfig = field(default_factory=WifiProbeConfig)
+    latency_probe: LatencyProbeConfig = field(default_factory=LatencyProbeConfig)
+
+
+@dataclass
+class UpdateConfig:
+    """Self-update checks (quota/updater.py).
+
+    ``enabled: false`` turns the whole subsystem off — no 24 h check, no
+    Admin-tab update card (the endpoints 404 and the snapshot carries
+    ``update: None``), exactly like ``history.enabled``. The dashboard's
+    per-gateway "check automatically / auto-install" toggles live in the DB
+    settings and are honored when this master switch is on.
+    """
+
+    enabled: bool = True
+    #: GitHub owner/repo holding the releases + the CHANGELOG.md.
+    repo: str = "UserJoo9/QuotaManager"
+    #: Release-check cadence (hours).
+    interval_hours: int = 24
+
+
+@dataclass
 class Config:
     db_path: str = "data/quota.db"
     log_file: str = "logs/quota.log"
@@ -312,6 +429,8 @@ class Config:
     report: ReportConfig = field(default_factory=ReportConfig)
     history: HistoryConfig = field(default_factory=HistoryConfig)
     dns_filter: DnsFilterConfig = field(default_factory=DnsFilterConfig)
+    network: NetworkConfig = field(default_factory=NetworkConfig)
+    updates: UpdateConfig = field(default_factory=UpdateConfig)
     timezone: str = ""  # empty => system local timezone
 
 

@@ -44,7 +44,8 @@ class FakeNft:
         #: table -> setname -> member IPs
         self._sets: dict[str, dict[str, set[str]]] = {
             "inet quota_gateway": {"blocked": set(), "known_ips": set(),
-                                   "gw_allowed": set()},
+                                   "gw_allowed": set(),
+                                   "blocked_macs": set()},
             "arp quota_arp_lock": {},
         }
         self.tables: set[str] = set()
@@ -56,6 +57,10 @@ class FakeNft:
     @property
     def blocked(self) -> set[str]:
         return self._sets["inet quota_gateway"]["blocked"]
+
+    @property
+    def blocked_macs(self) -> set[str]:
+        return self._sets["inet quota_gateway"]["blocked_macs"]
 
     @property
     def known_ips(self) -> set[str]:
@@ -217,7 +222,8 @@ def test_update_state_is_add_only():
     eng.update_state({"192.168.2.111": "aa:bb:cc:dd:ee:01"}, {})
     n_calls = len(fake.calls)
     eng.update_state({}, {})  # device gone
-    assert len(fake.calls) == n_calls + 1  # only the blocked-set flush
+    # only the two blocked-set flushes (IP + MAC, both empty) — no deletes
+    assert len(fake.calls) == n_calls + 2
     # counters still exist but are not surfaced (flush filters by ip_to_mac)
     assert "q_up_192_168_2_111" in fake.counters
 
@@ -229,6 +235,47 @@ def test_blocked_mac_adds_its_ip_to_set():
     eng.update_state({"192.168.2.111": "aa:bb:cc:dd:ee:01"},
                      {"aa:bb:cc:dd:ee:01": True})
     assert "192.168.2.111" in fake.blocked
+    # ... AND the same MAC is dropped by ethernet address: a lease-less /
+    # static-IP device (its IP never lands in ip_to_mac) is still kernel-cut.
+    assert "aa:bb:cc:dd:ee:01" in fake.blocked_macs
+
+
+def test_lease_less_blocked_mac_is_kernel_cut():
+    """The MAC channel is the whole point: a blocked device whose IP never
+    enters ip_to_mac (no lease row) still gets dropped by ether saddr/daddr."""
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    # NO ip_to_mac entry — the device has no lease
+    eng.update_state({}, {"aa:bb:cc:dd:ee:01": True})
+    assert fake.blocked == set()        # nothing programmed into the IP set
+    assert "aa:bb:cc:dd:ee:01" in fake.blocked_macs
+    # the ether drop rules are in the chain, LAN-excluded like the IP drops
+    assert ("ether saddr @blocked_macs ip daddr != 192.168.1.0/24 "
+            "ip daddr != 192.168.2.0/24 drop") in fake.rules
+    assert ("ether daddr @blocked_macs ip saddr != 192.168.1.0/24 "
+            "ip saddr != 192.168.2.0/24 drop") in fake.rules
+
+
+def test_unblocked_mac_clears_ether_set():
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    eng.update_state({}, {"aa:bb:cc:dd:ee:01": True})
+    assert "aa:bb:cc:dd:ee:01" in fake.blocked_macs
+    eng.update_state({}, {"aa:bb:cc:dd:ee:01": False})
+    assert fake.blocked_macs == set()  # empty desired set always re-flushes
+
+
+def test_gateway_mac_never_enters_ether_set():
+    """The box's own sentinel MAC must never be kernel-cut via the MAC set
+    (its packets never cross the forward chain; the Gateway cut is the
+    input/output-chain gw_blocked path instead)."""
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    eng.update_state({}, {"00:00:00:00:00:00": True})
+    assert fake.blocked_macs == set()
 
 
 def test_blocked_mac_without_ip_is_not_dropped():

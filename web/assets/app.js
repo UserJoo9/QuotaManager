@@ -104,6 +104,7 @@ let editDeviceId = null;   // device being edited (null = add mode)
 let settingsDirty = false; // admin typed in the bundle form — freeze its sync
 let expandedUsers = new Set(); // user ids whose device accordion is open
 let networkConfig = null;  // latest /api/network payload (Network preview)
+let shapingLive = null;    // latest snapshot's shaping engine state {available, applied}
 let macListsDirty = false; // admin typed in the MAC-lists textareas — freeze their sync
 let logLines = [];         // raw lines from /api/logs
 let logMeta = null;        // {total, truncated} from the last /api/logs call
@@ -127,6 +128,7 @@ function showApp() {
 
 function render(data) {
   dashboard = data;
+  shapingLive = data.shaping || null;
   renderBundle(data.bundle, data.devices, data.users);
   renderUsers(data.users, data.devices, data.gateway);
   renderRogue(data.rogue);
@@ -134,8 +136,107 @@ function render(data) {
   renderNetStatus(data.internet);
   renderNetworkPreview(networkConfig); // null-safe — refreshed by refreshNetwork()
   renderVpnShare(data); // live status rides the WS snapshot so "applying…" advances
+  renderUpdate(data.update); // null-safe — no updater wired (tests / degraded boot)
   const v = $("app-version");
   if (v) v.textContent = data.version ? `Quota Manager ${data.version}` : "—";
+}
+
+/* ---------------- software updates (Admin tab + notification) ---------------- */
+
+//: the update version the notification banner has already announced (or the
+//: admin dismissed). Persisted per version so a reload doesn't re-announce
+//: the same release, but a NEWER one still notifies.
+function updateBannerDismissedFor() {
+  return localStorage.getItem("quota_update_banner") || "";
+}
+
+function renderUpdate(u) {
+  const card = $("upd-current");
+  if (!card) return;  // update card absent — nothing to render
+  const checking = u && u.checking;
+  const off = !u || !u.enabled;
+  $("upd-current").textContent = u && u.current_version ? `v${u.current_version}` : "—";
+  // while the toggle is OFF, hide the STALE last-check/latest results — they
+  // describe an old run and only confuse; the status line tells the admin to
+  // enable checks instead
+  $("upd-latest").textContent =
+    off ? "—" : (u && u.latest_version ? `v${u.latest_version}` : (checking ? "checking…" : "—"));
+  $("upd-checked").textContent =
+    off ? "—" : (u && u.checked_at ? new Date(u.checked_at).toLocaleString() : "never");
+  const statusEl = $("upd-status");
+  let status = "—";
+  if (off) status = "Checks are OFF — toggle ON to check for updates";
+  else if (checking) status = "Checking…";
+  else if (u && u.error) {
+    // the raw exception (e.g. "<urlopen error timed out>") is kept in the
+    // muted detail line below + the hover title — the status row stays
+    // human and points at the cause
+    const timeout = /timeout|timed ?out/i.test(u.error);
+    status = timeout
+      ? "Couldn't reach GitHub (timed out) — check the box's internet; retries automatically"
+      : "Update check failed — retrying automatically";
+    statusEl.title = u.error;
+  } else if (u && u.available) status = "Update available";
+  else if (u && u.latest_version) status = "Up to date";
+  statusEl.textContent = status;
+  const errEl = $("upd-error");
+  if (errEl) {
+    errEl.textContent = u && u.error ? u.error : "";
+    errEl.classList.toggle("hidden", !(u && u.error) || off);
+  }
+  $("upd-check").disabled = !!checking || off;
+  $("upd-install").classList.toggle("hidden", !(u && u.available) || off);
+  $("upd-install").textContent = u && u.available ? `Install v${u.latest_version}` : "Install";
+  $("upd-details").classList.toggle("hidden", !(u && u.available && (u.changelog || []).length) || off);
+  // the toggles are set without firing the change handlers (those POST on change)
+  $("upd-enabled").checked = u ? !!u.enabled : true;
+  $("upd-auto").checked = u ? !!u.auto_install : false;
+
+  // "update available" notification: show once per version (or until dismissed)
+  const banner = $("update-banner");
+  if (banner) {
+    if (u && u.available && u.latest_version !== updateBannerDismissedFor()) {
+      $("update-banner-sub").textContent = `v${u.current_version} → v${u.latest_version}`;
+      banner.classList.remove("hidden");
+    } else {
+      banner.classList.add("hidden");
+    }
+  }
+}
+
+async function refreshUpdates() {
+  let u;
+  try {
+    u = await API.get("/api/updates");
+  } catch (_) {
+    return;  // updater not wired (tests) — card stays blank
+  }
+  renderUpdate(u);
+}
+
+function openChangelog() {
+  const u = dashboard && dashboard.update;
+  const body = $("changelog-body");
+  if (body && u) {
+    const list = (u.changelog || []).map((c) =>
+      `<h4>${esc(c.title)}</h4><p>${esc(c.body)}</p>`).join("");
+    body.innerHTML = list ||
+      `<p class="muted">No changelog available for the new version.</p>`;
+    $("changelog-sub").textContent =
+      `New versions since v${u.current_version} (${(u.changelog || []).length})`;
+  }
+  $("changelog-modal").classList.remove("hidden");
+}
+
+function updateResetDayAvailability() {
+  // end-of-month bills still take a day (many ISPs close the month on the
+  // 25th/28th); only the 0-hint differs from renew-day mode.
+  const eom = $("set-period-type").value === "end_of_month";
+  const hint = $("reset-day-hint");
+  if (hint) hint.textContent = eom ? "(0 = calendar end)" : "(0 = manual)";
+  const setupHint = $("setup-reset-day-hint");
+  if (setupHint) setupHint.textContent =
+    $("setup-period-type").value === "end_of_month" ? "(0 = calendar end)" : "(0 = never)";
 }
 
 function renderBundle(b, devices, users) {
@@ -160,8 +261,12 @@ function renderBundle(b, devices, users) {
   // unfreeze after a successful save.
   if (!settingsDirty) {
     $("set-total").value = b.total_gb;
+    $("set-period-type").value = b.period_type || "renew_day";
     $("set-reset-day").value = b.reset_day;
   }
+  // end-of-month bills still take a day (many ISPs close the month on the
+  // 25th/28th); only the 0-hint differs from renew-day mode.
+  updateResetDayAvailability();
 
   // bundle ownership banner: config.yaml owns the bundle until the admin
   // edits it once in the dashboard (then the dashboard owns it and edits
@@ -330,7 +435,9 @@ function userCard(u, udevs, gw, ghost) {
       <div class="user-head-info">
         <div class="user-name">${statusDot(u.block_state, connected)}${esc(u.name || (u.guest ? "Guest" : "Unnamed user"))}${guestTag}${gatewayTag}${exemptTag}${speedTag}${statusTag(u.block_state)}</div>
         <div class="user-sub">${udevs.length} device${udevs.length === 1 ? "" : "s"} ·
-          ${u.quota_mode === "fixed" ? `Fixed ${u.fixed_gb ?? u.allowance_gb} GB` : "Auto (share of remainder)"}</div>
+          ${u.quota_mode === "fixed" ? `Fixed ${u.fixed_gb ?? u.allowance_gb} GB`
+            : u.quota_mode === "disabled" ? "Disabled — assign quota"
+            : "Auto (share of remainder)"}</div>
       </div>
     </div>
     <div class="device-bar">
@@ -391,7 +498,7 @@ function deviceRow(d) {
     <div class="device-head">
       <div>
         <div class="device-name">${esc(d.name || (d.guest ? "Guest" : d.vendor) || "Unnamed device")}${speedTag}</div>
-        <div class="device-mac">${esc(macText(d.mac))}${statusDot(d.block_state, d.connected)}${d.ip ? ` · <span class="device-ip">${esc(d.ip)}</span>` : ""}${vendorTag}${guestTag}${gatewayTag}${bypassTag}${statusTag(d.block_state)}</div>
+        <div class="device-mac">${esc(macText(d.mac))}${statusDot(d.block_state, d.connected)}${d.ip ? ` · <span class="device-ip">${esc(d.ip)}</span>` : ""}${ifaceTag(d)}${vendorTag}${guestTag}${gatewayTag}${bypassTag}${statusTag(d.block_state)}</div>
       </div>
     </div>
     ${devBar}
@@ -405,6 +512,21 @@ function deviceRow(d) {
       ${deleteBtn}
     </div>
   </div>`;
+}
+
+// The WiFi/LAN chip. Preference order:
+//   1. d.access_interface — the ROUTER-side label ("WiFi · <SSID>" / "LAN"),
+//      auto-learned from the air by the passive probe (quota.wifi_probe.py)
+//      or pinned manually in the device modal (access override wins display).
+//   2. d.interface_label — the box-side NIC tag (ip neigh + config.yaml
+//      network.interface_tags); shown when no probe data exists yet.
+function ifaceTag(d) {
+  if (!d) return "";
+  const label = d.access_interface || d.interface_label;
+  if (!label) return "";
+  return ` <span class="iface-tag" title="${d.access_interface
+    ? "Router-side: ARP round-trip classification / set in the device modal"
+    : "Box-side NIC (neighbor table)"}">${esc(label)}</span>`;
 }
 
 /* ---------------- sidebar panels (management / network / wan / admin / logs) ---------------- */
@@ -794,6 +916,26 @@ function downloadLogs() {
 let ws = null;
 let wsRetry = 0;
 let wsTimer = null;
+let pollTimer = null;
+let pollInFlight = false;
+
+function startPolling() {
+  if (pollTimer) return;
+  pollTimer = setInterval(async () => {
+    if (pollInFlight) return;  // don't stack requests on a slow box
+    pollInFlight = true;
+    try {
+      const data = await API.get("/api/dashboard");
+      if (data && typeof data === "object" && !data.error) render(data);
+    } catch (_) { /* WS will resume pushing when it reconnects */ }
+    finally { pollInFlight = false; }
+  }, 10000);
+}
+
+function stopPolling() {
+  clearInterval(pollTimer);
+  pollTimer = null;
+}
 
 function wsConnect() {
   if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
@@ -801,6 +943,7 @@ function wsConnect() {
   ws = new WebSocket(`${proto}://${location.host}/ws`);
   ws.onopen = () => {
     wsRetry = 0;
+    stopPolling();  // live push is back — kill the polling fallback
   };
   ws.onmessage = async (ev) => {
     try {
@@ -810,7 +953,8 @@ function wsConnect() {
   };
   ws.onclose = () => {
     ws = null;
-    // fall back to polling while disconnected
+    // fall back to polling while disconnected, then keep retrying the socket
+    startPolling();
     scheduleWsRetry();
   };
   ws.onerror = () => { try { ws.close(); } catch (_) {} };
@@ -820,6 +964,7 @@ function wsClose() {
   if (ws) { try { ws.close(); } catch (_) {} }
   ws = null;
   clearTimeout(wsTimer);
+  stopPolling();
 }
 
 function scheduleWsRetry() {
@@ -930,6 +1075,8 @@ function openDeviceModal(id) {
   $("d-limit-down").value = dev ? (dev.limit_down_mbps || 0) : 0;
   $("d-limit-up").value = dev ? (dev.limit_up_mbps || 0) : 0;
   $("d-dns-server").value = dev ? (dev.dns_server || "") : "";
+  $("d-access").value = dev ? (dev.access_override || "") : "";
+  populateAccessList();  // fill the SSID datalist (best-effort, async)
   $("d-fixed-wrap").classList.toggle("hidden", $("d-mode").value !== "fixed");
   $("modal-submit").textContent = dev ? "Save" : "Add";
   $("modal").classList.remove("hidden");
@@ -966,6 +1113,19 @@ function normalizeMac(raw) {
   let hex = String(raw || "").toLowerCase().replace(/[^0-9a-f]/g, "");
   if (hex.length !== 12) return null;
   return hex.match(/.{1,2}/g).join(":");
+}
+
+// Fill the device modal's access-label datalist with the SSIDs the passive
+// probe currently hears ("WiFi · <name>" options + "LAN"). Best-effort: a
+// probe-less box leaves the list empty and the field still accepts free text.
+async function populateAccessList() {
+  try {
+    const data = await API.get("/api/wifi/ssids");
+    const ssids = (data && data.ssids) || [];
+    const opts = ssids.map((s) => `<option value="WiFi · ${esc(s)}">`)
+      .join("") + `<option value="LAN">`;
+    $("d-access-list").innerHTML = opts;
+  } catch (_) { /* probe off / not logged in — free text only */ }
 }
 
 async function submitDevice(ev) {
@@ -1015,6 +1175,14 @@ async function submitDevice(ev) {
   if (targetDeviceId != null) {
     try { await API.patch(`/api/devices/${targetDeviceId}/dns`, { dns_server: dnsServer }); }
     catch (e) { alert("Device saved, but the DNS server value was rejected: " + e.message); }
+  }
+  // The router-side access label (WiFi · <SSID> / LAN) — manual pin; blank
+  // clears the pin so the passive probe's auto label takes over again.
+  if (targetDeviceId != null) {
+    try {
+      await API.post(`/api/devices/${targetDeviceId}/access`,
+        { override: $("d-access").value.trim() });
+    } catch (e) { alert("Device saved, but the access label was rejected: " + e.message); }
   }
   closeModal();
   await refreshAll();
@@ -1098,7 +1266,9 @@ async function showWelcomeIfNeeded() {
   } catch (_) { return; } // auth/network hiccup — never block the dashboard
   if (state.setup_complete) return;
   $("setup-total").value = state.total_gb;
+  $("setup-period-type").value = state.period_type || "renew_day";
   $("setup-reset-day").value = state.reset_day;
+  updateResetDayAvailability();
   $("welcome-overlay").classList.remove("hidden");
 }
 
@@ -1106,15 +1276,17 @@ async function submitWelcome(ev) {
   ev.preventDefault();
   const errEl = $("welcome-error");
   errEl.classList.add("hidden");
+  const periodType = $("setup-period-type").value;
   const body = {
     total_gb: parseFloat($("setup-total").value),
     reset_day: parseInt($("setup-reset-day").value, 10),
+    period_type: periodType,
     current_password: $("setup-cur-pw").value,
     new_password: $("setup-new-pw").value || null,
   };
   if (!(body.total_gb > 0)) { errEl.textContent = "Bundle size must be positive."; errEl.classList.remove("hidden"); return; }
-  if (!(body.reset_day >= 0 && body.reset_day <= 28)) {
-    errEl.textContent = "Reset day must be 0–28 (0 = never auto-reset).";
+  if (!(body.reset_day >= 0 && body.reset_day <= 31)) {
+    errEl.textContent = "Reset day must be 0–31 (0 = never auto-reset).";
     errEl.classList.remove("hidden"); return;
   }
   try {
@@ -1146,13 +1318,14 @@ async function submitLogin(ev) {
 async function submitSettings(ev) {
   ev.preventDefault();
   const total = parseFloat($("set-total").value);
+  const periodType = $("set-period-type").value;
   const resetDay = parseInt($("set-reset-day").value, 10);
   if (!(total > 0)) { alert("Bundle size must be positive."); return; }
-  if (!(resetDay >= 0 && resetDay <= 28)) {
-    alert("Reset day must be 0–28 (0 = never auto-reset; you recharge manually).");
+  if (!(resetDay >= 0 && resetDay <= 31)) {
+    alert("Reset day must be 0–31 (0 = never auto-reset; you recharge manually).");
     return;
   }
-  await API.post("/api/bundle", { total_gb: total, reset_day: resetDay });
+  await API.post("/api/bundle", { total_gb: total, reset_day: resetDay, period_type: periodType });
   settingsDirty = false;
   await refreshAll();
 }
@@ -1384,8 +1557,14 @@ function renderVpnShare(n) {
 
 function renderNetworkPreview(n) {
   if (!n || !$("np-status")) return;
-  $("np-status").textContent = n.enabled ? "On" : "Off";
-  $("np-status").className = `stat-value ${n.enabled ? "ok" : "off"}`;
+  // "applying…" while a saved change is queued: the shaper's kernel tree is
+  // rebuilt off the event loop after each save. applied=false (with tc
+  // available) means the tree doesn't match the last save yet — show it
+  // instead of silently stale numbers. Degrades to plain On/Off when the
+  // snapshot carries no shaping state (pre-first-tick / no shaper wired).
+  const rebuilding = shapingLive && shapingLive.available && !shapingLive.applied;
+  $("np-status").textContent = rebuilding ? "Applying…" : (n.enabled ? "On" : "Off");
+  $("np-status").className = `stat-value ${rebuilding ? "warning" : n.enabled ? "ok" : "off"}`;
   $("np-down").textContent = n.total_down_mbps ? `${n.total_down_mbps} Mbps` : "—";
   $("np-up").textContent = n.total_up_mbps ? `${n.total_up_mbps} Mbps` : "—";
   $("np-lan").textContent = n.lan_rate_mbps ? `${n.lan_rate_mbps} Mbps` : "1000 Mbps";
@@ -1955,6 +2134,11 @@ async function init() {
   $("settings-form").addEventListener("submit", submitSettings);
   $("set-total").addEventListener("input", () => { settingsDirty = true; });
   $("set-reset-day").addEventListener("input", () => { settingsDirty = true; });
+  $("set-period-type").addEventListener("change", () => {
+    settingsDirty = true;
+    updateResetDayAvailability();
+  });
+  $("setup-period-type").addEventListener("change", updateResetDayAvailability);
   $("add-user-btn").addEventListener("click", () => openUserModal(null));
   $("add-device-btn").addEventListener("click", () => openDeviceModal(null));
   $("modal-cancel").addEventListener("click", closeModal);
@@ -2001,6 +2185,48 @@ async function init() {
   $("wan-revert-btn").addEventListener("click", revertWan);
   $("wan-restart-btn").addEventListener("click", renewWanIp);
   $("wan-renew-save").addEventListener("click", submitWanRenew);
+  // software updates (Admin tab + the notification banner)
+  $("upd-check").addEventListener("click", async () => {
+    renderUpdate({ ...(dashboard && dashboard.update), checking: true });
+    let u;
+    try { u = await API.post("/api/updates/check"); }
+    catch (e) { alert(e.message); return; }
+    if (dashboard) dashboard.update = u;
+    renderUpdate(u);
+  });
+  $("upd-install").addEventListener("click", async () => {
+    if (!confirm("Download and install the update now? The gateway restarts into the new version.")) return;
+    $("upd-status").textContent = "Installing — the gateway will restart…";
+    $("upd-install").disabled = true;
+    // the install stops the service (package prerm), so the response may never
+    // arrive — that is the expected success path
+    try { await API.post("/api/updates/install"); } catch (_) { /* restarting */ }
+  });
+  $("upd-details").addEventListener("click", openChangelog);
+  $("update-banner-details").addEventListener("click", openChangelog);
+  $("update-banner-dismiss").addEventListener("click", () => {
+    const u = dashboard && dashboard.update;
+    if (u && u.latest_version) localStorage.setItem("quota_update_banner", u.latest_version);
+    $("update-banner").classList.add("hidden");
+  });
+  $("upd-enabled").addEventListener("change", async (ev) => {
+    try {
+      const u = await API.post("/api/updates", { enabled: ev.target.checked });
+      if (dashboard) dashboard.update = u;
+      renderUpdate(u);
+    } catch (e) { alert(e.message); ev.target.checked = !ev.target.checked; }
+  });
+  $("upd-auto").addEventListener("change", async (ev) => {
+    try {
+      const u = await API.post("/api/updates", { auto_install: ev.target.checked });
+      if (dashboard) dashboard.update = u;
+      renderUpdate(u);
+    } catch (e) { alert(e.message); ev.target.checked = !ev.target.checked; }
+  });
+  $("changelog-close").addEventListener("click", () => $("changelog-modal").classList.add("hidden"));
+  $("changelog-modal").addEventListener("click", (ev) => {
+    if (ev.target === $("changelog-modal")) $("changelog-modal").classList.add("hidden");
+  });
   // browsing history: refetch on device/window change or manual refresh
   $("hist-device").addEventListener("change", refreshHistory);
   $("hist-window").addEventListener("change", refreshHistory);

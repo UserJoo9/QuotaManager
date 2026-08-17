@@ -318,3 +318,80 @@ def test_delete_guest_users_never_blacklists(tmp_path):
         assert run(d.list_users())[0].protected is True
     finally:
         run(d.close())
+
+
+def test_access_columns_auto_migrated(tmp_path):
+    """The router-side access label landed AFTER the v2 users migration — a
+    pre-access DB (devices without access_interface/access_override) must be
+    upgraded in place by connect(), with defaults on existing rows."""
+    path = tmp_path / "access.db"
+    conn = None
+    try:
+        async def _build():
+            nonlocal conn
+            conn = await aiosqlite.connect(path)
+            await conn.execute("""
+                CREATE TABLE devices (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    mac              TEXT UNIQUE NOT NULL,
+                    name             TEXT NOT NULL DEFAULT '',
+                    quota_mode       TEXT NOT NULL DEFAULT 'auto',
+                    fixed_gb         REAL,
+                    block_state      TEXT NOT NULL DEFAULT 'ok',
+                    created_at       REAL NOT NULL,
+                    topup_gb         REAL NOT NULL DEFAULT 0,
+                    limit_down_mbps  REAL NOT NULL DEFAULT 0,
+                    limit_up_mbps    REAL NOT NULL DEFAULT 0,
+                    dns_server       TEXT NOT NULL DEFAULT '',
+                    source_interface TEXT NOT NULL DEFAULT '',
+                    user_id          INTEGER,
+                    bypass           INTEGER NOT NULL DEFAULT 0)""")
+            await conn.execute(
+                "INSERT INTO devices (mac, name, created_at) VALUES (?, ?, ?)",
+                ("aa:bb:cc:dd:ee:40", "Old", 1.0))
+            await conn.execute("""
+                CREATE TABLE leases (
+                    mac TEXT PRIMARY KEY, ip TEXT NOT NULL,
+                    lease_start REAL NOT NULL, lease_end REAL NOT NULL)""")
+            await conn.execute("""
+                CREATE TABLE users (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name             TEXT NOT NULL DEFAULT '',
+                    quota_mode       TEXT NOT NULL DEFAULT 'auto',
+                    fixed_gb         REAL,
+                    block_state      TEXT NOT NULL DEFAULT 'ok',
+                    topup_gb         REAL NOT NULL DEFAULT 0,
+                    created_at       REAL NOT NULL,
+                    guest            INTEGER NOT NULL DEFAULT 0,
+                    protected        INTEGER NOT NULL DEFAULT 0,
+                    exempt_quota     INTEGER NOT NULL DEFAULT 0,
+                    limit_down_mbps  REAL NOT NULL DEFAULT 0,
+                    limit_up_mbps    REAL NOT NULL DEFAULT 0,
+                    notified_50      INTEGER NOT NULL DEFAULT 0,
+                    notified_75      INTEGER NOT NULL DEFAULT 0,
+                    notified_100     INTEGER NOT NULL DEFAULT 0,
+                    history_days     INTEGER,
+                    dns_server       TEXT NOT NULL DEFAULT '')""")
+            await conn.commit()
+            await conn.close()
+            conn = None
+        run(_build())
+        d = _db.Database(path)
+        run(d.connect())
+        try:
+            dev = run(d.get_device(mac="aa:bb:cc:dd:ee:40"))
+            assert dev.access_interface == ""
+            assert dev.access_override == ""
+            # the migrated columns are writable + readable
+            run(d.update_device(dev.id, access_override="LAN1"))
+            dev = run(d.get_device(mac="aa:bb:cc:dd:ee:40"))
+            assert dev.access_override == "LAN1"
+            assert dev.access_interface == ""
+            run(d.update_device(dev.id, access_interface="WiFi · MyNet"))
+            dev = run(d.get_device(mac="aa:bb:cc:dd:ee:40"))
+            assert dev.access_interface == "WiFi · MyNet"
+        finally:
+            run(d.close())
+    finally:
+        if conn is not None:
+            run(conn.close())
