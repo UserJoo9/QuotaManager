@@ -64,7 +64,11 @@ def parse_changelog(text: str, current: str, latest: str,
     ``###`` sub-headings preserved).
     """
     # re.split with a capturing group returns [pre, hdr, body, hdr, body, ...]
-    parts = re.split(r"^##\s+\[([^\]]+)\]\s*$", text, flags=re.M)
+    # A header may carry a " — YYYY-MM-DD" date suffix ("## [0.2.1] —
+    # 2026-08-17") — the trailing group tolerates it but stays on the SAME
+    # line (never eating the following section's header via \s); non-version
+    # and Unreleased titles are filtered below anyway.
+    parts = re.split(r"^##\s+\[([^\]]+)\](?:[ \t]+[^\n]*)?$", text, flags=re.M)
     sections: list[tuple[str, str]] = []
     for i in range(1, len(parts) - 1, 2):
         title = parts[i].strip()

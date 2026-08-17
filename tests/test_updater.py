@@ -90,6 +90,42 @@ def test_parse_changelog_old_box_gets_every_thing():
     assert [s["version"] for s in sections] == ["0.3.1", "0.3.0", "0.2.0"]
 
 
+def test_parse_changelog_matches_date_suffixed_headers():
+    """The repo's CHANGELOG headers carry a `` — YYYY-MM-DD`` date suffix
+    (``## [0.2.1] — 2026-08-17``). The live "Show details" popup showed
+    "No changelog available" because the parser only matched bare
+    ``## [0.2.1]`` headers — pin the real format so it can't regress."""
+    text = """
+# Changelog
+
+## [Unreleased]
+
+## [0.2.1] — 2026-08-17
+
+### Added
+
+- self-update checks.
+
+### Fixed
+
+- a bug.
+
+## [0.2.0] — 2026-08-16
+
+### Added
+
+- older feature.
+"""
+    sections = parse_changelog(text, "0.2.0", "0.2.1")
+    assert [s["version"] for s in sections] == ["0.2.1"]
+    assert sections[0]["title"] == "v0.2.1"
+    # the body keeps its "###" sub-headings — the popup renders from Added down
+    assert "### Added" in sections[0]["body"]
+    assert "self-update checks." in sections[0]["body"]
+    # the version is still the only thing captured (never the date)
+    assert sections[0]["version"] == "0.2.1"
+
+
 # -- the updater -------------------------------------------------------------
 
 def make_updater(db, **kw):

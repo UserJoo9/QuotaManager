@@ -411,6 +411,14 @@ kernel counts and drops.
 _Orphans + debt are tracked in [LEGACY_DEBT_AND_RISKS] below. Version history
 (newest first) — full detail in the git history / CHANGELOG.md; these are the
 headlines + the gotchas to remember:_
+- **2026-08-17** — **Show-details changelog bug fixed**: `parse_changelog` only
+  matched BARE `## [version]` headers — the real CHANGELOG writes
+  `## [0.2.1] — 2026-08-17` (date suffix), so the popup said "New versions
+  since v0.2.0 (0) / No changelog available". The split regex now tolerates a
+  same-line suffix (`(?:[ \t]+[^\n]*)?`) — must NOT use `\s+.*` (it crosses
+  the blank line and swallows the NEXT section's header into the previous
+  body). Release notes (release.yml awk `index()` substring) were unaffected.
+  Pinned by `test_parse_changelog_matches_date_suffixed_headers`.
 - **2026-08-17** — **v0.2.1 released + pushed**: the whole uncommitted batch
   below (self-update, period_type/end_of_month + period-math fix, disabled
   onboarding lock, DHCP-level refusals, guest-limit apply-to-existing,
