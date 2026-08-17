@@ -92,20 +92,30 @@ class ArpRttProbe:
     def enabled(self) -> bool:
         return bool(self._networks) and bool(self._client_ip)
 
+    def _open_raw_socket(self) -> socket.socket | None:
+        """Open the raw AF_PACKET socket (injected factory or real). None =>
+        raw sockets unavailable (no root / non-Linux / a refused factory) and
+        the caller falls back to ping parsing."""
+        if self._socket_factory is not None:
+            return self._socket_factory()
+        try:
+            return socket.socket(socket.AF_PACKET, socket.SOCK_RAW,
+                                 socket.htons(ETH_P_ARP))
+        except (AttributeError, OSError):
+            return None
+
     def _raw_probe(self, targets: list[str], iface: str, box_mac: str,
                    box_ips: set[str]) -> dict[str, list[float]] | None:
         """Burst ARP requests per target; time the replies. None => no raw
         sockets (caller falls back)."""
-        if self._socket_factory is not None:
-            sock = self._socket_factory()
-        else:
-            try:
-                sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW,
-                                     socket.htons(ETH_P_ARP))
-            except (AttributeError, OSError):
-                log.warning("cannot open a raw ARP socket (root?) — latency "
-                            "probe falls back to ping parsing")
-                return None
+        try:
+            sock = self._open_raw_socket()
+        except (AttributeError, OSError):
+            sock = None
+        if sock is None:
+            log.warning("cannot open a raw ARP socket (root?) — latency "
+                        "probe falls back to ping parsing")
+            return None
         rtts: dict[str, list[float]] = {ip: [] for ip in targets}
         try:
             sock.bind((iface, 0))

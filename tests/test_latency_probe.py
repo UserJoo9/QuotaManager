@@ -34,9 +34,14 @@ def test_classify_needs_min_samples():
 
 
 def test_probe_ping_fallback_parses_time_ms():
-    """Without raw sockets the probe parses ``time=`` values out of ping —
-    ICMP-blocking clients are simply not classified."""
+    """Without raw sockets — no root, non-Linux, or a refused factory — the
+    probe parses ``time=`` values out of ping. ICMP-blocking clients are
+    simply not classified. (The factory refusal makes the fallback
+    deterministic on EVERY platform, including root-on-Linux CI.)"""
     calls = []
+
+    def no_raw_socket():
+        raise OSError("raw sockets unavailable (root?)")
 
     def fake_run(argv):
         calls.append(argv)
@@ -54,7 +59,8 @@ def test_probe_ping_fallback_parses_time_ms():
             return 0, "2: eth0    link/ether 11:22:33:44:55:66 brd ff:ff:ff:ff:ff:ff\n"
         return 0, ""
 
-    probe = ArpRttProbe(_cfg(), run_command=fake_run)
+    probe = ArpRttProbe(_cfg(), run_command=fake_run,
+                        socket_factory=no_raw_socket)
     assert probe.enabled
     rtts = probe.probe(["1.2.3.4", "10.0.0.9"])
     assert rtts == {"1.2.3.4": [2.51, 1.98, 2.10]}
