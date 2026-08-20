@@ -90,8 +90,8 @@ def test_index_served(client):
     assert 'id="panel-management"' in r.text
     assert r.text.index('id="panel-management"') < r.text.index("bundle-used")
     assert 'id="usage-chart"' not in r.text
-    assert "assets/app.js?v=52" in r.text
-    assert "assets/styles.css?v=49" in r.text
+    assert "assets/app.js?v=55" in r.text
+    assert "assets/styles.css?v=51" in r.text
     # v24: the sidebar collapse toggle is gone — the sidebar is a fixed rail.
     assert "sidebar-toggle" not in r.text
     assert "sidebar-collapsed" not in r.text
@@ -212,7 +212,13 @@ def test_wan_tab_present(client):
     # are actively CLEARED (not merely left un-prefilled), so a value revealed
     # then re-hidden vanishes immediately instead of lingering until a refresh.
     assert "user.value = privacyHide ? \"\" : (w.pppoe_user" in rjs.text
-    assert "pass.value = privacyHide ? \"\" : (w.pppoe_password" in rjs.text
+    # Sensitive-data hardening: the stored PPPoE password is NEVER prefilled —
+    # the field stays empty (blank = keep the stored value) with a
+    # presence-aware placeholder; the server masks it as "********" and ships
+    # pppoe_has_password so the panel knows a value exists.
+    assert "pppoe_has_password" in rjs.text
+    assert "pass.value = \"\"" in rjs.text
+    assert "leave blank to keep" in rjs.text
     # v28: the last visited sidebar tab is remembered across page reloads —
     # switchPanel persists it, init restores a saved panel only if it still
     # exists in the nav (falls back to the default Management page otherwise).
@@ -341,6 +347,6 @@ def test_history_assets_bumped(client):
     48/47; the v27.1 PPPoE-username privacy fix took app.js to 48 — this
     always checks the CURRENT baseline, not the original bump."""
     r = client.get("/")
-    assert "assets/styles.css?v=49" in r.text
-    assert "assets/app.js?v=52" in r.text
+    assert "assets/styles.css?v=51" in r.text
+    assert "assets/app.js?v=55" in r.text
 

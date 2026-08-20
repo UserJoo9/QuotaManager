@@ -944,6 +944,43 @@ select option { background: var(--bg-2); }
   color: var(--accent-3);
 }
 
+/* Security alerting toast (failed logins / weak password / WAN-over-HTTP) —
+   a fixed top-center notification below the update toast, same pattern. */
+.security-banner {
+  position: fixed;
+  top: 76px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 44;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  max-width: min(680px, calc(100vw - 24px));
+  padding: 12px 14px;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(135deg, rgba(50, 12, 14, 0.96),
+                              rgba(62, 16, 20, 0.96));
+  border: 1px solid rgba(220, 38, 38, 0.55);
+  box-shadow: var(--shadow-lg);
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: #FCA5A5;
+}
+.security-banner-text { flex: 1; min-width: 0; }
+
+.totp-secret {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  letter-spacing: 2px;
+  word-break: break-all;
+  margin: 8px 0;
+}
+
+.link-sep { color: var(--text-dim); padding: 0 6px; }
+
 /* ---------- WAN tab: step-by-step router guide ---------- */
 .btn-row {
   display: flex;
@@ -1242,6 +1279,58 @@ select option { background: var(--bg-2); }
   .dns-preset-row { flex-direction: column; align-items: flex-start; }
 }
 
+/* ---------- Firewall tab ---------- */
+.fw-head { display: flex; align-items: center; gap: 10px; }
+.badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 0.72rem;
+  font-weight: 700; letter-spacing: 0.02em; }
+.badge-lan { color: var(--accent-3); background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.35); }
+.badge-wan { color: var(--warn); background: rgba(217, 119, 6, 0.12); border: 1px solid rgba(217, 119, 6, 0.4); }
+.fw-toggle-row { display: flex; flex-wrap: wrap; gap: 10px 24px; align-items: center; margin-top: 12px; }
+.switch-row { display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 0.88rem; }
+.switch-row em { color: var(--warn); font-style: normal; font-size: 0.78rem; }
+.fw-rule-list { display: flex; flex-direction: column; gap: 8px; }
+.fw-rule { display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--surface-2); }
+.fw-rule.deny { border-left: 3px solid var(--danger); }
+.fw-rule.allow { border-left: 3px solid var(--accent); }
+.fw-rule-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.fw-rule-badge { font-size: 0.68rem; font-weight: 800; letter-spacing: 0.05em; padding: 2px 8px;
+  border-radius: 999px; flex: 0 0 auto; }
+.fw-rule-badge.allow { color: var(--accent-3); background: rgba(59, 130, 246, 0.14); }
+.fw-rule-badge.deny { color: var(--danger); background: rgba(220, 38, 38, 0.12); }
+.fw-rule-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.fw-rule-actions { display: inline-flex; gap: 4px; flex: 0 0 auto; }
+.btn.ghost.tiny.danger { color: var(--danger); }
+.fw-ban-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.fw-ban { display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius-md); }
+.ban-form { display: flex; gap: 8px; }
+.ban-form input { flex: 1 1 auto; }
+.fw-log { display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow-y: auto;
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace; font-size: 0.78rem; }
+.fw-log-entry { display: flex; gap: 8px; padding: 4px 2px; border-bottom: 1px solid var(--border-soft); }
+.fw-log-entry.warn .fw-log-msg { color: var(--warn); }
+.fw-log-entry.error .fw-log-msg { color: var(--danger); }
+.fw-log-entry.info .fw-log-msg { color: var(--text-dim); }
+.fw-log-msg { word-break: break-word; }
+.fw-warnings { margin-top: 8px; }
+#fw-msg { margin-left: 10px; }
+
+/* ---------- enforce-https card ---------- */
+.fw-https-card { border-top: 1px solid rgba(99, 179, 237, 0.18); }
+.fw-https-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.fw-https-info { flex: 1; min-width: 0; }
+.fw-https-info h3 { margin: 0 0 4px; }
+.fw-https-info p { margin: 0; }
+.fw-https-btns { display: flex; gap: 8px; flex-shrink: 0; }
+.fw-https-status { margin-top: 10px; padding: 8px 12px; border-radius: 8px; background: rgba(99, 179, 237, 0.08); }
+.fw-https-success { color: #68d391; background: rgba(104, 211, 145, 0.08); }
+.fw-https-error { color: var(--danger); background: rgba(220, 38, 38, 0.08); }
+.fw-https-done { border-top-color: rgba(104, 211, 145, 0.3); }
+.btn.danger { color: var(--danger); border: 1px solid rgba(220, 38, 38, 0.3); }
+.btn.danger:hover { background: rgba(220, 38, 38, 0.12); }
+
 /* ---------- component vitality: hover lift + brighten ---------- */
 .glass.card, .bundle-card, .user-card {
   transition: transform 0.25s ease, background 0.25s ease, box-shadow 0.25s ease;
@@ -1252,3 +1341,43 @@ select option { background: var(--bg-2); }
   transform: translateY(-2px);
   background: rgba(25, 31, 44, 0.65) !important;
 }
+
+/* ---------- notification bell + dropdown ---------- */
+.notif-bell-wrap { position: fixed; top: 14px; right: 24px; z-index: 46; }
+.notif-badge {
+  position: absolute; top: -4px; right: -4px;
+  min-width: 16px; height: 16px; padding: 0 4px;
+  font-size: 0.65rem; font-weight: 700; line-height: 16px; text-align: center;
+  color: #fff; background: var(--danger); border-radius: 999px;
+  pointer-events: none;
+}
+.notif-dropdown {
+  position: absolute; top: calc(100% + 8px); right: 0;
+  width: 340px; max-height: 420px; overflow-y: auto;
+  background: linear-gradient(135deg, rgba(13, 16, 23, 0.96), rgba(20, 26, 38, 0.96));
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg); z-index: 50;
+  backdrop-filter: var(--glass-filter); -webkit-backdrop-filter: var(--glass-filter);
+}
+.notif-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 12px 14px; border-bottom: 1px solid var(--border-soft);
+}
+.notif-header strong { font-size: 0.88rem; }
+.notif-list { display: flex; flex-direction: column; gap: 0; }
+.notif-item {
+  display: flex; gap: 10px; padding: 10px 14px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 0.82rem; line-height: 1.4;
+}
+.notif-item:last-child { border-bottom: none; }
+.notif-item.warn { border-left: 3px solid var(--warn); }
+.notif-item.danger { border-left: 3px solid var(--danger); }
+.notif-item.info { border-left: 3px solid var(--accent); }
+.notif-item .notif-time { color: var(--text-faint); font-size: 0.7rem; white-space: nowrap; flex: 0 0 auto; }
+.notif-item .notif-msg { flex: 1 1 auto; word-break: break-word; }
+.notif-empty { padding: 20px 14px; text-align: center; }
+
+/* ---------- firewall rule + forward form modals ---------- */
+.fw-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.fw-form-row .field { margin-top: 0; }

@@ -71,7 +71,9 @@ const API = {
   async req(method, path, body) {
     const opts = {
       method,
-      headers: { "Content-Type": "application/json" },
+      // X-QM-CSRF: every state-changing request must carry the custom header
+      // (CSRF defense-in-depth — a cross-site form can't set one).
+      headers: { "Content-Type": "application/json", "X-QM-CSRF": "1" },
       credentials: "same-origin",
     };
     if (body !== undefined) opts.body = JSON.stringify(body);
@@ -110,6 +112,7 @@ let logLines = [];         // raw lines from /api/logs
 let logMeta = null;        // {total, truncated} from the last /api/logs call
 let logFilter = "ALL";     // active log level filter
 let logSearch = "";        // current log search string
+let firewallState = null;  // latest /api/firewall payload (Firewall tab)
 
 /* ---------------- screens ---------------- */
 
@@ -137,8 +140,105 @@ function render(data) {
   renderNetworkPreview(networkConfig); // null-safe — refreshed by refreshNetwork()
   renderVpnShare(data); // live status rides the WS snapshot so "applying…" advances
   renderUpdate(data.update); // null-safe — no updater wired (tests / degraded boot)
+  renderSecurity(data.security); // auth-hardening alerting banner
   const v = $("app-version");
   if (v) v.textContent = data.version ? `Quota Manager ${data.version}` : "—";
+}
+
+/* ---------------- security alerting banner ---------------- */
+
+function renderSecurity(sec) {
+  const el = $("security-banner");
+  if (!el || !sec) return;
+  const msgs = [];
+  if (sec.default_password) {
+    msgs.push("Default admin password still active — change it in Settings (Strong WAN mode is blocked until you do).");
+  }
+  if (sec.wan_http) {
+    msgs.push("WAN mode is running over plain HTTP — credentials travel unencrypted. Configure web.tls_* for HTTPS (or set secure_cookies).");
+  }
+  if (sec.failed_logins_1h > 0) {
+    msgs.push(`${sec.failed_logins_1h} failed login attempt${sec.failed_logins_1h === 1 ? "" : "s"} blocked in the last hour.`);
+  }
+  if (sec.waf_blocks_1h > 0) {
+    msgs.push(`${sec.waf_blocks_1h} request${sec.waf_blocks_1h === 1 ? "" : "s"} blocked by the WAF in the last hour.`);
+  }
+  if (msgs.length) {
+    const text = "⚠ " + msgs.join("  ");
+    // Dismissed until the warning text changes (a new condition or count).
+    if (localStorage.getItem("quota_sec_banner_dismissed") === text) {
+      el.classList.add("hidden");
+      return;
+    }
+    $("security-banner-text").textContent = text;
+    el.classList.remove("hidden");
+  } else {
+    el.classList.add("hidden");
+  }
+  /* ---- notification center ---- */
+  _pushNotifs(sec);
+}
+
+/* ---------------- notification center ---------------- */
+
+const _notifSeenKey = "quota_notifs_seen";
+const _notifBuf = [];
+
+function _pushNotifs(sec) {
+  if (!sec) return;
+  const now = Date.now();
+  if (sec.failed_logins_1h > 0) {
+    _notifBuf.push({ id: "logins", type: "danger", time: now,
+      msg: `${sec.failed_logins_1h} failed login attempt${sec.failed_logins_1h === 1 ? "" : "s"} in the last hour.` });
+  }
+  if (sec.waf_blocks_1h > 0) {
+    _notifBuf.push({ id: "waf", type: "warn", time: now,
+      msg: `${sec.waf_blocks_1h} request${sec.waf_blocks_1h === 1 ? "" : "s"} blocked by the WAF in the last hour.` });
+  }
+  if (sec.default_password) {
+    _notifBuf.push({ id: "default_pw", type: "danger", time: now,
+      msg: "Default admin password is still active." });
+  }
+  if (sec.wan_http) {
+    _notifBuf.push({ id: "wan_http", type: "warn", time: now,
+      msg: "WAN mode running over plain HTTP — credentials unencrypted." });
+  }
+  _renderNotifDropdown();
+}
+
+function _renderNotifDropdown() {
+  const badge = $("notif-badge");
+  const list = $("notif-list");
+  if (!badge || !list) return;
+  const seen = JSON.parse(localStorage.getItem(_notifSeenKey) || "[]");
+  const unseen = _notifBuf.filter((n) => !seen.includes(n.id));
+  if (unseen.length) {
+    badge.textContent = unseen.length > 9 ? "9+" : String(unseen.length);
+    badge.classList.remove("hidden");
+  } else {
+    badge.classList.add("hidden");
+  }
+  if (!_notifBuf.length) {
+    list.innerHTML = `<p class="muted small notif-empty">No notifications.</p>`;
+    return;
+  }
+  list.innerHTML = _notifBuf.map((n) => {
+    const t = new Date(n.time);
+    const ts = t.getHours().toString().padStart(2, "0") + ":" + t.getMinutes().toString().padStart(2, "0");
+    return `<div class="notif-item ${esc(n.type)}">
+      <span class="notif-time">${ts}</span>
+      <span class="notif-msg">${esc(n.msg)}</span>
+    </div>`;
+  }).join("");
+}
+
+function _notifDismissAll() {
+  const seen = _notifBuf.map((n) => n.id);
+  localStorage.setItem(_notifSeenKey, JSON.stringify(seen));
+  $("notif-badge").classList.add("hidden");
+  $("notif-dropdown").classList.add("hidden");
+  _notifBuf.length = 0;
+  _renderNotifDropdown();
 }
 
 /* ---------------- software updates (Admin tab + notification) ---------------- */
@@ -540,6 +640,7 @@ function switchPanel(name) {
   if (name === "admin") refreshLogs(); // the System Logs console lives on the Admin page
   if (name === "network") { refreshNetwork(); refreshGuest(); }
   if (name === "wan") refreshWan();
+  if (name === "firewall") refreshFirewall();
   if (name === "history") refreshHistory();
   if (name === "dns") refreshDns();
 }
@@ -551,6 +652,423 @@ async function refreshLogs() {
     logMeta = data;
     renderLogs();
   } catch (_) { /* not critical — activity still works */ }
+}
+
+/* ---------------- firewall ---------------- */
+
+function fwRuleStr(r) {
+  const parts = [];
+  if (r.src && r.src !== "0.0.0.0/0") parts.push("src " + r.src);
+  if (r.dst && r.dst !== "0.0.0.0/0") parts.push("dst " + r.dst);
+  if (r.protocol) parts.push(r.protocol);
+  if (r.src_port) parts.push("sport " + r.src_port);
+  if (r.dst_port) parts.push("dport " + r.dst_port);
+  return parts.join(" ") || "any";
+}
+
+function fwRuleRow(r, i) {
+  const cls = r.action === "allow" ? "fw-rule allow" : "fw-rule deny";
+  const badge = r.action === "allow" ? "ALLOW" : "DENY";
+  return `
+    <div class="${cls}">
+      <div class="fw-rule-main">
+        <span class="fw-rule-badge ${r.action}">${badge}</span>
+        <span class="fw-rule-text">
+          <strong>${esc(r.name || "rule " + (i + 1))}</strong>
+          <span class="muted small">${esc(r.chain)} · ${esc(fwRuleStr(r))}</span>
+        </span>
+      </div>
+      <div class="fw-rule-actions">
+        <button type="button" class="btn ghost tiny" onclick="fwEditRule(${i})">Edit</button>
+        <button type="button" class="btn ghost tiny danger" onclick="fwDeleteRule(${i})">×</button>
+      </div>
+    </div>`;
+}
+
+function fwServiceRow(s, i) {
+  return `
+    <div class="fw-rule allow">
+      <div class="fw-rule-main">
+        <span class="fw-rule-badge allow">OPEN</span>
+        <span class="fw-rule-text">
+          <strong>${esc(s.name || "service " + (i + 1))}</strong>
+          <span class="muted small">${esc(s.protocol)}/${s.port}${s.source && s.source !== "0.0.0.0/0" ? " · from " + esc(s.source) : ""}</span>
+        </span>
+      </div>
+      <div class="fw-rule-actions">
+        <button type="button" class="btn ghost tiny danger" onclick="fwDeleteService(${i})">×</button>
+      </div>
+    </div>`;
+}
+
+function fwForwardRow(f, i) {
+  return `
+    <div class="fw-rule allow">
+      <div class="fw-rule-main">
+        <span class="fw-rule-badge allow">FWD</span>
+        <span class="fw-rule-text">
+          <strong>${esc(f.name || "forward " + (i + 1))}</strong>
+          <span class="muted small">${esc(f.protocol)}/${f.source_port} → ${esc(f.target_ip)}:${f.target_port}${f.source && f.source !== "0.0.0.0/0" ? " from " + esc(f.source) : ""}</span>
+        </span>
+      </div>
+      <div class="fw-rule-actions">
+        <button type="button" class="btn ghost tiny" onclick="fwEditForward(${i})">Edit</button>
+        <button type="button" class="btn ghost tiny danger" onclick="fwDeleteForward(${i})">×</button>
+      </div>
+    </div>`;
+}
+
+function fwLoadFromState() {
+  const c = (firewallState && firewallState.config) || {};
+  $("fw-enabled").checked = c.enabled !== false;
+  $("fw-syn-rate").value = (c.syn_flood && c.syn_flood.rate) ?? 10;
+  $("fw-syn-burst").value = (c.syn_flood && c.syn_flood.burst) ?? 20;
+  $("fw-bf-threshold").value = (c.brute_force && c.brute_force.threshold) ?? 10;
+  $("fw-bf-seconds").value = (c.brute_force && c.brute_force.ban_seconds) ?? 1800;
+  $("fw-scan-threshold").value = (c.scan_detect && c.scan_detect.syn_threshold) ?? 200;
+  $("fw-scan-seconds").value = (c.scan_detect && c.scan_detect.ban_seconds) ?? 3600;
+  $("fw-scan-enabled").checked = !c.scan_detect || c.scan_detect.enabled !== false;
+  $("fw-geo").checked = c.geo_block === true;
+  $("fw-wan-confirmed").checked = c.wan_confirmed === true;
+  $("fw-dmz").value = c.dmz || "";
+  $("fw-allow-cidrs").value = (c.allow_cidrs || []).join("\n");
+  $("fw-deny-cidrs").value = (c.deny_cidrs || []).join("\n");
+  $("fw-rules").innerHTML = (c.rules || []).length
+    ? (c.rules || []).map(fwRuleRow).join("")
+    : `<p class="muted small">No custom rules — the posture defaults apply.</p>`;
+  $("fw-services").innerHTML = (c.services || []).length
+    ? (c.services || []).map(fwServiceRow).join("")
+    : `<p class="muted small">No services exposed (LAN-only box management).</p>`;
+  $("fw-forwards").innerHTML = (c.port_forwards || []).length
+    ? (c.port_forwards || []).map(fwForwardRow).join("")
+    : `<p class="muted small">No port forwards (WAN mode only).</p>`;
+}
+
+function fwRenderStatus() {
+  const st = (firewallState && firewallState.status) || {};
+  const mode = firewallState && firewallState.mode;
+  const badge = $("fw-mode-badge");
+  badge.textContent = mode === "wan" ? "WAN mode · default-deny inbound on ppp0"
+    : mode === "lan" ? "LAN mode · permissive-out" : "—";
+  badge.className = "badge " + (mode === "wan" ? "badge-wan" : "badge-lan");
+  $("fw-apply-state").textContent =
+    st.apply_ok === false ? "⚠ last apply failed — " + (st.last_error || "nft error")
+    : st.apply_ok ? "applied ✓"
+    : "not applied yet";
+  const unavail = $("fw-unavailable");
+  if (firewallState && firewallState.available === false) {
+    unavail.classList.remove("hidden");
+    unavail.textContent = "Firewall unavailable (no nft/root) — the table is not programmed. " +
+      (firewallState.reason || "");
+  } else {
+    unavail.classList.add("hidden");
+  }
+  // bans
+  const bans = (st.bans || []);
+  $("fw-bans").innerHTML = bans.length
+    ? bans.map((b) => `
+        <div class="fw-ban">
+          <span><strong>${esc(b.ip)}</strong> <span class="muted small">${esc(b.reason)}</span></span>
+          <span class="muted small">${Math.ceil(b.remaining / 60)} min left</span>
+          <button type="button" class="btn ghost tiny danger" onclick='fwUnban("${b.ip}")'>×</button>
+        </div>`).join("")
+    : `<p class="muted small">No active bans.</p>`;
+  // log
+  const log = (firewallState && firewallState.log) || [];
+  $("fw-log").innerHTML = log.length
+    ? log.map((e) => `
+        <div class="fw-log-entry ${e.level}">
+          <span class="muted small">${new Date(e.ts * 1000).toLocaleString()}</span>
+          <span class="fw-log-msg">${esc(e.message)}</span>
+        </div>`).join("")
+    : `<p class="muted small">No firewall events yet.</p>`;
+}
+
+async function refreshFirewall() {
+  try {
+    firewallState = await API.get("/api/firewall");
+    if (!firewallState || firewallState.available === false) {
+      fwRenderStatus();
+      $("fw-rules").innerHTML = `<p class="muted small">Firewall disabled in config.</p>`;
+      return;
+    }
+    fwLoadFromState();
+    fwRenderStatus();
+    fwCheckTls();
+  } catch (e) {
+    if (e.message !== "unauthorized") {
+      $("fw-rules").innerHTML = `<p class="muted small">Firewall unavailable: ${esc(e.message)}</p>`;
+    }
+  }
+}
+
+function fwCollect() {
+  return {
+    enabled: $("fw-enabled").checked,
+    services: (firewallState && firewallState.config && firewallState.config.services) || [],
+    port_forwards: (firewallState && firewallState.config && firewallState.config.port_forwards) || [],
+    rules: (firewallState && firewallState.config && firewallState.config.rules) || [],
+    allow_cidrs: $("fw-allow-cidrs").value.split("\n").map((s) => s.trim()).filter(Boolean),
+    deny_cidrs: $("fw-deny-cidrs").value.split("\n").map((s) => s.trim()).filter(Boolean),
+    dmz: $("fw-dmz").value.trim(),
+    syn_flood: { rate: +$("fw-syn-rate").value || 10, burst: +$("fw-syn-burst").value || 20 },
+    brute_force: { threshold: +$("fw-bf-threshold").value || 10, ban_seconds: +$("fw-bf-seconds").value || 1800 },
+    scan_detect: { enabled: $("fw-scan-enabled").checked, syn_threshold: +$("fw-scan-threshold").value || 200, ban_seconds: +$("fw-scan-seconds").value || 3600 },
+    geo_block: $("fw-geo").checked,
+    wan_confirmed: $("fw-wan-confirmed").checked,
+  };
+}
+
+async function fwApply() {
+  const btn = $("fw-apply");
+  btn.disabled = true;
+  btn.textContent = "Applying…";
+  const msg = $("fw-msg");
+  msg.textContent = "";
+  try {
+    const res = await API.post("/api/firewall", fwCollect());
+    msg.textContent = "Applied ✓" + (res.watchdog_seconds ? ` (watchdog armed: auto-reverts in ${res.watchdog_seconds}s only if the box is locked out)` : "");
+    if (res.warnings && res.warnings.length) {
+      $("fw-warnings").innerHTML =
+        `<p class="muted small" style="color:var(--warn)">Ignored (would lock you out / invalid):</p>` +
+        res.warnings.map((w) => `<p class="muted small">• ${esc(w)}</p>`).join("");
+    } else {
+      $("fw-warnings").innerHTML = "";
+    }
+    await refreshFirewall();
+  } catch (e) {
+    msg.textContent = "Apply failed: " + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Apply firewall";
+  }
+}
+
+async function fwRevert() {
+  try {
+    const res = await API.post("/api/firewall/revert");
+    $("fw-msg").textContent = res.applied ? "Reverted to last-good ✓" : "Revert failed";
+    await refreshFirewall();
+  } catch (e) {
+    $("fw-msg").textContent = "Revert failed: " + e.message;
+  }
+}
+
+async function fwCheckTls() {
+  try {
+    const st = await API.get("/api/security/tls");
+    const card = $("fw-https-card");
+    const btn = $("fw-enforce-https");
+    const rmBtn = $("fw-remove-https");
+    const status = $("fw-https-status");
+    if (st.enforced) {
+      btn.textContent = "HTTPS active";
+      btn.disabled = true;
+      btn.classList.remove("primary");
+      btn.classList.add("ghost");
+      rmBtn.classList.remove("hidden");
+      status.textContent = "TLS certificate and secure cookies are enabled. "
+        + "The dashboard is accessible at https://<your-box-ip>:8080";
+      status.classList.remove("hidden");
+      card.classList.add("fw-https-done");
+    } else {
+      btn.textContent = "Enable HTTPS";
+      btn.disabled = false;
+      btn.classList.remove("ghost");
+      btn.classList.add("primary");
+      rmBtn.classList.add("hidden");
+      status.classList.add("hidden");
+      card.classList.remove("fw-https-done");
+    }
+  } catch (e) {
+    // TLS check failed — non-critical, just show the button
+  }
+}
+
+async function fwEnforceHttps() {
+  const btn = $("fw-enforce-https");
+  const status = $("fw-https-status");
+  btn.disabled = true;
+  btn.textContent = "Generating certificate…";
+  status.classList.remove("hidden");
+  status.textContent = "Creating self-signed TLS certificate and updating config…";
+  try {
+    const res = await API.post("/api/security/enforce-https");
+    btn.textContent = "Restarting…";
+    status.textContent = res.message || "HTTPS enforced — the dashboard is restarting over HTTPS. "
+      + "Accept the self-signed certificate warning in your browser once, then "
+      + "the connection is encrypted. If the page does not reload, open "
+      + "https://<your-box-ip>:8080 manually.";
+    status.classList.add("fw-https-success");
+    btn.classList.remove("primary");
+    btn.classList.add("ghost");
+    btn.textContent = "HTTPS active";
+    $("fw-remove-https").classList.remove("hidden");
+  } catch (e) {
+    status.textContent = "Failed: " + e.message;
+    status.classList.add("fw-https-error");
+    btn.disabled = false;
+    btn.textContent = "Enable HTTPS";
+  }
+}
+
+async function fwRemoveHttps() {
+  $("fw-https-modal").classList.add("hidden");
+  const btn = $("fw-enforce-https");
+  const rmBtn = $("fw-remove-https");
+  const status = $("fw-https-status");
+  rmBtn.disabled = true;
+  rmBtn.textContent = "Removing…";
+  status.classList.remove("hidden", "fw-https-success", "fw-https-error");
+  status.textContent = "Removing TLS certificate and reverting to plain HTTP…";
+  try {
+    const res = await API.post("/api/security/remove-https");
+    status.textContent = res.message || "HTTPS removed — the dashboard is restarting over plain HTTP.";
+    status.classList.add("fw-https-success");
+    rmBtn.classList.add("hidden");
+    btn.textContent = "Enable HTTPS";
+    btn.disabled = false;
+    btn.classList.remove("ghost");
+    btn.classList.add("primary");
+    $("fw-https-card").classList.remove("fw-https-done");
+  } catch (e) {
+    status.textContent = "Failed: " + e.message;
+    status.classList.add("fw-https-error");
+    rmBtn.disabled = false;
+    rmBtn.textContent = "Remove HTTPS";
+  }
+}
+
+async function fwBan() {
+  const ip = $("fw-ban-ip").value.trim();
+  if (!ip) return;
+  try {
+    await API.post("/api/firewall/ban", { ip, seconds: 1800, reason: "manual" });
+    $("fw-ban-ip").value = "";
+    await refreshFirewall();
+  } catch (e) {
+    alert("Ban failed: " + e.message);
+  }
+}
+
+async function fwUnban(ip) {
+  try {
+    await API.post("/api/firewall/unban", { ip });
+    await refreshFirewall();
+  } catch (e) {
+    alert("Unban failed: " + e.message);
+  }
+}
+
+function fwEditRule(i) {
+  const rules = (firewallState && firewallState.config && firewallState.config.rules) || [];
+  const r = rules[i];
+  if (!r) return;
+  _openRuleModal(i, r);
+}
+
+function fwDeleteRule(i) {
+  (firewallState.config.rules || []).splice(i, 1);
+  fwLoadFromState();
+}
+
+function fwDeleteService(i) {
+  (firewallState.config.services || []).splice(i, 1);
+  fwLoadFromState();
+}
+
+function fwDeleteForward(i) {
+  (firewallState.config.port_forwards || []).splice(i, 1);
+  fwLoadFromState();
+}
+
+function fwAddRule() {
+  _openRuleModal(-1, {
+    name: "", chain: "forward", action: "deny", src: "", dst: "",
+    protocol: "tcp", src_port: 0, dst_port: 0, log: true,
+  });
+}
+
+function fwAddForward() {
+  _openFwdModal(-1, {
+    name: "", protocol: "tcp", source_port: 8080,
+    target_ip: "", target_port: 8080, source: "",
+  });
+}
+
+/* ---- rule modal ---- */
+let _fwRuleIdx = -1;
+function _openRuleModal(idx, r) {
+  _fwRuleIdx = idx;
+  $("fw-rule-modal-title").textContent = idx < 0 ? "Add rule" : "Edit rule";
+  $("fw-rm-name").value = r.name || "";
+  $("fw-rm-action").value = r.action || "deny";
+  $("fw-rm-chain").value = r.chain || "forward";
+  $("fw-rm-src").value = (r.src && r.src !== "0.0.0.0/0") ? r.src : "";
+  $("fw-rm-dst").value = (r.dst && r.dst !== "0.0.0.0/0") ? r.dst : "";
+  $("fw-rm-proto").value = r.protocol || "";
+  $("fw-rm-sport").value = r.src_port || 0;
+  $("fw-rm-dport").value = r.dst_port || 0;
+  $("fw-rule-modal").classList.remove("hidden");
+}
+function _saveRuleModal() {
+  const r = {
+    name: $("fw-rm-name").value.trim(),
+    action: $("fw-rm-action").value,
+    chain: $("fw-rm-chain").value,
+    src: $("fw-rm-src").value.trim() || "0.0.0.0/0",
+    dst: $("fw-rm-dst").value.trim() || "0.0.0.0/0",
+    protocol: $("fw-rm-proto").value,
+    src_port: +$("fw-rm-sport").value || 0,
+    dst_port: +$("fw-rm-dport").value || 0,
+    log: true,
+  };
+  const rules = (firewallState.config.rules = firewallState.config.rules || []);
+  if (_fwRuleIdx < 0) {
+    rules.push(r);
+  } else {
+    rules[_fwRuleIdx] = r;
+  }
+  $("fw-rule-modal").classList.add("hidden");
+  fwLoadFromState();
+}
+
+/* ---- forward modal ---- */
+let _fwFwdIdx = -1;
+function fwEditForward(i) {
+  const fwds = (firewallState && firewallState.config && firewallState.config.port_forwards) || [];
+  const f = fwds[i];
+  if (!f) return;
+  _openFwdModal(i, f);
+}
+function _openFwdModal(idx, f) {
+  _fwFwdIdx = idx;
+  $("fw-fwd-modal-title").textContent = idx < 0 ? "Add port forward" : "Edit port forward";
+  $("fw-fm-name").value = f.name || "";
+  $("fw-fm-proto").value = f.protocol || "tcp";
+  $("fw-fm-wan-port").value = f.source_port || 8080;
+  $("fw-fm-lan-port").value = f.target_port || 8080;
+  $("fw-fm-from").value = (f.source && f.source !== "0.0.0.0/0") ? f.source : "";
+  $("fw-fm-to").value = f.target_ip || "";
+  $("fw-fwd-modal").classList.remove("hidden");
+}
+function _saveFwdModal() {
+  const f = {
+    name: $("fw-fm-name").value.trim(),
+    protocol: $("fw-fm-proto").value,
+    source_port: +$("fw-fm-wan-port").value || 8080,
+    target_port: +$("fw-fm-lan-port").value || 8080,
+    source: $("fw-fm-from").value.trim() || "0.0.0.0/0",
+    target_ip: $("fw-fm-to").value.trim(),
+  };
+  const fwds = (firewallState.config.port_forwards = firewallState.config.port_forwards || []);
+  if (_fwFwdIdx < 0) {
+    fwds.push(f);
+  } else {
+    fwds[_fwFwdIdx] = f;
+  }
+  $("fw-fwd-modal").classList.add("hidden");
+  fwLoadFromState();
 }
 
 /* ---------------- browsing history ---------------- */
@@ -1302,9 +1820,27 @@ async function submitWelcome(ev) {
 async function submitLogin(ev) {
   ev.preventDefault();
   $("login-error").classList.add("hidden");
+  const code = $("login-totp").value.trim();
   try {
-    await API.post("/api/login", { password: $("login-password").value });
+    // Two-stage TOTP: stage 1 (password only) returns {ok:false, totp:true}
+    // when 2FA is enabled — then prompt for the authenticator code and
+    // re-submit WITH it. A code is never accepted without the password.
+    const res = await API.post("/api/login", {
+      password: $("login-password").value,
+      code: code || undefined,
+    });
+    if (res && res.ok === false && res.totp) {
+      $("login-totp").classList.remove("hidden");
+      $("login-totp-label").classList.remove("hidden");
+      $("login-submit").textContent = "Verify code & unlock";
+      $("login-totp").focus();
+      return;
+    }
     $("login-password").value = "";
+    $("login-totp").value = "";
+    $("login-totp").classList.add("hidden");
+    $("login-totp-label").classList.add("hidden");
+    $("login-submit").textContent = "Unlock dashboard";
     showApp();
     await refreshAll();
     wsConnect();
@@ -1788,7 +2324,16 @@ async function refreshWan() {
     // lingering in the DOM until a refresh.
     const user = $("wan-user"), pass = $("wan-pass"), wanif = $("wan-if");
     if (user && !wanToggleDirty) user.value = privacyHide ? "" : (w.pppoe_user || "");
-    if (pass && !wanToggleDirty) pass.value = privacyHide ? "" : (w.pppoe_password || "");
+    if (pass && !wanToggleDirty) {
+      // Sensitive-data hardening: the server never ships the stored PPPoE
+      // password (masked "********" + pppoe_has_password). The field stays
+      // EMPTY — leaving it blank preserves the stored value on apply — with a
+      // placeholder that says so. A non-empty value is always a NEW password.
+      pass.value = "";
+      pass.placeholder = w.pppoe_has_password
+        ? "•••••••• (stored — leave blank to keep)"
+        : "Enter PPPoE password";
+    }
     if (wanif && !wanToggleDirty) wanif.value = w.wan_if || "";
     renderWan(w);
     await maybeAutoDiagnose(w);
@@ -2028,16 +2573,89 @@ async function submitPassword(ev) {
   ev.preventDefault();
   const cur = $("p-cur").value;
   const next = $("p-new").value;
-  if (next.length < 4) { alert("New password must be at least 4 characters."); return; }
+  if (next.length < 12) { alert("New password must be at least 12 characters."); return; }
   try {
     await API.post("/api/password", { current: cur, new: next });
     $("pwd-modal").classList.add("hidden");
     $("pwd-form").reset();
-    alert("Password updated.");
+    // Password change invalidates the session — back to the login screen.
+    showLogin();
+    alert("Password updated — sign in again with the new password.");
   } catch (err) {
     // A 401 already showed the login screen (session expired) — don't double-alert.
     if (err.message === "unauthorized") return;
     alert(err.message === "current password incorrect" ? "Current password is wrong." : err.message);
+  }
+}
+
+/* ---------------- TOTP 2FA (opt-in) ---------------- */
+
+async function refreshTotp() {
+  try {
+    const st = await API.get("/api/totp");
+    $("totp-state").textContent = st.enabled ? "· enabled" : "";
+  } catch (_) { /* offline / degraded */ }
+}
+
+async function openTotp() {
+  try {
+    const st = await API.get("/api/totp");
+    let body;
+    if (st.enabled) {
+      body = `<p class="muted small">Two-factor is <strong>enabled</strong> — every login now needs a 6-digit code from your authenticator app.</p>
+        <div class="modal-actions">
+          <button type="button" id="totp-close" class="btn ghost">Close</button>
+          <button type="button" id="totp-disable" class="btn danger">Disable 2FA</button>
+        </div>`;
+    } else if (st.pending) {
+      body = `<p class="muted small">Enrollment pending — enter the code your authenticator app shows to confirm.</p>
+        <input type="text" id="totp-code" inputmode="numeric" placeholder="000 000" required>
+        <p id="totp-err" class="error hidden"></p>
+        <div class="modal-actions">
+          <button type="button" id="totp-close" class="btn ghost">Cancel</button>
+          <button type="button" id="totp-enable" class="btn primary">Enable</button>
+        </div>`;
+    } else {
+      const enr = await API.post("/api/totp/enroll");
+      $("totp-state").textContent = "· pending";
+      body = `<p class="muted small">Scan this with your authenticator app (or type the secret manually):</p>
+        <div class="totp-secret">${enr.secret}</div>
+        <p class="muted small">URI: <code>${enr.otpauth_uri}</code></p>
+        <input type="text" id="totp-code" inputmode="numeric" placeholder="000 000" required>
+        <p id="totp-err" class="error hidden"></p>
+        <div class="modal-actions">
+          <button type="button" id="totp-close" class="btn ghost">Cancel</button>
+          <button type="button" id="totp-enable" class="btn primary">Enable</button>
+        </div>`;
+    }
+    $("totp-body").innerHTML = body;
+    $("totp-modal").classList.remove("hidden");
+    $("totp-close").addEventListener("click", () => $("totp-modal").classList.add("hidden"));
+    const enableBtn = $("totp-enable");
+    if (enableBtn) enableBtn.addEventListener("click", enableTotp);
+    const disableBtn = $("totp-disable");
+    if (disableBtn) disableBtn.addEventListener("click", async () => {
+      await API.post("/api/totp/disable").catch(() => {});
+      $("totp-modal").classList.add("hidden");
+      await refreshTotp();
+      alert("Two-factor disabled.");
+    });
+  } catch (err) {
+    if (err.message !== "unauthorized") alert(err.message);
+  }
+}
+
+async function enableTotp() {
+  const code = $("totp-code").value.trim();
+  try {
+    await API.post("/api/totp/enable", { code });
+    $("totp-modal").classList.add("hidden");
+    await refreshTotp();
+    alert("Two-factor enabled — the next login needs your authenticator code.");
+  } catch (err) {
+    if (err.message === "unauthorized") return;
+    $("totp-err").textContent = err.message;
+    $("totp-err").classList.remove("hidden");
   }
 }
 
@@ -2185,6 +2803,43 @@ async function init() {
   $("wan-revert-btn").addEventListener("click", revertWan);
   $("wan-restart-btn").addEventListener("click", renewWanIp);
   $("wan-renew-save").addEventListener("click", submitWanRenew);
+  $("fw-apply").addEventListener("click", fwApply);
+  $("fw-revert").addEventListener("click", fwRevert);
+  $("fw-enforce-https").addEventListener("click", fwEnforceHttps);
+  $("fw-remove-https").addEventListener("click", () => $("fw-https-modal").classList.remove("hidden"));
+  $("fw-https-modal-cancel").addEventListener("click", () => $("fw-https-modal").classList.add("hidden"));
+  $("fw-https-modal-confirm").addEventListener("click", fwRemoveHttps);
+  $("fw-https-modal").addEventListener("click", (ev) => {
+    if (ev.target === $("fw-https-modal")) $("fw-https-modal").classList.add("hidden");
+  });
+  $("fw-ban-btn").addEventListener("click", fwBan);
+  $("fw-ban-ip").addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") fwBan();
+  });
+  $("fw-rule-add").addEventListener("click", fwAddRule);
+  $("fw-fwd-add").addEventListener("click", fwAddForward);
+  // firewall rule modal
+  $("fw-rm-save").addEventListener("click", _saveRuleModal);
+  $("fw-rm-cancel").addEventListener("click", () => $("fw-rule-modal").classList.add("hidden"));
+  $("fw-rule-modal").addEventListener("click", (ev) => {
+    if (ev.target === $("fw-rule-modal")) $("fw-rule-modal").classList.add("hidden");
+  });
+  // firewall forward modal
+  $("fw-fm-save").addEventListener("click", _saveFwdModal);
+  $("fw-fm-cancel").addEventListener("click", () => $("fw-fwd-modal").classList.add("hidden"));
+  $("fw-fwd-modal").addEventListener("click", (ev) => {
+    if (ev.target === $("fw-fwd-modal")) $("fw-fwd-modal").classList.add("hidden");
+  });
+  // notification bell
+  $("notif-bell").addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    $("notif-dropdown").classList.toggle("hidden");
+  });
+  $("notif-clear").addEventListener("click", _notifDismissAll);
+  document.addEventListener("click", (ev) => {
+    const wrap = $("notif-bell-wrap");
+    if (wrap && !wrap.contains(ev.target)) $("notif-dropdown").classList.add("hidden");
+  });
   // software updates (Admin tab + the notification banner)
   $("upd-check").addEventListener("click", async () => {
     renderUpdate({ ...(dashboard && dashboard.update), checking: true });
@@ -2208,6 +2863,11 @@ async function init() {
     const u = dashboard && dashboard.update;
     if (u && u.latest_version) localStorage.setItem("quota_update_banner", u.latest_version);
     $("update-banner").classList.add("hidden");
+  });
+  $("security-banner-dismiss").addEventListener("click", () => {
+    localStorage.setItem("quota_sec_banner_dismissed",
+                         $("security-banner-text").textContent);
+    $("security-banner").classList.add("hidden");
   });
   $("upd-enabled").addEventListener("change", async (ev) => {
     try {
@@ -2252,6 +2912,7 @@ async function init() {
   $("password-link").addEventListener("click", () => $("pwd-modal").classList.remove("hidden"));
   $("pwd-cancel").addEventListener("click", () => $("pwd-modal").classList.add("hidden"));
   $("pwd-form").addEventListener("submit", submitPassword);
+  $("totp-link").addEventListener("click", openTotp);
   $("welcome-form").addEventListener("submit", submitWelcome);
   $("welcome-skip").addEventListener("click", () => {
     window.__welcomeSkipped = true;

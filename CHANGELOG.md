@@ -6,6 +6,48 @@ The version is the single source of truth in `quota/version.py`; a release tag
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-19
+
+### Added
+
+- **Notification center** — a bell icon in the top-right corner of the dashboard
+  shows a red badge when there are new security alerts (failed logins, WAF
+  blocks, default-password warning, WAN-over-HTTP warning). Click it to open a
+  dropdown list; each item includes a timestamp and a short explanation. "Clear
+  all" hides the badge until the next event. The list is remembered between
+  visits so you can come back later.
+- **Firewall rule forms** — adding or editing a custom firewall rule now opens
+  a form (rule name, action, chain, source/destination IP, protocol, source and
+  destination ports) instead of six separate browser pop-ups. The same applies
+  to port forwards: a form now collects the forward name, protocol, WAN and LAN
+  ports, source filter, and target IP. Each existing port forward has its own
+  **Edit** button.
+- **One-click HTTPS** — the Firewall tab now has an **Enforce HTTPS** card.
+  Click **Enable HTTPS** to generate a self-signed TLS certificate, write it
+  to disk, update the config, and restart the dashboard over HTTPS — all in one
+  step. A **Remove HTTPS** button (with a confirmation dialog) appears once
+  HTTPS is active and lets you roll back to plain HTTP just as easily.
+
+### Fixed
+
+- **Firewall could not fully block external connections** — a SYN flood rate
+  limit was placed before the "drop new connections from the internet" rule, so
+  the two rules never reached external traffic. The drop rule is now processed
+  first, then the rate limit, so the block actually works.
+- **HTTPS "Enable" button crashed on first use** — the private key file was
+  `chmod`-ed before `openssl` created it, causing a `FileNotFoundError`. The
+  permission lock is now applied after cert generation succeeds.
+- **One-click HTTPS wrote to the wrong config.yaml on production** — the
+  endpoints used `resolve_config_path()` without arguments, which falls back
+  to the project-root config file. On a box where the service was started with
+  `--config /etc/quota-gateway/config.yaml`, the enforce/remove endpoints
+  updated the wrong file and the restart loaded the unchanged config. Fixed by
+  resolving the path from the running topology manager.
+- **"Remove HTTPS" silently did nothing** — the rollback endpoint used
+  `data.get("web") or {}`, which creates a throwaway empty dict when the key
+  is absent. The `secure_cookies: false` write never reached the YAML. Fixed
+  by using `setdefault("web", {})`.
+
 ## [0.2.1] — 2026-08-17
 
 ### Added

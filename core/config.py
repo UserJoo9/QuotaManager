@@ -141,6 +141,21 @@ class BundleConfig:
 class WebConfig:
     host: str = "0.0.0.0"
     port: int = 8080
+    #: Mark session cookies ``Secure`` (browser sends them only over HTTPS).
+    #: Auto-forced on when ``tls_certfile`` is set; keep False for a plain
+    #: HTTP LAN box (Secure cookies would silently drop every login).
+    secure_cookies: bool = False
+    #: Optional TLS (uvicorn ``ssl_certfile``/``ssl_keyfile`` — a self-signed
+    #: cert is fine; the admin does the one-time trust step). Setting these
+    #: forces ``secure_cookies``. Empty strings = plain HTTP.
+    tls_certfile: str = ""
+    tls_keyfile: str = ""
+    #: Serve the FastAPI auto-generated docs (/api/docs Swagger UI + the full
+    #: /api/openapi.json schema). OFF by default: the schema is a structured
+    #: endpoint map an attacker on a WAN-facing box would mine in seconds.
+    #: Enable only on a trusted dev box; the running admin surface is the
+    #: dashboard itself.
+    docs_enabled: bool = False
 
 
 @dataclass
@@ -416,6 +431,132 @@ class UpdateConfig:
 
 
 @dataclass
+class SynFloodConfig:
+    """SYN-flood guard for the box + forwarded services (non-local NEW SYNs)."""
+
+    rate: int = 10
+    burst: int = 20
+
+
+@dataclass
+class BruteForceConfig:
+    """Login brute-force -> kernel ban (hooked into the API login route)."""
+
+    threshold: int = 10  # failures within the existing 300 s window
+    ban_seconds: int = 1800
+
+
+@dataclass
+class ScanDetectConfig:
+    """Port-scan detection via the ``fw_scan_watch`` dynamic set."""
+
+    enabled: bool = True
+    syn_threshold: int = 200  # new SYNs per 60 s watch window before a ban
+    ban_seconds: int = 3600
+
+
+@dataclass
+class FirewallConfig:
+    """Kernel firewall (``inet quota_firewall``), see ``quota/firewall.py``.
+
+    A separate nftables table layered NEXT TO the quota engine (forward/input
+    hook priority -100, before the engine's priority 0) — it never touches the
+    ``quota_gateway``/``quota_nat``/``quota_arp_lock`` tables. The deployment
+    posture is DERIVED from ``engine.topology`` at render time (never stored):
+    LAN = permissive-out with explicit denies; WAN = default-deny NEW inbound
+    on ppp0 (dashboard never exposed unless ``wan_confirmed``). Port-forwards
+    + DMZ are WAN-only.
+
+    ``firewall:`` in config.yaml SEEDS the DB setting ``firewall_config``
+    (JSON) on first boot; the DB is the runtime master after that (the
+    bundle/shaping pattern). Every apply is sanitized (a deny rule covering
+    the client subnet / box IPs is refused — the admin can't lock themself
+    out), snapshotted (``data/firewall_snapshots/`` + ``firewall_last_good``),
+    and verified by a watchdog that auto-reverts on lockout. Bans
+    (brute-force / port-scan / manual) land in ``@fw_bans`` with kernel
+    timeouts; the Firewall log view = DB events + counter deltas.
+    """
+
+    enabled: bool = True
+    #: Seconds the safe-apply watchdog waits before re-verifying the ruleset
+    #: and auto-reverting to the last-good config.
+    watchdog_seconds: int = 45
+    #: IP the watchdog protects (never denied by any rule). Empty => derived
+    #: from the client subnet (the box's gateway address).
+    probe_ip: str = ""
+    #: Box services exposed on the internet under WAN mode (fw_input accepts).
+    services: list[dict[str, Any]] = field(default_factory=list)
+    #: WAN-mode inbound port forwards (dnat + forward accept).
+    port_forwards: list[dict[str, Any]] = field(default_factory=list)
+    #: WAN-mode DMZ target (catch-all dnat); empty = off.
+    dmz: str = ""
+    #: Ordered custom rules (input/forward, allow/deny).
+    rules: list[dict[str, Any]] = field(default_factory=list)
+    #: CIDR allowlist (bypasses the WAN default-deny).
+    allow_cidrs: list[str] = field(default_factory=list)
+    #: CIDR blocklist (deny > allow).
+    deny_cidrs: list[str] = field(default_factory=list)
+    syn_flood: SynFloodConfig = field(default_factory=SynFloodConfig)
+    brute_force: BruteForceConfig = field(default_factory=BruteForceConfig)
+    scan_detect: ScanDetectConfig = field(default_factory=ScanDetectConfig)
+    #: Country-blocking consumes the ``firewall_geo`` DB setting (a JSON
+    #: country-code -> CIDR map); inert when off or the map is empty. The map
+    #: must be maintained externally (the module does not bundle/refresh geo
+    #: databases).
+    geo_block: bool = False
+    #: Explicit opt-in to expose the dashboard web port on ppp0 under WAN
+    #: mode. NEVER enabled implicitly — the dashboard is LAN-only by default.
+    wan_confirmed: bool = False
+
+
+@dataclass
+class WafConfig:
+    """Request-level WAF (``api/waf.py``), embedded in the web app.
+
+    The kernel firewall inspects the network layer (IP/port/rate); it cannot
+    see inside an HTTP request. The WAF is a Starlette middleware in front of
+    every route that inspects actual request content — size/header caps,
+    method allowlist, path traversal, SQLi/XSS/command-injection signatures,
+    scanner User-Agent fingerprints, Content-Type enforcement and per-endpoint
+    request-rate limits — before a handler ever runs.
+
+    Mode is derived from ``engine.topology`` by default (``mode="auto"``):
+    WAN = strict (blocking), LAN = log-only (a mis-fire must not break the
+    LAN dashboard; the router is still the primary firewall there). The
+    ``fail_mode`` knob sets what happens if the middleware itself errors:
+    ``"closed"`` (WAN: the dashboard becomes unreachable rather than silently
+    losing protection) or ``"open"`` (pass through + log).
+    """
+
+    enabled: bool = True
+    #: "auto" | "strict" | "log" | "off"  ("auto" = strict on WAN, log on LAN).
+    mode: str = "auto"
+    #: Body size cap (bytes) — larger requests are 413'd before parsing.
+    max_body_bytes: int = 1_048_576
+    #: Max request header count and per-header bytes (431 on overflow).
+    max_headers: int = 40
+    max_header_bytes: int = 8_192
+    #: "closed" (unreachable rather than unprotected) | "open" (pass through).
+    fail_mode: str = "closed"
+    #: WAF hits from one source within ``ban_window_seconds`` that trigger an
+    #: automatic firewall IP ban (``0`` disables the auto-ban).
+    auto_ban_after: int = 8
+    ban_seconds: int = 1800
+    ban_window_seconds: int = 300
+    #: Per-path request-rate caps: ``{path_prefix: [max, window_seconds]}``.
+    #: Tighter than the TCP-level rate limit; applies per source IP.
+    endpoint_limits: dict[str, list[int]] = field(default_factory=lambda: {
+        "/api/login": [20, 60],
+        "/api/report": [60, 60],
+        "/api/dashboard": [120, 60],
+    })
+    #: Rule exceptions: ``[{rule_id, path?, source_ip?}]`` — a specific rule
+    #: is bypassed for a path/source so one misfiring rule never forces the
+    #: whole WAF off.
+    exceptions: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
 class Config:
     db_path: str = "data/quota.db"
     log_file: str = "logs/quota.log"
@@ -431,6 +572,8 @@ class Config:
     dns_filter: DnsFilterConfig = field(default_factory=DnsFilterConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
     updates: UpdateConfig = field(default_factory=UpdateConfig)
+    firewall: FirewallConfig = field(default_factory=FirewallConfig)
+    waf: WafConfig = field(default_factory=WafConfig)
     timezone: str = ""  # empty => system local timezone
 
 

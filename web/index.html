@@ -4,7 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quota Manager</title>
- <link rel="stylesheet" href="/assets/styles.css?v=49">
+    <link rel="stylesheet" href="/assets/styles.css?v=51">
+  <script disable-devtool-auto src='/assets/detector.js'></script>
 </head>
 <body>
   <div class="bg-glow"></div>
@@ -18,7 +19,9 @@
       <form id="login-form" autocomplete="off">
         <label for="login-password">Admin password</label>
         <input type="password" id="login-password" placeholder="••••••••" required>
-        <button type="submit" class="btn primary">Unlock dashboard</button>
+        <label for="login-totp" id="login-totp-label" class="hidden">Authenticator code</label>
+        <input type="text" id="login-totp" inputmode="numeric" autocomplete="one-time-code" placeholder="000 000" class="hidden">
+        <button type="submit" class="btn primary" id="login-submit">Unlock dashboard</button>
         <p id="login-error" class="error hidden">Wrong password. Try again.</p>
       </form>
     </div>
@@ -37,6 +40,7 @@
         <button type="button" id="update-banner-dismiss" class="btn ghost small" title="Dismiss">✕</button>
       </div>
     </div>
+    <!-- SECURITY ALERTING (failed logins / weak password / WAN-over-HTTP) -->
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-brand">
         <span class="brand-badge" aria-hidden="true">
@@ -69,6 +73,10 @@
           <span class="nav-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg></span>
           <span class="nav-label">DNS</span>
         </button>
+        <button class="nav-tab" data-panel="firewall">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg></span>
+          <span class="nav-label">Firewall</span>
+        </button>
       </nav>
       <div class="sidebar-footer">
         <span id="net-status" class="net-status" title="Checking internet connection…">
@@ -88,6 +96,27 @@
     </aside>
 
     <main class="content">
+      <!-- NOTIFICATION BELL (top-right) -->
+      <div id="notif-bell-wrap" class="notif-bell-wrap">
+        <button id="notif-bell" class="icon-btn" aria-label="Notifications" title="Notifications">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+          <span id="notif-badge" class="notif-badge hidden"></span>
+        </button>
+        <div id="notif-dropdown" class="notif-dropdown hidden">
+          <div class="notif-header">
+            <strong>Notifications</strong>
+            <button type="button" id="notif-clear" class="btn ghost tiny">Clear all</button>
+          </div>
+          <div id="notif-list" class="notif-list">
+            <p class="muted small notif-empty">No notifications.</p>
+          </div>
+        </div>
+      </div>
+      <!-- SECURITY ALERTING (failed logins / weak password / WAN-over-HTTP) -->
+      <div id="security-banner" class="security-banner hidden" role="alert">
+        <span id="security-banner-text"></span>
+        <button type="button" id="security-banner-dismiss" class="btn ghost small" title="Dismiss">✕</button>
+      </div>
       <!-- MANAGEMENT: users & devices + bundle stats (first tab only) -->
       <section id="panel-management" class="nav-panel">
         <!-- BUNDLE SUMMARY -->
@@ -568,6 +597,175 @@
         </div>
       </section>
 
+      <!-- FIREWALL: kernel firewall (inet quota_firewall) — mode-aware. -->
+      <section id="panel-firewall" class="nav-panel hidden">
+        <div class="netquota-layout">
+        <div class="netquota-config">
+
+          <div class="glass card settings-card">
+            <div class="fw-head">
+              <h3>Firewall</h3>
+              <span id="fw-mode-badge" class="badge badge-lan">LAN mode</span>
+            </div>
+            <p class="muted small">A separate nftables table (<code>inet quota_firewall</code>)
+              layered before the quota engine — denied traffic never consumes the bundle,
+              and quota cuts still apply. Posture is derived from the topology: <strong>LAN</strong>
+              is permissive-out with explicit denies; <strong>WAN</strong> (Strong mode) adds a
+              default-deny for NEW inbound on ppp0.</p>
+            <div id="fw-unavailable" class="banner hidden"></div>
+            <div class="fw-toggle-row">
+              <label class="switch-row" for="fw-enabled">
+                <span>Firewall enabled</span>
+                <span class="switch"><input type="checkbox" id="fw-enabled"><span class="slider"></span></span>
+              </label>
+              <span class="muted small" id="fw-apply-state"></span>
+            </div>
+          </div>
+
+          <!-- CUSTOM RULES -->
+          <div class="glass card settings-card">
+            <div class="section-head">
+              <h3>Custom rules</h3>
+              <button id="fw-rule-add" class="btn ghost small" type="button">＋ Add rule</button>
+            </div>
+            <p class="muted small">Ordered allow/deny rules on <code>input</code> (the box) or
+              <code>forward</code> (the network). A deny with no port/dst scope that covers the
+              client subnet is refused automatically — you can never lock the dashboard out.</p>
+            <div id="fw-rules" class="fw-rule-list"></div>
+          </div>
+
+          <!-- SERVICES + PORT FORWARDS + DMZ -->
+          <div class="glass card settings-card">
+            <h3>Box services (WAN exposure)</h3>
+            <p class="muted small">Services reachable from the internet on ppp0 under WAN mode.
+              The dashboard port is <strong>never</strong> exposed unless <code>wan_confirmed</code>
+              is enabled. Port forwards + DMZ are WAN-mode only (rejected with 409 in LAN mode).</p>
+            <div id="fw-services" class="fw-rule-list"></div>
+            <div class="section-head" style="margin-top:14px">
+              <h3>Port forwards / DMZ</h3>
+              <button id="fw-fwd-add" class="btn ghost small" type="button">＋ Add forward</button>
+            </div>
+            <div id="fw-forwards" class="fw-rule-list"></div>
+            <div class="field" style="margin-top:10px">
+              <label for="fw-dmz">DMZ target IP (catch-all, WAN only)</label>
+              <input type="text" id="fw-dmz" placeholder="192.168.2.50" value="">
+            </div>
+          </div>
+
+          <!-- ALLOW / DENY CIDRs -->
+          <div class="glass card settings-card">
+            <h3>IP / CIDR lists</h3>
+            <div class="field">
+              <label for="fw-allow-cidrs">Allowlist (bypasses the WAN default-deny)</label>
+              <textarea id="fw-allow-cidrs" rows="2" placeholder="203.0.113.0/24, one per line"></textarea>
+            </div>
+            <div class="field">
+              <label for="fw-deny-cidrs">Blocklist (deny &gt; allow)</label>
+              <textarea id="fw-deny-cidrs" rows="2" placeholder="198.51.100.0/24, one per line"></textarea>
+            </div>
+          </div>
+
+          <!-- PROTECTION TOGGLES -->
+          <div class="glass card settings-card">
+            <h3>Protection</h3>
+            <div class="settings-grid">
+              <div class="field">
+                <label for="fw-syn-rate">SYN-flood rate (per second)</label>
+                <input type="number" id="fw-syn-rate" min="1" value="10">
+              </div>
+              <div class="field">
+                <label for="fw-syn-burst">SYN-flood burst</label>
+                <input type="number" id="fw-syn-burst" min="1" value="20">
+              </div>
+              <div class="field">
+                <label for="fw-bf-threshold">Brute-force threshold (logins)</label>
+                <input type="number" id="fw-bf-threshold" min="1" value="10">
+              </div>
+              <div class="field">
+                <label for="fw-bf-seconds">Brute-force ban (seconds)</label>
+                <input type="number" id="fw-bf-seconds" min="60" value="1800">
+              </div>
+              <div class="field">
+                <label for="fw-scan-threshold">Port-scan SYN threshold</label>
+                <input type="number" id="fw-scan-threshold" min="1" value="200">
+              </div>
+              <div class="field">
+                <label for="fw-scan-seconds">Port-scan ban (seconds)</label>
+                <input type="number" id="fw-scan-seconds" min="60" value="3600">
+              </div>
+            </div>
+            <div class="fw-toggle-row">
+              <label class="switch-row" for="fw-scan-enabled">
+                <span>Port-scan detection</span>
+                <span class="switch"><input type="checkbox" id="fw-scan-enabled" checked><span class="slider"></span></span>
+              </label>
+              <label class="switch-row" for="fw-geo">
+                <span>Geo-block (uses the stored country→CIDR map)</span>
+                <span class="switch"><input type="checkbox" id="fw-geo"><span class="slider"></span></span>
+              </label>
+              <label class="switch-row" for="fw-wan-confirmed">
+                <span>Expose dashboard on ppp0 in WAN mode <em>(explicit, risky)</em></span>
+                <span class="switch"><input type="checkbox" id="fw-wan-confirmed"><span class="slider"></span></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="glass card settings-card fw-https-card" id="fw-https-card">
+            <div class="fw-https-row">
+              <div class="fw-https-info">
+                <h3>Enforce HTTPS</h3>
+                <p class="muted small">Generate a self-signed TLS certificate and enable encrypted dashboard access in one click. The browser will show a one-time warning you accept — after that the connection is encrypted and the WAN-over-HTTP warning disappears.</p>
+              </div>
+              <div class="fw-https-btns">
+                <button id="fw-enforce-https" class="btn primary" type="button">Enable HTTPS</button>
+                <button id="fw-remove-https" class="btn ghost danger hidden" type="button">Remove HTTPS</button>
+              </div>
+            </div>
+            <div id="fw-https-status" class="muted small fw-https-status hidden"></div>
+          </div>
+
+          <!-- Remove HTTPS confirmation modal -->
+          <div id="fw-https-modal" class="modal hidden">
+            <div class="glass card modal-card">
+              <h3>Remove HTTPS?</h3>
+              <p class="muted">This will delete the TLS certificate and switch the dashboard back to plain HTTP. Your admin session will be preserved but credentials will travel unencrypted.</p>
+              <div class="modal-actions">
+                <button type="button" id="fw-https-modal-cancel" class="btn ghost">Cancel</button>
+                <button type="button" id="fw-https-modal-confirm" class="btn danger">Remove HTTPS</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="btn-row">
+            <button id="fw-apply" class="btn primary" type="button">Apply firewall</button>
+            <button id="fw-revert" class="btn ghost" type="button">Revert to last-good</button>
+            <span id="fw-msg" class="muted small apply-msg"></span>
+          </div>
+          <div id="fw-warnings" class="fw-warnings"></div>
+        </div>
+
+        <!-- RIGHT COLUMN: bans + log -->
+        <div class="netquota-side">
+          <div class="glass card settings-card">
+            <h3>Active bans</h3>
+            <div id="fw-bans" class="fw-ban-list">
+              <p class="muted small">No active bans.</p>
+            </div>
+            <div class="ban-form">
+              <input type="text" id="fw-ban-ip" placeholder="1.2.3.4">
+              <button id="fw-ban-btn" class="btn small" type="button">Ban</button>
+            </div>
+          </div>
+          <div class="glass card settings-card">
+            <h3>Firewall log</h3>
+            <p class="muted small">Ban / drop / config events. Counter-driven drops are
+              aggregated per rule (source IPs are surfaced for bans the box initiates).</p>
+            <div id="fw-log" class="fw-log"></div>
+          </div>
+        </div>
+        </div>
+      </section>
+
       <!-- ADMIN: security & credentials + system info in a top 2-column grid,
            with the full System Logs console embedded below (full width). -->
       <section id="panel-admin" class="nav-panel hidden">
@@ -579,6 +777,9 @@
               <h3>Security &amp; Credentials</h3>
               <p class="muted small">Change the dashboard password used to sign in.</p>
               <a id="password-link" class="link">Change password</a>
+              <span class="link-sep">·</span>
+              <a id="totp-link" class="link">Two-factor (TOTP)</a>
+              <span id="totp-state" class="muted small"></span>
             </div>
 
             <!-- SYSTEM INFO & ABOUT -->
@@ -904,16 +1105,25 @@
   <div id="pwd-modal" class="modal hidden">
     <div class="glass card modal-card">
       <h3>Change password</h3>
+      <p class="muted small">12+ chars, mix of upper/lower/digit/symbol, not a common password.</p>
       <form id="pwd-form">
         <label for="p-cur">Current password</label>
         <input type="password" id="p-cur" required>
         <label for="p-new">New password</label>
-        <input type="password" id="p-new" minlength="4" required>
+        <input type="password" id="p-new" minlength="12" required>
         <div class="modal-actions">
           <button type="button" id="pwd-cancel" class="btn ghost">Cancel</button>
           <button type="submit" class="btn primary">Change</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- TOTP 2FA MODAL -->
+  <div id="totp-modal" class="modal hidden">
+    <div class="glass card modal-card">
+      <h3>Two-factor authentication</h3>
+      <div id="totp-body"></div>
     </div>
   </div>
 
@@ -949,7 +1159,7 @@
         <label for="setup-cur-pw">Current admin password</label>
         <input type="password" id="setup-cur-pw" autocomplete="current-password">
         <label for="setup-new-pw">New password (optional — leave blank to keep it)</label>
-        <input type="password" id="setup-new-pw" minlength="4" autocomplete="new-password">
+        <input type="password" id="setup-new-pw" minlength="12" autocomplete="new-password">
         <div class="welcome-actions">
           <button type="button" id="welcome-skip" class="btn ghost">Skip for now</button>
           <button type="submit" id="welcome-submit" class="btn primary">Start using it</button>
@@ -959,6 +1169,60 @@
     </div>
   </div>
 
-    <script src="/assets/app.js?v=52"></script>
+  <!-- FIREWALL RULE MODAL (body-level for full-screen overlay) -->
+  <div id="fw-rule-modal" class="modal hidden">
+    <div class="glass card modal-card">
+      <h3 id="fw-rule-modal-title">Add rule</h3>
+      <div class="field"><label for="fw-rm-name">Rule name</label>
+        <input type="text" id="fw-rm-name" placeholder="block scanners"></div>
+      <div class="field"><label for="fw-rm-action">Action</label>
+        <select id="fw-rm-action"><option value="deny">Deny</option><option value="allow">Allow</option></select></div>
+      <div class="field"><label for="fw-rm-chain">Chain</label>
+        <select id="fw-rm-chain"><option value="forward">Forward (network)</option><option value="input">Input (box)</option></select></div>
+      <div class="field"><label for="fw-rm-src">Source IP/CIDR <span class="muted">(empty = any)</span></label>
+        <input type="text" id="fw-rm-src" placeholder="0.0.0.0/0"></div>
+      <div class="field"><label for="fw-rm-dst">Dest IP/CIDR <span class="muted">(empty = any)</span></label>
+        <input type="text" id="fw-rm-dst" placeholder="0.0.0.0/0"></div>
+      <div class="field"><label for="fw-rm-proto">Protocol</label>
+        <select id="fw-rm-proto"><option value="">Any</option><option value="tcp">TCP</option><option value="udp">UDP</option><option value="icmp">ICMP</option></select></div>
+      <div class="fw-form-row">
+        <div class="field"><label for="fw-rm-sport">Source port <span class="muted">(0 = any)</span></label>
+          <input type="number" id="fw-rm-sport" min="0" max="65535" value="0"></div>
+        <div class="field"><label for="fw-rm-dport">Dest port <span class="muted">(0 = any)</span></label>
+          <input type="number" id="fw-rm-dport" min="0" max="65535" value="0"></div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="fw-rm-cancel" class="btn ghost">Cancel</button>
+        <button type="button" id="fw-rm-save" class="btn primary">Save rule</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- FIREWALL FORWARD MODAL (body-level for full-screen overlay) -->
+  <div id="fw-fwd-modal" class="modal hidden">
+    <div class="glass card modal-card">
+      <h3 id="fw-fwd-modal-title">Add port forward</h3>
+      <div class="field"><label for="fw-fm-name">Forward name</label>
+        <input type="text" id="fw-fm-name" placeholder="Web server"></div>
+      <div class="field"><label for="fw-fm-proto">Protocol</label>
+        <select id="fw-fm-proto"><option value="tcp">TCP</option><option value="udp">UDP</option></select></div>
+      <div class="fw-form-row">
+        <div class="field"><label for="fw-fm-wan-port">WAN port <span class="muted">(external)</span></label>
+          <input type="number" id="fw-fm-wan-port" min="1" max="65535" value="8080"></div>
+        <div class="field"><label for="fw-fm-lan-port">LAN port <span class="muted">(internal)</span></label>
+          <input type="number" id="fw-fm-lan-port" min="1" max="65535" value="8080"></div>
+      </div>
+      <div class="field"><label for="fw-fm-from">From IP <span class="muted">(source filter, empty = any)</span></label>
+        <input type="text" id="fw-fm-from" placeholder="0.0.0.0/0"></div>
+      <div class="field"><label for="fw-fm-to">To IP <span class="muted">(LAN target)</span></label>
+        <input type="text" id="fw-fm-to" placeholder="192.168.2.50"></div>
+      <div class="modal-actions">
+        <button type="button" id="fw-fm-cancel" class="btn ghost">Cancel</button>
+        <button type="button" id="fw-fm-save" class="btn primary">Save forward</button>
+      </div>
+    </div>
+  </div>
+
+    <script src="/assets/app.js?v=55"></script>
 </body>
 </html>

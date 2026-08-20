@@ -150,7 +150,9 @@ class MacListsUpdate(BaseModel):
 
 class PasswordUpdate(BaseModel):
     current: str
-    new: str = Field(..., min_length=4)
+    #: Password policy (core/passwords.py) is enforced in the handler — this
+    #: schema-level floor keeps obvious garbage out of the PBKDF2 path.
+    new: str = Field(..., min_length=12)
 
 
 class SetupComplete(BaseModel):
@@ -170,8 +172,9 @@ class SetupComplete(BaseModel):
     period_type: Optional[str] = None
     #: Required to change the password (wrong value => HTTP 400).
     current_password: Optional[str] = None
-    #: New admin password (4+ chars). Omit to keep the current one.
-    new_password: Optional[str] = Field(None, min_length=4)
+    #: New admin password (policy-enforced, see core/passwords.py). Omit to
+    #: keep the current one.
+    new_password: Optional[str] = Field(None, min_length=12)
 
 
 class MilestoneNotify(BaseModel):
@@ -187,6 +190,21 @@ class MilestoneNotify(BaseModel):
 
 class LoginRequest(BaseModel):
     password: str
+    #: Optional TOTP code (quota/totp.py). Required when 2FA is enabled; the
+    #: flow is two-stage: POST without a code verifies the password and returns
+    #: ``{"totp": true}``, then the client re-POSTs WITH the code to log in.
+    code: Optional[str] = None
+
+
+class TotpEnableRequest(BaseModel):
+    """Verify the enrollment code (from the authenticator app) and switch on."""
+    code: str = Field(..., min_length=6, max_length=8)
+
+
+class TotpDisableRequest(BaseModel):
+    """Turn 2FA off. A valid session is the only requirement (an attacker
+    without one can't reach this route at all)."""
+    pass
 
 
 class WanUpdate(BaseModel):
@@ -349,6 +367,100 @@ class WanRenewConfig(BaseModel):
 
     enabled: bool
     minutes: int
+
+
+class FirewallRule(BaseModel):
+    """One ordered custom firewall rule (Firewall tab).
+
+    ``chain`` ``"input"`` guards the box itself (the dashboard), ``"forward"``
+    the forwarded path. ``action`` ``"deny"`` drops, ``"allow"`` accepts.
+    Empty ``src``/``dst``/``protocol``/ports mean "any". A deny rule whose
+    source/dest covers the client subnet or the box's own IPs is refused
+    server-side (the admin can never lock themself out).
+    """
+
+    name: str = ""
+    chain: str = Field("forward", pattern="^(input|forward)$")
+    action: str = Field("deny", pattern="^(allow|deny)$")
+    src: str = ""
+    dst: str = ""
+    protocol: str = Field("", pattern="^(|tcp|udp|icmp)$")
+    src_port: int = Field(0, ge=0, le=65535)
+    dst_port: int = Field(0, ge=0, le=65535)
+    log: bool = True
+
+
+class FirewallService(BaseModel):
+    """A box service exposed on the internet under WAN mode."""
+
+    name: str = ""
+    protocol: str = Field("tcp", pattern="^(tcp|udp)$")
+    port: int = Field(..., ge=1, le=65535)
+    source: str = "0.0.0.0/0"
+
+
+class FirewallPortForward(BaseModel):
+    """WAN-mode inbound port forward (dnat to an internal host)."""
+
+    name: str = ""
+    protocol: str = Field("tcp", pattern="^(tcp|udp)$")
+    source_port: int = Field(..., ge=1, le=65535)
+    target_ip: str = ""
+    target_port: int = Field(..., ge=1, le=65535)
+
+    @field_validator("target_ip")
+    @classmethod
+    def _validate_target_ip(cls, v: str) -> str:
+        v = v.strip()
+        try:
+            ipaddress.ip_address(v)
+        except ValueError:
+            raise ValueError(f"target_ip must be a bare IP address, got {v!r}") from None
+        return v
+
+
+class FirewallConfigUpdate(BaseModel):
+    """Full firewall config replacement (Firewall tab "Apply").
+
+    Mirrors the ``firewall:`` YAML schema; every field optional so a partial
+    payload merges over the current config. Applied through the safe-apply
+    path (sanitize -> snapshot -> program -> watchdog auto-revert).
+    """
+
+    enabled: Optional[bool] = None
+    watchdog_seconds: Optional[int] = Field(None, ge=1, le=3600)
+    probe_ip: Optional[str] = None
+    services: Optional[list[FirewallService]] = None
+    port_forwards: Optional[list[FirewallPortForward]] = None
+    dmz: Optional[str] = None
+    rules: Optional[list[FirewallRule]] = None
+    allow_cidrs: Optional[list[str]] = None
+    deny_cidrs: Optional[list[str]] = None
+    syn_flood: Optional[dict] = None
+    brute_force: Optional[dict] = None
+    scan_detect: Optional[dict] = None
+    geo_block: Optional[bool] = None
+    wan_confirmed: Optional[bool] = None
+
+
+class FirewallBanRequest(BaseModel):
+    """Manual kernel ban (auto-expiring)."""
+
+    ip: str = ""
+    seconds: int = Field(1800, ge=60, le=604800)
+    reason: str = "manual"
+
+
+class FirewallUnbanRequest(BaseModel):
+    ip: str = ""
+
+
+class FirewallGeoUpdate(BaseModel):
+    """Country -> CIDR map for geo-blocking, e.g. {"CN": ["1.0.1.0/24"]}.
+    Stored in the ``firewall_geo`` DB setting; inert while ``geo_block`` is
+    off. Maintained externally (the module never refreshes geo databases)."""
+
+    mapping: dict = Field(default_factory=dict)
 
 
 class UpdateSettings(BaseModel):

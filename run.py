@@ -49,6 +49,7 @@ from quota import dns_rules as _dns_rules
 from quota.arp_scan import ArpScanner
 from quota.dnslog import DnslogTailer
 from quota.engine import GATEWAY_MAC, EngineSnapshot, SnapshotHolder
+from quota.firewall import FirewallManager
 from quota.latency_probe import UNKNOWN, WIFI, classify_rtts
 from quota.netmgr import TopologyManager
 from quota.nftables import NftablesEngine
@@ -296,6 +297,12 @@ class Gateway:
         #: injectable learner (tests fake the `ss` probe); default _learn_vpn_servers
         self._vpn_learn: Callable[..., set[str]] = _learn_vpn_servers
         self.arp_lock: object | None = None  # quota.arp_lock.ArpLock (opt-in)
+        #: Kernel firewall (quota.firewall.FirewallManager — the separate
+        #: ``inet quota_firewall`` nftables table layered BEFORE the quota
+        #: engine, forward/input priority -100). Built in startup() AFTER the
+        #: topology override so its LAN/WAN posture derives from the effective
+        #: topology. None when cfg.firewall.enabled is false.
+        self.firewall: FirewallManager | None = None
         # Built in startup(), AFTER the DB topology override: the scanner
         # resolves its probe networks from cfg at construction, so building it
         # here (before the override exists) would probe the wrong subnets in
@@ -484,6 +491,25 @@ class Gateway:
         self.tun2socks_manager = _make_tun2socks_manager(self.cfg)
         await self._sync_vpn_share()
 
+        # -- kernel firewall (nftables quota_firewall) ------------------------
+        # A SEPARATE table layered BEFORE the quota engine (forward/input hook
+        # priority -100, the engine is 0): firewall-denied traffic never reaches
+        # the quota counters, and quota cuts still apply afterward. It never
+        # touches quota_gateway / quota_nat / quota_arp_lock. Built AFTER the
+        # topology override so its LAN/WAN posture derives from the EFFECTIVE
+        # topology. Reconciles on every maintenance tick; the API drives
+        # safe-apply (watchdog auto-revert), bans, and the WAN-transition
+        # pre-apply (no exposure window).
+        if getattr(self.cfg, "firewall", None) is not None \
+                and self.cfg.firewall.enabled:
+            self.firewall = FirewallManager(self.cfg, self.database,
+                                            web_port=self.cfg.web.port)
+            await self.firewall.load_config()
+            await self.firewall.load_geo()
+            await asyncio.to_thread(self.firewall.apply)
+            log.info("firewall started (%s mode)",
+                     "wan" if self.firewall.topology == "wan" else "lan")
+
         # -- ARP gateway-lock (opt-in) ---------------------------------------
         # Deny internet to devices that bypass the box by using the ROUTER as
         # their gateway (static-IP cheat). The engine already programmed the
@@ -608,6 +634,26 @@ class Gateway:
         log.info("topology from dashboard: %s (overrides config.yaml)", db_topology)
 
     # ------------------------------------------------------------- callbacks
+
+    async def _firewall_wan_preapply(self, target_topology: str) -> None:
+        """Program the firewall in the TARGET topology BEFORE the WAN applier.
+
+        The live LAN->WAN switch (dashboard WAN tab) runs ``topology.sh`` which
+        dials ppp0 and schedules a restart. Between ppp0 coming up and the
+        restart the OLD (LAN-posture) firewall would be in place — an inbound
+        exposure window. Re-render + apply in the target posture first; the
+        in-memory cfg keeps the current topology until the restart (the
+        override is transient).
+        """
+        if self.firewall is None or not getattr(self.firewall, "available", False):
+            return
+        self.firewall.set_topology_override(target_topology)
+        try:
+            await asyncio.to_thread(self.firewall.apply)
+        except Exception:  # noqa: BLE001
+            log.exception("firewall WAN-preapply failed")
+        finally:
+            self.firewall.set_topology_override(None)
 
     async def _persist_lease(self, mac: str, ip: str) -> None:
         try:
@@ -1263,6 +1309,17 @@ class Gateway:
         #    clients never ride a dead VPN into a blackhole).
         await self._sync_vpn_share()
 
+        # 8. Reconcile the kernel firewall (quota_firewall). Re-applies ONLY
+        #    when the stored config or the topology changed (signature-gated),
+        #    drains the scan-watch + fw_* counters into the Firewall log view,
+        #    and persists any ban/drop events. All nft work runs off the loop.
+        if self.firewall is not None \
+                and getattr(self.firewall, "available", False):
+            try:
+                await self.firewall.reconcile()
+            except Exception:  # noqa: BLE001 — never let the firewall stall a tick
+                log.exception("firewall reconcile failed")
+
     async def _sync_shaping(self, ip_to_mac: dict[str, str]) -> None:
         """Push the latest shaping settings + device caps into the tc shaper.
 
@@ -1761,6 +1818,9 @@ class Gateway:
                 pass
         if self.engine is not None:
             self.engine.stop()
+        if self.firewall is not None:
+            # Cancel watchdogs; kernel rules are left in place (conservative).
+            await self.firewall.shutdown()
         if self.shaper is not None:
             self.shaper.stop()  # leaves tc rules in place (conservative)
         if self.arp_lock is not None:
@@ -1825,12 +1885,21 @@ def main() -> None:
                          stop_new_sync=gateway._apply_stop_new_now,
                          decline_random_sync=gateway._apply_decline_random_now,
                          active_ips_getter=gateway._latency_active_ips,
-                         updater=gateway.updater)
+                         firewall=gateway.firewall,
+                         firewall_wan_preapply=gateway._firewall_wan_preapply,
+                         updater=gateway.updater,
+                         web_config=cfg.web,
+                         waf_config=cfg.waf)
+        # TLS (web.tls_certfile / web.tls_keyfile): uvicorn terminates HTTPS
+        # itself — a self-signed cert is fine (one-time trust step in the
+        # browser). When TLS is on, secure_cookies is forced True by the app.
         server_config = uvicorn.Config(
             app,
             host=cfg.web.host,
             port=cfg.web.port,
             log_level="warning",
+            ssl_certfile=cfg.web.tls_certfile or None,
+            ssl_keyfile=cfg.web.tls_keyfile or None,
         )
         server = uvicorn.Server(server_config)
         try:

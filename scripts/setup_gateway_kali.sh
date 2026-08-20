@@ -822,6 +822,12 @@ web:
   port: 8080
 EOF
 echo "  example config written to $CONF_DIR/config.yaml"
+# Security hardening: the config holds PPPoE credentials — root-only read,
+# never world-readable. The DB holds password hashes + settings; same story.
+chmod 600 "$CONF_DIR/config.yaml"
+if [ -f /var/lib/quota-gateway/quota.db ]; then
+    chmod 600 /var/lib/quota-gateway/quota.db
+fi
 # A setup re-run is the admin's authoritative "set the box to THIS topology",
 # so drop any dashboard-persisted override that would otherwise re-force the
 # old value on the next boot (the v18 revert bug: setup rewrote config.yaml to

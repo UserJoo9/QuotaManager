@@ -1275,9 +1275,14 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | POST | `/api/login` · `/api/logout` | session auth |
 | GET | `/api/me` | session check |
 | POST | `/api/password` | change admin password |
+| GET | `/api/security/tls` | check whether HTTPS is currently enforced (TLS certs present + secure_cookies enabled); read-only |
+| POST | `/api/security/enforce-https` | one-click HTTPS: generate self-signed cert, write to disk, update config.yaml (tls_certfile + tls_keyfile + secure_cookies: true), schedule service restart. Config path is resolved from the running topology manager (not the project root). Returns cert paths + user-facing message |
+| POST | `/api/security/remove-https` | rollback HTTPS: delete cert files, clear TLS settings from config.yaml, set secure_cookies: false, schedule restart. Same config path resolution as enforce-https. Returns deleted files + message |
 | WS | `/ws` | pushes `{"type":"snapshot","data":{...}}` every 5 s |
 
-Interactive docs: `http://<gateway-ip>:8080/api/docs` (Swagger UI).
+Interactive docs: `http://<gateway-ip>:8080/api/docs` (Swagger UI) — OFF by
+default (API-surface hygiene); enable for dev with `web.docs_enabled: true` in
+config.yaml.
 
 ---
 

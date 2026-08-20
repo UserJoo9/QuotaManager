@@ -18,6 +18,7 @@ import logging
 import re
 import subprocess
 import time
+import urllib.parse
 import urllib.request
 from typing import Any, Callable
 
@@ -85,8 +86,44 @@ def parse_changelog(text: str, current: str, latest: str,
 
 # -- default blocking implementations (off the event loop) -------------------
 
+#: SSRF allowlist — the ONLY hosts the updater may fetch. Everything else
+#: (an attacker-influenced repo string, a DNS-rebinding trick, a crafted
+#: release asset URL) is refused before any connection is made.
+_GITHUB_HOSTS = frozenset({
+    "api.github.com",
+    "raw.githubusercontent.com",
+    "github.com",
+    "objects.githubusercontent.com",
+    "codeload.github.com",
+})
+
+#: Private / loopback prefixes the allowlist refuses regardless of hostname.
+_PRIVATE_NETS = ("127.", "10.", "192.168.", "169.254.", "0.", "::1", "fe80:")
+
+
+def _assert_safe_github_url(url: str) -> None:
+    """Raise ValueError unless ``url`` is an https GitHub-host URL.
+
+    Guards every fetch in this module against SSRF: the host must be on the
+    allowlist, the scheme must be https, and the host must not resolve to a
+    private/loopback address. Raises instead of fetching so a bad value is a
+    loud failure, never a silent connection to an internal service.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("https",):
+        raise ValueError(f"refusing non-https update URL: {url!r}")
+    if parsed.username or parsed.password:
+        raise ValueError("refusing update URL with embedded credentials")
+    host = (parsed.hostname or "").lower()
+    if host not in _GITHUB_HOSTS:
+        raise ValueError(f"update host {host!r} not in allowlist")
+    if host.startswith(_PRIVATE_NETS) or host == "localhost":
+        raise ValueError(f"update host {host!r} is private/loopback")
+
+
 def _fetch_json(url: str, timeout: float = 30.0) -> dict[str, Any]:
     """Fetch + parse a JSON document (the GitHub API). Raises on failure."""
+    _assert_safe_github_url(url)
     req = urllib.request.Request(
         url, headers={"User-Agent": "QuotaManager",
                       "Accept": "application/vnd.github+json"})
@@ -96,6 +133,7 @@ def _fetch_json(url: str, timeout: float = 30.0) -> dict[str, Any]:
 
 def _fetch_text(url: str, timeout: float = 30.0) -> str:
     """Fetch a UTF-8 text document (raw CHANGELOG.md). Raises on failure."""
+    _assert_safe_github_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": "QuotaManager"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
         return resp.read().decode("utf-8", errors="replace")
@@ -103,6 +141,7 @@ def _fetch_text(url: str, timeout: float = 30.0) -> str:
 
 def _download(url: str, dest: str, timeout: float = 120.0) -> None:
     """Download a release asset (.deb) to ``dest``. Raises on failure."""
+    _assert_safe_github_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": "QuotaManager"})
     with urllib.request.urlopen(req, timeout=timeout) as resp, \
             open(dest, "wb") as fh:  # noqa: S310

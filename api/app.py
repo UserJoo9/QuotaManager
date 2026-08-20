@@ -14,15 +14,19 @@ import datetime as _dt
 import hashlib
 import hmac
 import ipaddress
+import json
 import logging
 import os
 import secrets
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+import yaml
+
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
@@ -30,14 +34,21 @@ from api.schemas import (BundleUpdate, DeviceAccessUpdate, DeviceCreate,
                          DeviceUpdate, DnsImportRequest, DnsPresetEnable,
                          DnsQuickRule,
                          DnsServerUpdate, DomainRuleCreate, DomainRuleUpdate,
+                         FirewallBanRequest, FirewallConfigUpdate,
+                         FirewallGeoUpdate, FirewallUnbanRequest,
                          GuestUpdate, LoginRequest, MacListsUpdate,
                          MilestoneNotify,
                          NetworkUpdate, PasswordUpdate, SetupComplete,
-                         TopUpRequest, UpdateSettings, UserCreate, UserUpdate,
+                         TopUpRequest, TotpEnableRequest,
+                         UpdateSettings, UserCreate, UserUpdate,
                          WanRenewConfig, WanTest, WanUpdate)
+from api import waf as _waf
+from core import passwords as _passwords
 from core import timeutil
+from core.config import WafConfig, WebConfig
 from quota import db as _db
 from quota import dns_rules as _dns_rules
+from quota import totp as _totp
 from quota.engine import GATEWAY_MAC, EngineSnapshot, SnapshotHolder
 from quota.service import GB, QuotaService
 from quota.vendor import vendor_for
@@ -101,11 +112,94 @@ def _read_log_tail(path: str | Path | None, limit: int = 300) -> dict[str, Any]:
 #: original cost and are re-hashed on the next successful login.
 PBKDF2_ITERATIONS = 600_000
 
-#: login throttling: max failed attempts per source IP within the window,
-#: then HTTP 429 for the rest of the window. In-memory (a LAN admin box);
-#: the session cookie and PBKDF2 already gate the account itself.
-LOGIN_MAX_FAILURES = 10
-LOGIN_WINDOW_SEC = 300.0
+#: login throttling (authentication hardening, 2026-08-19). The OLD design was
+#: a flat per-IP budget (10 fails/300 s then 429). The new ``_LoginLimiter``
+#: escalates: the first few failures are answered instantly (so a typo never
+#: stalls a real user), then every further attempt is REJECTED with an
+#: exponentially increasing Retry-After (the attempt is never even processed —
+#: no PBKDF2 work is spent on a throttled guess), capping into a 30-minute
+#: lockout. A *global* circuit breaker trips independently of source IP, so a
+#: distributed botnet rotating addresses still gets throttled.
+LOGIN_FREE_FAILURES = 3          # instant attempts before backoff starts
+LOGIN_BACKOFF_BASE_SEC = 1.0     # Retry-After after the 4th consecutive failure
+LOGIN_BACKOFF_FACTOR = 2.0       # ... then doubles per further failure
+LOGIN_MAX_BACKOFF_SEC = 300.0    # exponential cap before the lockout step
+LOGIN_LOCKOUT_FAILURES = 12      # consecutive failures -> temporary lockout
+LOGIN_LOCKOUT_SEC = 1800.0       # 30-minute lockout
+LOGIN_GLOBAL_MAX_FAILURES = 50   # across ALL source IPs in the window
+LOGIN_GLOBAL_WINDOW_SEC = 300.0
+
+
+class _LoginLimiter:
+    """Progressive, multi-axis failed-login throttle (app layer).
+
+    Three independent buckets feed a single ``check``:
+      * per source IP,
+      * per account (the single admin account — kept so the model survives a
+        future multi-admin),
+      * a GLOBAL circuit breaker across every source, so distributed guessing
+        (rotating IPs that individually stay under the per-IP threshold) is
+        still cut off.
+
+    Design: the first ``LOGIN_FREE_FAILURES`` failures are processed instantly
+    (typo-friendly). Each subsequent failure raises the account/IP ``Retry-
+    After`` exponentially (base * factor ** (fails - free)); any attempt
+    before ``next_allowed_at`` is REJECTED with 429 + Retry-After without
+    touching the PBKDF2 path. Past ``LOGIN_LOCKOUT_FAILURES`` consecutive
+    failures the next_allowed jumps to a 30-minute lockout. A success resets
+    every bucket. The global breaker mirrors the same shape over all sources.
+    """
+
+    def __init__(self) -> None:
+        self._fails: dict[str, int] = {}
+        self._next_allowed: dict[str, float] = {}
+        self._global_fails: list[float] = []       # timestamps of all failures
+        self._global_next_allowed = 0.0
+
+    def _retry_after(self, key: str) -> float:
+        """Seconds until the next attempt for ``key`` is processed (0 = now)."""
+        nxt = self._next_allowed.get(key, 0.0)
+        remaining = nxt - time.monotonic()
+        return max(0.0, remaining)
+
+    def check(self, key: str, now: float | None = None) -> float:
+        """Retry-After for ``key``. 0.0 = this attempt may be processed now."""
+        now = now if now is not None else time.monotonic()
+        if now < self._global_next_allowed:
+            return self._global_next_allowed - now
+        if now < self._next_allowed.get(key, 0.0):
+            return self._next_allowed[key] - now
+        # window roll: forget an old locked entry so a stale key unblocks
+        return 0.0
+
+    def fail(self, key: str, now: float | None = None) -> None:
+        now = now if now is not None else time.monotonic()
+        fails = self._fails.get(key, 0) + 1
+        self._fails[key] = fails
+        # No delay for the first LOGIN_FREE_FAILURES failures (typo-friendly);
+        # the failure that CROSSES the free tier arms the first backoff step,
+        # so the NEXT attempt is the first one throttled.
+        if fails > LOGIN_LOCKOUT_FAILURES:
+            self._next_allowed[key] = now + LOGIN_LOCKOUT_SEC
+        elif fails > LOGIN_FREE_FAILURES:
+            delay = (LOGIN_BACKOFF_BASE_SEC *
+                     (LOGIN_BACKOFF_FACTOR ** (fails - LOGIN_FREE_FAILURES - 1)))
+            self._next_allowed[key] = now + min(delay, LOGIN_MAX_BACKOFF_SEC)
+        # global breaker: a rolling window of failures across ALL sources
+        self._global_fails = [t for t in self._global_fails
+                              if now - t <= LOGIN_GLOBAL_WINDOW_SEC]
+        self._global_fails.append(now)
+        if len(self._global_fails) >= LOGIN_GLOBAL_MAX_FAILURES:
+            self._global_next_allowed = now + LOGIN_LOCKOUT_SEC
+
+    def success(self, key: str) -> None:
+        self._fails.pop(key, None)
+        self._next_allowed.pop(key, None)
+
+
+async def _record_failed_login(database: _db.Database, host: str) -> None:
+    """One audit row per failed attempt (drives the dashboard alerting banner)."""
+    await database.add_event(f"Failed login attempt from {host}", "warn")
 
 
 def _hash_password(password: str, salt: bytes | None = None,
@@ -141,45 +235,15 @@ def _verify_password(password: str, stored: str) -> tuple[bool, bool]:
         return False, False
 
 
-class _LoginRateLimiter:
-    """In-memory per-IP failed-login throttle.
-
-    Tracks failed attempts + the window start; when the attempt budget is
-    exhausted within the window every further attempt from that IP is denied
-    (429) until the window rolls. Successes reset the budget (a wrong-password
-    guesser hammering the LAN box is the threat; a legitimate user typing the
-    right password is not).
-    """
-
-    def __init__(self) -> None:
-        self._fails: dict[str, int] = {}
-        self._window_start: dict[str, float] = {}
-
-    def check(self, ip: str) -> bool:
-        """May this IP attempt a login now? (True = allowed.)"""
-        if ip not in self._fails:
-            return True
-        if time.monotonic() - self._window_start.get(ip, 0.0) > LOGIN_WINDOW_SEC:
-            del self._fails[ip]
-            self._window_start.pop(ip, None)
-            return True
-        return self._fails[ip] < LOGIN_MAX_FAILURES
-
-    def fail(self, ip: str) -> None:
-        if ip not in self._window_start:
-            self._window_start[ip] = time.monotonic()
-        self._fails[ip] = self._fails.get(ip, 0) + 1
-
-    def success(self, ip: str) -> None:
-        self._fails.pop(ip, None)
-        self._window_start.pop(ip, None)
-
-
 async def _ensure_admin_password(db: _db.Database) -> None:
     stored = await db.get_setting("admin_password")
     if not stored:
         default = os.environ.get("QUOTA_ADMIN_PASSWORD", "admin")
         await db.set_setting("admin_password", _hash_password(default))
+        # Factory-default marker: Strong WAN mode is BLOCKED while this flag
+        # is set, and the dashboard shows a persistent warning banner. Cleared
+        # the moment the admin changes the password to a policy-compliant one.
+        await db.set_setting("admin_password_default", "1")
         log.warning("admin password created with default — change it in Settings")
 
 
@@ -206,10 +270,23 @@ def create_app(
     active_ips_getter: Optional[Callable[[], Optional[set[str]]]] = None,
     stop_new_sync: Optional[Callable[[], object]] = None,
     decline_random_sync: Optional[Callable[[], object]] = None,
+    firewall: object | None = None,
+    firewall_wan_preapply: Optional[Callable[[str], object]] = None,
     updater: object | None = None,
+    web_config: WebConfig | None = None,
+    waf_config: WafConfig | None = None,
 ) -> FastAPI:
+    web_cfg: WebConfig = web_config or WebConfig()
+    waf_cfg: WafConfig = waf_config or WafConfig()
+    # API surface hygiene: the auto-generated docs (Swagger UI + the full
+    # OpenAPI schema) are a structured endpoint map served to ANYONE who can
+    # reach the port — a perfect recon target on a WAN-facing box. Off unless
+    # explicitly enabled for a dev environment (web.docs_enabled).
     app = FastAPI(title="Quota Manager", version=__version__,
-                  docs_url="/api/docs", openapi_url="/api/openapi.json")
+                  docs_url="/api/docs" if web_cfg.docs_enabled else None,
+                  redoc_url=None,
+                  openapi_url="/api/openapi.json" if web_cfg.docs_enabled
+                  else None)
     #: NIC name -> human label for the per-device WiFi/LAN tag (config.yaml
     #: network.interface_tags); an unknown NIC falls back to its raw name.
     _interface_tags: dict[str, str] = interface_tags or {}
@@ -550,6 +627,24 @@ def create_app(
             # "Update available" notification (None = not wired — tests /
             # degraded boot; the JS treats it as "no updater").
             "update": (await updater.state()) if updater is not None else None,
+            # Security alerting (authentication hardening): counts for the
+            # dashboard banner + the WAN/TLS posture. The admin SEES an active
+            # attack (failed-login clusters + WAF blocks in the last hour), not
+            # just a buried log line.
+            "security": {
+                "failed_logins_1h": await database.count_matching_events(
+                    "Failed login%", 3600),
+                "waf_blocks_1h": await database.count_matching_events(
+                    "WAF %", 3600),
+                "default_password": await database.get_setting(
+                    "admin_password_default", "") == "1",
+                "totp_enabled": await _totp_enabled(),
+                # WAN over plain HTTP = credentials on the wire. TLS (web.tls_*)
+                # or secure_cookies flips this off; the UI warns loudly while
+                # it's on.
+                "wan_http": (live.wan_status or {}).get("topology") == "wan"
+                            and not _secure_cookies(),
+            },
             "ts": _now().isoformat(),
         }
 
@@ -723,7 +818,7 @@ def create_app(
             "wan": live.wan_status or {},
             "version": __version__,
         }
-
+        
     @app.get("/api/report", dependencies=[Depends(_require_report_ip)],
              response_model=None)
     async def report_api() -> dict[str, Any]:
@@ -849,7 +944,14 @@ def create_app(
         """
         status = dict((await _dashboard_payload()).get("wan") or {})
         status["pppoe_user"] = await database.get_setting("pppoe_user", "")
-        status["pppoe_password"] = await database.get_setting("pppoe_password", "")
+        status["pppoe_has_password"] = bool(
+            await database.get_setting("pppoe_password", ""))
+        # Sensitive-data hardening: NEVER ship the plaintext PPPoE password to
+        # the client. The WAN tab prefills the field with a placeholder and
+        # only sends a NEW password when the admin actually types one (an empty
+        # field preserves the stored value server-side). The old UI-side "eye"
+        # masking was purely cosmetic — the secret now never leaves the box.
+        status["pppoe_password"] = "********"
         status["wan_if"] = await database.get_setting("wan_if", "")
         return status
 
@@ -865,6 +967,14 @@ def create_app(
         """
         if body.topology not in ("lan", "wan"):
             raise HTTPException(400, "topology must be 'lan' or 'wan'")
+        if body.topology == "wan" and \
+                await database.get_setting("admin_password_default", "") == "1":
+            # Authentication hardening gate: Strong WAN mode puts the dashboard
+            # on a public IP — a factory-default "admin" password must never
+            # ride that. Force a password change first (Settings page).
+            raise HTTPException(
+                400, "change the default admin password before enabling "
+                     "Strong WAN mode (Settings > Change password)")
         st = dict(holder.get().wan_status or {})
         st.setdefault("topology", "lan")
         st.setdefault("ppp0", "n/a")
@@ -893,6 +1003,12 @@ def create_app(
             st["applies_on_restart"] = True
             return st
         try:
+            # Firewall WAN-transition pre-apply: program the TARGET posture
+            # BEFORE topology.sh brings ppp0 up, so there is no window where a
+            # LAN-posture firewall sits on a live public interface (the default
+            # deny lands first; the scheduled restart then rebuilds everything).
+            if firewall_wan_preapply is not None and body.topology == "wan":
+                await firewall_wan_preapply("wan")
             result = await topology_manager.apply(
                 body.topology,
                 pppoe_user=body.pppoe_user or "",
@@ -908,6 +1024,266 @@ def create_app(
         st["restart_scheduled"] = bool(result.get("restart_scheduled"))
         st["script_output"] = result.get("script_output", "")
         return st
+
+    # -- firewall ------------------------------------------------------------
+
+    @app.get("/api/firewall", dependencies=[Depends(_require_auth)])
+    async def get_firewall() -> dict[str, Any]:
+        """Full firewall state: current config, status (mode/bans/counters),
+        recent log entries, and the active geo map. Degrades when the firewall
+        is disabled or unavailable (the whole feature is optional)."""
+        if firewall is None:
+            return {"available": False, "reason": "firewall disabled in config"}
+        cfg_data = await firewall.load_config()
+        await firewall.load_geo()
+        cfg_data = {k: v for k, v in cfg_data.items() if not k.startswith("_")}
+        geo_raw = await database.get_setting("firewall_geo", "")
+        try:
+            geo = json.loads(geo_raw) if geo_raw else {}
+        except ValueError:
+            geo = {}
+        return {
+            "available": firewall.available,
+            "enabled": bool(cfg_data.get("enabled", True)),
+            "topology": firewall.topology,
+            "mode": firewall.status().get("mode"),
+            "config": cfg_data,
+            "status": firewall.status(),
+            "log": firewall.recent_log(100),
+            "geo": geo if isinstance(geo, dict) else {},
+        }
+
+    @app.post("/api/firewall", dependencies=[Depends(_require_auth)])
+    async def set_firewall(body: FirewallConfigUpdate) -> dict[str, Any]:
+        """Safe-apply a new firewall config (sanitize -> snapshot -> program ->
+        watchdog auto-revert). Partial payloads merge over the current config;
+        sanitization warnings ride in the response. Port-forwards + DMZ are
+        WAN-only (409 in LAN mode)."""
+        if firewall is None:
+            raise HTTPException(404, "firewall disabled in config")
+        current = dict(await firewall.load_config())
+        incoming = body.model_dump(exclude_none=True)
+        current.update(incoming)
+        if firewall.topology != "wan":
+            if current.get("port_forwards") or current.get("dmz"):
+                raise HTTPException(
+                    409, "port forwards and DMZ are WAN-mode only — apply "
+                         "them after switching to Strong (WAN) mode")
+        result = await firewall.safe_apply(current, reason="dashboard")
+        if not result.get("ok"):
+            raise HTTPException(500, result.get("error", "firewall apply failed"))
+        return result
+
+    @app.post("/api/firewall/revert", dependencies=[Depends(_require_auth)])
+    async def revert_firewall() -> dict[str, Any]:
+        """Re-apply the stored last-good config (manual rollback)."""
+        if firewall is None:
+            raise HTTPException(404, "firewall disabled in config")
+        return await firewall.revert_last_good()
+
+    @app.post("/api/firewall/ban", dependencies=[Depends(_require_auth)])
+    async def ban_firewall(body: FirewallBanRequest) -> dict[str, Any]:
+        """Kernel-ban an IP (auto-expiring in @fw_bans). Refuses the box's
+        own IPs / the client subnet (self-DoS guard)."""
+        if firewall is None:
+            raise HTTPException(404, "firewall disabled in config")
+        ok = await firewall.ban_ip(body.ip, body.seconds, body.reason)
+        if not ok:
+            raise HTTPException(400, "refusing to ban the box itself or the client subnet")
+        return {"ok": True}
+
+    @app.post("/api/firewall/unban", dependencies=[Depends(_require_auth)])
+    async def unban_firewall(body: FirewallUnbanRequest) -> dict[str, Any]:
+        if firewall is None:
+            raise HTTPException(404, "firewall disabled in config")
+        await firewall.unban_ip(body.ip)
+        return {"ok": True}
+
+    @app.post("/api/firewall/geo", dependencies=[Depends(_require_auth)])
+    async def set_firewall_geo(body: FirewallGeoUpdate) -> dict[str, Any]:
+        """Persist the country->CIDR map (inert while ``geo_block`` is off).
+        The map is maintained externally; this endpoint only stores it."""
+        if firewall is None:
+            raise HTTPException(404, "firewall disabled in config")
+        await firewall.save_geo(body.mapping)
+        return {"ok": True}
+
+    @app.get("/api/firewall/log", dependencies=[Depends(_require_auth)])
+    async def firewall_log() -> dict[str, Any]:
+        """Recent Firewall log entries (ban/drop/config events)."""
+        if firewall is None:
+            return {"log": [], "counters": [], "bans": []}
+        return {"log": firewall.recent_log(200),
+                "counters": firewall.status().get("counters", []),
+                "bans": firewall.list_bans()}
+
+    # -- HTTPS enforcement (one-click TLS setup) ----------------------------
+
+    # Resolve the canonical config path from the topology_manager (the path the
+    # gateway was actually started with) instead of resolve_config_path() which
+    # may fall back to the project-root config.yaml.
+    def _resolve_cfg_path() -> Path:
+        if topology_manager is not None and getattr(topology_manager, "config_path", None):
+            return Path(topology_manager.config_path)
+        from core.config import resolve_config_path
+        return resolve_config_path()
+
+    @app.get("/api/security/tls", dependencies=[Depends(_require_auth)])
+    async def tls_status() -> dict[str, Any]:
+        """Check whether HTTPS is currently enforced (TLS certs present +
+        secure_cookies enabled). Read-only — no side effects."""
+        cfg_path = _resolve_cfg_path()
+        cfg_exists = cfg_path.is_file()
+        tls_on = bool(getattr(web_cfg, "tls_certfile", "")) and bool(
+            getattr(web_cfg, "tls_keyfile", ""))
+        secure_on = bool(getattr(web_cfg, "secure_cookies", False))
+        # Also check config.yaml on disk (the running process may not have
+        # reloaded after a previous enforce-https call).
+        disk_tls = False
+        if cfg_exists:
+            try:
+                disk = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+                web_sec = disk.get("web") or {}
+                disk_tls = bool(web_sec.get("tls_certfile")) and bool(
+                    web_sec.get("tls_keyfile"))
+            except Exception:  # noqa: BLE001
+                pass
+        enforced = tls_on or secure_on or disk_tls
+        return {"enforced": enforced, "tls": tls_on, "secure_cookies": secure_on}
+
+    @app.post("/api/security/enforce-https", dependencies=[Depends(_require_auth)])
+    async def enforce_https() -> dict[str, Any]:
+        """One-click HTTPS setup: generate a self-signed TLS certificate,
+        write it to disk, update config.yaml with tls_certfile / tls_keyfile /
+        secure_cookies, and schedule a service restart.
+
+        The dashboard will be unreachable over HTTP after the restart; the
+        browser must accept the self-signed certificate warning once. The
+        session cookie survives the restart (stored in the DB)."""
+        # -- 1. Resolve config path + cert directory -------------------------
+        cfg_path = _resolve_cfg_path()
+        cert_dir = cfg_path.parent / "certs"
+        cert_path = cert_dir / "dashboard.crt"
+        key_path = cert_dir / "dashboard.key"
+
+        # -- 2. Generate self-signed cert (10-year validity) -----------------
+        try:
+            cert_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise HTTPException(500, f"cannot create cert directory: {exc}")
+
+        try:
+            proc = subprocess.run(
+                ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                 "-keyout", str(key_path), "-out", str(cert_path),
+                 "-days", "3650", "-subj", "/CN=quota-gateway"],
+                capture_output=True, text=True, timeout=30)
+            if proc.returncode != 0:
+                raise HTTPException(
+                    500, f"openssl failed (rc={proc.returncode}): "
+                         f"{proc.stderr.strip()[:200]}")
+            # Lock down the private key AFTER it's been created
+            key_path.chmod(0o600)
+        except FileNotFoundError:
+            raise HTTPException(
+                500, "openssl not found — install it with "
+                     "sudo apt install openssl")
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(500, f"cert generation failed: {exc}")
+
+        # -- 3. Update config.yaml (read → merge web: section → write) -------
+        try:
+            data = {}
+            if cfg_path.is_file():
+                data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            web_sec = data.setdefault("web", {})
+            web_sec["tls_certfile"] = str(cert_path)
+            web_sec["tls_keyfile"] = str(key_path)
+            web_sec["secure_cookies"] = True
+            cfg_path.write_text(
+                yaml.safe_dump(data, sort_keys=False, default_flow_style=None),
+                encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                500, f"could not update config.yaml: {exc}")
+
+        # -- 4. Schedule service restart (2 s delay — let the HTTP response --
+        #    flush before the process goes down over plain HTTP) --------------
+        try:
+            subprocess.Popen(
+                ["sh", "-c",
+                 "sleep 2 && systemctl restart quota-gateway"],
+                start_new_session=True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not schedule restart: %s", exc)
+
+        log.info("HTTPS enforced: cert=%s key=%s", cert_path, key_path)
+        return {"ok": True,
+                "cert": str(cert_path),
+                "key": str(key_path),
+                "message": "HTTPS enforced — the dashboard will restart over "
+                           "HTTPS. Accept the self-signed certificate warning "
+                           "in your browser once, then the connection is "
+                           "encrypted."}
+
+    @app.post("/api/security/remove-https", dependencies=[Depends(_require_auth)])
+    async def remove_https() -> dict[str, Any]:
+        """Roll back HTTPS enforcement: clear tls_certfile / tls_keyfile /
+        secure_cookies from config.yaml, delete the generated certificate
+        files, and schedule a service restart. The dashboard returns to plain
+        HTTP."""
+        cfg_path = _resolve_cfg_path()
+        cert_dir = cfg_path.parent / "certs"
+        cert_path = cert_dir / "dashboard.crt"
+        key_path = cert_dir / "dashboard.key"
+
+        # -- 1. Delete cert files (best-effort) ------------------------------
+        deleted = []
+        for p in (cert_path, key_path):
+            try:
+                if p.is_file():
+                    p.unlink()
+                    deleted.append(str(p))
+            except OSError:  # noqa: BLE001
+                pass
+        try:
+            if cert_dir.is_dir() and not any(cert_dir.iterdir()):
+                cert_dir.rmdir()
+        except OSError:  # noqa: BLE001
+            pass
+
+        # -- 2. Update config.yaml (clear TLS + secure_cookies) ---------------
+        try:
+            data = {}
+            if cfg_path.is_file():
+                data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            web_sec = data.setdefault("web", {})
+            web_sec.pop("tls_certfile", None)
+            web_sec.pop("tls_keyfile", None)
+            web_sec["secure_cookies"] = False
+            cfg_path.write_text(
+                yaml.safe_dump(data, sort_keys=False, default_flow_style=None),
+                encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                500, f"could not update config.yaml: {exc}")
+
+        # -- 3. Schedule service restart -------------------------------------
+        try:
+            subprocess.Popen(
+                ["sh", "-c",
+                 "sleep 2 && systemctl restart quota-gateway"],
+                start_new_session=True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not schedule restart: %s", exc)
+
+        log.info("HTTPS removed: deleted %s", deleted)
+        return {"ok": True,
+                "deleted": deleted,
+                "message": "HTTPS removed — the dashboard will restart over "
+                           "plain HTTP."}
 
     @app.post("/api/wan/test", dependencies=[Depends(_require_auth)])
     async def test_wan(body: WanTest) -> dict[str, Any]:
@@ -1474,8 +1850,18 @@ def create_app(
             valid, _ = _verify_password(body.current_password or "", stored)
             if not valid:
                 raise HTTPException(400, "current password incorrect")
+            violations = _passwords.policy_violations(body.new_password)
+            if violations:
+                raise HTTPException(400, "weak password: "
+                                        + "; ".join(violations))
             await database.set_setting("admin_password",
                                        _hash_password(body.new_password))
+            # Clear the factory-default marker (WAN mode is now allowed). The
+            # session is NOT rotated here on purpose: on a fresh install the
+            # current session is the only one, and forcing a re-login in the
+            # middle of first-run setup is hostile UX. /api/password (a normal
+            # change with other sessions possible) DOES rotate.
+            await database.set_setting("admin_password_default", "0")
             await database.add_event("Admin password changed", "warn")
         # Only apply the bundle when a value was given — a password-only save
         # must not take bundle ownership from config.yaml (see _apply_bundle_values).
@@ -1622,34 +2008,98 @@ def create_app(
 
     # -- auth -----------------------------------------------------------------
 
-    login_limiter = _LoginRateLimiter()
+    login_limiter = _LoginLimiter()
+    #: Timing-safe fallback: if the stored hash is somehow missing, verify the
+    #: candidate against this fixed dummy so an "unknown account" costs the
+    #: same PBKDF2 time as a real one (no username-enumeration timing oracle).
+    _DUMMY_HASH = _hash_password(secrets.token_hex(16))
+
+    def _secure_cookies() -> bool:
+        return (bool(getattr(web_cfg, "tls_certfile", "")) or
+                bool(getattr(web_cfg, "secure_cookies", False)))
+
+    async def _totp_enabled() -> bool:
+        if await database.get_setting("totp_enabled", "") != "1":
+            return False
+        secret = await database.get_setting("totp_secret", "")
+        return bool(secret) and _totp.is_valid_secret(secret)
 
     @app.post("/api/login")
     async def login(body: LoginRequest, request: Request,
                     response: Response) -> dict[str, Any]:
         await _ensure_admin_password(database)
         host = request.client.host if request.client else ""
-        if not login_limiter.check(host):
-            raise HTTPException(429, "too many failed logins — try again later")
-        stored = await database.get_setting("admin_password")
+        ip_key, acct_key = f"ip:{host}", "account:admin"
+        retry = max(login_limiter.check(ip_key),
+                    login_limiter.check(acct_key))
+        if retry > 0:
+            # Progressive backoff: the attempt is never even processed (no
+            # PBKDF2 work spent on a throttled guess) — and the rejection
+            # itself escalates the next Retry-After (1s, 2s, 4s, ...), so a
+            # hammering client climbs the ladder fast.
+            login_limiter.fail(ip_key)
+            login_limiter.fail(acct_key)
+            raise HTTPException(429, "too many failed logins — try again later",
+                                headers={"Retry-After": f"{int(retry) + 1}"})
+        stored = await database.get_setting("admin_password") or _DUMMY_HASH
         valid, needs_rehash = _verify_password(body.password, stored)
         if not valid:
-            login_limiter.fail(host)
-            raise HTTPException(401, "invalid password")
-        login_limiter.success(host)
+            login_limiter.fail(ip_key)
+            login_limiter.fail(acct_key)
+            await _record_failed_login(database, host)
+            # Brute-force -> kernel ban: past the configured failure threshold
+            # the source IP is cut at the kernel for the ban window, not just
+            # throttled (the app limiter already 429s; the firewall ban is the
+            # stronger second layer that blocks the attacker's NEW connections
+            # entirely, independent of any per-IP app budget).
+            if host and firewall is not None:
+                bf = getattr(firewall, "_config", {}) or {}
+                threshold = int((bf.get("brute_force", {}) or {}).get("threshold", 0) or 0)
+                if threshold and login_limiter._fails.get(ip_key, 0) >= threshold:
+                    seconds = int((bf.get("brute_force", {}) or {}).get("ban_seconds", 0) or 0) or 1800
+                    ban = getattr(firewall, "ban_ip", None)
+                    if ban is not None:
+                        try:
+                            await ban(host, seconds, "login brute-force")
+                        except Exception:  # noqa: BLE001
+                            log.exception("firewall brute-force ban failed")
+            # Generic message for BOTH "unknown account" and "wrong password" —
+            # never reveal which part failed (username enumeration).
+            raise HTTPException(401, "invalid credentials")
+        login_limiter.success(ip_key)
+        login_limiter.success(acct_key)
         if needs_rehash:
             # Legacy 200k hash verified — upgrade it to the current work
             # factor so the stored secret keeps pace with the default.
             await database.set_setting("admin_password",
                                        _hash_password(body.password))
+        if await _totp_enabled():
+            # TOTP second factor. Stage 1: password verified, no session yet —
+            # the client prompts for the 6-digit code and re-posts WITH it.
+            # A code alone is NEVER sufficient: the password must verify first.
+            code = (body.code or "").strip()
+            if not code:
+                return {"ok": False, "totp": True}
+            secret = await database.get_setting("totp_secret", "")
+            if not _totp.verify_code(secret, code):
+                login_limiter.fail(ip_key)
+                login_limiter.fail(acct_key)
+                await _record_failed_login(database, host)
+                raise HTTPException(401, "invalid credentials")
+            login_limiter.success(ip_key)
+            login_limiter.success(acct_key)
         token = secrets.token_hex(24)
         await database.set_setting("session_token", token)
         response.set_cookie(COOKIE_NAME, token, httponly=True,
-                            samesite="lax", max_age=SESSION_TTL_SEC)
+                            samesite="lax", secure=_secure_cookies(),
+                            max_age=SESSION_TTL_SEC)
         return {"ok": True}
 
     @app.post("/api/logout")
     async def logout(response: Response) -> dict[str, Any]:
+        # Rotate the stored token so the just-deleted cookie can NEVER be
+        # replayed against a session (defense-in-depth for a stolen cookie).
+        await database.set_setting("session_token", secrets.token_hex(24))
         response.delete_cookie(COOKIE_NAME)
         return {"ok": True}
 
@@ -1673,8 +2123,67 @@ def create_app(
         valid, _ = _verify_password(body.current, stored)
         if not valid:
             raise HTTPException(400, "current password incorrect")
+        violations = _passwords.policy_violations(body.new)
+        if violations:
+            raise HTTPException(400, "weak password: " + "; ".join(violations))
         await database.set_setting("admin_password", _hash_password(body.new))
+        # Password change invalidates every existing session (the current one
+        # included — the client re-logs-in with the new password).
+        await database.set_setting("session_token", secrets.token_hex(24))
+        # Clear the factory-default marker: WAN mode is now allowed.
+        await database.set_setting("admin_password_default", "0")
         await database.add_event("Admin password changed", "warn")
+        return {"ok": True}
+
+    # -- TOTP (opt-in 2FA, quota/totp.py) ------------------------------------
+
+    @app.get("/api/totp", dependencies=[Depends(_require_auth)])
+    async def totp_status() -> dict[str, Any]:
+        """2FA status. The enrollment secret is exposed ONLY before the code
+        is verified (the authenticator still needs it); once enabled the
+        secret is never served again (re-enrollment resets it)."""
+        if not await _totp_enabled():
+            pending = await database.get_setting("totp_pending", "") == "1"
+            return {"enabled": False, "pending": pending}
+        return {"enabled": True}
+
+    @app.post("/api/totp/enroll", dependencies=[Depends(_require_auth)])
+    async def totp_enroll() -> dict[str, Any]:
+        """Generate a fresh TOTP secret (replaces any previous one). The
+        secret is returned exactly once; ``/api/totp/enable`` verifies the
+        authenticator actually scanned it before it becomes active."""
+        if await _totp_enabled():
+            raise HTTPException(409, "TOTP is already enabled")
+        secret = _totp.generate_secret()
+        await database.set_setting("totp_secret", secret)
+        await database.set_setting("totp_pending", "1")
+        await database.add_event("TOTP enrollment started", "warn")
+        return {"secret": secret,
+                "otpauth_uri": _totp.otpauth_uri(secret)}
+
+    @app.post("/api/totp/enable", dependencies=[Depends(_require_auth)])
+    async def totp_enable(body: TotpEnableRequest) -> dict[str, Any]:
+        """Verify the enrollment code and switch 2FA on."""
+        if await _totp_enabled():
+            raise HTTPException(409, "TOTP is already enabled")
+        if await database.get_setting("totp_pending", "") != "1":
+            raise HTTPException(400, "no pending enrollment — POST /api/totp/enroll first")
+        secret = await database.get_setting("totp_secret", "")
+        if not _totp.verify_code(secret, body.code):
+            raise HTTPException(400, "invalid code — check the time on your device")
+        await database.set_setting("totp_enabled", "1")
+        await database.set_setting("totp_pending", "0")
+        await database.add_event("TOTP two-factor enabled", "warn")
+        return {"ok": True}
+
+    @app.post("/api/totp/disable", dependencies=[Depends(_require_auth)])
+    async def totp_disable() -> dict[str, Any]:
+        """Turn 2FA off (a valid session is the proof — disabling without one
+        is impossible, which is the whole point)."""
+        await database.set_setting("totp_enabled", "0")
+        await database.set_setting("totp_secret", "")
+        await database.set_setting("totp_pending", "0")
+        await database.add_event("TOTP two-factor disabled", "warn")
         return {"ok": True}
 
     # -- websocket ------------------------------------------------------------
@@ -1735,6 +2244,190 @@ def create_app(
             push_task.cancel()
 
     app.router.lifespan_context = _lifespan
+
+    # -- WAF / CSRF / security headers (request-level middleware) -------------
+    # Defense-in-depth in front of every route: the kernel firewall can't see
+    # inside an HTTP request, so this layer inspects actual request content
+    # (api/waf.py), rejects cross-site state changes without a custom header,
+    # and stamps every response with the security headers. Mode-aware: strict
+    # (blocking) on WAN, log-only on LAN; fail-closed on WAN if the layer
+    # itself errors.
+
+    waf_state = _waf.WafRateState()
+
+    def _waf_mode() -> str:
+        if not getattr(waf_cfg, "enabled", True):
+            return "off"
+        topology = (holder.get().wan_status or {}).get("topology", "lan") \
+            if holder else "lan"
+        return _waf.resolve_mode(getattr(waf_cfg, "mode", "auto"), topology)
+
+    @app.middleware("http")
+    async def _security_middleware(request: Request,
+                                   call_next) -> Response:
+        """WAF inspection + CSRF custom-header guard + security headers.
+
+        Order: WAF first (reject the request before any handler runs), then
+        CSRF (a session-bearing cross-site mutation must carry ``X-QM-CSRF``),
+        then the response is stamped with the security headers. A WAF crash
+        fails CLOSED in strict mode (503) — the dashboard becomes unreachable
+        rather than silently unprotected — and OPEN (pass + log) in log mode.
+        """
+        response: Response | None = None
+        try:
+            waf_mode = _waf_mode()
+            if waf_mode != "off":
+                blocked = await _waf_inspect(request, waf_mode)
+                if blocked is not None:
+                    return blocked
+            # CSRF: a state-changing request carrying a valid session cookie
+            # must ALSO carry the custom header. Browser-context requests
+            # (which are the only ones that can BE cross-site attacks) always
+            # send Origin/Referer — a raw API client (curl, the test suite)
+            # sends neither and can't carry a session cookie anyway, so it is
+            # exempt rather than broken. SameSite=lax is the first layer; the
+            # custom header is the second, header-based layer.
+            if request.method in ("POST", "PUT", "PATCH", "DELETE") and \
+                    request.url.path not in ("/api/login", "/api/logout") and \
+                    request.cookies.get(COOKIE_NAME, "") and \
+                    (request.headers.get("origin") or
+                     request.headers.get("referer")) and \
+                    request.headers.get("x-qm-csrf") != "1":
+                return JSONResponse(
+                    {"detail": "missing CSRF token"},
+                    status_code=403,
+                    headers={"X-QM-CSRF": "required"})
+        except Exception:  # noqa: BLE001
+            log.exception("security middleware error")
+            if _waf_mode() == "strict" and \
+                    getattr(waf_cfg, "fail_mode", "closed") == "closed":
+                return JSONResponse(
+                    {"detail": "security layer unavailable"},
+                    status_code=503)
+        response = await call_next(request)
+        _stamp_security_headers(request.url.path, response)
+        return response
+
+    async def _waf_inspect(request: Request,
+                           waf_mode: str) -> Response | None:
+        """Run the WAF checks; return a Response to short-circuit, else None."""
+        host = request.client.host if request.client else ""
+        now = time.monotonic()
+        cfg = waf_cfg
+
+        # -- cheap whole-request caps (before touching the body) --------------
+        cl = request.headers.get("content-length", "")
+        if cl.isdigit() and int(cl) > getattr(cfg, "max_body_bytes", 1_048_576):
+            return await _waf_block(request, host, now, waf_mode,
+                                    "oversized-body", "request-size", cl)
+        if len(request.headers) > getattr(cfg, "max_headers", 40):
+            return await _waf_block(request, host, now, waf_mode,
+                                    "too-many-headers", "request-size", "")
+        for key, value in request.headers.items():
+            if len(value) > getattr(cfg, "max_header_bytes", 8192):
+                return await _waf_block(request, host, now, waf_mode,
+                                        "oversized-header", "request-size", key)
+
+        # -- signatures over path / query / body ------------------------------
+        body_text = ""
+        if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+            try:
+                raw = await request.body()
+            except Exception:  # noqa: BLE001
+                raw = b""
+            body_text = raw.decode("utf-8", "replace")
+        rule = _waf.classify(
+            request.method, request.url.path, request.url.query,
+            body_text, dict(request.headers))
+        if rule is not None and not _waf.is_exempt(
+                getattr(cfg, "exceptions", []), rule[0],
+                request.url.path, host):
+            return await _waf_block(request, host, now, waf_mode,
+                                    rule[1], rule[0], "")
+
+        # -- scanner User-Agent -----------------------------------------------
+        if _waf.classify_ua(request.headers.get("user-agent", "")):
+            return await _waf_block(request, host, now, waf_mode,
+                                    "scanner-ua", "scanner", "")
+
+        # -- per-endpoint request-rate cap (strict only; logged otherwise) ----
+        limits = getattr(cfg, "endpoint_limits", {}) or {}
+        if limits and waf_state.rate_limited(host, request.url.path,
+                                             limits, now):
+            if waf_mode == "strict":
+                return JSONResponse(
+                    {"detail": "request rate limit exceeded"},
+                    status_code=429,
+                    headers={"Retry-After": "30"})
+        return None
+
+    async def _waf_block(request: Request, host: str, now: float,
+                         waf_mode: str, category: str, rule_id: str,
+                         extra: str) -> Response | None:
+        """Log a WAF hit, feed the auto-ban, and (in strict mode) reject."""
+        where = f"{request.url.path}" + (f"?{extra}" if extra else "")
+        message = (f"WAF {category} ({rule_id}) from {host} "
+                   f"{where}")
+        if firewall is not None and hasattr(firewall, "record_event"):
+            try:
+                firewall.record_event("warn", f"WAF: {message}")
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            await database.add_event(message, "warn")
+        except Exception:  # noqa: BLE001
+            pass
+        waf_state.register_block(host, now)
+        auto_after = int(getattr(waf_cfg, "auto_ban_after", 8) or 0)
+        if auto_after and firewall is not None and \
+                hasattr(firewall, "ban_ip"):
+            window = float(getattr(waf_cfg, "ban_window_seconds", 300) or 300)
+            if waf_state.blocks_in_window(host, window, now) >= auto_after:
+                seconds = int(getattr(waf_cfg, "ban_seconds", 1800) or 1800)
+                try:
+                    await firewall.ban_ip(host, seconds, "waf")
+                except Exception:  # noqa: BLE001
+                    log.exception("waf auto-ban failed")
+        if waf_mode == "strict":
+            return JSONResponse(
+                {"detail": f"blocked by WAF ({category})"},
+                status_code=403)
+        return None  # log-only (LAN): record + pass through
+
+    def _stamp_security_headers(path: str, response: Response) -> None:
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        # If the dashboard ever sits on a public address, search engines must
+        # never index the admin UI (robots.txt + this header both say so).
+        response.headers.setdefault("X-Robots-Tag", "noindex, nofollow")
+        # Sensitive-data protection (anti-replay / anti-cache): every DATA
+        # response (API + the HTML pages) is marked no-store so the browser
+        # never writes the payloads — MACs, usage, history, events, log lines —
+        # to the HTTP cache, back/forward cache, or disk on a shared machine.
+        # Static assets (/assets/*) stay cacheable (public, no secrets).
+        if path.startswith(("/api", "/report", "/milestone")) or path == "/":
+            response.headers.setdefault("Cache-Control",
+                                        "no-store, no-cache, must-revalidate, "
+                                        "max-age=0")
+            response.headers.setdefault("Pragma", "no-cache")
+            response.headers.setdefault("Expires", "0")
+        # Strict CSP for the dashboard + API. /report and /milestone carry
+        # inline scripts, so they get the looser (still-useful) profile.
+        if path.startswith(("/report", "/milestone")):
+            response.headers.setdefault(
+                "Content-Security-Policy",
+                "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data:; connect-src 'self' ws: wss:; "
+                "script-src 'self' 'unsafe-inline'; base-uri 'self'; "
+                "frame-ancestors 'none'; form-action 'self'")
+        else:
+            response.headers.setdefault(
+                "Content-Security-Policy",
+                "default-src 'self'; script-src 'self'; "
+                "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+                "connect-src 'self' ws: wss:; font-src 'self'; "
+                "base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
 
     # static UI
     if WEB_DIR.exists():

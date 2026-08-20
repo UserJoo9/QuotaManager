@@ -1190,6 +1190,21 @@ class Database:
             "SELECT * FROM events ORDER BY ts DESC LIMIT ?", (limit,))
         return [dict(r) for r in rows]
 
+    async def count_matching_events(self, pattern: str,
+                                    seconds: float) -> int:
+        """Count events whose ``message`` matches ``pattern`` (LIKE, e.g.
+        ``"Failed login%"``) newer than ``seconds`` ago.
+
+        Feeds the dashboard's security alerting banner (failed logins in the
+        last hour) without shipping the raw rows to the client.
+        """
+        cutoff = time.time() - seconds
+        rows = await self.conn.execute_fetchall(
+            "SELECT COUNT(*) AS n FROM events "
+            "WHERE message LIKE ? AND ts > ?",
+            (pattern, cutoff))
+        return int(rows[0]["n"]) if rows else 0
+
     async def prune_events(self, before_ts: float) -> int:
         """Delete audit rows older than ``before_ts`` (unix seconds).
 

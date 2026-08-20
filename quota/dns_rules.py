@@ -40,6 +40,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -237,9 +238,28 @@ def normalize_pattern(pattern: str) -> str:
 def fetch_url(url: str, timeout: float = 20.0) -> str:
     """Best-effort fetch of a preset source. Raises on failure — the caller
     decides whether that should keep a previously cached list."""
+    _assert_safe_preset_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": "QuotaManager"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
         return resp.read().decode("utf-8", errors="replace")
+
+
+def _assert_safe_preset_url(url: str) -> None:
+    """SSRF guard: a preset source must be https on the blocklist hosts.
+
+    Every preset ``urls`` entry is a curated GitHub raw URL — nothing else is
+    a legitimate source. Refuses other hosts/credentials/plain-http before any
+    connection is made, so a tampered preset can never be used to reach an
+    internal service.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("https",):
+        raise ValueError(f"refusing non-https preset URL: {url!r}")
+    if parsed.username or parsed.password:
+        raise ValueError("refusing preset URL with embedded credentials")
+    host = (parsed.hostname or "").lower()
+    if host not in ("raw.githubusercontent.com", "github.com"):
+        raise ValueError(f"preset host {host!r} not in allowlist")
 
 
 def fetch_preset(preset: Preset) -> set[str]:

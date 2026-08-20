@@ -22,6 +22,18 @@ def _login(c: TestClient) -> None:
     assert c.post("/api/login", json={"password": "admin"}).status_code == 200
 
 
+def _login_wan(c: TestClient) -> None:
+    """Log in AND move off the factory-default password — the WAN activation
+    gate refuses Strong WAN mode while the default password is in use — then
+    re-login (a password change rotates the session token)."""
+    _login(c)
+    r = c.post("/api/password", json={
+        "current": "admin", "new": "Str0ng!Passw0rd42"})
+    assert r.status_code == 200, r.text
+    assert c.post("/api/login",
+                  json={"password": "Str0ng!Passw0rd42"}).status_code == 200
+
+
 @pytest.fixture
 def client(tmp_path):
     """A TestClient wired to a temp database and quota service."""
@@ -59,15 +71,26 @@ def test_wrong_password(client):
 
 
 def test_login_rate_limit(client):
-    """> LOGIN_MAX_FAILURES failed attempts from one source IP -> 429 until the
-    window rolls (in-memory limiter; a LAN box's brute-force surface)."""
+    """Progressive backoff (authentication hardening): the first few failures
+    are answered instantly (typo-friendly), then the limiter escalates to 429
+    with an increasing Retry-After — and the correct password is throttled
+    too (no guessing funnel)."""
     c, _, _ = client
-    for i in range(10):
+    # attempts 1-4: instant 401s (free tier + the failure that arms backoff)
+    for i in range(4):
         r = c.post("/api/login", json={"password": f"wrong-{i}"})
         assert r.status_code == 401
-    r = c.post("/api/login", json={"password": "wrong-11"})
-    assert r.status_code == 429
-    # the correct password is also throttled mid-window (no guessing funnel)
+    # 5+: 429 + a Retry-After (the attempt is never processed). The exact
+    # ladder (1s, 2s, 4s, ...) is timing-dependent under load and asserted
+    # deterministically in the _LoginLimiter unit test (test_security.py);
+    # here we pin the contract: throttled, with a sane non-decreasing header.
+    retries = []
+    for i in range(4, 6):
+        r = c.post("/api/login", json={"password": f"wrong-{i}"})
+        assert r.status_code == 429
+        retries.append(int(r.headers.get("Retry-After", "0")))
+    assert retries[0] >= 1 and retries[1] >= retries[0]
+    # the correct password is also throttled mid-backoff (no guessing funnel)
     r = c.post("/api/login", json={"password": "admin"})
     assert r.status_code == 429
 
@@ -392,7 +415,8 @@ def test_bundle_recharge_grows_total(client):
 def test_password_change_requires_session(client):
     """Not logged in -> 401 (client shows the login screen), not a wrong-password 400."""
     c, _, _ = client
-    r = c.post("/api/password", json={"current": "admin", "new": "secret"})
+    r = c.post("/api/password",
+               json={"current": "admin", "new": "Str0ng!Passw0rd42"})
     assert r.status_code == 401, r.text
 
 
@@ -401,7 +425,8 @@ def test_password_change_wrong_current_is_400(client):
     'Current password is wrong.' instead of logging the user out."""
     c, _, _ = client
     assert c.post("/api/login", json={"password": "admin"}).status_code == 200
-    r = c.post("/api/password", json={"current": "wrong", "new": "secret"})
+    r = c.post("/api/password",
+               json={"current": "wrong", "new": "Str0ng!Passw0rd42"})
     assert r.status_code == 400, r.text
     assert r.json()["detail"] == "current password incorrect"
     # old password still works
@@ -411,10 +436,12 @@ def test_password_change_wrong_current_is_400(client):
 def test_password_change_success(client):
     c, _, _ = client
     assert c.post("/api/login", json={"password": "admin"}).status_code == 200
-    r = c.post("/api/password", json={"current": "admin", "new": "secret"})
+    r = c.post("/api/password",
+               json={"current": "admin", "new": "Str0ng!Passw0rd42"})
     assert r.status_code == 200, r.text
     # new password logs in, old one is rejected
-    assert c.post("/api/login", json={"password": "secret"}).status_code == 200
+    assert c.post("/api/login",
+                  json={"password": "Str0ng!Passw0rd42"}).status_code == 200
     assert c.post("/api/login", json={"password": "admin"}).status_code == 401
 
 
@@ -491,7 +518,7 @@ def test_setup_complete_writes_bundle_and_password(client):
     assert c.post("/api/login", json={"password": "admin"}).status_code == 200
     r = c.post("/api/setup/complete", json={
         "total_gb": 60, "reset_day": 15,
-        "current_password": "admin", "new_password": "secret"})
+        "current_password": "admin", "new_password": "Str0ng!Passw0rd42"})
     assert r.status_code == 200, r.text
     # bundle updated + dashboard owns it now (config.yaml stops overriding)
     b = c.get("/api/bundle").json()
@@ -499,7 +526,8 @@ def test_setup_complete_writes_bundle_and_password(client):
     assert b["reset_day"] == 15
     assert c.get("/api/setup").json()["setup_complete"] is True
     # new password logs in, old one is rejected
-    assert c.post("/api/login", json={"password": "secret"}).status_code == 200
+    assert c.post("/api/login",
+                  json={"password": "Str0ng!Passw0rd42"}).status_code == 200
     assert c.post("/api/login", json={"password": "admin"}).status_code == 401
 
 
@@ -508,7 +536,7 @@ def test_setup_password_only_keeps_bundle_source(client):
     c, _, _ = client
     assert c.post("/api/login", json={"password": "admin"}).status_code == 200
     r = c.post("/api/setup/complete", json={
-        "current_password": "admin", "new_password": "secret"})
+        "current_password": "admin", "new_password": "Str0ng!Passw0rd42"})
     assert r.status_code == 200, r.text
     b = c.get("/api/bundle").json()
     assert b["total_gb"] == 140.0   # untouched
@@ -520,7 +548,7 @@ def test_setup_wrong_current_password_is_400(client):
     c, _, _ = client
     assert c.post("/api/login", json={"password": "admin"}).status_code == 200
     r = c.post("/api/setup/complete", json={
-        "current_password": "wrong", "new_password": "secret"})
+        "current_password": "wrong", "new_password": "Str0ng!Passw0rd42"})
     assert r.status_code == 400, r.text
     assert r.json()["detail"] == "current password incorrect"
     # still not marked complete, old password still works
@@ -954,12 +982,15 @@ def test_wan_endpoint_defaults(client):
     ``rogue``. ``GET /api/wan`` additionally carries the saved PPPoE creds
     (empty here — that is what prefills the panel), while the dashboard payload
     keeps the creds out of the ``wan`` key (the WS push must never carry the
-    password). The endpoint never 500s."""
+    password). Sensitive-data hardening: the stored password is NEVER shipped
+    — ``pppoe_password`` is masked and ``pppoe_has_password`` tells the UI a
+    value exists. The endpoint never 500s."""
     c, _, _ = client
     _login(c)
     r = c.get("/api/wan")
     assert r.status_code == 200
-    assert r.json() == {"pppoe_user": "", "pppoe_password": "", "wan_if": ""}
+    assert r.json() == {"pppoe_user": "", "pppoe_password": "********",
+                        "pppoe_has_password": False, "wan_if": ""}
     assert c.get("/api/dashboard").json()["wan"] == {}
 
 
@@ -984,7 +1015,8 @@ def test_dashboard_surfaces_wan_status(tmp_path):
                     "pending": None, "ppp0": "n/a", "ppp_ip": "", "ppp_peer": ""}
         assert c.get("/api/wan").json() == {
             **expected,
-            "pppoe_user": "", "pppoe_password": "", "wan_if": "",
+            "pppoe_user": "", "pppoe_password": "********",
+            "pppoe_has_password": False, "wan_if": "",
         }
         assert c.get("/api/dashboard").json()["wan"] == expected
     asyncio.get_event_loop().run_until_complete(database.close())
@@ -1024,7 +1056,7 @@ def test_wan_toggle_persists_and_owns_topology(client):
     """POST /api/wan stores the preference (topology_source=dashboard) so it
     wins over config.yaml on the NEXT restart — the bundle_source pattern."""
     c, database, _ = client
-    _login(c)
+    _login_wan(c)
     r = c.post("/api/wan", json={"topology": "wan"})
     assert r.status_code == 200, r.text
     data = r.json()
@@ -1056,7 +1088,7 @@ def test_wan_persist_no_manager_preserves_saved_creds(tmp_path):
     asyncio.get_event_loop().run_until_complete(database.connect())
     app = create_app(database, service, holder, topology_manager=None)
     with TestClient(app) as c:
-        c.post("/api/login", json={"password": "admin"})
+        _login_wan(c)
         # save creds first
         r = c.post("/api/wan", json={"topology": "wan", "pppoe_user": "u@isp",
                                      "pppoe_password": "s3cret"})
@@ -1065,7 +1097,9 @@ def test_wan_persist_no_manager_preserves_saved_creds(tmp_path):
         r = c.post("/api/wan", json={"topology": "lan"})
         assert r.status_code == 200, r.text
         assert c.get("/api/wan").json()["pppoe_user"] == "u@isp"
-        assert c.get("/api/wan").json()["pppoe_password"] == "s3cret"
+        # the stored secret is NEVER shipped — masked + a presence flag instead
+        assert c.get("/api/wan").json()["pppoe_password"] == "********"
+        assert c.get("/api/wan").json()["pppoe_has_password"] is True
     asyncio.get_event_loop().run_until_complete(database.close())
 
 
@@ -1133,7 +1167,7 @@ def test_wan_apply_live_with_manager(tmp_path):
     asyncio.get_event_loop().run_until_complete(database.connect())
     app = create_app(database, service, holder, topology_manager=manager)
     with TestClient(app) as c:
-        c.post("/api/login", json={"password": "admin"})
+        _login_wan(c)
         r = c.post("/api/wan", json={"topology": "wan", "pppoe_user": "u@isp",
                                      "pppoe_password": "s3cret", "wan_if": "eth1"})
         assert r.status_code == 200, r.text
@@ -1167,7 +1201,7 @@ def test_wan_apply_failure_is_500(tmp_path):
     asyncio.get_event_loop().run_until_complete(database.connect())
     app = create_app(database, service, holder, topology_manager=manager)
     with TestClient(app) as c:
-        c.post("/api/login", json={"password": "admin"})
+        _login_wan(c)
         r = c.post("/api/wan", json={"topology": "wan"})
         assert r.status_code == 500
         assert "topology apply failed" in r.json()["detail"]
