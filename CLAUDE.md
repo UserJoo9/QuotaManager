@@ -658,6 +658,13 @@ the regression net that blocks the breaking change.
 ---
 
 ## [VERSION HISTORY] (headlines + gotchas; full detail in CHANGELOG.md)
+- **(fix)** — **VPN share TUN detection + existence fallback** —
+  `detect_interfaces()` and `_iface_exists()` gained ip-route2 fallbacks
+  (`ip -o -d link show` for detection, `ip link show dev` for existence)
+  that fire when sysfs doesn't expose the interface link-type file. Fixes
+  v2rayN/sing-box TUN never detected (fell through to tun2socks) and
+  nekoray reconcile teardown loop (detection flapping → repeated disconnects).
+  9 new tests. Suite 640→649.
 - **v0.3.0 (2026-08-19)** — security hardening pass (password policy, login
   limiter, session rotation, TOTP 2FA, embedded WAF, CSRF guard, security
   headers, default-password WAN gate, PPPoE masking, SSRF allowlists), firewall

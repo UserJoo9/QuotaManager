@@ -6,6 +6,26 @@ The version is the single source of truth in `quota/version.py`; a release tag
 
 ## [Unreleased]
 
+### Fixed
+
+- **VPN share stuck on "No VPN tunnel detected" / repeated disconnects with
+  real VPN clients** — `VpnShareManager.detect_interfaces()` and `_iface_exists()`
+  relied solely on sysfs (`/sys/class/net/<iface>/type`) to find and verify
+  TUN/WireGuard interfaces. When sysfs does not expose the link-type file
+  (partial mount, permissions, kernel config differences), detection returned
+  empty and `_iface_exists()` returned false. This caused two distinct failures:
+  (a) v2rayN/sing-box TUN interfaces were never found — the code fell through
+  to the tun2socks auto-provisioner even with a real kernel tunnel running,
+  creating a routing conflict. (b) nekoray's TUN was intermittently detected
+  — the reconcile loop alternated between routing through the real tunnel and
+  attempting tun2socks, causing repeated VPN disconnects ("core frequently
+  disconnect"). Fixed by adding an `ip -o -d link show` fallback to
+  `detect_interfaces()` that parses the iproute2 output for `link/none`
+  (the kernel's text representation of ARPHRD_NONE = 65534, the same value
+  sysfs exposes), and an `ip link show dev` fallback to `_iface_exists()`.
+  The sysfs scan remains the primary path (no subprocess, chroot-safe); the
+  fallback only fires when sysfs yields nothing. 9 new tests. Suite 640→649.
+
 ## [0.3.0] — 2026-08-19
 
 ### Added

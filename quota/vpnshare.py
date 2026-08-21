@@ -158,22 +158,26 @@ class VpnShareManager:
         A candidate is an interface whose kernel link type is ARPHRD_NONE
         (65534 — tun/utun/wireguard). Order: named tun*/utun*/wg* first,
         then the rest; an interface carrying an IPv4 address beats a bare
-        one. ``ip`` is never consulted here (sysfs only), so detection also
-        runs chrooted/root-free.
+        one.  The primary path reads ``/sys/class/net/<iface>/type``
+        (no subprocess, chroot-safe); when sysfs does not expose the type
+        file (partial mount, permissions, kernel config), ``ip -o -d link
+        show`` is consulted as a fallback.
         """
         root = self.sysfs_root
-        if not root.is_dir():
-            return []
         candidates: list[str] = []
-        for dev in root.iterdir():
-            if not dev.is_dir():
-                continue
-            try:
-                link_type = (dev / "type").read_text(encoding="utf-8").strip()
-            except OSError:
-                continue
-            if link_type == str(ARPHRD_NONE):
-                candidates.append(dev.name)
+        if root.is_dir():
+            for dev in root.iterdir():
+                if not dev.is_dir():
+                    continue
+                try:
+                    link_type = (dev / "type").read_text(
+                        encoding="utf-8").strip()
+                except OSError:
+                    continue
+                if link_type == str(ARPHRD_NONE):
+                    candidates.append(dev.name)
+        if not candidates:
+            candidates = self._detect_interfaces_ip()
         if not candidates:
             return []
 
@@ -186,11 +190,40 @@ class VpnShareManager:
 
         return sorted(candidates, key=rank)
 
+    def _detect_interfaces_ip(self) -> list[str]:
+        """``ip -o -d link show`` fallback for :meth:`detect_interfaces`.
+
+        Parses the two-line-per-interface output for ``link/none`` — the
+        kernel's text representation of ARPHRD_NONE (65534), the same
+        value sysfs exposes in ``/sys/class/net/<iface>/type``.  Returns
+        a flat list (caller applies the rank/sort); an ``ip`` failure or
+        an empty result yields ``[]``.
+        """
+        code, out = self._run_command(["ip", "-o", "-d", "link", "show"])
+        if code != 0:
+            return []
+        candidates: list[str] = []
+        current_iface = ""
+        for line in (out or "").splitlines():
+            hdr = re.match(r"\d+:\s+(\S+?):", line)
+            if hdr:
+                current_iface = hdr.group(1)
+            if current_iface and "link/none" in line:
+                candidates.append(current_iface)
+                current_iface = ""
+        return candidates
+
     def _iface_exists(self, iface: str) -> bool:
-        """Does the tunnel device exist right now? Sysfs check (no
-        subprocess). A pinned tunnel that went away must never be routed
-        into — the VPN client may have restarted as a new tun index."""
-        return (self.sysfs_root / iface).is_dir()
+        """Does the tunnel device exist right now?  Primary check is the
+        sysfs directory (no subprocess).  When sysfs is incomplete the
+        method falls back to ``ip link show dev <iface>`` so that a
+        pinned tunnel discovered via the ip-link path is not treated as
+        gone — a false-negative here would trigger the reconcile teardown
+        loop that causes repeated VPN disconnects."""
+        if (self.sysfs_root / iface).is_dir():
+            return True
+        code, _out = self._run_command(["ip", "link", "show", "dev", iface])
+        return code == 0
 
     def _ensure_link_up(self, iface: str) -> bool:
         """Best-effort: bring the tunnel device's link UP so the kernel

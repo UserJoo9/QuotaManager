@@ -144,6 +144,133 @@ def test_detect_ranks_xray_tun_like_classic_tunnels():
     assert m.detect_interfaces() == ["xray_tun", "evice"]
 
 
+# ---------------------------------------------------------------------------
+# ip-link fallback (sysfs incomplete / missing)
+# ---------------------------------------------------------------------------
+
+_IP_LINK_OUTPUT_MULTI = (
+    "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN\n"
+    "    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00\n"
+    "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast\n"
+    "    link/ether aa:bb:cc:dd:ee:ff brd ff:ff:ff:ff:ff:ff\n"
+    "3: tun0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1500\n"
+    "    link/none\n"
+    "4: wg0: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420\n"
+    "    link/none\n"
+)
+
+
+def test_ip_link_fallback_finds_tun0():
+    """When sysfs yields zero candidates, _detect_interfaces_ip parses the
+    ip -o -d link show output and returns interfaces with link/none."""
+    root = make_sysfs()                       # empty sysfs → no candidates
+    fake = FakeIp()
+    fake.script[("ip", "-o", "-d", "link", "show")] = (0, _IP_LINK_OUTPUT_MULTI)
+    m = VpnShareManager(make_cfg(), run_command=fake, sysfs_root=root)
+    found = m.detect_interfaces()
+    assert "tun0" in found and "wg0" in found
+    assert "lo" not in found and "eth0" not in found
+
+
+def test_ip_link_fallback_finds_wg0():
+    """The fallback returns wg0 even when only WireGuard is present."""
+    root = make_sysfs()
+    fake = FakeIp()
+    fake.script[("ip", "-o", "-d", "link", "show")] = (0,
+        "1: lo: <LOOPBACK,UP> mtu 65536\n"
+        "    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00\n"
+        "10: wg0: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420\n"
+        "    link/none\n"
+    )
+    m = VpnShareManager(make_cfg(), run_command=fake, sysfs_root=root)
+    assert m.detect_interfaces() == ["wg0"]
+
+
+def test_ip_link_skipped_when_sysfs_works():
+    """When sysfs DOES expose ARPHRD_NONE candidates, ip -o -d is never
+    called (sysfs is faster and chroot-safe)."""
+    root = make_sysfs(("tun0", "65534"))
+    fake = FakeIp()
+    fake.script[("ip", "-o", "-d", "link", "show")] = (
+        "3: tun0: <POINTOPOINT,UP> mtu 1500\n"
+        "    link/none\n"
+    )
+    m = VpnShareManager(make_cfg(), run_command=fake, sysfs_root=root)
+    assert m.detect_interfaces() == ["tun0"]
+    assert not fake.has("ip", "-o", "-d", "link", "show")
+
+
+def test_ip_link_fallback_empty_returns_empty():
+    """When ip -o -d link show returns no link/none, detect returns []."""
+    root = make_sysfs()
+    fake = FakeIp()
+    fake.script[("ip", "-o", "-d", "link", "show")] = (0,
+        "1: lo: <LOOPBACK,UP> mtu 65536\n"
+        "    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00\n"
+    )
+    m = VpnShareManager(make_cfg(), run_command=fake, sysfs_root=root)
+    assert m.detect_interfaces() == []
+
+
+def test_ip_link_fallback_ip_unavailable():
+    """When ip -o -d link show fails (code != 0), fallback yields []."""
+    root = make_sysfs()
+    fake = FakeIp()
+    fake.script[("ip", "-o", "-d", "link", "show")] = (1, "")
+    m = VpnShareManager(make_cfg(), run_command=fake, sysfs_root=root)
+    assert m.detect_interfaces() == []
+
+
+def test_ip_link_fallback_excludes_loopback():
+    """Loopback and ethernet never carry link/none."""
+    root = make_sysfs()
+    fake = FakeIp()
+    fake.script[("ip", "-o", "-d", "link", "show")] = (0,
+        "1: lo: <LOOPBACK,UP> mtu 65536\n"
+        "    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00\n"
+        "2: eth0: <BROADCAST,MULTICAST,UP> mtu 1500\n"
+        "    link/ether aa:bb:cc:dd:ee:ff brd ff:ff:ff:ff:ff:ff\n"
+    )
+    m = VpnShareManager(make_cfg(), run_command=fake, sysfs_root=root)
+    assert m.detect_interfaces() == []
+
+
+# ---------------------------------------------------------------------------
+# _iface_exists: sysfs primary + ip fallback
+# ---------------------------------------------------------------------------
+
+def test_iface_exists_sysfs_primary():
+    """Sysfs directory is the fast path — no subprocess."""
+    root = make_sysfs(("tun0", "65534"))
+    fake = FakeIp()
+    m = VpnShareManager(make_cfg(), run_command=fake, sysfs_root=root)
+    assert m._iface_exists("tun0")
+    assert not fake.has("ip", "link", "show", "dev", "tun0")
+
+
+def test_iface_exists_ip_fallback():
+    """When sysfs is incomplete, _iface_exists falls back to ip link show dev
+    so a pinned tunnel discovered via the ip-link path is not treated as gone."""
+    root = make_sysfs()                       # no tun0 in sysfs
+    fake = FakeIp()
+    fake.script[("ip", "link", "show", "dev", "tun0")] = (0,
+        "3: tun0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1500 "
+        "qdisc pfifo_fast state UP\n"
+    )
+    m = VpnShareManager(make_cfg(), run_command=fake, sysfs_root=root)
+    assert m._iface_exists("tun0")
+    assert fake.has("ip", "link", "show", "dev", "tun0")
+
+
+def test_iface_exists_ip_fallback_not_found():
+    """When both sysfs and ip link show dev fail, _iface_exists returns False."""
+    root = make_sysfs()
+    fake = FakeIp()
+    fake.script[("ip", "link", "show", "dev", "tun0")] = (1, "")
+    m = VpnShareManager(make_cfg(), run_command=fake, sysfs_root=root)
+    assert not m._iface_exists("tun0")
+
+
 def test_peer_ip_only_from_peer_field():
     m, fake = mgr()
     fake.script[("ip", "-o", "-4", "addr", "show", "dev", "tun0")] = \
@@ -406,6 +533,9 @@ def test_reconcile_on_no_tunnel_reports_and_never_blackholes():
     assert m.reconcile(True, interface_pin="utun4").state == STATE_ON
     # sysfs is now empty — the same tunnel name is gone
     m.sysfs_root = make_sysfs()
+    # ip link show dev must fail for the vanished interface (real kernel
+    # returns non-zero for a device that does not exist)
+    fake.script[("ip", "link", "show", "dev", "utun4")] = (1, "")
     st = m.reconcile(True, interface_pin="utun4")
     assert st.state == STATE_NO_INTERFACE
     assert m._applied is False
@@ -421,6 +551,8 @@ def test_reconcile_pin_gone_falls_back_to_redetected_tunnel():
     m.sysfs_root = make_sysfs(("wg0", "65534"))
     fake.script[("ip", "-o", "-4", "addr", "show", "dev", "wg0")] = \
         (0, "3: wg0    inet 10.8.0.2/24 scope global wg0\n")
+    # The old pin (utun4) is gone — ip link show dev must fail for it
+    fake.script[("ip", "link", "show", "dev", "utun4")] = (1, "")
     st = m.reconcile(True, interface_pin="utun4")
     assert st.state == STATE_ON and st.interface == "wg0"
     assert fake.has("ip", "route", "replace", "table", "200",
