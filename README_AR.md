@@ -30,18 +30,10 @@
   </tr>
 </table>
 
-```
-┌──────────────┐   Ethernet    ┌───────────────────────────────────────────┐
-│  ISP Router  │◄─────────────│  Old laptop (24/7)                        │
-│  WiFi + NAT  │              │  dnsmasq        nftables    web dashboard │
-│  DHCP off    │              │  (DHCP + DNS)   (count + cut)             │
-└──────────────┘              └───────▲───────────────────────────┬────────┘
-                                      │ devices' gateway + DNS    │ every byte
-                                ┌─────┴───────┐           ┌───────┴────────┐
-                                │  Phones     │           │  TVs           │
-                                │  Laptops    │           │  Consoles      │
-                                └─────────────┘           └────────────────┘
-```
+<p align="center">
+  <img src="docs/diagrams/AR_skitch_diagram.png" width="640"
+       alt="مخطط: موجّه الإنترنت يغذي لابتوب قديمًا يشغّل Quota Manager، وتستخدم الأجهزة (هواتف، حواسيب، شاشات) اللابتوب كبوابة وDNS.">
+</p>
 
 **للمطورين** — كيف يعمل التطبيق فعليًا (البنية، الإعدادات، الـ API، الاختبارات،
 عملية الإصدار): [Structure_README.md](Structure_README.md).

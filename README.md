@@ -31,18 +31,10 @@ gateway:
   </tr>
 </table>
 
-```
-┌──────────────┐   Ethernet    ┌───────────────────────────────────────────┐
-│  ISP Router  │◄─────────────│  Old laptop (24/7)                        │
-│  WiFi + NAT  │              │  dnsmasq        nftables    web dashboard │
-│  DHCP off    │              │  (DHCP + DNS)   (count + cut)             │
-└──────────────┘              └───────▲───────────────────────────┬────────┘
-                                      │ devices' gateway + DNS    │ every byte
-                                ┌─────┴───────┐           ┌───────┴────────┐
-                                │  Phones     │           │  TVs           │
-                                │  Laptops    │           │  Consoles      │
-                                └─────────────┘           └────────────────┘
-```
+<p align="center">
+  <img src="docs/diagrams/EN_skitch_diagram.png" width="640"
+       alt="The ISP router feeds an old laptop running Quota Manager; phones, laptops, TVs and consoles use it as their gateway and DNS.">
+</p>
 
 **For developers** — how the app actually works (architecture, config, API,
 tests, release process): [Structure_README.md](Structure_README.md).
