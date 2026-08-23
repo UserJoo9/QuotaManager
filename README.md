@@ -32,7 +32,7 @@ gateway:
 </table>
 
 <p align="center">
-  <img src="docs/diagrams/EN_skitch_diagram.png" width="640"
+  <img src="docs/diagrams/EN_sketch_diagram.png" width="640"
        alt="The ISP router feeds an old laptop running Quota Manager; phones, laptops, TVs and consoles use it as their gateway and DNS.">
 </p>
 

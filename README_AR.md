@@ -31,7 +31,7 @@
 </table>
 
 <p align="center">
-  <img src="docs/diagrams/AR_skitch_diagram.png" width="640"
+  <img src="docs/diagrams/AR_sketch_diagram.png" width="640"
        alt="مخطط: موجّه الإنترنت يغذي لابتوب قديمًا يشغّل Quota Manager، وتستخدم الأجهزة (هواتف، حواسيب، شاشات) اللابتوب كبوابة وDNS.">
 </p>
 
