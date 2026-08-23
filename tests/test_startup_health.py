@@ -5,6 +5,7 @@ All nft / ip / sysctl calls are faked — no root or kernel features required.
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -108,31 +109,149 @@ class TestEnsureNatTable:
 # ensure_network_infrastructure
 # ------------------------------------------------------------------
 
+class FakeIp:
+    """In-memory ``ip`` stand-in: records argv, scripts select responses.
+
+    Script keys match by LONGEST PREFIX (an exact key wins) — so
+    ``("ip", "addr", "add")`` scripts every address-add regardless of its
+    cidr/dev tail, while ``("ip", "-o", "-4", "addr", "show", "dev",
+    "eth0")`` still beats the shorter bare-show key.
+    """
+
+    def __init__(self, script: dict[tuple[str, ...], tuple[int, str]] | None = None) -> None:
+        self.calls: list[list[str]] = []
+        self.script = {tuple(k): v for k, v in (script or {}).items()}
+
+    def __call__(self, argv: list[str]) -> tuple[int, str]:
+        self.calls.append(argv)
+        key = tuple(argv)
+        if key in self.script:
+            return self.script[key]
+        best: tuple[str, ...] | None = None
+        for k in self.script:
+            if len(k) <= len(key) and key[:len(k)] == k:
+                if best is None or len(k) > len(best):
+                    best = k
+        return self.script[best] if best else (0, "")
+
+    def adds(self) -> list[list[str]]:
+        return [c for c in self.calls if c[:3] == ["ip", "addr", "add"]]
+
+
+def make_net(*ifaces: tuple[str, str, str]) -> Path:
+    """Fake /sys/class/net: entries of (name, link-type, carrier)."""
+    root = Path(tempfile.mkdtemp(prefix="qm-sysnet-"))
+    for name, link_type, carrier in ifaces:
+        d = root / name
+        d.mkdir()
+        (d / "type").write_text(link_type, encoding="utf-8")
+        if carrier:
+            (d / "carrier").write_text(carrier, encoding="utf-8")
+    return root
+
+
+ADDR_SHOW = ("ip", "-o", "-4", "addr", "show")
+ADDR_SHOW_DEV = ("ip", "-o", "-4", "addr", "show", "dev", "eth0")
+
+
+def _fwd_on(tmp_path: Path) -> Path:
+    """A healthy ip_forward file (already 1) — never touches the real /proc."""
+    fwd = tmp_path / "ip_forward"
+    fwd.write_text("1\n", encoding="utf-8")
+    return fwd
+
+
 class TestEnsureNetworkInfrastructure:
-    def test_enables_ip_forward(self, tmp_path: Path) -> None:
-        """When ip_forward is 0, the function should write 1."""
+    def test_enables_ip_forward_when_disabled(self, tmp_path: Path) -> None:
+        """A 0 in the ip_forward file is rewritten to 1."""
         fwd = tmp_path / "ip_forward"
-        fwd.write_text("0\n")
+        fwd.write_text("0\n", encoding="utf-8")
+        ok = ensure_network_infrastructure(
+            run=FakeIp(), proc_ipforward=fwd, sysfs_net=make_net())
+        assert ok is True
+        assert fwd.read_text(encoding="utf-8").strip() == "1"
 
-        # Patch /proc path — we can't in tests, so just test the function
-        # doesn't crash on a system without /proc.
-        # On Windows (CI), this is a no-op. On Linux it would fix it.
+    def test_ip_forward_already_on_is_untouched(self, tmp_path: Path) -> None:
+        fwd = tmp_path / "ip_forward"
+        fwd.write_text("1\n", encoding="utf-8")
+        assert ensure_network_infrastructure(
+            run=FakeIp(), proc_ipforward=fwd, sysfs_net=make_net()) is True
+        assert fwd.read_text(encoding="utf-8") == "1\n"
+
+    def test_missing_proc_file_skips_silently(self, tmp_path: Path) -> None:
+        """No ip_forward file (non-Linux / container) is not a failure."""
+        ok = ensure_network_infrastructure(
+            run=FakeIp(),
+            proc_ipforward=tmp_path / "nonexistent",
+            sysfs_net=make_net(),
+        )
+        assert ok is True
+
+    def test_readds_missing_gateway_and_uplink(self, tmp_path: Path) -> None:
+        """The wired NIC lost its static addresses — both are re-added."""
+        other = "2: eth0    inet 10.9.9.5/24 brd 10.9.9.255 scope global eth0\n"
+        fake = FakeIp({
+            ADDR_SHOW: (0, other),
+            ADDR_SHOW_DEV: (0, other),
+        })
         ok = ensure_network_infrastructure(
             gateway_ip="192.168.2.1",
             uplink_ip="192.168.1.110",
             lan_cidr=24,
+            run=fake,
+            proc_ipforward=_fwd_on(tmp_path),
+            sysfs_net=make_net(("eth0", "1", "1")),
         )
-        # Function should not crash regardless of platform.
         assert ok is True
+        added = [c[3] for c in fake.adds()]
+        assert added == ["192.168.2.1/24", "192.168.1.110/24"]
 
-    def test_no_crash_without_lan_interface(self) -> None:
-        """On a system with no wired NIC, function should not crash."""
+    def test_healthy_system_makes_no_changes(self, tmp_path: Path) -> None:
+        """Both addresses present — nothing is re-added (idempotent)."""
+        out = ("2: eth0    inet 192.168.1.110/24 brd 192.168.1.255 scope global eth0\n"
+               "2: eth0    inet 192.168.2.1/24 brd 192.168.2.255 scope global eth0\n")
+        fake = FakeIp({ADDR_SHOW: (0, out), ADDR_SHOW_DEV: (0, out)})
         ok = ensure_network_infrastructure(
             gateway_ip="192.168.2.1",
             uplink_ip="192.168.1.110",
             lan_cidr=24,
+            run=fake,
+            proc_ipforward=_fwd_on(tmp_path),
+            sysfs_net=make_net(("eth0", "1", "1")),
         )
         assert ok is True
+        assert fake.adds() == []
+
+    def test_addr_add_failure_returns_false(self, tmp_path: Path) -> None:
+        """A failed address add (no root) is reported via False, never raised."""
+        other = "2: eth0    inet 10.9.9.5/24 brd 10.9.9.255 scope global eth0\n"
+        fake = FakeIp({
+            ADDR_SHOW: (0, other),
+            ADDR_SHOW_DEV: (0, other),
+            ("ip", "addr", "add"): (1, "RTNETLINK answers: Operation not permitted"),
+        })
+        ok = ensure_network_infrastructure(
+            gateway_ip="192.168.2.1",
+            uplink_ip="192.168.1.110",
+            lan_cidr=24,
+            run=fake,
+            proc_ipforward=_fwd_on(tmp_path),
+            sysfs_net=make_net(("eth0", "1", "1")),
+        )
+        assert ok is False
+        assert len(fake.adds()) == 2
+
+    def test_no_wired_interface_makes_no_changes(self, tmp_path: Path) -> None:
+        """WiFi-only / no-carrier boxes skip the address check gracefully."""
+        fake = FakeIp()
+        ok = ensure_network_infrastructure(
+            run=fake,
+            proc_ipforward=_fwd_on(tmp_path),
+            sysfs_net=make_net(("wlan0", "1", ""),   # no carrier file value
+                               ("lo", "772", "1")),
+        )
+        assert ok is True
+        assert fake.adds() == []
 
 
 # ------------------------------------------------------------------

@@ -35,6 +35,9 @@ NFT_TABLE = "inet quota_nat"
 _CONF_SYMLINK = Path("/etc/nftables.conf")
 _CONF_TARGET = Path("/etc/quota-gateway/nftables.gateway.nft")
 
+_PROC_IPFORWARD = Path("/proc/sys/net/ipv4/ip_forward")
+_SYS_NET = Path("/sys/class/net")
+
 
 def _default_run(argv: list[str]) -> tuple[int, str]:
     try:
@@ -159,21 +162,19 @@ def ensure_nftables_conf() -> bool:
 # NIC addresses + sysctl
 # ------------------------------------------------------------------
 
-def _find_lan_interface() -> str:
+def _find_lan_interface(run: RunCommand,
+                        sysfs_net: Path = _SYS_NET) -> str:
     """Detect the wired Ethernet NIC carrying the gateway IP.
 
     Mirrors ``quota.netmgr.TopologyManager.lan_interface()`` but without
-    needing the full config object.
+    needing the full config object.  ``run`` and ``sysfs_net`` are
+    injectable so tests never touch the real kernel.
     """
-    try:
-        out = subprocess.run(
-            ["ip", "-o", "-4", "addr", "show"],
-            capture_output=True, text=True, timeout=10,
-        ).stdout or ""
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    code, out = run(["ip", "-o", "-4", "addr", "show"])
+    if code != 0:
         return ""
     # Prefer the kernel's default-route interface if it's an Ethernet NIC.
-    for line in out.splitlines():
+    for line in (out or "").splitlines():
         # line format: "2: eth0    inet 192.168.2.1/24 ..."
         parts = line.split(":", 1)
         if len(parts) < 2:
@@ -182,36 +183,30 @@ def _find_lan_interface() -> str:
         if not iface or iface == "lo":
             continue
         # Check it's wired (type 1 = Ethernet).
-        type_path = f"/sys/class/net/{iface}/type"
+        type_path = sysfs_net / iface / "type"
         try:
-            with open(type_path) as f:
-                if f.read().strip() != "1":
-                    continue
+            if type_path.read_text(encoding="utf-8").strip() != "1":
+                continue
         except OSError:
             continue
         # Check it has a live link.
-        carrier_path = f"/sys/class/net/{iface}/carrier"
+        carrier_path = sysfs_net / iface / "carrier"
         try:
-            with open(carrier_path) as f:
-                if f.read().strip() != "1":
-                    continue
+            if carrier_path.read_text(encoding="utf-8").strip() != "1":
+                continue
         except OSError:
             continue
         return iface
     return ""
 
 
-def _current_addrs(iface: str) -> dict[str, str]:
+def _current_addrs(run: RunCommand, iface: str) -> dict[str, str]:
     """Map of CIDR → ip-addr output line for all IPv4 addrs on *iface*."""
     addrs: dict[str, str] = {}
-    try:
-        out = subprocess.run(
-            ["ip", "-o", "-4", "addr", "show", "dev", iface],
-            capture_output=True, text=True, timeout=10,
-        ).stdout or ""
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    code, out = run(["ip", "-o", "-4", "addr", "show", "dev", iface])
+    if code != 0:
         return addrs
-    for line in out.splitlines():
+    for line in (out or "").splitlines():
         # "2: eth0    inet 192.168.2.1/24 brd ..."
         for token in line.split():
             if "/" in token and not token.startswith("brd"):
@@ -226,6 +221,8 @@ def ensure_network_infrastructure(
     uplink_ip: str = "",
     lan_cidr: int = 24,
     run: RunCommand | None = None,
+    proc_ipforward: Path | None = None,
+    sysfs_net: Path | None = None,
 ) -> bool:
     """Verify critical network settings survive reboots / NM reconnections.
 
@@ -235,20 +232,23 @@ def ensure_network_infrastructure(
     3. ``/etc/nftables.conf`` symlink integrity.
 
     Best-effort: failures are logged, never raised.  Returns True when
-    everything was (already) healthy or was repaired.
+    everything was (already) healthy or was repaired.  ``run``,
+    ``proc_ipforward``, and ``sysfs_net`` are injectable so tests drive a
+    fake ``ip`` binary and fake proc/sysfs files — on a real box they
+    default to the live kernel interfaces.
     """
     run = run or _default_run
+    fwd_path = proc_ipforward or _PROC_IPFORWARD
+    net_root = sysfs_net or _SYS_NET
     ok = True
 
     # -- ip_forward -------------------------------------------------
     try:
-        with open("/proc/sys/net/ipv4/ip_forward") as f:
-            val = f.read().strip()
+        val = fwd_path.read_text(encoding="utf-8").strip()
         if val != "1":
             log.warning("net.ipv4.ip_forward is %s — enabling", val)
             try:
-                with open("/proc/sys/net/ipv4/ip_forward", "w") as f:
-                    f.write("1\n")
+                fwd_path.write_text("1\n", encoding="utf-8")
             except OSError as exc:
                 log.error("could not enable ip_forward: %s", exc)
                 ok = False
@@ -256,13 +256,13 @@ def ensure_network_infrastructure(
         pass  # non-Linux or container — skip silently
 
     # -- NIC addresses ----------------------------------------------
-    iface = _find_lan_interface()
+    iface = _find_lan_interface(run, net_root)
     if not iface:
         log.debug("ensure_network_infrastructure: no wired LAN interface found — "
                   "skipping address check")
         return ok and ensure_nftables_conf()
 
-    addrs = _current_addrs(iface)
+    addrs = _current_addrs(run, iface)
     needed: dict[str, str] = {}
 
     # Client gateway IP (always required).
