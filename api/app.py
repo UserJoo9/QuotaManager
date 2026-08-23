@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
-from api.schemas import (BundleUpdate, DeviceAccessUpdate, DeviceCreate,
+from api.schemas import (BundleUpdate, DeviceCreate,
                          DeviceUpdate, DnsImportRequest, DnsPresetEnable,
                          DnsQuickRule,
                          DnsServerUpdate, DomainRuleCreate, DomainRuleUpdate,
@@ -264,9 +264,7 @@ def create_app(
     vpn_apply: Optional[Callable[[], object]] = None,
     vpn_status_getter: Optional[Callable[[], dict]] = None,
     wan_renew: Optional[Callable[[], object]] = None,
-    interface_tags: Optional[dict[str, str]] = None,
     shaping_state_getter: Optional[Callable[[], dict]] = None,
-    wifi_probe_getter: Optional[Callable[[], dict]] = None,
     active_ips_getter: Optional[Callable[[], Optional[set[str]]]] = None,
     stop_new_sync: Optional[Callable[[], object]] = None,
     decline_random_sync: Optional[Callable[[], object]] = None,
@@ -287,9 +285,6 @@ def create_app(
                   redoc_url=None,
                   openapi_url="/api/openapi.json" if web_cfg.docs_enabled
                   else None)
-    #: NIC name -> human label for the per-device WiFi/LAN tag (config.yaml
-    #: network.interface_tags); an unknown NIC falls back to its raw name.
-    _interface_tags: dict[str, str] = interface_tags or {}
 
     def _now() -> _dt.datetime:
         return now_provider() if now_provider else _dt.datetime.now().astimezone()
@@ -442,28 +437,17 @@ def create_app(
             "quota_mode": uv["quota_mode"] if uv else dev.quota_mode,
             "fixed_gb": uv["fixed_gb"] if uv else dev.fixed_gb,
             "bypass": dev.bypass,
+            # per-device VPN-share exclusion: own flag + effective state
+            # (own flag OR the owning user's flag). The UI shows a tag for
+            # the effective state and edits only the device's own flag.
+            "vpn_bypass": bool(dev.vpn_bypass),
+            "vpn_bypass_effective": bool(
+                dev.vpn_bypass or (user.vpn_bypass if user else False)),
             # per-device internet speed caps (Mbps, 0 = unlimited)
             "limit_down_mbps": float(dev.limit_down_mbps or 0.0),
             "limit_up_mbps": float(dev.limit_up_mbps or 0.0),
             # per-device upstream DNS-server override (empty = inherit)
             "dns_server": dev.dns_server or "",
-            # which NIC the device was last seen on (ip neigh) + its display
-            # label — the WiFi/LAN chip on the device card. Empty interface =
-            # unknown/offline (no tag rendered). The box-side label comes
-            # ONLY from an explicit network.interface_tags mapping — never a
-            # guess: every client arrives on the same wired NIC (eth0), so an
-            # unmapped name says nothing about WiFi vs LAN (that verdict
-            # belongs to the router-side access_interface probe).
-            "source_interface": dev.source_interface or "",
-            "interface_label": _interface_tags.get(dev.source_interface) or "",
-            # ROUTER-side access label: "WiFi · <SSID>" / "LAN" learned from
-            # the passive radio probe (quota.wifi_probe.py), or the admin's
-            # manual pin. The manual override always wins; ``access_interface``
-            # below is the DISPLAY label (override || auto), while the raw
-            # auto value stays in dev.access_interface for the UI.
-            "access_override": dev.access_override or "",
-            "access_interface": (
-                dev.access_override or dev.access_interface or ""),
             "allowance_gb": allowance,
             "used_gb": used_gb,
             "live_up": live_c.up,
@@ -523,6 +507,8 @@ def create_app(
                 "protected": bool(u.protected),
                 # exempt users are never quota-blocked (admin cuts still apply)
                 "exempt_quota": bool(u.exempt_quota),
+                # exclude all this user's devices from the VPN-share tunnel
+                "vpn_bypass": bool(u.vpn_bypass),
                 # per-user aggregate speed caps (Mbps, 0 = unlimited)
                 "limit_down_mbps": float(u.limit_down_mbps or 0.0),
                 "limit_up_mbps": float(u.limit_up_mbps or 0.0),
@@ -1209,6 +1195,13 @@ def create_app(
             raise HTTPException(
                 500, f"could not update config.yaml: {exc}")
 
+        # -- 3b. Also persist in DB so TLS survives a config.yaml overwrite --
+        try:
+            await database.set_setting("tls_certfile", str(cert_path))
+            await database.set_setting("tls_keyfile", str(key_path))
+        except Exception:  # noqa: BLE001
+            log.warning("could not persist TLS paths in DB")
+
         # -- 4. Schedule service restart (2 s delay — let the HTTP response --
         #    flush before the process goes down over plain HTTP) --------------
         try:
@@ -1269,6 +1262,13 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(
                 500, f"could not update config.yaml: {exc}")
+
+        # -- 2b. Clear DB-persisted TLS paths --------------------------------
+        try:
+            await database.delete_setting("tls_certfile")
+            await database.delete_setting("tls_keyfile")
+        except Exception:  # noqa: BLE001
+            log.warning("could not clear TLS paths from DB")
 
         # -- 3. Schedule service restart -------------------------------------
         try:
@@ -1389,6 +1389,8 @@ def create_app(
             fields["user_id"] = body.user_id
         if body.bypass is not None:
             fields["bypass"] = body.bypass
+        if body.vpn_bypass is not None:
+            fields["vpn_bypass"] = body.vpn_bypass
         # Speed caps are per-device (NOT forwarded to the user, unlike quota):
         # a device with its own limit keeps it even when its user has none.
         if body.limit_down_mbps is not None:
@@ -1416,6 +1418,9 @@ def create_app(
                 "info", device_id)
         # Cap edits must reach tc now, not on the next 15 s maintenance tick.
         _schedule_shaping_sync()
+        # A VPN-bypass edit must re-program the policy-routing exclusions now.
+        if body.vpn_bypass is not None:
+            _schedule_vpn_apply()
         return {"id": device_id, "updated": True}
 
     @app.delete("/api/devices/{device_id}", dependencies=[Depends(_require_auth)])
@@ -1442,32 +1447,6 @@ def create_app(
             raise HTTPException(404, "device not found")
         return result
 
-    @app.post("/api/devices/{device_id}/access", dependencies=[Depends(_require_auth)])
-    async def set_device_access(device_id: int,
-                                body: DeviceAccessUpdate) -> dict[str, Any]:
-        """Pin (or clear) the router-side access label shown on the device
-        card: "WiFi · <SSID>", "LAN1", ... — whatever the admin types. The
-        passive probe's auto label (``access_interface``) keeps updating in
-        the background; the override just wins the display. Empty string
-        clears the pin."""
-        dev = await database.update_device(
-            device_id, access_override=body.override.strip())
-        if dev is None:
-            raise HTTPException(404, "device not found")
-        return {"id": device_id,
-                "access_override": dev.access_override,
-                "access_interface": dev.access_override or dev.access_interface}
-
-    @app.get("/api/wifi/ssids", dependencies=[Depends(_require_auth)])
-    async def get_wifi_ssids() -> dict[str, Any]:
-        """SSIDs the passive probe currently hears — the device modal's
-        access-label picker. Degrades to an empty list when the probe is off
-        or the box has no monitor card."""
-        if wifi_probe_getter is None:
-            return {"available": False, "ssids": [], "error": "not configured",
-                    "ssid_by_mac": {}, "wireless_macs": []}
-        return wifi_probe_getter()
-
     # -- users (a person owns devices; the quota lives on the user) ----------
 
     @app.get("/api/users", dependencies=[Depends(_require_auth)])
@@ -1480,11 +1459,14 @@ def create_app(
             body.name, body.quota_mode, body.fixed_gb,
             limit_down_mbps=body.limit_down_mbps or 0.0,
             limit_up_mbps=body.limit_up_mbps or 0.0,
-            exempt_quota=bool(body.exempt_quota or False))
+            exempt_quota=bool(body.exempt_quota or False),
+            vpn_bypass=bool(body.vpn_bypass or False))
         await service.recompute_allowances()
         await database.add_event(
             f"User added: {body.name or 'unnamed'}", "info", user_id=user.id)
         _schedule_shaping_sync()  # the user's aggregate cap lands in tc now
+        if body.vpn_bypass:
+            _schedule_vpn_apply()
         return {"id": user.id, "name": user.name}
 
     @app.patch("/api/users/{user_id}", dependencies=[Depends(_require_auth)])
@@ -1495,7 +1477,7 @@ def create_app(
         fields: dict[str, Any] = {}
         for key in ("name", "quota_mode", "fixed_gb",
                     "limit_down_mbps", "limit_up_mbps", "history_days",
-                    "exempt_quota"):
+                    "exempt_quota", "vpn_bypass"):
             value = getattr(body, key)
             if value is not None:
                 fields[key] = value
@@ -1505,6 +1487,9 @@ def create_app(
             await service.set_admin_block_user(user_id, body.block)
         await service.recompute_allowances()
         _schedule_shaping_sync()  # the user's aggregate cap lands in tc now
+        # A VPN-bypass edit must re-program the policy-routing exclusions now.
+        if body.vpn_bypass is not None:
+            _schedule_vpn_apply()
         return {"id": user_id, "updated": True}
 
     @app.delete("/api/users/{user_id}", dependencies=[Depends(_require_auth)])
@@ -1927,7 +1912,6 @@ def create_app(
             enabled=body.enabled,
             total_down_mbps=body.total_down_mbps,
             total_up_mbps=body.total_up_mbps,
-            aqm=body.aqm,
             lan_rate_mbps=body.lan_rate_mbps)
         # Apply to the kernel NOW — no 15 s wait for the maintenance tick, so a
         # saved Network-tab change is enforced immediately (no page refresh).
@@ -1952,7 +1936,7 @@ def create_app(
                 result["vpn_share"]["status"] = vpn_status_getter()
             except Exception:  # noqa: BLE001
                 result["vpn_share"]["status"] = {"state": "error",
-                                                 "message": "status probe failed"}
+                                                  "message": "status probe failed"}
         result["decline_random_macs"] = await service.decline_random_macs()
         return result
 
@@ -2314,6 +2298,14 @@ def create_app(
         host = request.client.host if request.client else ""
         now = time.monotonic()
         cfg = waf_cfg
+
+        # -- local-management exemption ------------------------------------
+        # Requests from the LAN (client subnet, uplink subnet, loopback) are
+        # never blocked or auto-banned by the WAF.  The panel must stay
+        # reachable during failures and misconfigurations — an admin locked
+        # out of the recovery UI can't fix the problem.
+        if _waf.is_local_ip(host, getattr(cfg, "local_subnets", [])):
+            return None
 
         # -- cheap whole-request caps (before touching the body) --------------
         cl = request.headers.get("content-length", "")

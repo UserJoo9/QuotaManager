@@ -342,6 +342,13 @@ kernel tunnel (xray/sing-box/WireGuard) is always preferred.
 **VPN share** switch in the Network tab. The switch works either way — the
 rule only lands once the tunnel actually exists.
 
+**Switching VPN servers or clients:** the tunnel is re-detected
+automatically — when the new connection appears alongside the old one, the
+household moves to the newest tunnel within one 15 s tick (the box and the
+devices always exit at the same VPN IP). If devices ever seem stuck on an old
+server, toggle **VPN share** off and back on — that clears the remembered
+tunnel and forces a fresh detection.
+
 The design is in
 [Structure_README.md](Structure_README.md) → *VPN share*.
 

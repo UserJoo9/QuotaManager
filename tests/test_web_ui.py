@@ -117,7 +117,6 @@ def test_index_served(client):
     assert 'id="set-total-up"' in r.text
     assert 'id="set-lan-rate"' in r.text
     assert 'id="np-lan"' in r.text
-    assert 'id="aqm-toggle"' in r.text
     assert 'id="shaping-save-btn"' in r.text
     # speed-limit inputs in the device + user modals
     assert 'id="d-limit-down"' in r.text

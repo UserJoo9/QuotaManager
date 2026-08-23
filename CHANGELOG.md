@@ -6,8 +6,125 @@ The version is the single source of truth in `quota/version.py`; a release tag
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.1] — 2026-08-23
+
+### Added
+
+- **Per-device / per-user VPN bypass** (`quota/vpnshare.py` + `run.py` +
+  device/user modals) — while VPN share is ON, any device (or all devices of
+  a user) marked **VPN bypass** keeps riding the direct uplink instead of the
+  shared tunnel: the gateway computes the bypass IP set every maintenance
+  tick and feeds it to the policy-routing reconciler as exclusions, so a
+  gaming console or work laptop can stay out of the tunnel without turning
+  the share off for everyone. Device-modal + user-modal checkboxes; a
+  user-level flag applies to all their devices; an effective bypass shows a
+  "VPN bypass" tag on the device card. Toggling re-programs the exclusions
+  immediately (no 15 s window).
+- **WAF local-management exemption** — requests from the local network
+  (client subnet, uplink subnet, loopback) are never blocked or auto-banned
+  by the WAF, even in strict (WAN) mode. The panel must stay reachable from
+  the LAN during failures and misconfigurations. The exemption is configured
+  via `WafConfig.local_subnets` (defaults to loopback; engine subnets are
+  wired in at startup). Hits from local IPs are still logged for audit but
+  never rejected or kernel-banned. 3 new tests. Suite 651→654.
+- **Startup self-heal** (`quota/startup_health.py`) — The app now verifies
+  critical network infrastructure on every boot and recreates anything missing:
+  (1) the ``inet quota_nat`` masquerade table (lost on ``nft flush ruleset`` /
+  nftables package upgrade / broken ``/etc/nftables.conf`` symlink), (2) the
+  static IPs on the LAN NIC (lost on NetworkManager reconnection), (3)
+  ``net.ipv4.ip_forward``, (4) the ``/etc/nftables.conf`` symlink integrity.
+  All operations are best-effort — a failure is logged and never prevents the
+  app from starting.  Works in both LAN and WAN topologies. 10 new tests.
+  Suite 655→665.
+
+### Changed
+
+- **Speed shaping simplified: latency behavior hardwired**
+  (`quota/shaping.py` + Network tab) — the AQM toggle, line safety margin,
+  VPN-share margin, upload ACK-filter toggle, and the through-VPN totals
+  pair are GONE. The tc tree now always runs fq_codel on every queue plus
+  ``cake ack-filter`` on the upload tree (falling back to plain fq_codel
+  where ``sch_cake`` is unavailable) — the low-latency configuration those
+  knobs existed to produce is now the only behavior, with zero
+  mis-tuning risk. The Network tab keeps what admins need daily: master
+  switch, line down/up totals, per-user/per-device caps, LAN pass-through
+  rate. The `/api/network` GET/POST contract is reduced to
+  `{enabled, total_down_mbps, total_up_mbps, lan_rate_mbps}`.
+
+### Removed
+
+- **SNMP connection-type detection removed** (`quota/snmp_bridge.py`) — the
+  opt-in SNMP v2c bridge-table query and its Wi-Fi/Cable device labels are
+  gone. Classification was unreliable across routers (many do not expose the
+  Bridge MIB) and silently mislabeled devices; device cards no longer show a
+  connection-type chip and the Network tab has no SNMP card.
+- **LAN/WiFi NIC tags removed** — the box-side NIC-tag chain is gone:
+  `network.interface_tags` config key, the `devices.source_interface`
+  column + its migration, the `source_interface`/`interface_label` payload
+  fields, and the gray NIC chip on device cards. Every client arrives on the
+  same wired NIC, so the label carried no signal. The neighbor collector
+  survives solely as online-LED reinforcement, renamed
+  `_collect_neigh_active`. Existing databases keep an inert orphan column;
+  fresh installs never get it. 1 wiring test replaced by a text-fallback
+  test of the renamed collector. Suite 674→673.
+- **WiFi/LAN classification removed** — The ARP-RTT WiFi/LAN classification,
+  the WiFi probe label writer, the manual access-label pin, and the WiFi/LAN
+  chip on device cards have all been removed. There is no 100% reliable way to
+  determine whether a device is connected via WiFi or wired from the gateway
+  box, so the feature produced inaccurate labels. The ARP probe still runs for
+  the LED connected-status (responder set); `_wifi_probe_tick` still collects
+  the monitor snapshot for the yield check. Removed: `classify_rtts` call +
+  streak guard in `_maybe_latency_tick`, `_wifi_probe_tick` label-writing
+  logic, `POST /api/devices/{id}/access` endpoint, `GET /api/wifi/ssids`
+  endpoint, `wifi_probe_getter` from `create_app`, `DeviceAccessUpdate`
+  schema, `access_interface`/`access_override` from `_device_view` response,
+  WiFi/LAN chip + access-label picker from device modal. 4 tests removed,
+  2 rewritten. Suite 659→655.
+
 ### Fixed
 
+- **VPN share keeps devices on the OLD server after a VPN switch** (`run.py` +
+  `quota/vpnshare.py`) — the share pins its tunnel interface in the DB and
+  re-uses it every tick as long as the DEVICE still exists, so switching the
+  VPN server/client (which spawns the new tunnel alongside the old one, or
+  leaves a stale bridge tun carrying the subnet) kept routing the household
+  into the STALE tunnel: the box itself exited via the new VPN while devices
+  kept showing the old VPN IP indefinitely. Now, when more than one live
+  tunnel exists, the NEWEST tunnel that is not our own tun2socks device wins
+  (higher ifindex = dialed later), the pin moves to it, the multi-tunnel
+  state is logged loudly for diagnosis, and turning the share OFF clears the
+  pin so the next ON re-detects from scratch (toggling the dashboard switch
+  is now a reliable recovery). Single-tunnel boxes are untouched — no extra
+  probes, same stability. New `VpnShareManager.ifindexes()` helper. 3 new
+  wiring tests + 2 unit tests.
+- **Online LED intermittent gray / "all LEDs gray while traffic flows"** — Two
+  bugs in the connected-status chain: (1) an empty ARP sweep (probe returns `{}`
+  cleanly — NIC resolution failure, raw-socket loss, power-save devices all
+  sleeping through the burst) wiped `_latency_responders` to `set()`. Since the
+  freshness gate returns `set()` (not `None`), every device failed the
+  membership test → ALL LEDs went gray while the kernel kept counting traffic.
+  Fixed: an empty sweep now preserves the old responder map (same as an
+  exception); the map goes stale after 3×interval and falls back to
+  lease-based connectedness. (2) A device generating traffic could still miss
+  the 6-packet ARP burst (WiFi power-save, timing). Fixed: the neighbor
+  collector now also collects IPs with active kernel neighbor states
+  (REACHABLE/STALE) into `_neigh_active_ips`; the latency tick merges this
+  into `_latency_responders`, so a device with a valid ARP mapping in the
+  kernel stays blue even if it missed the probe. 3 new tests + 1 updated.
+- **HTTPS reverts on folder copy** — `enforce-https` now persists TLS cert
+  paths in the DB as well as config.yaml.  On startup, if config.yaml is
+  missing TLS settings but the DB and cert files on disk are present, HTTPS
+  is auto-restored. `remove-https` clears both. Suite 654→659.
+- **Online LED detection delay** — When `_sync_dnsmasq_leases` auto-registers
+  a brand-new device, it now resets `_last_latency_sweep` so the ARP probe
+  fires in the same maintenance tick. Cuts worst-case grey-to-blue from ~50 s
+  to ~20 s. 1 new test.
+- **VPN share addressless TUN gate** — `apply()` no longer hard-rejects a TUN
+  that lacks an IPv4 address (xray-core / sing-box TUN mode). The settle gate
+  now checks link state instead. `reconcile()` falls back to the next detected
+  candidate if `apply()` rejects. 2 tests updated + 1 new. Suite 649→651.
 - **VPN share stuck on "No VPN tunnel detected" / repeated disconnects with
   real VPN clients** — `VpnShareManager.detect_interfaces()` and `_iface_exists()`
   relied solely on sysfs (`/sys/class/net/<iface>/type`) to find and verify
@@ -25,6 +142,7 @@ The version is the single source of truth in `quota/version.py`; a release tag
   sysfs exposes), and an `ip link show dev` fallback to `_iface_exists()`.
   The sysfs scan remains the primary path (no subprocess, chroot-safe); the
   fallback only fires when sysfs yields nothing. 9 new tests. Suite 640→649.
+
 
 ## [0.3.0] — 2026-08-19
 

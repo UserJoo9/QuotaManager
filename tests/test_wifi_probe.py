@@ -169,9 +169,9 @@ def test_gateway_startup_starts_probe(tmp_path):
     assert calls[-1] == "stop", "shutdown must stop the probe"
 
 
-def test_wifi_probe_tick_labels_devices(tmp_path):
-    """Resolution precedence: SSID sighting > plain wireless sighting > LAN
-    after the grace window; manual overrides are never overwritten."""
+def test_wifi_probe_tick_collects_snapshot(tmp_path):
+    """_wifi_probe_tick collects the probe snapshot for the API and yields
+    logic, but no longer writes access_interface labels."""
     from run import Gateway
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
@@ -195,37 +195,13 @@ def test_wifi_probe_tick_labels_devices(tmp_path):
         loop.run_until_complete(
             gw.database.set_lease("aa:bb:cc:dd:ee:03", "192.168.2.3"))
         loop.run_until_complete(gw._wifi_probe_tick())
-        # ssid-sighted + plain-sighted devices are WiFi right away; the
-        # unsighted one enters the grace window first, so label it on the
-        # SECOND tick (lan_after=0 -> deadline already passed)
-        loop.run_until_complete(gw._wifi_probe_tick())
-        assert loop.run_until_complete(
-            gw.database.get_device(mac="aa:bb:cc:dd:ee:01")
-        ).access_interface == "WiFi · MyNet"
-        assert loop.run_until_complete(
-            gw.database.get_device(mac="aa:bb:cc:dd:ee:02")
-        ).access_interface == "WiFi"
-        assert loop.run_until_complete(
-            gw.database.get_device(mac="aa:bb:cc:dd:ee:03")
-        ).access_interface == "LAN"
-        # a manual override is never overwritten by the probe
-        dev3_row = loop.run_until_complete(
-            gw.database.get_device(mac="aa:bb:cc:dd:ee:03"))
-        loop.run_until_complete(gw.database.update_device(
-            dev3_row.id, access_override="LAN1"))
-        loop.run_until_complete(gw._wifi_probe_tick())
-        dev3 = loop.run_until_complete(
-            gw.database.get_device(mac="aa:bb:cc:dd:ee:03"))
-        assert dev3.access_override == "LAN1"
-        assert dev3.access_interface == "LAN"
-        # a LAN-labeled device heard on the air flips back to WiFi
-        gw.wifi_probe = type("P", (), {"snapshot": staticmethod(
-            lambda: {"available": True, "error": "", "ssid_by_mac": {},
-                    "wireless_macs": ["aa:bb:cc:dd:ee:03"], "ssids": []})})()
-        loop.run_until_complete(gw._wifi_probe_tick())
-        dev3 = loop.run_until_complete(
-            gw.database.get_device(mac="aa:bb:cc:dd:ee:03"))
-        assert dev3.access_interface == "WiFi"
+        # snapshot is stored for the yield check in _maybe_latency_tick
+        assert gw._wifi_probe_state["available"] is True
+        assert gw._wifi_probe_state["ssids"] == ["MyNet"]
+        # access_interface is NOT written by the tick anymore
+        dev1 = loop.run_until_complete(
+            gw.database.get_device(mac="aa:bb:cc:dd:ee:01"))
+        assert dev1.access_interface == ""
     finally:
         loop.run_until_complete(gw.database.close())
         loop.close()

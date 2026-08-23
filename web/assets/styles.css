@@ -519,7 +519,7 @@ select option { background: var(--bg-2); }
 .rogue-mac .device-vendor { margin-left: 0; font-style: italic; }
 
 /* pill tags — subtle glass chips */
-.bypass-tag, .guest-tag, .gateway-tag, .speed-tag, .status-tag, .hist-device-badge, .iface-tag {
+.bypass-tag, .guest-tag, .gateway-tag, .speed-tag, .status-tag, .hist-device-badge, .vpn-bypass-tag {
   font-family: inherit;
   font-size: 0.62rem;
   font-weight: 700;
@@ -535,7 +535,7 @@ select option { background: var(--bg-2); }
 .guest-tag { color: var(--warn); background: rgba(217, 119, 6, 0.08); border: 1px solid rgba(217, 119, 6, 0.4); }
 .gateway-tag { color: #F472B6; background: rgba(244, 114, 182, 0.08); border: 1px solid rgba(244, 114, 182, 0.4); }
 .speed-tag { color: var(--down); background: rgba(34, 211, 238, 0.08); border: 1px solid rgba(34, 211, 238, 0.4); }
-.iface-tag { color: var(--text-dim); background: rgba(148, 163, 184, 0.10); border: 1px solid rgba(148, 163, 184, 0.35); }
+.vpn-bypass-tag { color: #a78bfa; background: rgba(167, 139, 250, 0.08); border: 1px solid rgba(167, 139, 250, 0.4); }
 .status-tag { margin-left: 6px; }
 .status-tag.quota { color: var(--warn); background: rgba(217, 119, 6, 0.08); border: 1px solid rgba(217, 119, 6, 0.4); }
 .status-tag.admin_off { color: var(--danger); background: rgba(220, 38, 38, 0.08); border: 1px solid rgba(220, 38, 38, 0.4); }

@@ -25,6 +25,7 @@ silently unprotected) | "open" (log + pass through).
 
 from __future__ import annotations
 
+import ipaddress
 import re
 
 #: HTTP verbs the dashboard actually uses; everything else is rejected
@@ -125,6 +126,29 @@ def resolve_mode(configured: str, topology: str) -> str:
     if mode in ("strict", "log", "off"):
         return mode
     return "log"  # unknown value: default to the safest LAN posture
+
+
+def is_local_ip(ip: str, subnets: list[str]) -> bool:
+    """True when *ip* belongs to any of the CIDR *subnets*.
+
+    Used by the middleware to exempt local management traffic from WAF
+    blocking — the panel must always be reachable from the LAN even in
+    strict (WAN) mode.  Invalid IPs or empty subnet lists are handled
+    gracefully (returns False).
+    """
+    if not ip or not subnets:
+        return False
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    for cidr in subnets:
+        try:
+            if addr in ipaddress.ip_network(cidr, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def is_exempt(exceptions: list[dict], rule_id: str, path: str,

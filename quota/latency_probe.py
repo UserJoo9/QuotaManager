@@ -137,8 +137,14 @@ class ArpRttProbe:
                     except OSError:
                         continue
                     pending.setdefault(ip, []).append(time.monotonic())
-                time.sleep(self.inter_round_s)
+                # Drain BEFORE sleeping: fast (wired) devices reply in
+                # <1 ms — reading them now gives an honest sub-ms RTT.
+                # Sleeping first would inflate every sample by inter_round_s,
+                # making all devices appear WiFi regardless of medium.
+                # Power-save devices that wake late are still caught by
+                # subsequent rounds (interleaved send/drain).
                 self._drain(sock, pending, rtts)
+                time.sleep(self.inter_round_s)
         finally:
             sock.close()
         return {ip: ts for ip, ts in rtts.items() if ts}
@@ -167,7 +173,7 @@ class ArpRttProbe:
         rtts: dict[str, list[float]] = {}
         for ip in targets:
             code, out = self._run(
-                ["ping", "-c", str(self.samples), "-W", "1", "-n", "-q", ip])
+                ["ping", "-c", str(self.samples), "-W", "1", "-n", ip])
             if code != 0:
                 continue
             values = [float(m) for m in re.findall(r"time=([0-9.]+)\s*ms", out)]

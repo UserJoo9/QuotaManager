@@ -391,41 +391,52 @@ def test_waf_rate_state_window():
 
 
 def test_waf_strict_blocks_on_wan(client):
-    c, database, _, holder, _ = client
+    c, database, _, holder, make = client
     holder.swap(EngineSnapshot(wan_status={"topology": "wan"}))
-    # SQLi payload to a mutating route -> blocked before the handler runs
-    r = c.post("/api/bundle", json={"total_gb": 1},
-               data="total_gb=1' or 1=1 --", headers={
-                   "content-type": "text/plain"})
-    assert r.status_code == 403
-    assert "WAF" in r.json()["detail"]
-    events = asyncio.get_event_loop().run_until_complete(database.list_events())
-    assert any("WAF" in e["message"] for e in events)
+    # Disable local exemption so the test's 127.0.0.1 source is not exempt.
+    app = make(WafConfig(local_subnets=[]))
+    with TestClient(app) as c2:
+        # SQLi payload to a mutating route -> blocked before the handler runs
+        r = c2.post("/api/bundle", json={"total_gb": 1},
+                    data="total_gb=1' or 1=1 --", headers={
+                        "content-type": "text/plain"})
+        assert r.status_code == 403
+        assert "WAF" in r.json()["detail"]
+        events = asyncio.get_event_loop().run_until_complete(
+            database.list_events())
+        assert any("WAF" in e["message"] for e in events)
 
 
 def test_waf_log_only_on_lan(client):
-    c, database, _, holder, _ = client
+    c, database, _, holder, make = client
     holder.swap(EngineSnapshot(wan_status={"topology": "lan"}))
-    # same payload on LAN: recorded, NOT blocked (the LAN dashboard stays up)
-    r = c.post("/api/bundle", json={"total_gb": 1},
-               data="total_gb=<script>alert(1)</script>", headers={
-                   "content-type": "text/plain"})
-    assert r.status_code == 401  # passed through WAF, hit auth
-    events = asyncio.get_event_loop().run_until_complete(database.list_events())
-    assert any("WAF xss" in e["message"] for e in events)
+    # Disable local exemption so the WAF inspects the test's 127.0.0.1.
+    app = make(WafConfig(local_subnets=[]))
+    with TestClient(app) as c2:
+        # same payload on LAN: recorded, NOT blocked (the LAN dashboard stays up)
+        r = c2.post("/api/bundle", json={"total_gb": 1},
+                    data="total_gb=<script>alert(1)</script>", headers={
+                        "content-type": "text/plain"})
+        assert r.status_code == 401  # passed through WAF, hit auth
+        events = asyncio.get_event_loop().run_until_complete(
+            database.list_events())
+        assert any("WAF xss" in e["message"] for e in events)
 
 
 def test_waf_scanner_ua_blocks_on_wan(client):
-    c, _, _, holder, _ = client
+    c, _, _, holder, make = client
     holder.swap(EngineSnapshot(wan_status={"topology": "wan"}))
-    r = c.get("/api/dashboard", headers={"User-Agent": "sqlmap/1.7.4"})
-    assert r.status_code == 403
+    # Disable local exemption so the test's 127.0.0.1 source is not exempt.
+    app = make(WafConfig(local_subnets=[]))
+    with TestClient(app) as c2:
+        r = c2.get("/api/dashboard", headers={"User-Agent": "sqlmap/1.7.4"})
+        assert r.status_code == 403
 
 
 def test_waf_oversized_body_blocks(client):
     c, _, _, holder, make = client
     holder.swap(EngineSnapshot(wan_status={"topology": "wan"}))
-    app = make(WafConfig(max_body_bytes=64))
+    app = make(WafConfig(max_body_bytes=64, local_subnets=[]))
     with TestClient(app) as c2:
         c2.post("/api/login", json={"password": "admin"})
         r = c2.post("/api/bundle",
@@ -437,7 +448,8 @@ def test_waf_oversized_body_blocks(client):
 def test_waf_endpoint_rate_limit_strict(client):
     c, _, _, holder, make = client
     holder.swap(EngineSnapshot(wan_status={"topology": "wan"}))
-    app = make(WafConfig(endpoint_limits={"/api/dashboard": [1, 60]}))
+    app = make(WafConfig(endpoint_limits={"/api/dashboard": [1, 60]},
+                          local_subnets=[]))
     with TestClient(app) as c2:
         c2.post("/api/login", json={"password": "admin"})
         assert c2.get("/api/dashboard").status_code == 200
@@ -453,6 +465,43 @@ def test_waf_off_when_disabled(client):
                     data="x' or 1=1 --", headers={
                         "content-type": "text/plain"})
         assert r.status_code == 401  # WAF off -> passed through
+
+
+# -- local-management WAF exemption -----------------------------------------
+
+
+def test_is_local_ip_unit():
+    """is_local_ip matches loopback, client subnet, and rejects external."""
+    assert _waf.is_local_ip("127.0.0.1", ["127.0.0.0/8"])
+    assert _waf.is_local_ip("127.255.255.255", ["127.0.0.0/8"])
+    assert _waf.is_local_ip("::1", ["::1/128"])
+    assert _waf.is_local_ip("192.168.2.50", ["192.168.2.0/24"])
+    assert not _waf.is_local_ip("10.0.0.1", ["192.168.2.0/24"])
+    assert not _waf.is_local_ip("8.8.8.8", ["127.0.0.0/8"])
+    assert not _waf.is_local_ip("", ["127.0.0.0/8"])
+    assert not _waf.is_local_ip("127.0.0.1", [])
+
+
+def test_waf_custom_subnet_exempt(client):
+    """Request from a custom local subnet is exempt in WAN strict mode."""
+    c, _, _, holder, make = client
+    holder.swap(EngineSnapshot(wan_status={"topology": "wan"}))
+    # Only the client subnet is exempt; loopback is NOT.
+    app = make(WafConfig(local_subnets=["192.168.2.0/24"]))
+    with TestClient(app) as c2:
+        # 127.0.0.1 is NOT in 192.168.2.0/24 → should be blocked.
+        r = c2.get("/api/dashboard", headers={"User-Agent": "curl/8.0"})
+        assert r.status_code == 403
+
+
+def test_waf_no_exemption_when_local_subnets_empty(client):
+    """Without local_subnets, even localhost is subject to WAF."""
+    c, _, _, holder, make = client
+    holder.swap(EngineSnapshot(wan_status={"topology": "wan"}))
+    app = make(WafConfig(local_subnets=[]))
+    with TestClient(app) as c2:
+        r = c2.get("/api/dashboard", headers={"User-Agent": "sqlmap/1.7.4"})
+        assert r.status_code == 403
 
 
 # -- SSRF guards (updater / dns_rules) -----------------------------------------

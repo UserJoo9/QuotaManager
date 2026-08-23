@@ -1121,11 +1121,11 @@ def test_shaping_settings_round_trip(database):
     async def scenario():
         d = await database()
         svc = QuotaService(d, timezone="Africa/Cairo")
-        # defaults: off, no totals, AQM on
+        # defaults: off, no totals, LAN pass-through at 1000 Mbps.
+        # Latency behavior is hardwired in the shaper — no AQM/margin knobs.
         cfg = await svc.get_shaping_config()
         assert cfg == {"enabled": False, "total_down_mbps": 0.0,
-                       "total_up_mbps": 0.0, "aqm": True,
-                       "lan_rate_mbps": 1000.0}
+                       "total_up_mbps": 0.0, "lan_rate_mbps": 1000.0}
 
         # partial update — only the fields passed change
         cfg = await svc.set_shaping(enabled=True, total_down_mbps=100,
@@ -1133,7 +1133,6 @@ def test_shaping_settings_round_trip(database):
         assert cfg["enabled"] is True
         assert cfg["total_down_mbps"] == 100.0
         assert cfg["total_up_mbps"] == 20.0
-        assert cfg["aqm"] is True           # untouched
 
         # LAN rate round-trips independently of the WAN totals
         cfg = await svc.set_shaping(lan_rate_mbps=250)
@@ -1141,11 +1140,6 @@ def test_shaping_settings_round_trip(database):
         assert cfg["total_down_mbps"] == 100.0   # WAN untouched
         cfg = await svc.set_shaping(lan_rate_mbps=0)
         assert cfg["lan_rate_mbps"] == 0.0
-
-        cfg = await svc.set_shaping(aqm=False)
-        assert cfg["aqm"] is False          # totals + enabled survive
-        assert cfg["enabled"] is True
-        assert cfg["total_down_mbps"] == 100.0
 
         # negative values clamp to 0
         cfg = await svc.set_shaping(total_up_mbps=-5)

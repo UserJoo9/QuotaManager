@@ -391,23 +391,16 @@ class LatencyProbeConfig:
 
 @dataclass
 class NetworkConfig:
-    """Per-device WiFi/LAN source-interface tags.
+    """WiFi probe + latency probe settings.
 
-    run.py learns each leased client's source NIC from the kernel neighbor
-    table (``ip -j neigh``) and stores it per device. ``interface_tags`` maps
-    a NIC name to a human label for the dashboard chip — e.g. ``{"eth0":
-    "LAN", "wlan0": "WiFi"}``. An interface without a label falls back to its
-    raw name; empty mapping shows the raw name everywhere.
-
-    ``wifi_probe`` (OFF by default) upgrades the chip from the box-side NIC
-    to the ROUTER-side access point: the box's monitor-mode WiFi card hears
-    which SSID each device is actually associated with (see
-    :class:`WifiProbeConfig`). It needs a monitor-capable card — when the box
-    lacks one, ``latency_probe`` (ON by default) answers WiFi-vs-LAN with
-    ARP round-trip times on any hardware (see :class:`LatencyProbeConfig`).
+    ``wifi_probe`` (OFF by default) collects the ROUTER-side access point:
+    the box's monitor-mode WiFi card hears which SSID each device is actually
+    associated with (see :class:`WifiProbeConfig`). It needs a
+    monitor-capable card — when the box lacks one, ``latency_probe``
+    (ON by default) drives the device LED with ARP round-trip times on any
+    hardware (see :class:`LatencyProbeConfig`).
     """
 
-    interface_tags: dict[str, str] = field(default_factory=dict)
     wifi_probe: WifiProbeConfig = field(default_factory=WifiProbeConfig)
     latency_probe: LatencyProbeConfig = field(default_factory=LatencyProbeConfig)
 
@@ -554,6 +547,14 @@ class WafConfig:
     #: is bypassed for a path/source so one misfiring rule never forces the
     #: whole WAF off.
     exceptions: list[dict[str, Any]] = field(default_factory=list)
+    #: CIDR subnets whose IPs are exempt from WAF blocking + auto-ban.
+    #: Requests from these IPs are still logged (audit trail) but never
+    #: rejected or kernel-banned — keeps the management panel reachable
+    #: during failures.  Populated at startup from the engine's
+    #: ``client_subnet`` + ``uplink_subnet``; loopback always included.
+    local_subnets: list[str] = field(default_factory=lambda: [
+        "127.0.0.0/8", "::1/128",
+    ])
 
 
 @dataclass

@@ -16,8 +16,10 @@ two directions use two different HTB trees:
   un-NAT'd the destination back to the client IP, so we shape directly on
   egress by ``ip dst`` (no second ifb needed).
 
-Both trees are HTB (hierarchical token bucket) with **fq_codel on every leaf**.
-The class hierarchy enforces:
+Both trees are HTB (hierarchical token bucket) with **fq_codel on every leaf**
+(the download tree, the default class, and the LAN pass-through) and **cake
+ack-filter on every upload leaf** — both ALWAYS on, no knob. The class
+hierarchy enforces:
 * the **total-link cap** — the root caps at the LAN link rate
   (``shaping.lan_rate_mbps``) while every WAN class is capped at the configured
   line speed, so the internet queue forms at the tc layer (where fq_codel can
@@ -26,6 +28,12 @@ The class hierarchy enforces:
 * the **per-user aggregate** — a user's device leaves sit under their user
   class, which is capped at the user's configured total;
 * the **per-device cap** — each device leaf ``rate = ceil = eff`` (hard cap).
+
+Upload leaves run **cake ack-filter**: a download floods the uplink with TCP
+ACKs (~3-13% of its own bandwidth), which on a small upload link starves
+everyone else's handshakes and DNS — cake drops the redundant ACKs before they
+queue. A kernel without ``sch_cake`` automatically falls back to plain
+fq_codel on the upload queues (the first rejected cake qdisc switches the rest).
 
 LAN traffic gets a **pass-through**: client<->uplink-subnet traffic (NAS,
 router admin, LAN transfers) AND client<->the box itself (dashboard, SSH,
@@ -47,8 +55,8 @@ root qdisc ``handle 1: htb default 2``; root class ``1:1`` (rate = LAN link
 rate); default ``1:2``; LAN pass-through ``1:99``; download aggregate ``1:100``;
 user classes ``1:<0x300+uid>``; device leaves ``1:<0x8000+devid>``.
 
-The tree is rebuilt only when a **signature** of (enabled, totals, aqm, sorted
-device entries) changes — same idempotent-reconcile pattern as the
+The tree is rebuilt only when a **signature** of (enabled, totals, LAN rate,
+sorted device entries) changes — same idempotent-reconcile pattern as the
 ``_last_blocked_ips`` cache in :mod:`quota.nftables`. ``start()`` always tears
 down + rebuilds; ``stop()`` leaves rules in place (conservative, like nftables
 — limits keep applying if the service dies; a reboot clears all qdiscs).
@@ -296,7 +304,6 @@ class TcShaper:
         self._enabled = False
         self._total_down = 0.0
         self._total_up = 0.0
-        self._aqm = True
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -366,14 +373,20 @@ class TcShaper:
         return True
 
     def update_state(self, rate_map: list[dict[str, Any]], enabled: bool,
-                     total_down: float, total_up: float, aqm: bool,
+                     total_down: float, total_up: float,
                      lan_rate_mbps: float | None = None) -> None:
-        """Reconcile the kernel's tc tree with the desired shaping state."""
+        """Reconcile the kernel's tc tree with the desired shaping state.
+
+        The leaf queues are NOT configurable: every queue runs fq_codel, and
+        the UPLOAD tree's queues run ``cake ack-filter`` (with an automatic
+        fallback to fq_codel on kernels without sch_cake). Both are always
+        on — they are what keeps one device's download from inflating
+        everyone's ping.
+        """
         self._rate_map = sorted(rate_map or [], key=lambda e: str(e.get("ip", "")))
         self._enabled = bool(enabled)
         self._total_down = max(0.0, float(total_down or 0.0))
         self._total_up = max(0.0, float(total_up or 0.0))
-        self._aqm = bool(aqm)
         if lan_rate_mbps is not None:
             # The LAN pass-through rate is a live setting (Network-tab "LAN
             # speed"), not just a boot-time config value: keep it in sync so
@@ -426,16 +439,53 @@ class TcShaper:
              round(float(e.get("user_up") or 0.0), 3))
             for e in self._rate_map)
         return (self._enabled, round(self._total_down, 3),
-                round(self._total_up, 3), self._aqm, self._lan_rate_mbps,
+                round(self._total_up, 3), self._lan_rate_mbps,
                 self.uplink_subnet, tuple(sorted(self.own_addresses)), entries)
+
+    def _aqm_args(self, upload: bool) -> list[str]:
+        """Leaf-qdisc args for one tree's queues — ALWAYS on, no knob.
+
+        ``fq_codel`` everywhere except the UPLOAD tree: ``cake ack-filter``
+        (no ``bandwidth`` — HTB still shapes; cake only replaces fq_codel as
+        the fair queue) suppresses the redundant TCP acknowledgements a
+        download floods upstream, which on a small upload link otherwise
+        starve every other device's handshakes + DNS.
+        """
+        if upload:
+            return ["cake", "ack-filter"]
+        return ["fq_codel"]
 
     def _apply(self) -> bool:
         """Program the full tree from the stored state. On any failure, tear
-        down so no half-built tree lingers, then degrade."""
-        for argv in self._build_cmds():
-            if not self._run(argv):
-                self._teardown()
-                return False
+        down so no half-built tree lingers, then degrade.
+
+        ``cake ack-filter`` is best-effort: a kernel without the sch_cake
+        module rejects those qdiscs — that must NOT kill the whole tree (the
+        pre-cake behavior was fine). The first cake rejection switches every
+        remaining cake queue to plain fq_codel (upload ACK filtering off)
+        and the apply continues; only a non-cake failure degrades the shaper.
+        """
+        cmds = self._build_cmds()
+        idx = 0
+        cake_fallback = False
+        while idx < len(cmds):
+            argv = cmds[idx]
+            code, out = self._run_command(argv)
+            if code == 0:
+                idx += 1
+                continue
+            if not cake_fallback and argv[-2:] == ["cake", "ack-filter"]:
+                cake_fallback = True
+                log.warning("tc rejected cake ack-filter (%s) — upload queues "
+                            "fall back to fq_codel (upload ACK filtering is "
+                            "off on this kernel)", (out or "").strip())
+                cmds = [a[:-2] + ["fq_codel"]
+                        if a[-2:] == ["cake", "ack-filter"] else a
+                        for a in cmds]
+                continue  # retry the SAME slot, now fq_codel
+            self._fail(f"{argv[0]} failed: {(out or '').strip()}")
+            self._teardown()
+            return False
         return True
 
     def _build_cmds(self) -> list[list[str]]:
@@ -468,7 +518,8 @@ class TcShaper:
 
     def _tree_cmds(self, dev: str, total: float, match_field: str) -> list[list[str]]:
         """HTB + fq_codel commands for one direction's tree."""
-        base = _rate(total)
+        stotal = total
+        base = _rate(stotal)
         # The root caps at the LAN link rate so the pass-through class can
         # exceed the WAN line; every WAN class below stays capped at ``total``
         # so fq_codel keeps draining the internet queue at the line rate.
@@ -496,7 +547,8 @@ class TcShaper:
                 "cap_up": float(e.get("user_up") or 0.0), "devs": []})
             by_user[uid]["devs"].append(e)
 
-        base_burst = _burst(total)
+        base_burst = _burst(stotal)
+        aqm_args = self._aqm_args(match_field == "src")
         cmds: list[list[str]] = [
             ["tc", "qdisc", "add", "dev", dev, "root", "handle", "1:",
              "htb", "default", "2"],
@@ -513,9 +565,9 @@ class TcShaper:
             ["tc", "class", "add", "dev", dev, "parent", "1:1", "classid",
              "1:100", "htb", "rate", base, "ceil", base, *base_burst],
         ]
-        if self._aqm:
+        if aqm_args:
             cmds.append(["tc", "qdisc", "add", "dev", dev, "parent", "1:2",
-                         "handle", "2:", "fq_codel"])
+                         "handle", "2:", *aqm_args])
 
         # LAN pass-through: client<->uplink-subnet traffic (NAS, router admin,
         # LAN transfers) AND client<->the box itself (dashboard, SSH, file
@@ -546,9 +598,9 @@ class TcShaper:
             cmds.append(["tc", "class", "add", "dev", dev, "parent", "1:1",
                          "classid", "1:99", "htb", "rate", lan_rate,
                          "ceil", lan_rate, *_burst(lan)])
-            if self._aqm:
+            if aqm_args:
                 cmds.append(["tc", "qdisc", "add", "dev", dev, "parent",
-                             "1:99", "handle", "0x99:", "fq_codel"])
+                             "1:99", "handle", "0x99:", *aqm_args])
             if match_field == "src":
                 if self.uplink_subnet and self.uplink_subnet != self.client_subnet:
                     cmds.append(["tc", "filter", "add", "dev", dev, "parent",
@@ -585,10 +637,10 @@ class TcShaper:
             dev_attr = "down" if match_field == "dst" else "up"
             leaves = [e for e in grp["devs"]
                       if _effective(float(e.get(dev_attr) or 0.0),
-                                    cap, total) is not None]
+                                    cap, stotal) is not None]
             if not leaves:
                 continue  # every one of this user's devices is unlimited
-            user_rate = min(cap, total) if cap > 0 else total
+            user_rate = min(cap, stotal) if cap > 0 else stotal
             user_cid = _user_class(uid)
             cmds.append(["tc", "class", "add", "dev", dev, "parent", "1:100",
                          "classid", user_cid, "htb", "rate", _rate(user_rate),
@@ -596,7 +648,7 @@ class TcShaper:
             for e in sorted(leaves, key=lambda x: str(x.get("ip", ""))):
                 dev_cap = float(e.get("down") or 0.0) if match_field == "dst" \
                     else float(e.get("up") or 0.0)
-                eff = _effective(dev_cap, cap, total)
+                eff = _effective(dev_cap, cap, stotal)
                 if eff is None:
                     continue
                 dev_cid = _device_class(int(e["device_id"]))
@@ -604,10 +656,10 @@ class TcShaper:
                              user_cid, "classid", dev_cid, "htb",
                              "rate", _rate(eff), "ceil", _rate(eff),
                              *_burst(eff)])
-                if self._aqm:
+                if aqm_args:
                     cmds.append(["tc", "qdisc", "add", "dev", dev, "parent",
                                  dev_cid, "handle", _device_qdisc(int(e["device_id"])),
-                                 "fq_codel"])
+                                 *aqm_args])
                 cmds.append(["tc", "filter", "add", "dev", dev, "parent", "1:",
                              "protocol", "ip", "prio", "2", "u32", "match",
                              "ip", match_field, str(e["ip"]), "flowid", dev_cid])

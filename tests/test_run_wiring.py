@@ -8,7 +8,6 @@ loop ticks and pushes enforcement state.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -167,88 +166,31 @@ class FakeIpRunner:
         return 0, self.text_out
 
 
-def test_collect_interfaces_learns_neigh_device(tmp_path):
-    """Each leased device's source NIC is learned from `ip -j neigh` and
-    persisted to devices.source_interface (drives the WiFi/LAN card tag)."""
-    cfg = _cfg(tmp_path)
-    gw = Gateway(cfg)
-    gw._ip_run = FakeIpRunner(json_out=json.dumps([
-        {"dst": "192.168.2.42", "dev": "wlan0", "state": "REACHABLE",
-         "lladdr": "aa:bb:cc:dd:ee:42"},
-        {"dst": "192.168.2.43", "dev": "eth0", "state": "STALE",
-         "lladdr": "aa:bb:cc:dd:ee:43"},
-        # filters: IPv6 row + FAILED state + a non-lease IP
-        {"dst": "fe80::1", "dev": "wlan0", "state": "REACHABLE"},
-        {"dst": "192.168.2.44", "dev": "eth0", "state": "FAILED"},
-        {"dst": "192.168.1.99", "dev": "eth0", "state": "REACHABLE"},
-    ]))
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(gw.database.connect())
-        loop.run_until_complete(gw.service.ensure_period())
-        loop.run_until_complete(
-            gw.database.upsert_device("aa:bb:cc:dd:ee:42", name="Phone"))
-        loop.run_until_complete(
-            gw.database.upsert_device("aa:bb:cc:dd:ee:43", name="PC"))
-        loop.run_until_complete(
-            gw.database.upsert_device("aa:bb:cc:dd:ee:44", name="Static"))
-        loop.run_until_complete(
-            gw.database.set_lease("aa:bb:cc:dd:ee:42", "192.168.2.42"))
-        loop.run_until_complete(
-            gw.database.set_lease("aa:bb:cc:dd:ee:43", "192.168.2.43"))
-        loop.run_until_complete(
-            gw.database.set_lease("aa:bb:cc:dd:ee:44", "192.168.2.44"))
-        loop.run_until_complete(gw._collect_interfaces())
-        dev42 = loop.run_until_complete(
-            gw.database.get_device(mac="aa:bb:cc:dd:ee:42"))
-        dev43 = loop.run_until_complete(
-            gw.database.get_device(mac="aa:bb:cc:dd:ee:43"))
-        dev44 = loop.run_until_complete(
-            gw.database.get_device(mac="aa:bb:cc:dd:ee:44"))
-        assert dev42.source_interface == "wlan0"
-        assert dev43.source_interface == "eth0"
-        assert dev44.source_interface == "", "FAILED neigh rows are skipped"
-        # disconnect keeps the last-known interface (fresh empty row ignored)
-        loop.run_until_complete(
-            gw.database.set_lease("aa:bb:cc:dd:ee:42", "192.168.2.42"))
-        gw._ip_run.json_out = "[]"
-        loop.run_until_complete(gw._collect_interfaces())
-        dev42 = loop.run_until_complete(
-            gw.database.get_device(mac="aa:bb:cc:dd:ee:42"))
-        assert dev42.source_interface == "wlan0"
-    finally:
-        loop.run_until_complete(gw.database.close())
-        loop.close()
-
-
-def test_collect_interfaces_text_fallback(tmp_path):
-    """`ip neigh` plain-text fallback (older iproute2) parses dev names too."""
+def test_collect_neigh_active_text_fallback(tmp_path):
+    """`ip neigh` plain-text fallback (older iproute2) feeds the same LED
+    reinforcement set: active states kept, FAILED/IPv6/non-lease rows
+    dropped."""
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
     gw._ip_run = FakeIpRunner(
         json_out="",  # `ip -j neigh` failed/empty -> text fallback
         text_out=("192.168.2.42 dev wlan0 lladdr aa:bb:cc:dd:ee:42 REACHABLE\n"
                   "192.168.2.43 dev eth0 lladdr aa:bb:cc:dd:ee:43 STALE\n"
-                  "192.168.2.44 dev eth0 lladdr aa:bb:cc:dd:ee:44 FAILED\n"))
+                  "192.168.2.44 dev eth0 lladdr aa:bb:cc:dd:ee:44 FAILED\n"
+                  "fe80::1 dev wlan0 REACHABLE\n"
+                  "192.168.1.99 dev eth0 lladdr aa:bb:cc:dd:ee:99 REACHABLE\n"))
     loop = asyncio.new_event_loop()
     try:
         loop.run_until_complete(gw.database.connect())
         loop.run_until_complete(gw.service.ensure_period())
-        loop.run_until_complete(
-            gw.database.upsert_device("aa:bb:cc:dd:ee:42", name="Phone"))
-        loop.run_until_complete(
-            gw.database.upsert_device("aa:bb:cc:dd:ee:44", name="Static"))
-        loop.run_until_complete(
-            gw.database.set_lease("aa:bb:cc:dd:ee:42", "192.168.2.42"))
-        loop.run_until_complete(
-            gw.database.set_lease("aa:bb:cc:dd:ee:44", "192.168.2.44"))
-        loop.run_until_complete(gw._collect_interfaces())
-        dev42 = loop.run_until_complete(
-            gw.database.get_device(mac="aa:bb:cc:dd:ee:42"))
-        dev44 = loop.run_until_complete(
-            gw.database.get_device(mac="aa:bb:cc:dd:ee:44"))
-        assert dev42.source_interface == "wlan0"
-        assert dev44.source_interface == "", "FAILED rows skipped in text too"
+        for mac, ip in (("aa:bb:cc:dd:ee:42", "192.168.2.42"),
+                        ("aa:bb:cc:dd:ee:44", "192.168.2.44")):
+            loop.run_until_complete(gw.database.upsert_device(mac, name=mac))
+            loop.run_until_complete(gw.database.set_lease(mac, ip))
+        loop.run_until_complete(gw._collect_neigh_active())
+        # only live leases in an active state survive (FAILED + the IPv6 row +
+        # the non-lease uplink IP are all excluded)
+        assert gw._neigh_active_ips == {"192.168.2.42"}
         # both ip invocations were attempted (json then text)
         assert gw._ip_run.calls[0][:3] == ["ip", "-j", "neigh"]
         assert gw._ip_run.calls[1][:3] == ["ip", "neigh"]
@@ -1051,6 +993,42 @@ def test_sync_dnsmasq_leases_registers_devices(tmp_path):
         asyncio.get_event_loop().run_until_complete(gw.shutdown())
 
 
+def test_sync_dnsmasq_leases_schedules_immediate_sweep_on_new_device(tmp_path):
+    """When a brand-new device appears in the lease file, the latency sweep
+    timer is reset so the ARP probe runs in the same tick -- the device's LED
+    turns blue immediately instead of waiting up to 30 s."""
+    cfg = _cfg(tmp_path)
+    lease_file = tmp_path / "dnsmasq.leases"
+    lease_file.write_text("", encoding="utf-8")
+    cfg.dhcp.lease_file = str(lease_file)
+    gw = Gateway(cfg)
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(gw.startup())
+        # Cancel the background maintenance loop so it doesn't race with our
+        # manual _sync_dnsmasq_leases call (it would register the device first).
+        if gw._maintenance_task is not None:
+            gw._maintenance_task.cancel()
+            try:
+                loop.run_until_complete(gw._maintenance_task)
+            except asyncio.CancelledError:
+                pass
+        gw._latency_sweep_ran = True
+        gw._last_latency_sweep = 999999.0  # far in the future -- gate closed
+        assert not gw._new_devices_detected
+        lease_file.write_text(
+            "1730000000 de:ad:be:ef:00:01 192.168.1.200 newdev "
+            "01:de:ad:be:ef:00:01\n",
+            encoding="utf-8")
+        loop.run_until_complete(gw._sync_dnsmasq_leases())
+        # sweep timer must have been reset so _maybe_latency_tick fires next
+        assert gw._last_latency_sweep == 0
+        assert not gw._new_devices_detected  # flag consumed
+    finally:
+        loop.run_until_complete(gw.shutdown())
+        loop.close()
+
+
 def test_sync_dnsmasq_leases_missing_file_is_safe(tmp_path):
     cfg = _cfg(tmp_path)
     cfg.dhcp.lease_file = str(tmp_path / "does-not-exist.leases")
@@ -1163,7 +1141,7 @@ def test_maintenance_tick_syncs_shaper(tmp_path):
             gw.service.set_shaping(enabled=True, total_down_mbps=100.0,
                                    total_up_mbps=20.0))
 
-        calls: list[tuple[list, bool, float, float, bool]] = []
+        calls: list[tuple[list, bool, float, float]] = []
 
         class _FakeShaper:
             available = True
@@ -1172,18 +1150,17 @@ def test_maintenance_tick_syncs_shaper(tmp_path):
             def stop(self):
                 pass
             def update_state(self, rate_map, enabled, total_down,
-                             total_up, aqm, lan_rate_mbps=None):
-                calls.append((rate_map, enabled, total_down, total_up, aqm,
+                             total_up, lan_rate_mbps=None):
+                calls.append((rate_map, enabled, total_down, total_up,
                               lan_rate_mbps))
 
         gw.shaper = _FakeShaper()  # type: ignore[assignment]
         asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
 
         assert len(calls) == 1, "one maintenance tick must sync the shaper"
-        rate_map, enabled, total_down, total_up, aqm, lan_rate = calls[0]
+        rate_map, enabled, total_down, total_up, lan_rate = calls[0]
         assert enabled is True
         assert total_down == 100.0 and total_up == 20.0
-        assert aqm is True
         assert lan_rate == 1000.0   # DB default for the LAN pass-through rate
         assert len(rate_map) == 1
         entry = rate_map[0]
@@ -1232,7 +1209,7 @@ def test_shaper_applies_default_guest_speed_cap(tmp_path):
             gw.service.set_shaping(enabled=True, total_down_mbps=100.0,
                                    total_up_mbps=20.0))
 
-        calls: list[tuple[list, bool, float, float, bool]] = []
+        calls: list[tuple[list, bool, float, float]] = []
 
         class _FakeShaper:
             available = True
@@ -1241,8 +1218,8 @@ def test_shaper_applies_default_guest_speed_cap(tmp_path):
             def stop(self):
                 pass
             def update_state(self, rate_map, enabled, total_down,
-                             total_up, aqm, lan_rate_mbps=None):
-                calls.append((rate_map, enabled, total_down, total_up, aqm,
+                             total_up, lan_rate_mbps=None):
+                calls.append((rate_map, enabled, total_down, total_up,
                               lan_rate_mbps))
 
         gw.shaper = _FakeShaper()  # type: ignore[assignment]
@@ -1398,15 +1375,29 @@ def test_arp_lock_not_started_under_wan(tmp_path):
 
 class _FakeVpnManager:
     """Stands in for VpnShareManager in the wiring test: records the
-    reconcile args, returns a scripted VpnShareStatus."""
+    reconcile args (the per-device/user ``vpn_bypass`` exclusion list is the
+    manager's own contract — pinned by test_vpnshare.py), returns a scripted
+    VpnShareStatus."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[bool, str]] = []
         self.status = VpnShareStatus()
+        #: live tunnels returned by detect_interfaces() (empty = not wired,
+        #: mirroring a manager without the method)
+        self.candidates: list[str] = []
+        #: ifindexes() result — higher = created later
+        self.indexes: dict[str, int] = {}
 
-    def reconcile(self, enabled: bool, pin: str) -> VpnShareStatus:
+    def reconcile(self, enabled: bool, pin: str,
+                  exclusions: list[str] | None = None) -> VpnShareStatus:
         self.calls.append((enabled, pin))
         return self.status
+
+    def detect_interfaces(self) -> list[str]:
+        return list(self.candidates)
+
+    def ifindexes(self) -> dict[str, int]:
+        return dict(self.indexes)
 
 
 class _FakeEngineRelay:
@@ -1649,6 +1640,162 @@ def test_sync_vpn_share_kernel_tunnel_wins_over_bridge(tmp_path):
         loop.run_until_complete(gw._sync_vpn_share())
         assert fake_ts.calls == [False]  # stopped as redundant
         assert fake_mgr.calls[-1] == (True, "xray_tun")  # pin persisted
+    finally:
+        loop.run_until_complete(gw.shutdown())
+        loop.close()
+
+
+def test_sync_vpn_share_stale_pin_yields_to_fresher_tunnel(tmp_path):
+    """Switching the VPN server/client leaves the OLD tunnel device alive
+    alongside the new one; the persisted pin must not keep routing the
+    household into the stale server forever while the box itself already
+    exits via the new one (devices keep showing the old VPN IP — the exact
+    switch-servers incident). With more than one live tun the NEWEST
+    non-bridge tunnel wins (higher ifindex = dialed later) and the pin
+    moves; with a single live tunnel nothing changes."""
+    cfg = _cfg(tmp_path)
+    cfg.vpn_share.tun2socks = False  # hermetic: the bridge is a real downloader
+    gw = Gateway(cfg)
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(gw.startup())
+        if gw._maintenance_task is not None:
+            gw._maintenance_task.cancel()  # the background loop must not race
+            try:
+                loop.run_until_complete(gw._maintenance_task)
+            except asyncio.CancelledError:
+                pass
+        fake_mgr = _FakeVpnManager()
+        fake_engine = _FakeEngineRelay()
+        gw.vpn_manager = fake_mgr
+        gw.engine = fake_engine  # type: ignore[assignment]
+        gw._vpn_learn = lambda _: set()
+        loop.run_until_complete(gw.database.set_setting(
+            "vpn_share_enabled", "1"))
+        # yesterday's tunnel is still pinned AND still alive; the operator
+        # switched clients and the fresh xray_tun appeared alongside it
+        loop.run_until_complete(gw.database.set_setting(
+            "vpn_share_interface", "wg0"))
+        # single live tunnel -> pin honored unchanged (stability contract)
+        fake_mgr.candidates = ["wg0"]
+        fake_mgr.indexes = {"wg0": 11}
+        fake_mgr.status = VpnShareStatus(
+            state="on", interface="wg0", candidates=["wg0"])
+        loop.run_until_complete(gw._sync_vpn_share())
+        assert fake_mgr.calls == [(True, "wg0")]
+        # second tunnel appears (newer ifindex) -> the pin is superseded and
+        # re-persisted onto the fresher device
+        fake_mgr.calls.clear()
+        fake_mgr.candidates = ["wg0", "xray_tun"]
+        fake_mgr.indexes = {"wg0": 11, "xray_tun": 19}
+        fake_mgr.status = VpnShareStatus(
+            state="on", interface="xray_tun",
+            candidates=["wg0", "xray_tun"])
+        loop.run_until_complete(gw._sync_vpn_share())
+        assert fake_mgr.calls == [(True, "xray_tun")]
+        pin = loop.run_until_complete(
+            gw.database.get_setting("vpn_share_interface", ""))
+        assert pin == "xray_tun"
+        assert gw._last_vpn_status["interface"] == "xray_tun"
+    finally:
+        loop.run_until_complete(gw.shutdown())
+        loop.close()
+
+
+def test_sync_vpn_share_bridge_device_yields_to_real_tunnel(tmp_path):
+    """While the auto-provisioned tun2socks bridge carries the subnet, its
+    own tun must NOT win the newest-tunnel race once a REAL kernel tunnel
+    appears (the operator switched to a TUN-mode client): routing moves to
+    the real tunnel and the redundant bridge child is stopped instead of
+    both tunnels fighting over the client subnet forever."""
+    cfg = _cfg(tmp_path)
+    gw = Gateway(cfg)
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(gw.startup())
+        if gw._maintenance_task is not None:
+            gw._maintenance_task.cancel()  # the background loop must not race
+            try:
+                loop.run_until_complete(gw._maintenance_task)
+            except asyncio.CancelledError:
+                pass
+        fake_mgr = _FakeVpnManager()
+        fake_ts = _FakeTun2socks()
+        fake_engine = _FakeEngineRelay()
+        gw.vpn_manager = fake_mgr
+        gw.tun2socks_manager = fake_ts
+        gw.engine = fake_engine  # type: ignore[assignment]
+        gw._vpn_learn = lambda _: set()
+        loop.run_until_complete(gw.database.set_setting(
+            "vpn_share_enabled", "1"))
+        # the bridge's tun0 is the current carrier/pin; a real kernel tunnel
+        # (Meta, newer) shows up -> it wins, the bridge device is excluded
+        # from the race and the child is stopped as redundant
+        loop.run_until_complete(gw.database.set_setting(
+            "vpn_share_interface", "tun0"))
+        fake_mgr.candidates = ["tun0", "Meta"]
+        fake_mgr.indexes = {"tun0": 7, "Meta": 21}
+        fake_mgr.status = VpnShareStatus(
+            state="on", interface="Meta", candidates=["tun0", "Meta"])
+        loop.run_until_complete(gw._sync_vpn_share())
+        assert fake_mgr.calls == [(True, "Meta")]
+        assert fake_ts.calls == [False]  # stopped as redundant
+        pin = loop.run_until_complete(
+            gw.database.get_setting("vpn_share_interface", ""))
+        assert pin == "Meta"
+        assert gw._last_vpn_status["interface"] == "Meta"
+    finally:
+        loop.run_until_complete(gw.shutdown())
+        loop.close()
+
+
+def test_sync_vpn_share_disable_clears_pinned_tunnel(tmp_path):
+    """Turning the share OFF clears the persisted pin, so the next ON starts
+    detection from scratch — toggling the dashboard switch stays a reliable
+    recovery after a stale/zombie tunnel got the box pinned to a dead
+    interface name (the pin used to survive OFF across toggles)."""
+    cfg = _cfg(tmp_path)
+    cfg.vpn_share.tun2socks = False  # hermetic: the bridge is a real downloader
+    gw = Gateway(cfg)
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(gw.startup())
+        if gw._maintenance_task is not None:
+            gw._maintenance_task.cancel()  # the background loop must not race
+            try:
+                loop.run_until_complete(gw._maintenance_task)
+            except asyncio.CancelledError:
+                pass
+        fake_mgr = _FakeVpnManager()
+        fake_engine = _FakeEngineRelay()
+        gw.vpn_manager = fake_mgr
+        gw.engine = fake_engine  # type: ignore[assignment]
+        gw._vpn_learn = lambda _: set()
+        loop.run_until_complete(gw.database.set_setting(
+            "vpn_share_enabled", "1"))
+        loop.run_until_complete(gw.database.set_setting(
+            "vpn_share_interface", "utun4"))
+        fake_mgr.status = VpnShareStatus(
+            state="on", interface="utun4", candidates=["utun4"])
+        loop.run_until_complete(gw._sync_vpn_share())
+        assert fake_mgr.calls == [(True, "utun4")]  # still pinned while on
+        # switch off: reconcile still sees the old pin that tick, then the DB
+        # pin is cleared so the next enable re-detects fresh
+        loop.run_until_complete(gw.database.set_setting(
+            "vpn_share_enabled", "0"))
+        fake_mgr.status = VpnShareStatus(state="off")
+        loop.run_until_complete(gw._sync_vpn_share())
+        assert fake_mgr.calls[-1] == (False, "utun4")
+        pin = loop.run_until_complete(
+            gw.database.get_setting("vpn_share_interface", ""))
+        assert pin == ""
+        # back on: NO pin -> fresh auto-detect
+        loop.run_until_complete(gw.database.set_setting(
+            "vpn_share_enabled", "1"))
+        fake_mgr.status = VpnShareStatus(
+            state="on", interface="utun9", candidates=["utun9"])
+        loop.run_until_complete(gw._sync_vpn_share())
+        assert fake_mgr.calls[-1] == (True, "")
     finally:
         loop.run_until_complete(gw.shutdown())
         loop.close()
@@ -2446,8 +2593,8 @@ def test_immediate_reshaping_waits_for_shaping_lock(tmp_path):
             def stop(self):
                 pass
             def update_state(self, rate_map, enabled, total_down,
-                             total_up, aqm, lan_rate_mbps=None):
-                calls.append((rate_map, enabled, total_down, total_up, aqm,
+                             total_up, lan_rate_mbps=None):
+                calls.append((rate_map, enabled, total_down, total_up,
                               lan_rate_mbps))
 
         gw.shaper = _FakeShaper()  # type: ignore[assignment]
@@ -2466,7 +2613,7 @@ def test_immediate_reshaping_waits_for_shaping_lock(tmp_path):
         lock.release()  # synchronous in 3.10+ (only acquire() is a coroutine)
         asyncio.get_event_loop().run_until_complete(task)
         assert len(calls) == 1, "re-sync programs the tree once the lock frees"
-        rate_map, enabled, total_down, total_up, aqm, lan_rate = calls[0]
+        rate_map, enabled, total_down, total_up, lan_rate = calls[0]
         assert enabled is True and total_down == 100.0 and total_up == 20.0
         assert lan_rate == 1000.0
         assert rate_map[0]["ip"] == "192.168.2.130"

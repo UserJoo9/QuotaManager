@@ -697,21 +697,34 @@ programs:
   client + uplink subnets via `lan_interface()` so LAN traffic never tunnels,
   mirroring the nftables local-net exclusions.
 
-Rules only ever land when sysfs confirms the tunnel device exists (`/sys/class/
-net/<iface>`), a missing tunnel is never routed into — that would blackhole the
-subnet — and a tunnel is only routed into once it carries an IPv4 address (a
-freshly spawned tun2socks gets a 2 s settle window to gain its address; a junk
-ARPHRD_NONE device like the live-box "evice" exists in sysfs yet routes
-nothing, so an address-less device is reported as no-interface, never routed
-into). A stale pin whose device is gone OR address-less is dropped and the
-tunnel re-detected instead. `peer_ip()` handles both `ip -o` shapes (bare local
-address vs `local ... peer ...`); the dev-only route falls back to `scope link`
-(no peer/HUTI interfaces like WireGuard's). The detected device is **pinned in
-the DB** (`vpn_share_interface` set by run.py; the `vpn_share.interface`
-config value is the initial pin), so a multi-VPN box or a reboot re-applies the
-same interface. `remove()` tears the rule + table down deterministically and
-`is_rule_installed()` makes every call idempotent — `reconcile` self-heals any
-crash/reboot/tunnel-restart leftover on the next 15 s tick.
+Rules only ever land when the tunnel device is confirmed to exist (sysfs
+`/sys/class/net/<iface>/type` first, `ip -o -d link show` parsing `link/none`
+as fallback), a missing tunnel is never routed into — that would blackhole the
+subnet — and a device is only routed into once it settles (2 s window): UP
+devices WITHOUT an IPv4 are fine (xray-core/sing-box TUNs work address-less —
+they get a dev-only default route); only missing or DOWN devices are rejected
+as no-interface, never routed into. A stale pin whose device is gone OR dead
+is dropped and the tunnel re-detected instead. `peer_ip()` handles both
+`ip -o` shapes (bare local address vs `local ... peer ...`); the dev-only
+route falls back to `scope link` (no peer/HUTI interfaces like WireGuard's).
+The detected device is **pinned in the DB** (`vpn_share_interface` set by
+run.py; the `vpn_share.interface` config value always overrides), so a
+multi-VPN box or a reboot re-applies the same interface.
+
+**Stale-pin arbitration (run.py `_arbitrate_vpn_tunnel`).** A pin must not
+outvote a FRESHER tunnel: switching VPN servers/clients leaves the old tunnel
+device alive alongside the new one, and routing by the old name would keep
+the HOUSEHOLD on the stale server while the box itself exits via the new one
+(devices stuck on the old VPN IP). When exactly zero/one tunnel is live the
+pin passes through untouched (no extra probes). With SEVERAL live tunnels,
+the NEWEST tunnel that is NOT the tun2socks bridge device wins (higher
+ifindex = dialed later — the connection the operator switched TO), the pin
+moves onto it, and the multi-tunnel state is logged loudly for diagnosis.
+Turning the share OFF clears the DB pin entirely, so toggling the dashboard
+switch off→on forces fresh detection — the reliable manual recovery after a
+zombie tunnel confused the pin. `remove()` tears the rule + table down
+deterministically and a one-time boot probe (`ip rule show`, `_clean_checked`)
+self-heals any crash/reboot/tunnel-restart leftover on the first tick.
 
 **Gateway cut + relay whitelist (`NftablesEngine.set_gateway_allowed`, vpn share
 only).** Relayed volume traverses the box's own input/output hooks a second time
@@ -1188,28 +1201,23 @@ vpn_share:
                               #   installed (supply chain)
 
 network:
-  interface_tags: {eth0: "LAN", wlan0: "WiFi"}  # box-side NIC each client
-                              #   arrives on (ip -j neigh) -> the card chip;
-                              #   an unmapped NIC shows its raw name
   latency_probe:
-    enabled: true             # ARP-RTT WiFi/LAN classification (ANY hardware):
-                              #   the box ARPs each leased client and times the
-                              #   replies — wired < 1 ms, WiFi pays airtime —
-                              #   the FASTEST sample decides WiFi/LAN. Raw
-                              #   AF_PACKET backend, `ping` fallback, previous
-                              #   label kept on silence. Threshold below only
-                              #   if a fast 5G device reads "LAN"
+    enabled: true             # ARP-RTT probe driving the online LED (ANY
+                              #   hardware): the box ARPs each leased client
+                              #   and times the replies; the responder set
+                              #   decides "connected NOW" vs grey on the card.
+                              #   Raw AF_PACKET backend, `ping` fallback.
     samples: 6                # ARP requests per device per sweep
-    min_samples: 2            # replies required before classifying at all
-    threshold_ms: 1.0         # fastest RTT at/above this => "WiFi"
-    min_consistent: 2         # agreeing sweeps before the label flips
+    min_samples: 2            # replies required before counting a device seen
+    threshold_ms: 1.0         # informational only — no classification anymore
+    min_consistent: 2         # agreeing sweeps before the LED state flips
     interval_s: 30            # sweep cadence
     timeout_s: 0.5            # per-sweep receive timeout
   wifi_probe:
     enabled: false            # passive air sniffing (airmon-ng + airodump-ng,
                               #   Kali staples) — ONLY with a monitor-capable
-                              #   spare WiFi card; labels "WiFi · <SSID>" and
-                              #   takes precedence over latency_probe
+                              #   spare WiFi card; collects SSID snapshots for
+                              #   the yield check
     interface: ""             # e.g. wlan0; empty = auto-detect the first wlan*
     poll_interval: 5          # CSV re-read cadence (seconds)
     sighted_ttl: 600          # a heard device stays "WiFi" this long while idle

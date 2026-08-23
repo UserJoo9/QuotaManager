@@ -1,6 +1,5 @@
-"""ARP-RTT WiFi/LAN classification (quota/latency_probe.py) — the any-hardware
-fallback for the router-side access label when the box's WiFi module has no
-monitor mode.
+"""ARP-RTT probe (quota/latency_probe.py) — drives the device-card LED
+(connected NOW) by probing every leased client by ARP round-trip time.
 
 The raw-socket backend needs root + Linux (never exercised here); the
 classifier math, the ping-parse fallback and run.py's sweep wiring are tested
@@ -246,10 +245,10 @@ def test_gateway_builds_probe_from_config(tmp_path):
     assert gw2.latency_probe is None
 
 
-def test_latency_tick_classifies_with_streak_guard(tmp_path):
-    """Sweep wiring: a leased device flips its access label only after
-    ``min_consistent`` agreeing sweeps; UNKNOWN resets the streak; the
-    monitor probe (available=True) yields the sweep entirely."""
+def test_latency_tick_populates_responders(tmp_path):
+    """Sweep wiring: the ARP probe populates the responder set for LED
+    connected status; the monitor probe (available=True) yields the sweep
+    entirely."""
     from core.config import Config, DhcpConfig
     from run import Gateway
 
@@ -258,12 +257,9 @@ def test_latency_tick_classifies_with_streak_guard(tmp_path):
     cfg.dhcp = DhcpConfig(gateway_ip="192.168.2.1",
                           subnet="255.255.255.0")
     cfg.network.latency_probe.samples = 3
-    cfg.network.latency_probe.min_samples = 3
-    cfg.network.latency_probe.min_consistent = 2
     cfg.network.latency_probe.interval_s = 0.0  # every tick sweeps
     gw = Gateway(cfg)
 
-    # wifi device answers slowly (WiFi airtime), the LAN one fast
     class FakeProbe:
         def probe(self, targets):
             out = {}
@@ -281,31 +277,17 @@ def test_latency_tick_classifies_with_streak_guard(tmp_path):
             loop.run_until_complete(
                 gw.database.upsert_device(mac, name=mac))
             loop.run_until_complete(gw.database.set_lease(mac, ip))
-        # sweep 1: streaks start, no label yet (min_consistent=2)
+        # sweep: both devices answered
         loop.run_until_complete(gw._maybe_latency_tick())
-        dev1 = loop.run_until_complete(
-            gw.database.get_device(mac="aa:bb:cc:dd:ee:01"))
-        assert dev1.access_interface == ""
-        # sweep 2: labels land
-        loop.run_until_complete(gw._maybe_latency_tick())
-        dev1 = loop.run_until_complete(
-            gw.database.get_device(mac="aa:bb:cc:dd:ee:01"))
-        dev2 = loop.run_until_complete(
-            gw.database.get_device(mac="aa:bb:cc:dd:ee:02"))
-        assert dev1.access_interface == "WiFi"
-        assert dev2.access_interface == "LAN"
-        # responders = the LED's "connected NOW" source: both devices answered
+        # responders = the LED's "connected NOW" source
         assert gw._latency_active_ips() == {"192.168.2.2", "192.168.2.3"}
-        # UNKNOWN (device stops replying) resets the streak; the label stays
+        # empty sweep preserves the old responder map (probe-degradation
+        # guard); the map goes stale after 3×interval and falls back to
+        # lease-based connectedness.  No _neigh_active_ips => old set kept.
         gw.latency_probe = type("P", (), {"probe": staticmethod(
             lambda targets: {})})()
         loop.run_until_complete(gw._maybe_latency_tick())
-        dev1 = loop.run_until_complete(
-            gw.database.get_device(mac="aa:bb:cc:dd:ee:01"))
-        assert dev1.access_interface == "WiFi"
-        # nobody answered the sweep => no responder => grey LEDs (lease alone
-        # no longer proves the device is awake)
-        assert gw._latency_active_ips() == set()
+        assert gw._latency_active_ips() == {"192.168.2.2", "192.168.2.3"}
         # monitor probe available => the latency sweep yields
         gw.wifi_probe = type("P", (), {"snapshot": staticmethod(
             lambda: {"available": True, "error": "", "ssid_by_mac": {},
@@ -314,9 +296,137 @@ def test_latency_tick_classifies_with_streak_guard(tmp_path):
         gw.latency_probe = type("P", (), {"probe": staticmethod(
             lambda targets: [])})()
         loop.run_until_complete(gw._maybe_latency_tick())
-        dev1 = loop.run_until_complete(
-            gw.database.get_device(mac="aa:bb:cc:dd:ee:01"))
-        assert dev1.access_interface == "WiFi"
+    finally:
+        loop.run_until_complete(gw.database.close())
+        loop.close()
+
+
+def test_empty_sweep_preserves_old_responder_map(tmp_path):
+    """An empty ARP sweep (probe returns {}) no longer wipes the responder
+    set — the old map is kept and goes stale after 3×interval, falling back
+    to lease-based connectedness.  This prevents the 'all LEDs gray while
+    traffic flows' bug when the probe backend degrades."""
+    from core.config import Config, DhcpConfig
+    from run import Gateway
+
+    cfg = Config()
+    cfg.db_path = str(tmp_path / "empty_sweep.db")
+    cfg.dhcp = DhcpConfig(gateway_ip="192.168.2.1",
+                          subnet="255.255.255.0")
+    cfg.network.latency_probe.samples = 3
+    cfg.network.latency_probe.min_samples = 1
+    cfg.network.latency_probe.interval_s = 0.0
+    gw = Gateway(cfg)
+
+    sweep_count = [0]
+    def fake_probe(targets):
+        sweep_count[0] += 1
+        if sweep_count[0] == 1:
+            # First sweep: both reply
+            return {"192.168.2.2": [0.3], "192.168.2.3": [0.2]}
+        # Second sweep: empty (probe degradation)
+        return {}
+
+    gw.latency_probe = type("P", (), {"probe": staticmethod(fake_probe)})
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(gw.database.connect())
+        loop.run_until_complete(gw.service.ensure_period())
+        for mac, ip in (("aa:bb:cc:dd:ee:01", "192.168.2.2"),
+                        ("aa:bb:cc:dd:ee:02", "192.168.2.3")):
+            loop.run_until_complete(
+                gw.database.upsert_device(mac, name=mac))
+            loop.run_until_complete(gw.database.set_lease(mac, ip))
+        # sweep 1: both reply
+        loop.run_until_complete(gw._maybe_latency_tick())
+        assert gw._latency_active_ips() == {"192.168.2.2", "192.168.2.3"}
+        # sweep 2: empty — old map preserved
+        loop.run_until_complete(gw._maybe_latency_tick())
+        assert gw._latency_active_ips() == {"192.168.2.2", "192.168.2.3"}
+    finally:
+        loop.run_until_complete(gw.database.close())
+        loop.close()
+
+
+def test_neigh_active_ips_reinforce_led(tmp_path):
+    """IPs from the kernel neighbor table (ip neigh) are merged into the
+    responder set, so a device that missed the ARP burst but is generating
+    traffic still shows blue."""
+    from core.config import Config, DhcpConfig
+    from run import Gateway
+
+    cfg = Config()
+    cfg.db_path = str(tmp_path / "neigh.db")
+    cfg.dhcp = DhcpConfig(gateway_ip="192.168.2.1",
+                          subnet="255.255.255.0")
+    cfg.network.latency_probe.samples = 3
+    cfg.network.latency_probe.min_samples = 1
+    cfg.network.latency_probe.interval_s = 0.0
+    gw = Gateway(cfg)
+
+    # ARP probe returns only .2, but .3 is in the neighbor table
+    gw.latency_probe = type("P", (), {"probe": staticmethod(
+        lambda targets: {"192.168.2.2": [0.3]})})
+    gw._neigh_active_ips = {"192.168.2.3"}
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(gw.database.connect())
+        loop.run_until_complete(gw.service.ensure_period())
+        for mac, ip in (("aa:bb:cc:dd:ee:01", "192.168.2.2"),
+                        ("aa:bb:cc:dd:ee:02", "192.168.2.3")):
+            loop.run_until_complete(
+                gw.database.upsert_device(mac, name=mac))
+            loop.run_until_complete(gw.database.set_lease(mac, ip))
+        loop.run_until_complete(gw._maybe_latency_tick())
+        # .2 from ARP probe + .3 from neighbor table = both connected
+        assert gw._latency_active_ips() == {"192.168.2.2", "192.168.2.3"}
+    finally:
+        loop.run_until_complete(gw.database.close())
+        loop.close()
+
+
+def test_collect_neigh_active_populates_active_ips(tmp_path):
+    """_collect_neigh_active parses ip -j neigh and stores active IPs in
+    _neigh_active_ips for the LED reinforcement."""
+    from core.config import Config, DhcpConfig
+    from run import Gateway
+
+    cfg = Config()
+    cfg.db_path = str(tmp_path / "neigh2.db")
+    cfg.dhcp = DhcpConfig(gateway_ip="192.168.2.1",
+                          subnet="255.255.255.0")
+    gw = Gateway(cfg)
+
+    import json as _json
+    neigh_data = _json.dumps([
+        {"dst": "192.168.2.10", "dev": "eth0",
+         "lladdr": "aa:bb:cc:dd:ee:01", "state": "REACHABLE"},
+        {"dst": "192.168.2.11", "dev": "eth0",
+         "lladdr": "aa:bb:cc:dd:ee:02", "state": "STALE"},
+        {"dst": "192.168.2.12", "dev": "eth0",
+         "lladdr": "aa:bb:cc:dd:ee:03", "state": "FAILED"},
+    ])
+
+    calls = []
+    def fake_ip_run(argv):
+        calls.append(argv)
+        if argv == ["ip", "-j", "neigh"]:
+            return 0, neigh_data
+        return 1, ""
+    gw._ip_run = fake_ip_run
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(gw.database.connect())
+        for mac, ip in (("aa:bb:cc:dd:ee:01", "192.168.2.10"),
+                        ("aa:bb:cc:dd:ee:02", "192.168.2.11"),
+                        ("aa:bb:cc:dd:ee:03", "192.168.2.12")):
+            loop.run_until_complete(
+                gw.database.upsert_device(mac, name=mac))
+            loop.run_until_complete(gw.database.set_lease(mac, ip))
+        loop.run_until_complete(gw._collect_neigh_active())
+        # REACHABLE + STALE are active; FAILED is excluded
+        assert gw._neigh_active_ips == {"192.168.2.10", "192.168.2.11"}
     finally:
         loop.run_until_complete(gw.database.close())
         loop.close()

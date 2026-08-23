@@ -81,6 +81,10 @@ class Device:
     #: Per-device override: when true this device is exempt from its user's
     #: quota block (an explicit admin_off block still wins).
     bypass: bool = False
+    #: Per-device override: this device's traffic skips the VPN-share tunnel
+    #: and rides the direct uplink (run.py feeds the effective set to the
+    #: policy-routing manager each tick). Quota/blocks/caps still apply.
+    vpn_bypass: bool = False
     #: Per-device internet speed caps in Mbps (0 = unlimited). Enforced by the
     #: tc shaper (quota/shaping.py).
     limit_down_mbps: float = 0.0
@@ -90,12 +94,6 @@ class Device:
     #: Rendered as a tag-restricted dnsmasq `server=` line — see
     #: quota/dns_rules.py.
     dns_server: str = ""
-    #: Which NIC the device was last seen on (``ip neigh`` dev — e.g. "eth0",
-    #: "wlan0"). Auto-learned by run.py each maintenance tick; empty when
-    #: ``ip`` is unavailable (non-Linux / degraded boot). Drives the device
-    #: card's WiFi/LAN tag (labels come from config.yaml's ``network.
-    #: interface_tags``).
-    source_interface: str = ""
     #: Router-side access label auto-learned by the WiFi probe
     #: (quota/wifi_probe.py + run.py): "WiFi · <SSID>" when the box's monitor
     #: card hears the device on the air, "LAN" once a leased device has been
@@ -131,6 +129,9 @@ class User:
     #: lifts the usage-vs-allowance gate. Per-device ``bypass`` is redundant
     #: for an exempt user's devices (their quota gate is already open).
     exempt_quota: bool = False
+    #: Exclude ALL of this user's devices from the VPN-share tunnel (per-device
+    #: ``vpn_bypass`` is OR-ed with this at enforcement time).
+    vpn_bypass: bool = False
     #: Per-user aggregate internet speed cap in Mbps (0 = unlimited): all of a
     #: user's devices share this ceiling. Enforced by the Linux tc shaper.
     limit_down_mbps: float = 0.0
@@ -216,9 +217,9 @@ CREATE TABLE IF NOT EXISTS devices (
     limit_down_mbps  REAL NOT NULL DEFAULT 0,
     limit_up_mbps    REAL NOT NULL DEFAULT 0,
     dns_server       TEXT NOT NULL DEFAULT '',
-    source_interface TEXT NOT NULL DEFAULT '',
     access_interface TEXT NOT NULL DEFAULT '',
-    access_override  TEXT NOT NULL DEFAULT ''
+    access_override  TEXT NOT NULL DEFAULT '',
+    vpn_bypass       INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS leases (
@@ -291,7 +292,8 @@ CREATE TABLE IF NOT EXISTS users (
     notified_75      INTEGER NOT NULL DEFAULT 0,
     notified_100     INTEGER NOT NULL DEFAULT 0,
     history_days     INTEGER,             -- NULL = global history.retention_days
-    dns_server       TEXT NOT NULL DEFAULT ''
+    dns_server       TEXT NOT NULL DEFAULT '',
+    vpn_bypass       INTEGER NOT NULL DEFAULT 0
 );
 
 -- MAC whitelist/blacklist (quota/service.py): 'allow' = never quota-blocked
@@ -478,16 +480,6 @@ class Database:
                 await self._conn.commit()
             except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
                 pass
-        # Per-device source-interface tag (WiFi/LAN): which NIC the device was
-        # last seen on, auto-learned from the kernel neighbor table. ALTER
-        # no-ops when already present (fresh SCHEMA includes it).
-        try:
-            await self._conn.execute(
-                "ALTER TABLE devices ADD COLUMN source_interface "
-                "TEXT NOT NULL DEFAULT ''")
-            await self._conn.commit()
-        except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
-            pass
         # Router-side access label (WiFi probe auto-learn + manual override).
         # ALTER no-ops when already present (fresh SCHEMA includes both).
         for column in ("access_interface", "access_override"):
@@ -495,6 +487,17 @@ class Database:
                 await self._conn.execute(
                     f"ALTER TABLE devices ADD COLUMN {column} "
                     "TEXT NOT NULL DEFAULT ''")
+                await self._conn.commit()
+            except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
+                pass
+        # VPN-share exclusion flags: a device (or its whole user) marked
+        # vpn_bypass rides the direct uplink instead of the shared tunnel.
+        # ALTER no-ops when already present (fresh SCHEMA includes both).
+        for table in ("devices", "users"):
+            try:
+                await self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN vpn_bypass "
+                    "INTEGER NOT NULL DEFAULT 0")
                 await self._conn.commit()
             except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
                 pass
@@ -684,8 +687,9 @@ class Database:
 
     async def update_device(self, device_id: int, **fields: Any) -> Device | None:
         allowed = {"name", "quota_mode", "fixed_gb", "block_state",
-                   "user_id", "bypass", "limit_down_mbps", "limit_up_mbps",
-                   "dns_server", "source_interface", "access_interface",
+                   "user_id", "bypass", "vpn_bypass",
+                   "limit_down_mbps", "limit_up_mbps",
+                   "dns_server", "access_interface",
                    "access_override"}
         sets, args = [], []
         for key, value in fields.items():
@@ -765,18 +769,19 @@ class Database:
                           protected: bool = False,
                           limit_down_mbps: float = 0.0,
                           limit_up_mbps: float = 0.0,
-                          exempt_quota: bool = False) -> User:
+                          exempt_quota: bool = False,
+                          vpn_bypass: bool = False) -> User:
         """Insert a user (no devices). Used by the API, by new-device
         auto-registration, by the v2 migration backfill, and by
         :meth:`_seed_gateway` (``protected=True`` for the Gateway account)."""
         cur = await self.conn.execute(
             "INSERT INTO users (name, quota_mode, fixed_gb, block_state, "
             "topup_gb, created_at, guest, protected, exempt_quota, "
-            "limit_down_mbps, limit_up_mbps) "
-            "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
+            "limit_down_mbps, limit_up_mbps, vpn_bypass) "
+            "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
             (name, quota_mode, fixed_gb, block_state, time.time(),
              int(guest), int(protected), int(exempt_quota),
-             limit_down_mbps, limit_up_mbps))
+             limit_down_mbps, limit_up_mbps, int(vpn_bypass)))
         await self.conn.commit()
         row = await self._fetch_one("SELECT * FROM users WHERE id=?",
                                     (cur.lastrowid,))
@@ -795,7 +800,8 @@ class Database:
         allowed = {"name", "quota_mode", "fixed_gb", "block_state",
                    "limit_down_mbps", "limit_up_mbps",
                    "notified_50", "notified_75", "notified_100",
-                   "history_days", "dns_server", "exempt_quota"}
+                   "history_days", "dns_server", "exempt_quota",
+                   "vpn_bypass"}
         sets, args = [], []
         for key, value in fields.items():
             if key in allowed:
@@ -1388,10 +1394,10 @@ def _row_to_device(row: Any) -> Device:
         topup_gb=float(row["topup_gb"] or 0.0),
         user_id=row["user_id"],
         bypass=bool(row["bypass"]),
+        vpn_bypass=bool(row["vpn_bypass"]),
         limit_down_mbps=float(row["limit_down_mbps"] or 0.0),
         limit_up_mbps=float(row["limit_up_mbps"] or 0.0),
         dns_server=row["dns_server"] or "",
-        source_interface=row["source_interface"] or "",
         access_interface=row["access_interface"] or "",
         access_override=row["access_override"] or "",
     )
@@ -1409,6 +1415,7 @@ def _row_to_user(row: Any) -> User:
         guest=bool(row["guest"]),
         protected=bool(row["protected"]),
         exempt_quota=bool(row["exempt_quota"]),
+        vpn_bypass=bool(row["vpn_bypass"]),
         limit_down_mbps=float(row["limit_down_mbps"] or 0.0),
         limit_up_mbps=float(row["limit_up_mbps"] or 0.0),
         notified_50=bool(row["notified_50"]),

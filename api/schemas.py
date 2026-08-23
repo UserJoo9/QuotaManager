@@ -36,6 +36,9 @@ class DeviceUpdate(BaseModel):
     user_id: Optional[int] = None
     #: Per-device override: exempt this device from its user's quota block.
     bypass: Optional[bool] = None
+    #: Per-device override: this device's traffic skips the VPN-share tunnel
+    #: and rides the direct uplink instead (its quota/blocks/caps still apply).
+    vpn_bypass: Optional[bool] = None
     limit_down_mbps: Optional[float] = _cap_field()
     limit_up_mbps: Optional[float] = _cap_field()
 
@@ -50,6 +53,8 @@ class UserCreate(BaseModel):
     limit_up_mbps: Optional[float] = _cap_field()
     #: Exempt this user from quota (never quota-blocked; admin cuts still apply).
     exempt_quota: Optional[bool] = None
+    #: Exclude all this user's devices from the VPN-share tunnel.
+    vpn_bypass: Optional[bool] = None
 
 
 class UserUpdate(BaseModel):
@@ -65,6 +70,10 @@ class UserUpdate(BaseModel):
     #: Exempt this user from quota — never quota-blocked, however much they
     #: use. A manual admin cut (user/device level) still applies.
     exempt_quota: Optional[bool] = None
+    #: Exclude ALL of this user's devices from the VPN-share tunnel (they ride
+    #: the direct uplink; quota/blocks/caps still apply). A per-device
+    #: ``vpn_bypass`` wins independently of this flag.
+    vpn_bypass: Optional[bool] = None
 
 
 class NetworkUpdate(BaseModel):
@@ -81,8 +90,6 @@ class NetworkUpdate(BaseModel):
     #: <-> uplink-subnet) traffic. 0/empty = the 1000 Mbps default; the WAN
     #: caps never apply to LAN transfers.
     lan_rate_mbps: Optional[float] = _cap_field()
-    #: Bufferbloat avoidance (fq_codel on every queue). Default on.
-    aqm: Optional[bool] = None
     #: "VPN share" master switch: route the whole client subnet through the
     #: box's VPN tunnel (quota/vpnshare.py policy routing). None = leave the
     #: current switch untouched (only the shaping fields changed).
@@ -98,15 +105,6 @@ class NetworkUpdate(BaseModel):
 
 class TopUpRequest(BaseModel):
     extra_gb: float = Field(..., gt=0)
-
-
-class DeviceAccessUpdate(BaseModel):
-    """Manual router-side access label for a device card ("WiFi · MyNet",
-    "LAN1", ...). Empty string clears the pin — the passive WiFi probe's
-    auto label takes over again. Capped: it is written verbatim into the DB
-    and rendered in the UI (no newlines / silly lengths)."""
-
-    override: str = Field("", max_length=80)
 
 
 class BundleUpdate(BaseModel):

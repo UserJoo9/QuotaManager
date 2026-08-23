@@ -743,19 +743,16 @@ class QuotaService:
     # -- speed shaping (Linux tc) ------------------------------------------------
 
     #: Settings keys for the Linux tc shaper (quota/shaping.py). The master
-    #: toggle, the real line down/up rates in Mbps (0 = not set -> shaper idle),
-    #: and the bufferbloat-avoidance (fq_codel) toggle.
+    #: toggle, the real line down/up rates in Mbps (0 = not set -> shaper idle).
     SHAPING_ENABLED_KEY = "shaping_enabled"
     SHAPING_DOWN_KEY = "shaping_total_down_mbps"
     SHAPING_UP_KEY = "shaping_total_up_mbps"
-    SHAPING_AQM_KEY = "shaping_aqm"
     SHAPING_LAN_RATE_KEY = "shaping_lan_rate_mbps"
 
     async def get_shaping_config(self) -> dict[str, Any]:
         """Current shaping settings (the shaper reads these each maintenance
         tick, so a change takes effect within ~15 s, like blocks/bundle)."""
         enabled = (await self.db.get_setting(self.SHAPING_ENABLED_KEY, "0")) == "1"
-        aqm = (await self.db.get_setting(self.SHAPING_AQM_KEY, "1")) == "1"
         try:
             total_down = max(0.0, float(
                 await self.db.get_setting(self.SHAPING_DOWN_KEY, "0") or 0))
@@ -773,8 +770,7 @@ class QuotaService:
         except ValueError:
             lan_rate = 1000.0
         return {"enabled": enabled, "total_down_mbps": total_down,
-                "total_up_mbps": total_up, "aqm": aqm,
-                "lan_rate_mbps": lan_rate}
+                "total_up_mbps": total_up, "lan_rate_mbps": lan_rate}
 
     # -- VPN share (policy-routing the client subnet into the box's tunnel) ------
 
@@ -876,7 +872,6 @@ class QuotaService:
     async def set_shaping(self, enabled: bool | None = None,
                           total_down_mbps: float | None = None,
                           total_up_mbps: float | None = None,
-                          aqm: bool | None = None,
                           lan_rate_mbps: float | None = None) -> dict[str, Any]:
         """Persist a shaping change. Each non-None field is written; a ``warn``
         event records what changed. No engine call here — the maintenance loop
@@ -899,10 +894,6 @@ class QuotaService:
             await self.db.set_setting(self.SHAPING_LAN_RATE_KEY,
                                       str(lan_rate_mbps))
             changes.append(f"LAN rate {lan_rate_mbps:g} Mbps")
-        if aqm is not None:
-            await self.db.set_setting(self.SHAPING_AQM_KEY, "1" if aqm else "0")
-            changes.append("low-latency queues " +
-                           ("enabled" if aqm else "disabled"))
         if changes:
             await self.db.add_event("Speed limits: " + ", ".join(changes), "warn")
         return await self.get_shaping_config()

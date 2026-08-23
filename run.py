@@ -50,7 +50,7 @@ from quota.arp_scan import ArpScanner
 from quota.dnslog import DnslogTailer
 from quota.engine import GATEWAY_MAC, EngineSnapshot, SnapshotHolder
 from quota.firewall import FirewallManager
-from quota.latency_probe import UNKNOWN, WIFI, classify_rtts
+from quota.latency_probe import ArpRttProbe
 from quota.netmgr import TopologyManager
 from quota.nftables import NftablesEngine
 from quota.service import QuotaService
@@ -378,27 +378,16 @@ class Gateway:
         #: injectable `ip` runner for the source-interface (neighbor table)
         #: collector — tests fake it; defaults to the module runner.
         self._ip_run: Callable[[list[str]], tuple[int, str]] = _default_run_command
-        #: Passive WiFi/LAN probe (quota/wifi_probe.py); built in startup()
+        #: Passive WiFi probe (quota/wifi_probe.py); built in startup()
         #: when cfg.network.wifi_probe.enabled. A dedicated thread hears the
-        #: air in monitor mode — the ROUTER-side "WiFi · <SSID> / LAN" answer
-        #: the box's own NICs can never see (clients are L2-bridged).
+        #: air in monitor mode; the snapshot drives the yield check in
+        #: _maybe_latency_tick (when the monitor probe is available, the
+        #: ARP-RTT probe yields).
         self.wifi_probe: object | None = None
-        #: probe snapshot mirrored for the API (SSID picker / availability).
+        #: probe snapshot mirrored for the API (availability check).
         self._wifi_probe_state: dict[str, object] = {
             "available": False, "ssids": [], "error": ""}
-        #: leased MACs waiting out the LAN grace period (mac -> monotonic
-        #: deadline). A device heard on the air is removed and labeled WiFi;
-        #: one that survives past its deadline unsighted is labeled LAN.
-        self._access_unknown_until: dict[str, float] = {}
-        #: grace before an unsighted leased device is labeled "LAN". Read
-        #: with an explicit None check — `x or 300.0` would swallow a
-        #: legitimate 0 (immediate LAN).
-        _lan_after = getattr(
-            getattr(cfg.network, "wifi_probe", None),
-            "lan_after_seconds", None)
-        self._access_lan_after = (
-            float(_lan_after) if _lan_after is not None else 300.0)
-        #: WiFi/LAN classifier by ARP round-trip time (quota/latency_probe.py).
+        #: ARP-RTT probe by ARP round-trip time (quota/latency_probe.py).
         #: Works on ANY hardware — no monitor-mode card required; it is the
         #: fallback the monitor probe hands to when the box's WiFi module can't
         #: sniff the air. Built in __init__ (no sockets opened); tests inject
@@ -406,36 +395,31 @@ class Gateway:
         self.latency_probe: object | None = None
         lcfg = getattr(cfg.network, "latency_probe", None)
         if lcfg is not None and getattr(lcfg, "enabled", True):
-            from quota.latency_probe import ArpRttProbe
-
             self.latency_probe = ArpRttProbe(
                 cfg,
                 samples=int(getattr(lcfg, "samples", 6) or 6),
                 timeout_s=float(getattr(lcfg, "timeout_s", 0.5) or 0.5))
-            self._latency_threshold_ms = float(
-                getattr(lcfg, "threshold_ms", 1.0) or 1.0)
-            self._latency_min_samples = int(
-                getattr(lcfg, "min_samples", 3) or 3)
-            self._latency_min_consistent = int(
-                getattr(lcfg, "min_consistent", 2) or 2)
             # explicit None check — `x or 30.0` would swallow a legitimate 0
             # (sweep every tick, used by tests)
             _l_iv = getattr(lcfg, "interval_s", None)
             self._latency_interval = (
                 float(_l_iv) if _l_iv is not None else 30.0)
         else:
-            self._latency_threshold_ms = 1.0
-            self._latency_min_samples = 3
-            self._latency_min_consistent = 2
             self._latency_interval = 30.0
-        #: consecutive agreeing classification per MAC (cls -> count) — the
-        #: flap guard: a label flips only after ``min_consistent`` sweeps agree.
-        self._latency_streaks: dict[str, tuple[str, int]] = {}
         self._last_latency_sweep = time.monotonic()
         #: IPs that answered the last ARP sweep — the "connected NOW" source
         #: for the LED (a lease alone lags reality by up to LEASE_HOURS).
         self._latency_responders: set[str] = set()
         self._latency_sweep_ran = False
+        #: IPs with an active kernel neighbor entry (REACHABLE/STALE/DELAY).
+        #: Reinforces the ARP probe: a device that missed the probe burst but
+        #: is generating traffic still has a valid ARP mapping in the kernel.
+        self._neigh_active_ips: set[str] = set()
+        #: set when _persist_lease creates a new device — _sync_dnsmasq_leases
+        #: resets _last_latency_sweep so the ARP probe runs in the same tick,
+        #: turning the new device's LED blue immediately instead of waiting up
+        #: to a full sweep interval (30 s).
+        self._new_devices_detected = False
 
     # ------------------------------------------------------------- startup
 
@@ -457,6 +441,14 @@ class Gateway:
         await self._seed_bundle_from_cfg()
         await self.service.ensure_period()
         log.info("database ready: %s", self.cfg.db_path)
+
+        # -- startup self-heal (infrastructure resilience) -----------------
+        # The setup script creates ``quota_nat`` (masquerade) and the NIC
+        # addresses once; either can be silently lost (nft flush ruleset,
+        # NM reconnection, broken symlink).  Recreate anything missing
+        # before the engine / firewall depend on it.  Best-effort — a
+        # failure is logged and never prevents the app from starting.
+        self._startup_self_heal()
 
         # -- packet engine (nftables kernel rules) --------------------------
         if self.cfg.engine.enabled:
@@ -552,7 +544,7 @@ class Gateway:
                      self.cfg.history.dnsmasq_log_file,
                      "yes" if resume else "no")
 
-        # -- passive WiFi/LAN probe (quota.wifi_probe) -----------------------
+        # -- passive WiFi probe (quota.wifi_probe) -----------------------
         # A dedicated thread runs airodump-ng against a monitor-mode WiFi card
         # and learns which SSID each device is actually associated with (the
         # router bridges clients L2, so the box's own NICs can't tell). OFF by
@@ -571,7 +563,7 @@ class Gateway:
                     getattr(wprobe_cfg, "sighted_ttl", 600.0) or 600.0))
         if self.wifi_probe is not None:
             self.wifi_probe.start()
-            log.info("WiFi/LAN probe started (interface %r)",
+            log.info("WiFi probe started (interface %r)",
                      getattr(wprobe_cfg, "interface", "") or "auto")
 
         # -- DHCP + DNS -----------------------------------------------------
@@ -613,6 +605,45 @@ class Gateway:
         await self.service.recompute_allowances()
         log.info("bundle synced from config.yaml: %.1f GB, reset day %d",
                  b.total_gb, b.reset_day)
+
+    def _startup_self_heal(self) -> None:
+        """Verify / recreate infrastructure the app depends on but doesn't own.
+
+        The setup script creates ``quota_nat`` (masquerade NAT) and the NIC
+        static IPs; either can be silently lost (``nft flush ruleset``,
+        NM reconnection, broken ``/etc/nftables.conf`` symlink).  This runs
+        once at startup before the engine / firewall are built.
+        """
+        from quota.startup_health import (  # lazy: subprocess + /proc
+            ensure_nat_table, ensure_network_infrastructure)
+
+        # -- NAT table ----------------------------------------------------
+        # Derive the client subnet from config (same logic as the engine).
+        client_subnet = (getattr(self.cfg.engine, "client_subnet", "") or "").strip()
+        if not client_subnet:
+            gw = getattr(self.cfg.dhcp, "gateway_ip", "") or ""
+            mask = getattr(self.cfg.dhcp, "subnet", "") or ""
+            if gw and mask:
+                from ipaddress import ip_network
+                try:
+                    client_subnet = str(ip_network(f"{gw}/{mask}", strict=False))
+                except ValueError:
+                    pass
+        if client_subnet:
+            ensure_nat_table(client_subnet)
+        else:
+            log.warning("startup self-heal: cannot derive client_subnet — "
+                        "skipping NAT table check")
+
+        # -- NIC addresses + ip_forward + nftables.conf symlink -----------
+        uplink_ip = getattr(self.cfg.dhcp, "uplink_ip", "") or ""
+        lan_cidr = getattr(self.cfg.dhcp, "lan_cidr", 24) or 24
+        gateway_ip = getattr(self.cfg.dhcp, "gateway_ip", "") or "192.168.2.1"
+        ensure_network_infrastructure(
+            gateway_ip=gateway_ip,
+            uplink_ip=uplink_ip,
+            lan_cidr=int(lan_cidr),
+        )
 
     async def _apply_topology_override(self) -> None:
         """Apply a dashboard WAN-mode toggle (takes effect on the NEXT restart).
@@ -781,6 +812,7 @@ class Gateway:
                 # next evaluate_blocks run, or allowances.get(mac) returns 0.0
                 # and the device is instantly blocked for "quota exceeded".
                 await self.service.recompute_allowances()
+                self._new_devices_detected = True
                 log.info("auto-registered new device %s (%s)", mac, ip)
         except Exception:  # noqa: BLE001
             log.exception("failed to persist lease %s -> %s", mac, ip)
@@ -825,32 +857,32 @@ class Gateway:
             # The deny list is NOT pruned here: a blacklisted MAC stays
             # blacklisted until the admin removes it in the Network tab, even
             # if the device left the network in between (permanent blacklist).
+        if self._new_devices_detected:
+            self._new_devices_detected = False
+            self._last_latency_sweep = 0
+            log.debug("new device detected — scheduling immediate ARP sweep")
 
-    async def _collect_interfaces(self) -> None:
-        """Learn each live lease's source NIC from the kernel neighbor table.
+    async def _collect_neigh_active(self) -> None:
+        """Collect IPs with an active kernel neighbor state into
+        ``_neigh_active_ips``.
 
-        ``ip -j neigh`` returns one entry per resolved neighbor: IP + device +
-        state. The client subnet is only reachable through the box's client
-        NIC(s), so the ``dev`` field IS the device's LAN interface — a phone on
-        "WiFi" shows the wlan NIC, a PC on cable shows the eth NIC, and a
-        multi-NIC gateway can tell them apart. Persisted per device and
-        surfaced as the device card's WiFi/LAN tag (labels from
-        ``cfg.network.interface_tags``).
+        ``ip -j neigh`` returns one entry per resolved neighbor: IP + state.
+        Anything except FAILED/INCOMPLETE means the kernel recently spoke to
+        that neighbor — these reinforce the ARP probe for the LED: a device
+        that missed the probe burst but is generating traffic still has a
+        valid ARP mapping.
 
         Parsing falls back to plain ``ip neigh`` text when ``-j`` is
         unavailable (old iproute2). Neighbor states that carry no usable MAC
         (FAILED/INCOMPLETE) are skipped. IPv6 rows are skipped (the quota model
         is IPv4). A missing/unusable ``ip`` binary or a non-Linux box degrades
-        to a no-op — the dashboard simply shows no tag. A device whose entry
-        vanished (disconnected) keeps its LAST known interface: the DB row is
-        only updated when a fresh non-empty value is seen, so an offline
-        device's tag stays meaningful.
+        to a no-op — the LED just falls back to the probe + lease data.
         """
         leases = await self.database.list_leases()
         if not leases:
             return
         wanted = {l.ip for l in leases}
-        by_ip: dict[str, str] = {}
+        active: set[str] = set()
         code, out = await asyncio.to_thread(
             self._ip_run, ["ip", "-j", "neigh"])
         if code == 0 and out:
@@ -860,9 +892,7 @@ class Gateway:
                     continue
                 if row.get("state") in ("FAILED", "INCOMPLETE"):
                     continue
-                dev = row.get("dev") or ""
-                if dev:
-                    by_ip[dst] = dev
+                active.add(dst)
         else:
             # Fallback: `ip neigh` text (older iproute2). Same filters.
             code2, out2 = await asyncio.to_thread(
@@ -877,87 +907,30 @@ class Gateway:
                         continue
                     if "FAILED" in fields or "INCOMPLETE" in fields:
                         continue
-                    if len(fields) >= 3 and fields[1] == "dev":
-                        by_ip[dst] = fields[2]
-        if not by_ip:
-            return
-        for lease in leases:
-            dev = lease.mac and await self.database.get_device(mac=lease.mac)
-            if dev is None:
-                continue
-            iface = by_ip.get(lease.ip)
-            if iface and iface != dev.source_interface:
-                await self.database.update_device(
-                    dev.id, source_interface=iface)
+                    active.add(dst)
+        self._neigh_active_ips = active
 
     async def _wifi_probe_tick(self) -> None:
-        """Resolve each leased device's router-side access label from the
-        WiFi probe's snapshot (monitor-mode radio data, collected on a
-        dedicated thread — nothing blocking here).
-
-        Resolution per leased device without a manual override:
-          * heard on a known BSSID -> "WiFi · <ESSID>" (the router's real SSID)
-          * heard on the air at all -> "WiFi"
-          * leased but NEVER heard for the ``lan_after_seconds`` grace -> "LAN"
-          * still inside the grace window -> keep the previous label (no flap)
-
-        The LAN grace is tracked in-memory (``_access_unknown_until``): every
-        leased MAC starts a deadline when it first goes unsighted and is
-        removed on the first sighting. A device that was labeled LAN and then
-        appears on the air is relabeled WiFi on the next tick.
+        """Collect a snapshot from the WiFi probe (monitor-mode radio data).
+        The snapshot drives the yield check in _maybe_latency_tick: when the
+        monitor probe is available, the ARP-RTT probe yields.
         """
         probe = self.wifi_probe
         if probe is None:
             return
         snap = await asyncio.to_thread(probe.snapshot)
         self._wifi_probe_state = snap
-        if not snap.get("available"):
-            return
-        ssid_by_mac = snap.get("ssid_by_mac") or {}
-        wireless = set(snap.get("wireless_macs") or [])
-        leases = await self.database.list_leases()
-        if not leases:
-            return
-        now = time.monotonic()
-        for lease in leases:
-            dev = await self.database.get_device(mac=lease.mac)
-            if dev is None:
-                continue
-            mac = dev.mac
-            if mac in ssid_by_mac:
-                label = f"WiFi · {ssid_by_mac[mac]}"
-            elif mac in wireless:
-                label = "WiFi"
-            else:
-                deadline = self._access_unknown_until.get(mac)
-                if deadline is None:
-                    self._access_unknown_until[mac] = now + self._access_lan_after
-                    continue  # grace window — keep the previous label
-                if now < deadline:
-                    continue
-                label = "LAN"
-                self._access_unknown_until.pop(mac, None)
-            if label != dev.access_interface:
-                await self.database.update_device(dev.id, access_interface=label)
-                log.info("device %s (%s) access -> %s", dev.name or mac,
-                         mac, label)
-        # Prune the grace map: disconnected devices and freshly-sighted ones
-        # are done (a sighted device that later falls idle re-enters grace).
-        live = {l.mac for l in leases}
-        for mac in list(self._access_unknown_until):
-            if mac not in live or mac in wireless:
-                self._access_unknown_until.pop(mac, None)
 
     async def _maybe_latency_tick(self) -> None:
-        """Classify every leased client WiFi-vs-LAN by ARP round-trip time.
+        """Probe every leased client by ARP round-trip time.
 
         Runs on its own cadence (``network.latency_probe.interval_s``) and
         never on the loop: the raw-socket probe sleeps between sends, so it
-        lives in a worker thread. Writes ``access_interface`` = "WiFi"/"LAN"
-        with a consecutive-sweep flap guard; a device that stops replying
-        (sleep, firewall, gone) keeps its previous label. When the monitor
-        probe is available it takes precedence (it knows the exact SSID) —
-        the latency tick yields.
+        lives in a worker thread. The probe result drives the device-card LED
+        (connected NOW): IPs that answered the latest sweep (plus IPs with
+        active kernel neighbor entries) are blue; others are grey. When the
+        monitor probe is available it takes precedence — the latency tick
+        yields.
         """
         probe = self.latency_probe
         if probe is None:
@@ -977,36 +950,25 @@ class Gateway:
         except Exception:  # noqa: BLE001
             log.exception("latency probe failed")
             return
-        # Every completed sweep refreshes the responder map — an empty sweep
-        # means nobody answered (honest grey LEDs); a failed probe keeps the
-        # previous map until it goes stale (freshness gate in
-        # ``_latency_active_ips``).
+        # Every completed sweep refreshes the responder map.  An empty sweep
+        # (0 replies from N targets) is treated as a probe-degradation event
+        # — NOT as "nobody is online" — because the probe backend can
+        # silently return {} (NIC resolution failure, raw-socket loss,
+        # power-save devices all sleeping through the burst).  The old map is
+        # kept; it goes stale after 3×interval and the freshness gate falls
+        # back to lease-based connectedness.  An *exception* already keeps
+        # the old map (line 987-989); this closes the clean-empty loophole.
         self._latency_sweep_ran = True
-        self._latency_responders = set(rtts)
-        if not rtts:
+        if rtts:
+            self._latency_responders = (
+                set(rtts) | self._neigh_active_ips)
+        # Even when the ARP probe returned results, merge the kernel neighbor
+        # table: a device that missed the ARP burst but is generating traffic
+        # still has a valid REACHABLE/STALE entry — it stays blue.
+        elif self._neigh_active_ips:
+            self._latency_responders = set(self._neigh_active_ips)
+        if not rtts and not self._neigh_active_ips:
             return
-        for lease in leases:
-            samples = rtts.get(lease.ip)
-            if not samples:
-                continue
-            dev = await self.database.get_device(mac=lease.mac)
-            if dev is None:
-                continue
-            cls = classify_rtts(samples, self._latency_threshold_ms,
-                                self._latency_min_samples)
-            if cls == UNKNOWN:
-                self._latency_streaks.pop(dev.mac, None)
-                continue
-            prev_cls, count = self._latency_streaks.get(dev.mac, ("", 0))
-            count = count + 1 if cls == prev_cls else 1
-            self._latency_streaks[dev.mac] = (cls, count)
-            if count < self._latency_min_consistent:
-                continue
-            label = "WiFi" if cls == WIFI else "LAN"
-            if label != dev.access_interface:
-                await self.database.update_device(dev.id, access_interface=label)
-                log.info("device %s (%s) access -> %s (arp rtt)",
-                         dev.name or dev.mac, dev.mac, label)
 
     def _latency_active_ips(self) -> Optional[set[str]]:
         """IPs that answered the latest ARP sweep, or None when the probe
@@ -1153,19 +1115,17 @@ class Gateway:
         # 1b. Learn device bindings from dnsmasq's lease file.
         await self._sync_dnsmasq_leases()
 
-        # 1b2. Learn each device's source NIC (WiFi/LAN tag) from the kernel
+        # 1b2. Learn each device's source NIC (NIC tag) from the kernel
         #      neighbor table. Only updates when a fresh value is seen, so an
         #      offline device keeps its last-known interface.
-        await self._collect_interfaces()
+        await self._collect_neigh_active()
 
-        # 1b3. ROUTER-side access labels from the passive WiFi probe: which
-        #      SSID each device is really on (or "LAN"). The probe thread did
-        #      the radio + CSV work; this only reads its snapshot. When the
-        #      box has no monitor-capable card the latency probe (1b4) covers
-        #      the same WiFi-vs-LAN question with ARP round-trip times.
+        # 1b3. Passive WiFi probe: collects monitor-mode snapshots for the
+        #      yield check in _maybe_latency_tick (when the monitor probe is
+        #      available, the ARP-RTT probe yields).
         await self._wifi_probe_tick()
 
-        # 1b4. ARP-RTT WiFi/LAN classification (any hardware). Slow cadence,
+        # 1b4. ARP-RTT probe (any hardware). Slow cadence,
         #      off the event loop (raw sockets + sleeps in a worker thread).
         await self._maybe_latency_tick()
 
@@ -1369,8 +1329,9 @@ class Gateway:
                 # update_state's signature gate makes the common no-op free.
                 await asyncio.to_thread(
                     shaper.update_state,
-                    rate_map, config["enabled"], config["total_down_mbps"],
-                    config["total_up_mbps"], config["aqm"],
+                    rate_map, config["enabled"],
+                    config["total_down_mbps"],
+                    config["total_up_mbps"],
                     lan_rate_mbps=config["lan_rate_mbps"])
                 self._shaping_applied = bool(getattr(shaper, "applied", True))
                 self._shaping_available = bool(
@@ -1407,10 +1368,6 @@ class Gateway:
             "available": self._shaping_available,
             "applied": self._shaping_applied,
         }
-
-    def _wifi_probe_state_getter(self) -> dict[str, object]:
-        """Live probe state for the API (SSID picker + availability)."""
-        return dict(self._wifi_probe_state)
 
     async def _sync_dns_rules(self) -> None:
         """Regenerate the dnsmasq domain-rule + tag config from the DB and
@@ -1528,17 +1485,89 @@ class Gateway:
         /api/network {decline_random_macs: ...} edit."""
         await self._sync_refuse_fragment()
 
+    async def _vpn_bypass_ips(self) -> list[str]:
+        """Client IPs excluded from the VPN-share tunnel (per-device/user
+        ``vpn_bypass``).
+
+        Effective flag = the device's own flag OR its owning user's flag;
+        only devices holding a LIVE IP matter (policy rules match source
+        addresses), so lease-less rows are skipped. Runs two DB reads —
+        called once per tick while the share is enabled, skipped entirely
+        when it is off.
+        """
+        snap = self.holder.get()
+        if not snap.ip_to_mac:
+            return []
+        devices = {d.mac: d for d in await self.database.list_devices()}
+        users = {u.id: u for u in await self.database.list_users()}
+        excluded: set[str] = set()
+        for ip, mac in snap.ip_to_mac.items():
+            if not ip:
+                continue
+            dev = devices.get(mac)
+            if dev is None:
+                continue
+            user = users.get(dev.user_id) if dev.user_id is not None else None
+            if dev.vpn_bypass or (user is not None and user.vpn_bypass):
+                excluded.add(ip)
+        return sorted(excluded)
+
+    @staticmethod
+    def _arbitrate_vpn_tunnel(manager: object, pin: str,
+                              bridge_iface: str) -> str:
+        """Which tunnel should VPN share prefer this tick?
+
+        The persisted pin keeps a healthy single-tunnel box stable, but it
+        must not outvote a FRESHER tunnel: switching the VPN server or client
+        leaves the old tunnel device alive alongside the new one, and routing
+        by the old name then keeps the HOUSEHOLD on the stale server forever
+        while the box itself exits via the new one (devices keep showing the
+        old VPN IP). When zero/one tunnel is live nothing changes — no extra
+        probes beyond one sysfs scan — and ``pin`` is returned UNCHANGED so
+        all legacy semantics (pin stability, cfg_iface precedence inside the
+        manager) hold. With several live tunnels, the NEWEST tunnel that is
+        not our own tun2socks bridge device wins (higher ifindex = dialed
+        later), and the multi-tunnel state is logged loudly so a
+        stale/zombie session is diagnosable. An injected manager without
+        ``detect_interfaces`` (wiring-test fakes) passes the pin through."""
+        detect = getattr(manager, "detect_interfaces", None)
+        if detect is None:
+            return pin
+        try:
+            cands = sorted(set(detect()))
+        except Exception:  # noqa: BLE001
+            return pin
+        if len(cands) <= 1:
+            return pin
+        idx_fn = getattr(manager, "ifindexes", None)
+        idx = (idx_fn() or {}) if idx_fn is not None else {}
+        foreign = [c for c in cands if not bridge_iface or c != bridge_iface]
+        if not foreign:
+            return pin
+        chosen = max(foreign, key=lambda n: (idx.get(n, 0), n))
+        log.warning(
+            "vpn share: multiple live tunnels (%s) — using %s%s",
+            ", ".join(f"{n}#{idx.get(n, '?')}" for n in cands),
+            chosen,
+            "" if chosen == pin else " — the pinned tunnel was superseded")
+        return chosen
+
     async def _sync_vpn_share(self) -> None:
         """Reconcile the VPN-share policy routing with the dashboard switch.
 
         Reads the DB setting + pinned tunnel, asks the kernel-side manager
         to reconcile (idempotent: apply when on, remove when off, self-heal
         leftovers), persists the detected tunnel as the pin (so a multi-VPN
-        / restarted-tunnel box re-applies the SAME interface), and keeps the
-        engine's gateway cut in step (while relaying, the box's own internet
+        / restarted-tunnel box re-applies the SAME interface — superseded
+        only when SEVERAL live tunnels exist and a fresher non-bridge one
+        appeared, so switching VPN servers can't strand devices on the old
+        one), and keeps the engine's gateway cut in step (while relaying,
+        the box's own internet
         can be cut — Gateway OFF — and ONLY the VPN server endpoint(s) the
         relay rides stay reachable via the ``gw_allowed`` whitelist, so the
         household's tunnel survives; see NftablesEngine.set_gateway_allowed).
+        While enabled, per-device/user ``vpn_bypass`` IPs are computed here
+        and handed to the manager so those devices ride the direct uplink.
         The routing manager is reconciled FIRST so a REAL kernel tunnel
         (xray/sing-box/WireGuard tun) always wins and needs no config edits.
         The tun2socks bridge (for userspace-netstack clients like v2rayN,
@@ -1559,6 +1588,10 @@ class Gateway:
                 db_pin = (await self.database.get_setting(
                     "vpn_share_interface", "") or "").strip()
                 pin = db_pin
+                # Devices/users marked vpn_bypass keep riding the direct
+                # uplink while everyone else shares the tunnel.
+                bypass_ips: list[str] = (
+                    await self._vpn_bypass_ips() if enabled else [])
                 # Prefer a REAL kernel tunnel (xray/sing-box/WireGuard tun):
                 # reconcile the routing manager FIRST so its auto-detect wins.
                 # The tun2socks bridge is only the FALLBACK for userspace
@@ -1568,8 +1601,17 @@ class Gateway:
                 ts_status = None
                 bridge_iface = (self.tun2socks_manager.interface
                                 if self.tun2socks_manager is not None else "")
+                if enabled:
+                    # A stale pin must never outvote a fresher tunnel: a VPN
+                    # client/server switch spawns the new tunnel ALONGSIDE
+                    # the old one, and pinning the old name would keep the
+                    # household on the stale server while the box itself
+                    # already exits via the new one.
+                    pin = await asyncio.to_thread(
+                        self._arbitrate_vpn_tunnel, manager, pin,
+                        bridge_iface)
                 status = await asyncio.to_thread(
-                    manager.reconcile, enabled, pin)
+                    manager.reconcile, enabled, pin, bypass_ips)
                 if enabled and status.state != "on":
                     # No kernel tunnel was found/routed. For a userspace client
                     # auto-provision the bridge and retry the routing pinned to
@@ -1581,7 +1623,7 @@ class Gateway:
                                 and ts_status.interface):
                             status = await asyncio.to_thread(
                                 manager.reconcile, True,
-                                ts_status.interface)
+                                ts_status.interface, bypass_ips)
                 elif enabled and self.tun2socks_manager is not None:
                     # A real tunnel is carrying the subnet. The bridge's own
                     # device is legit (its child owns that tun — stopping it
@@ -1601,6 +1643,13 @@ class Gateway:
                         "vpn_share_interface", status.interface)
                     log.info("vpn share: pinned tunnel interface %s",
                              status.interface)
+                elif not enabled and db_pin:
+                    # Clear the pin on OFF so the next ON re-detects from
+                    # scratch — toggling the dashboard switch is then a
+                    # reliable recovery after a stale/zombie tunnel pinned a
+                    # dead interface name.
+                    await self.database.set_setting("vpn_share_interface", "")
+                    log.info("vpn share: cleared pinned tunnel interface")
                 # While relaying, keep ONLY the box's VPN-server connection(s)
                 # reachable under a Gateway cut — the relay rides them. Learn
                 # the VPN client's established peers, union the explicit
@@ -1646,7 +1695,7 @@ class Gateway:
     async def _apply_vpn_now(self) -> None:
         """Apply a VPN-share toggle immediately instead of waiting for the
         next maintenance tick. The API schedules this after a Network-tab
-        save that includes the switch."""
+        save that includes the switch (or a VPN-bypass edit)."""
         await self._sync_vpn_share()
 
     def _vpn_status(self) -> dict[str, object]:
@@ -1859,6 +1908,22 @@ def main() -> None:
 
     async def _serve() -> None:
         await gateway.startup()
+        # TLS fallback: enforce-https persists cert paths in BOTH config.yaml
+        # AND the DB.  When the user copies the project folder to the box,
+        # config.yaml gets overwritten (wiping the TLS keys) but the DB and
+        # the cert files on disk survive.  Apply DB-stored paths as a
+        # fallback so HTTPS doesn't silently revert.
+        if not cfg.web.tls_certfile:
+            db_cert = await gateway.database.get_setting("tls_certfile")
+            db_key = await gateway.database.get_setting("tls_keyfile")
+            if db_cert and db_key:
+                from pathlib import Path
+                if Path(db_cert).is_file() and Path(db_key).is_file():
+                    cfg.web.tls_certfile = db_cert
+                    cfg.web.tls_keyfile = db_key
+                    cfg.web.secure_cookies = True
+                    log.info("TLS restored from DB: cert=%s key=%s",
+                             db_cert, db_key)
         # Build the app AFTER startup: the WAN tab's topology manager is created
         # in startup() and the /api/wan endpoint must close over the real one.
         # The on-demand report gate needs the CLIENT subnet; the engine resolved
@@ -1868,6 +1933,18 @@ def main() -> None:
         client_net = getattr(getattr(gateway, "engine", None), "_client_net", "") or ""
         if client_net:
             report_cfg.client_subnet = client_net
+        # WAF local-management exemption: feed the engine's resolved LAN
+        # subnets into the WAF config so the panel is never blocked from the
+        # local network (even in strict/WAN mode).
+        local_nets = getattr(
+            getattr(gateway, "engine", None), "_local_networks", None)
+        if local_nets:
+            # Dedupe against the loopback defaults already in the config.
+            seen = set(cfg.waf.local_subnets)
+            for net in local_nets:
+                if net not in seen:
+                    cfg.waf.local_subnets.append(net)
+                    seen.add(net)
         app = create_app(gateway.database, gateway.service, gateway.holder,
                          log_path=cfg.log_file,
                          topology_manager=gateway.topology_manager,
@@ -1877,11 +1954,7 @@ def main() -> None:
                          vpn_apply=gateway._apply_vpn_now,
                          vpn_status_getter=gateway._vpn_status,
                          wan_renew=gateway._renew_wan_ip,
-                         interface_tags=getattr(
-                             getattr(cfg, "network", None),
-                             "interface_tags", {}) or {},
                          shaping_state_getter=gateway._shaping_state,
-                         wifi_probe_getter=gateway._wifi_probe_state_getter,
                          stop_new_sync=gateway._apply_stop_new_now,
                          decline_random_sync=gateway._apply_decline_random_now,
                          active_ips_getter=gateway._latency_active_ips,

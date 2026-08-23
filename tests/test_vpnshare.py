@@ -93,8 +93,8 @@ def mgr(cfg: Config | None = None, fake: FakeIp | None = None,
 def tunnel_mgr(*tunnels: str) -> tuple[VpnShareManager, FakeIp]:
     """A manager whose sysfs carries the given TUN devices (ready for
     direct ``apply`` calls, which refuse to route into a missing device).
-    Each tunnel carries an IPv4 address — a live tunnel always does (the
-    IPv4 liveness gate refuses address-less junk devices)."""
+    Each tunnel carries an IPv4 address for convenience, though a live
+    addressless UP tunnel would also be accepted."""
     m, fake = mgr(sysfs_root=make_sysfs(*((t, "65534") for t in tunnels)))
     fake.addr_shows("2: eth0    inet 192.168.2.1/24 scope global eth0\n")
     for i, t in enumerate(tunnels):
@@ -301,6 +301,22 @@ def test_lan_interface_falls_back_to_shaping_iface():
     cfg.shaping.interface = "enp0s3"
     m, fake = mgr(cfg)
     assert m.lan_interface() == "enp0s3"
+
+
+def test_ifindexes_maps_names_to_indices():
+    m, fake = mgr()
+    fake.script[("ip", "-o", "link", "show")] = (0,
+        "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN\n"
+        "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+        "11: wg0: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420 state UNKNOWN\n"
+        "19: xray_tun@if2: <POINTOPOINT,UP,LOWER_UP> mtu 9000 state UNKNOWN\n")
+    assert m.ifindexes() == {"lo": 1, "eth0": 2, "wg0": 11, "xray_tun": 19}
+
+
+def test_ifindexes_empty_on_failure():
+    m, fake = mgr()
+    fake.script[("ip", "-o", "link", "show")] = (127, "ip: not found")
+    assert m.ifindexes() == {}
 
 
 # ---------------------------------------------------------------------------
@@ -583,15 +599,20 @@ def test_reconcile_cfg_iface_wins_over_pin():
 
 def test_reconcile_refuses_stale_pin_without_ipv4():
     """A stale pin to a junk device that still EXISTS in sysfs but carries no
-    IPv4 (the live-box "evice" — ARPHRD_NONE yet routes nothing) must NOT be
-    routed into: that would blackhole the whole subnet. The pin is dropped and
-    the real tunnel (which carries an address) is detected instead."""
+    IPv4 and has its link DOWN (the live-box "evice" — ARPHRD_NONE yet routes
+    nothing) must NOT be routed into: that would blackhole the whole subnet.
+    apply() rejects the dead device; reconcile falls back to the real tunnel."""
     root = make_sysfs(("evice", "65534"), ("utun4", "65534"))
     fake = FakeIp()
     fake.addr_shows("2: eth0    inet 192.168.2.1/24 scope global eth0\n")
     fake.script[("ip", "-o", "-4", "addr", "show", "dev", "evice")] = (0, "")
     fake.script[("ip", "-o", "-4", "addr", "show", "dev", "utun4")] = \
         (0, "8: utun4    inet 10.9.0.2 peer 10.9.0.1/32 scope global utun4\n")
+    # evice is a dead device — link DOWN
+    fake.script[("ip", "-o", "-4", "addr", "show", "dev", "utun4")] = \
+        (0, "8: utun4    inet 10.9.0.2 peer 10.9.0.1/32 scope global utun4\n")
+    fake.script[("ip", "-o", "link", "show", "dev", "evice")] = \
+        (0, "1: evice: <NOARP,UP,LOWER_UP> mtu 1500 qdisc noop state DOWN\n")
     m = VpnShareManager(make_cfg(), run_command=fake, sysfs_root=root)
     st = m.reconcile(True, interface_pin="evice")
     assert st.state == STATE_ON and st.interface == "utun4"
@@ -602,16 +623,159 @@ def test_reconcile_refuses_stale_pin_without_ipv4():
                     "default", "via", "10.9.0.1", "dev", "utun4")
 
 
-def test_reconcile_refuses_apply_into_addressless_tunnel():
-    """apply() itself gates on the tunnel carrying an IPv4: a device that
-    exists but never gains an address (a junk ARPHRD_NONE) is reported as
+def test_reconcile_refuses_apply_into_dead_tunnel():
+    """apply() gates on link state: a device that exists but has no IPv4 AND
+    its link is DOWN (a dead ARPHRD_NONE junk device) is reported as
     no-interface, never routed into — the subnet cannot be blackholed."""
     root = make_sysfs(("evice", "65534"))
     fake = FakeIp()
     fake.addr_shows("2: eth0    inet 192.168.2.1/24 scope global eth0\n")
     fake.script[("ip", "-o", "-4", "addr", "show", "dev", "evice")] = (0, "")
+    # dead device — link DOWN
+    fake.script[("ip", "-o", "link", "show", "dev", "evice")] = \
+        (0, "1: evice: <NOARP,UP,LOWER_UP> mtu 1500 qdisc noop state DOWN\n")
     m = VpnShareManager(make_cfg(), run_command=fake, sysfs_root=root)
     st = m.reconcile(True, interface_pin="evice")
     assert st.state == STATE_NO_INTERFACE
     assert not fake.has("ip", "rule", "add", "from", "192.168.2.0/24",
                         "lookup", "200", "pref", "1000")
+
+
+def test_apply_addressless_but_up_tunnel():
+    """A TUN that has no IPv4 but its link is UP (xray-core / sing-box TUN
+    mode) IS routed into with a dev-only default route — the policy routing
+    works without an address on the device."""
+    root = make_sysfs(("xray_tun", "65534"))
+    fake = FakeIp()
+    fake.addr_shows("2: eth0    inet 192.168.2.1/24 scope global eth0\n")
+    # no IPv4 on the TUN
+    fake.script[("ip", "-o", "-4", "addr", "show", "dev", "xray_tun")] = (0, "")
+    # but the link is UP (TUNs show state UNKNOWN)
+    fake.script[("ip", "-o", "link", "show", "dev", "xray_tun")] = \
+        (0, ("3: xray_tun: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> "
+             "mtu 9000 qdisc fq_codel state UNKNOWN group default qlen 1000\n"))
+    m = VpnShareManager(make_cfg(), run_command=fake, sysfs_root=root)
+    st = m.reconcile(True)
+    assert st.state == STATE_ON and st.interface == "xray_tun"
+    # routed with dev-only default route (no via/peer)
+    assert fake.has("ip", "route", "replace", "table", "200",
+                    "default", "dev", "xray_tun")
+
+
+# ---------------------------------------------------------------------------
+# per-device VPN bypass: exclusion policy rules (pref rule_pref - 1)
+# ---------------------------------------------------------------------------
+
+def test_excl_pref_is_one_before_the_subnet_rule():
+    m, _fake = mgr()
+    assert m.excl_pref == 999
+
+
+def test_reconcile_on_adds_bypass_rules():
+    """Enabled + a bypass IP -> a `from <ip> lookup main` rule at pref 999,
+    ONE priority before the subnet divert (999 < 1000), so the device's
+    packets consult the main table first and ride the direct uplink."""
+    m, fake = tunnel_mgr("utun4")
+    st = m.reconcile(True, interface_pin="utun4",
+                     exclusions=["192.168.2.50"])
+    assert st.state == STATE_ON
+    assert fake.has("ip", "rule", "add", "pref", "999",
+                    "from", "192.168.2.50", "lookup", "main")
+
+
+def test_reconcile_on_dedupes_and_ignores_empty_ips():
+    m, fake = tunnel_mgr("utun4")
+    m.reconcile(True, interface_pin="utun4",
+                exclusions=["192.168.2.50", "", "192.168.2.50"])
+    adds = [c for c in fake.calls
+            if c[:3] == ["ip", "rule", "add"] and "192.168.2.50" in c]
+    assert len(adds) == 1
+
+
+def test_reconcile_on_deletes_stale_bypass_rules():
+    """A bypass rule for an IP no longer marked (or a leftover from a crashed
+    run) must be deleted on the next enabled tick — parse-based diff against
+    the LIVE kernel state."""
+    m, fake = tunnel_mgr("utun4")
+    fake.rule_show(present=False)
+    fake.script[("ip", "rule", "show")] = (
+        0,
+        "local:\n"
+        "default:\n"
+        "999:\tfrom 192.168.2.77 lookup main\n"
+        "1000:\tfrom 192.168.2.0/24 lookup 200\n")
+    st = m.reconcile(True, interface_pin="utun4",
+                     exclusions=["192.168.2.50"])
+    assert st.state == STATE_ON
+    assert fake.has("ip", "rule", "del", "pref", "999",
+                    "from", "192.168.2.77", "lookup", "main")
+    assert fake.has("ip", "rule", "add", "pref", "999",
+                    "from", "192.168.2.50", "lookup", "main")
+
+
+def test_reconcile_on_no_change_costs_one_show_only():
+    """Steady state (rules already correct): the sync runs exactly one
+    `ip rule show` and issues no mutators."""
+    m, fake = tunnel_mgr("utun4")
+    fake.rule_show(present=False)
+    fake.script[("ip", "rule", "show")] = (
+        0,
+        "local:\n"
+        "999:\tfrom 192.168.2.50 lookup main\n"
+        "1000:\tfrom 192.168.2.0/24 lookup 200\n")
+    before = len(fake.calls)
+    assert m.reconcile(True, interface_pin="utun4",
+                       exclusions=["192.168.2.50"]).state == STATE_ON
+    delta = fake.calls[before:]
+    shows = [c for c in delta if c == ["ip", "rule", "show"]]
+    mutators = [c for c in delta if c[:2] == ["ip", "rule", "add"]
+                or c[:2] == ["ip", "rule", "del"]]
+    assert len(shows) == 1 and not mutators
+
+
+def test_reconcile_disable_flushes_bypass_rules():
+    """Turning the share OFF removes the subnet divert AND every bypass
+    exclusion (they only matter while the divert exists)."""
+    m, fake = tunnel_mgr("utun4")
+    assert m.reconcile(True, interface_pin="utun4",
+                       exclusions=["192.168.2.50"]).state == STATE_ON
+    fake.calls.clear()
+    # the kernel still holds the exclusion when the switch flips off
+    # (FakeIp is stateless — re-script what a real box would show)
+    fake.rule_show(present=True)
+    fake.script[("ip", "rule", "show")] = (
+        0,
+        "local:\n"
+        "999:\tfrom 192.168.2.50 lookup main\n"
+        "1000:\tfrom 192.168.2.0/24 lookup 200\n")
+    st = m.reconcile(False)
+    assert st.state == STATE_OFF
+    assert fake.has("ip", "rule", "del", "pref", "999",
+                    "from", "192.168.2.50", "lookup", "main")
+    assert fake.has("ip", "rule", "del", "from", "192.168.2.0/24",
+                    "lookup", "200", "pref", "1000")
+
+
+def test_reconcile_off_boot_probe_cleans_leftover_bypass_rules():
+    """A crashed run left ONLY bypass rules behind (subnet divert already
+    gone): the one-time boot probe must still detect dirt and clean it."""
+    m, fake = mgr()
+    fake.script[("ip", "rule", "show")] = (
+        0,
+        "local:\n"
+        "999:\tfrom 192.168.2.77 lookup main\n")
+    st = m.reconcile(False)
+    assert st.state == STATE_OFF
+    assert fake.has("ip", "rule", "del", "pref", "999",
+                    "from", "192.168.2.77", "lookup", "main")
+
+
+def test_bypass_add_failure_is_nonfatal():
+    """A failed bypass add (kernels that reject same-pref selectors) logs and
+    moves on — the share itself stays ON; the next tick retries."""
+    m, fake = tunnel_mgr("utun4")
+    fake.script[("ip", "rule", "add", "pref", "999", "from", "192.168.2.50",
+                 "lookup", "main")] = (2, "RTNETLINK answers: Invalid argument")
+    st = m.reconcile(True, interface_pin="utun4",
+                     exclusions=["192.168.2.50"])
+    assert st.state == STATE_ON

@@ -259,32 +259,22 @@ dns_filter:
   reload_dnsmasq: true
   preset_cache_dir: data/dns_presets
 
-# Per-device WiFi/LAN access tags (dashboard device cards). Three layers:
-#   1. interface_tags — the box-side NIC each client arrives on (ip -j neigh;
-#      useful when the box itself has multiple client-facing NICs).
-#   2. latency_probe (ON by default) — the ROUTER-side answer that works on ANY
-#      hardware: the box ARPs every leased client and times the replies. Wired
-#      answers in well under a millisecond, WiFi pays airtime (1 ms and up), so
-#      the fastest sample decides "WiFi" vs "LAN". No monitor mode needed; the
-#      raw-socket ARP backend falls back to `ping`, then to keeping the
-#      previous label. Set threshold_ms lower if a 5G device reads "LAN".
-#   3. wifi_probe (OFF by default) — only when the box HAS a monitor-capable
+# Device presence probes:
+#   latency_probe (ON by default) — the box raw-ARPs every leased client and
+#      times the replies; the responder set drives the device-card LED
+#      (connected NOW vs grey). Works on ANY hardware; no monitor mode needed.
+#   wifi_probe (OFF by default) — only when the box HAS a monitor-capable
 #      WiFi card: passive air sniffing (airmon-ng + airodump-ng, Kali staples)
-#      labels every device "WiFi · <SSID>" (the real network name) or "LAN";
-#      it takes precedence over latency_probe and the interface must be a card
-#      NOT used for anything else.
-#   interface_tags: {eth0: "LAN", wlan0: "WiFi"}   # unknown NICs show raw name
+#      collects SSID snapshots for the yield check; the interface must be a
+#      card NOT used for anything else.
 network:
-  interface_tags:
-    eth0: "LAN"
-    wlan0: "WiFi"
   latency_probe:
-    enabled: true           # ARP-RTT WiFi/LAN classification (any hardware)
+    enabled: true           # ARP-RTT probe driving the online LED (any hardware)
     samples: 6              # ARP requests per device per sweep
-    min_samples: 2          # replies required before classifying at all
+    min_samples: 2          # replies required before counting a device seen
                             # (low on purpose: sleepy phones answer ~2/6)
-    threshold_ms: 1.0       # fastest RTT at/above this => "WiFi"
-    min_consistent: 2       # agreeing sweeps before the label flips (no flap)
+    threshold_ms: 1.0       # informational only — no classification anymore
+    min_consistent: 2       # agreeing sweeps before the LED state flips (no flap)
     interval_s: 30          # sweep cadence
     timeout_s: 0.5          # per-sweep receive timeout
   wifi_probe:

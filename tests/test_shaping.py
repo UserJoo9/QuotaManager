@@ -3,6 +3,10 @@
 
 The fake records every argv, mirroring :class:`FakeNft` in test_nftables.py —
 we assert the command sequence that programs the kernel, not kernel behavior.
+
+The shaper's latency behavior is hardwired: ``fq_codel`` on every download
+queue + ``cake ack-filter`` on every upload queue, no knobs — pinned by the
+dedicated cake tests below.
 """
 
 from __future__ import annotations
@@ -97,7 +101,7 @@ def test_full_build_emits_expected_tree():
     shaper.start()
     shaper.update_state(
         [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
-        True, 100.0, 20.0, True)
+        True, 100.0, 20.0)
 
     # probe + ifb bring-up: start() probes ifb0 and brings it up. Since the
     # fake's ifb0 already exists, start() never modprobes — and the APPLY no
@@ -181,7 +185,7 @@ def test_device_up_cap_honored_when_down_unlimited():
     shaper.start()
     shaper.update_state(
         [entry("192.168.2.100", device_id=1, user_id=1, down=0, up=5)],
-        True, 100.0, 20.0, True)
+        True, 100.0, 20.0)
     # upload tree (ifb0): the device gets a leaf at its UP cap, not dropped
     assert fake.has("tc", "class", "add", "dev", "ifb0", "parent", "1:0x301",
                     "classid", "1:0x8001", "htb", "rate", "5mbit",
@@ -204,7 +208,7 @@ def test_user_aggregate_caps_device_leaves():
                user_down=30, user_up=10),
          entry("192.168.2.101", device_id=2, user_id=1, down=15, up=0,
                user_down=30, user_up=10)],
-        True, 100.0, 20.0, True)
+        True, 100.0, 20.0)
     # user class capped at the user's aggregate (30 down / 10 up)
     assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:100",
                     "classid", "1:0x301", "htb", "rate", "30mbit", "ceil", "30mbit")
@@ -228,7 +232,7 @@ def test_every_class_has_tight_burst():
     shaper.start()
     shaper.update_state(
         [entry("192.168.2.100", device_id=1, user_id=1, down=2, up=2)],
-        True, 100.0, 20.0, True)
+        True, 100.0, 20.0)
     classes = [a for a in fake.calls if a[:3] == ["tc", "class", "add"]]
     assert classes, "the two HTB trees must create classes"
     for argv in classes:
@@ -248,18 +252,6 @@ def test_every_class_has_tight_burst():
                     "burst", "6250000", "cburst", "6250000")
 
 
-def test_aqm_off_no_fq_codel():
-    fake = FakeTc()
-    shaper = TcShaper(make_cfg(), run_command=fake)
-    shaper.start()
-    shaper.update_state(
-        [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
-        True, 100.0, 20.0, False)
-    assert fake.count("tc", "qdisc", "add") == 3  # ingress + 2 root HTB, no fq_codel
-    assert not fake.has("tc", "qdisc", "add", "dev", "eth0", "parent", "1:2",
-                        "handle", "2:", "fq_codel")
-
-
 def test_disabled_or_zero_totals_teardown_only():
     # disabled, or BOTH direction totals zero (nothing to cap) -> teardown.
     for kwargs in ({"enabled": False},
@@ -270,7 +262,7 @@ def test_disabled_or_zero_totals_teardown_only():
         shaper.update_state([entry("192.168.2.100", 1, 1)],
                             kwargs.get("enabled", True),
                             kwargs.get("total_down", 100.0),
-                            kwargs.get("total_up", 20.0), True)
+                            kwargs.get("total_up", 20.0))
         # teardown del calls happened, no add-class/htb program
         assert fake.count("tc", "qdisc", "del") >= 2
         assert fake.count("tc", "class", "add") == 0
@@ -280,7 +272,7 @@ def test_signature_no_rebuild_on_unchanged_state():
     fake = FakeTc()
     shaper = TcShaper(make_cfg(), run_command=fake)
     shaper.start()
-    state = dict(enabled=True, total_down=100.0, total_up=20.0, aqm=True)
+    state = dict(enabled=True, total_down=100.0, total_up=20.0)
     rm = [entry("192.168.2.100", 1, 1, down=10, up=5)]
     shaper.update_state(rm, **state)
     before = len(fake.calls)
@@ -300,7 +292,7 @@ def test_missing_tc_degrades_without_raise():
     assert shaper.available is False
     # update_state must not raise even when unavailable
     shaper.update_state([entry("192.168.2.100", 1, 1, down=10, up=5)],
-                        True, 100.0, 20.0, True)
+                        True, 100.0, 20.0)
 
 
 class _ModprobeFailsNoIfb(FakeTc):
@@ -370,7 +362,7 @@ def test_missing_ifb0_forces_clean_reload():
     assert fake.has("ip", "link", "set", "dev", "ifb0", "up")
     # shaping then programs the trees normally
     shaper.update_state([entry("192.168.2.100", 1, 1, down=10, up=5)],
-                        True, 100.0, 20.0, True)
+                        True, 100.0, 20.0)
     assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:0x301",
                     "classid", "1:0x8001", "htb", "rate", "10mbit",
                     "ceil", "10mbit")
@@ -430,7 +422,7 @@ def test_lan_traffic_gets_pass_through_class():
     shaper.start()
     shaper.update_state(
         [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
-        True, 100.0, 20.0, True)
+        True, 100.0, 20.0)
     # the pass-through class exists on both trees at the LAN link rate
     assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
                     "classid", "1:99", "htb", "rate", "1000mbit",
@@ -476,7 +468,7 @@ def test_lan_pass_through_respects_explicit_uplink_subnet():
     shaper.start()
     shaper.update_state(
         [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
-        True, 100.0, 20.0, True)
+        True, 100.0, 20.0)
     assert fake.has("tc", "filter", "add", "dev", "ifb0", "parent", "1:",
                     "protocol", "ip", "prio", "1", "u32", "match", "ip", "dst",
                     "10.10.10.0/24", "flowid", "1:99")
@@ -495,7 +487,7 @@ def test_lan_rate_is_configurable():
     shaper.start()
     shaper.update_state(
         [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
-        True, 100.0, 20.0, True)
+        True, 100.0, 20.0)
     assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:",
                     "classid", "1:1", "htb", "rate", "2500mbit")
     assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
@@ -514,14 +506,14 @@ def test_live_lan_rate_overrides_boot_config():
     shaper.start()
     shaper.update_state(
         [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
-        True, 100.0, 20.0, True)
+        True, 100.0, 20.0)
     assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
                     "classid", "1:99", "htb", "rate", "1000mbit",
                     "ceil", "1000mbit")
     # live edit: rebuild at the new LAN rate (signature includes the rate)
     shaper.update_state(
         [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
-        True, 100.0, 20.0, True, lan_rate_mbps=250)
+        True, 100.0, 20.0, lan_rate_mbps=250)
     assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
                     "classid", "1:99", "htb", "rate", "250mbit",
                     "ceil", "250mbit")
@@ -539,7 +531,7 @@ def test_unlimited_upload_still_shapes_downloads():
     shaper.start()
     shaper.update_state(
         [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
-        True, 100.0, 0.0, True)
+        True, 100.0, 0.0)
     # download tree on eth0 built + LAN pass-through present
     assert fake.has("tc", "qdisc", "add", "dev", "eth0", "root", "handle", "1:",
                     "htb", "default", "2")
@@ -568,7 +560,7 @@ def test_unlimited_download_still_shapes_uploads():
     shaper.start()
     shaper.update_state(
         [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
-        True, 0.0, 20.0, True)
+        True, 0.0, 20.0)
     # upload tree present: redirect + ifb0 root + ifb0 LAN pass-through filter
     assert fake.has("tc", "qdisc", "add", "dev", "eth0", "handle", "ffff:",
                     "ingress")
@@ -596,7 +588,7 @@ def test_lan_rate_zero_falls_back_to_default_not_wan_total():
     shaper.start()
     shaper.update_state(
         [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
-        True, 100.0, 2.5, True)
+        True, 100.0, 2.5)
     # root + pass-through at 1000mbit, NEVER at the 2.5 WAN upload cap
     assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:",
                     "classid", "1:1", "htb", "rate", "1000mbit")
@@ -646,7 +638,7 @@ def test_uplink_subnet_falls_back_to_nic_addresses():
     assert shaper.uplink_subnet == "192.168.1.0/24"
     shaper.update_state(
         [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
-        True, 100.0, 20.0, True)
+        True, 100.0, 20.0)
     assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
                     "classid", "1:99", "htb", "rate", "1000mbit",
                     "ceil", "1000mbit")
@@ -666,7 +658,7 @@ def test_uplink_fallback_leaves_passthrough_off_when_client_subnet_only():
     assert shaper.uplink_subnet == ""
     shaper.update_state(
         [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
-        True, 100.0, 20.0, True)
+        True, 100.0, 20.0)
     assert not fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
                         "classid", "1:99")
     assert not fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
@@ -701,7 +693,7 @@ def test_client_to_box_traffic_passes_through():
     assert shaper.own_addresses == ["192.168.2.1"]
     shaper.update_state(
         [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
-        True, 100.0, 20.0, True)
+        True, 100.0, 20.0)
     # pass-through class exists even though there is no uplink subnet
     assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
                     "classid", "1:99", "htb", "rate", "1000mbit",
@@ -736,7 +728,7 @@ def test_own_addresses_join_uplink_subnet_pass_through():
     assert shaper.own_addresses == ["192.168.1.110", "192.168.2.1"]
     shaper.update_state(
         [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
-        True, 100.0, 20.0, True)
+        True, 100.0, 20.0)
     # upload tree: both the uplink subnet and the box's own address pass
     assert fake.has("tc", "filter", "add", "dev", "ifb0", "parent", "1:",
                     "protocol", "ip", "prio", "1", "u32", "match", "ip", "dst",
@@ -757,3 +749,66 @@ def test_own_addresses_join_uplink_subnet_pass_through():
     assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
                     "protocol", "ip", "prio", "1", "u32", "match", "ip", "src",
                     "192.168.2.1", "flowid", "1:99")
+
+
+# ---------------------------------------------------------------------------
+# upload ACK filtering (always on for the upload tree)
+# ---------------------------------------------------------------------------
+
+def test_ack_filter_always_on_for_upload_tree():
+    """Hardwired latency contract: the UPLOAD tree's queues (default + LAN
+    pass-through + device leaf) run ``cake ack-filter`` so a download's ACK
+    flood cannot drown a small uplink; the DOWNLOAD tree keeps plain fq_codel."""
+    fake = FakeTc()
+    cfg = make_cfg()
+    cfg.dhcp.router_ip = "192.168.1.1"
+    shaper = TcShaper(cfg, run_command=fake)
+    shaper.start()
+    shaper.update_state(
+        [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
+        True, 100.0, 20.0)
+    # upload tree (ifb0): cake ack-filter on default + device leaf + pass-through
+    assert fake.has("tc", "qdisc", "add", "dev", "ifb0", "parent", "1:2",
+                    "handle", "2:", "cake", "ack-filter")
+    assert fake.has("tc", "qdisc", "add", "dev", "ifb0", "parent", "1:0x8001",
+                    "handle", "0x8001:", "cake", "ack-filter")
+    assert fake.has("tc", "qdisc", "add", "dev", "ifb0", "parent", "1:99",
+                    "handle", "0x99:", "cake", "ack-filter")
+    # download tree (eth0): plain fq_codel everywhere
+    assert fake.has("tc", "qdisc", "add", "dev", "eth0", "parent", "1:2",
+                    "handle", "2:", "fq_codel")
+    assert fake.has("tc", "qdisc", "add", "dev", "eth0", "parent", "1:0x8001",
+                    "handle", "0x8001:", "fq_codel")
+    # ...and NO cake anywhere on the download tree
+    assert not any("cake" in argv and argv[3:5] == ["dev", "eth0"]
+                   for argv in fake.calls)
+
+
+class _NoCake(FakeTc):
+    """A kernel without the sch_cake module: every cake qdisc add rejects."""
+
+    def __call__(self, argv):
+        if "cake" in argv:
+            self.calls.append(argv)
+            return 1, "Unknown qdisc 'cake'"
+        return super().__call__(argv)
+
+
+def test_missing_cake_falls_back_to_fq_codel():
+    """A kernel without sch_cake must NOT lose shaping over it: the first
+    cake rejection switches every upload queue to plain fq_codel and the
+    apply continues (ACK filtering is simply absent on that box)."""
+    fake = _NoCake()
+    cfg = make_cfg()
+    shaper = TcShaper(cfg, run_command=fake)
+    shaper.start()
+    shaper.update_state(
+        [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)],
+        True, 100.0, 20.0)
+    assert shaper.available is True
+    assert shaper.applied is True
+    # upload tree landed as fq_codel despite cake being rejected
+    assert fake.has("tc", "qdisc", "add", "dev", "ifb0", "parent", "1:2",
+                    "handle", "2:", "fq_codel")
+    assert fake.has("tc", "qdisc", "add", "dev", "ifb0", "parent",
+                    "1:0x8001", "handle", "0x8001:", "fq_codel")

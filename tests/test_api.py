@@ -181,10 +181,11 @@ def test_device_crud_and_dashboard(client):
 def test_network_and_user_speed_caps(client):
     c, _, _ = client
     _login(c)
-    # defaults: shaping off, no totals, AQM on, VPN share off, random-MAC gate off
+    # defaults: shaping off, no totals, VPN share off, random-MAC gate off.
+    # Latency behavior is hardwired in the shaper — no AQM/margin/ACK knobs.
     n = c.get("/api/network").json()
     assert n == {"enabled": False, "total_down_mbps": 0.0,
-                 "total_up_mbps": 0.0, "aqm": True, "lan_rate_mbps": 1000.0,
+                 "total_up_mbps": 0.0, "lan_rate_mbps": 1000.0,
                  "vpn_share": {"enabled": False, "interface": ""},
                  "decline_random_macs": False}
 
@@ -195,11 +196,9 @@ def test_network_and_user_speed_caps(client):
     assert n["enabled"] is True
     assert n["total_down_mbps"] == 100.0
     assert n["total_up_mbps"] == 0.0
-    assert n["aqm"] is True
 
-    r = c.post("/api/network", json={"total_up_mbps": 20, "aqm": False})
+    r = c.post("/api/network", json={"total_up_mbps": 20})
     assert r.json()["total_up_mbps"] == 20.0
-    assert r.json()["aqm"] is False
     assert r.json()["enabled"] is True   # untouched by the partial update
 
     # LAN pass-through rate round-trips independently of the WAN totals
@@ -282,10 +281,9 @@ def test_orphaned_usage_endpoints_removed(client):
     assert c.get("/api/events").status_code == 404
 
 
-def test_dashboard_shaping_and_interface_label(tmp_path):
+def test_dashboard_shaping_state(tmp_path):
     """The WS/dashboard payload carries the live shaping state (Network
-    preview's "applying…") and per-device WiFi/LAN labels from the neigh
-    collector + config interface_tags."""
+    preview's "applying…")."""
     database = _db.Database(tmp_path / "api2.db")
     service = QuotaService(database, timezone="Africa/Cairo")
 
@@ -296,7 +294,6 @@ def test_dashboard_shaping_and_interface_label(tmp_path):
 
     app = create_app(
         database, service, SnapshotHolder(),
-        interface_tags={"eth0": "LAN", "wlan0": "WiFi"},
         shaping_state_getter=lambda: {"available": True, "applied": False})
     try:
         with TestClient(app) as c:
@@ -304,30 +301,9 @@ def test_dashboard_shaping_and_interface_label(tmp_path):
             r = c.post("/api/devices", json={"mac": "aa:bb:cc:dd:ee:09",
                                              "quota_mode": "auto"})
             dev_id = r.json()["id"]
-            async def _tag():
-                await database.update_device(dev_id, source_interface="wlan0")
-            asyncio.get_event_loop().run_until_complete(_tag())
             dash = c.get("/api/dashboard").json()
             assert dash["shaping"] == {"available": True, "applied": False}
-            dev = next(d for d in dash["devices"] if d["id"] == dev_id)
-            assert dev["source_interface"] == "wlan0"
-            assert dev["interface_label"] == "WiFi"
-
-            # unmapped NICs get NO box-side label — every client arrives on
-            # the same wired NIC, so a guessed "LAN"/"eth0" would lie about
-            # WiFi devices; the router-side access probe owns that verdict.
-            async def _tag2():
-                await database.update_device(dev_id, source_interface="eth1")
-            asyncio.get_event_loop().run_until_complete(_tag2())
-            dash2 = c.get("/api/dashboard").json()
-            dev2 = next(d for d in dash2["devices"] if d["id"] == dev_id)
-            assert dev2["interface_label"] == ""
-            async def _tag3():
-                await database.update_device(dev_id, source_interface="eth0")
-            asyncio.get_event_loop().run_until_complete(_tag3())
-            dash3 = c.get("/api/dashboard").json()
-            dev3 = next(d for d in dash3["devices"] if d["id"] == dev_id)
-            assert dev3["interface_label"] == "LAN"  # mapped tag wins
+            assert any(d["id"] == dev_id for d in dash["devices"])
     finally:
         asyncio.get_event_loop().run_until_complete(database.close())
 
@@ -2120,34 +2096,6 @@ def _seed_history_device(d, svc, name, ip):
 def test_history_endpoint_requires_auth(client):
     c, _, _ = client
     assert c.get("/api/history/1").status_code == 401
-
-
-def test_wifi_ssids_endpoint_requires_auth(client):
-    """The SSID picker for the access-label field is admin-only (it leaks the
-    household's network names)."""
-    c, _, _ = client
-    assert c.get("/api/wifi/ssids").status_code == 401
-
-
-def test_wifi_ssids_unconfigured_defaults_to_empty(tmp_path):
-    """Without an injected probe getter the endpoint reports the feature as
-    not configured — the UI chip just falls back, no 500."""
-    database = _db.Database(tmp_path / "ssids.db")
-    service = QuotaService(database, timezone="Africa/Cairo")
-
-    async def _init():
-        await database.connect()
-    asyncio.get_event_loop().run_until_complete(_init())
-
-    app = create_app(database, service, SnapshotHolder())
-    try:
-        with TestClient(app) as c:
-            _login(c)
-            assert c.get("/api/wifi/ssids").json() == {
-                "available": False, "error": "not configured",
-                "ssids": [], "ssid_by_mac": {}, "wireless_macs": []}
-    finally:
-        asyncio.get_event_loop().run_until_complete(database.close())
 
 
 def test_history_returns_top_domains_and_activity(client):

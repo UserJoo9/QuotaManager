@@ -558,6 +558,10 @@ function userCard(u, udevs, gw, ghost) {
 function deviceRow(d) {
   const bypassTag = d.bypass
     ? `<span class="bypass-tag" title="Exempt from this user's quota block">bypass</span>` : "";
+  // effective VPN-share exclusion (own flag OR the user's flag) — a tag only;
+  // the checkbox in the edit modal controls the device's OWN flag.
+  const vpnBypassTag = d.vpn_bypass_effective
+    ? `<span class="vpn-bypass-tag" title="Rides the direct connection — excluded from the shared VPN tunnel">direct</span>` : "";
   // per-device internet speed caps (Mbps; shown only when one is set)
   const speedTag = (d.limit_down_mbps || d.limit_up_mbps)
     ? ` <span class="speed-tag" title="This device's speed limit">↓${d.limit_down_mbps || "∞"} ↑${d.limit_up_mbps || "∞"}</span>` : "";
@@ -598,7 +602,7 @@ function deviceRow(d) {
     <div class="device-head">
       <div>
         <div class="device-name">${esc(d.name || (d.guest ? "Guest" : d.vendor) || "Unnamed device")}${speedTag}</div>
-        <div class="device-mac">${esc(macText(d.mac))}${statusDot(d.block_state, d.connected)}${d.ip ? ` · <span class="device-ip">${esc(d.ip)}</span>` : ""}${ifaceTag(d)}${vendorTag}${guestTag}${gatewayTag}${bypassTag}${statusTag(d.block_state)}</div>
+        <div class="device-mac">${esc(macText(d.mac))}${statusDot(d.block_state, d.connected)}${d.ip ? ` · <span class="device-ip">${esc(d.ip)}</span>` : ""}${vendorTag}${guestTag}${gatewayTag}${bypassTag}${vpnBypassTag}${statusTag(d.block_state)}</div>
       </div>
     </div>
     ${devBar}
@@ -612,21 +616,6 @@ function deviceRow(d) {
       ${deleteBtn}
     </div>
   </div>`;
-}
-
-// The WiFi/LAN chip. Preference order:
-//   1. d.access_interface — the ROUTER-side label ("WiFi · <SSID>" / "LAN"),
-//      auto-learned from the air by the passive probe (quota.wifi_probe.py)
-//      or pinned manually in the device modal (access override wins display).
-//   2. d.interface_label — the box-side NIC tag (ip neigh + config.yaml
-//      network.interface_tags); shown when no probe data exists yet.
-function ifaceTag(d) {
-  if (!d) return "";
-  const label = d.access_interface || d.interface_label;
-  if (!label) return "";
-  return ` <span class="iface-tag" title="${d.access_interface
-    ? "Router-side: ARP round-trip classification / set in the device modal"
-    : "Box-side NIC (neighbor table)"}">${esc(label)}</span>`;
 }
 
 /* ---------------- sidebar panels (management / network / wan / admin / logs) ---------------- */
@@ -1588,13 +1577,12 @@ function openDeviceModal(id) {
   $("d-fixed").value = dev && dev.quota_mode === "fixed"
     ? (dev.fixed_gb ?? dev.allowance_gb ?? 10) : "";
   $("d-bypass").checked = dev ? !!dev.bypass : false;
+  $("d-vpn-bypass").checked = dev ? !!dev.vpn_bypass : false;
   $("d-topup").value = "";
   // per-device speed caps (Mbps, 0 = unlimited)
   $("d-limit-down").value = dev ? (dev.limit_down_mbps || 0) : 0;
   $("d-limit-up").value = dev ? (dev.limit_up_mbps || 0) : 0;
   $("d-dns-server").value = dev ? (dev.dns_server || "") : "";
-  $("d-access").value = dev ? (dev.access_override || "") : "";
-  populateAccessList();  // fill the SSID datalist (best-effort, async)
   $("d-fixed-wrap").classList.toggle("hidden", $("d-mode").value !== "fixed");
   $("modal-submit").textContent = dev ? "Save" : "Add";
   $("modal").classList.remove("hidden");
@@ -1633,19 +1621,6 @@ function normalizeMac(raw) {
   return hex.match(/.{1,2}/g).join(":");
 }
 
-// Fill the device modal's access-label datalist with the SSIDs the passive
-// probe currently hears ("WiFi · <name>" options + "LAN"). Best-effort: a
-// probe-less box leaves the list empty and the field still accepts free text.
-async function populateAccessList() {
-  try {
-    const data = await API.get("/api/wifi/ssids");
-    const ssids = (data && data.ssids) || [];
-    const opts = ssids.map((s) => `<option value="WiFi · ${esc(s)}">`)
-      .join("") + `<option value="LAN">`;
-    $("d-access-list").innerHTML = opts;
-  } catch (_) { /* probe off / not logged in — free text only */ }
-}
-
 async function submitDevice(ev) {
   ev.preventDefault();
   const name = $("d-name").value.trim();
@@ -1676,6 +1651,7 @@ async function submitDevice(ev) {
     const patch = { name, limit_down_mbps: limitDown, limit_up_mbps: limitUp };
     if (userId != null && userId !== originalUserId) patch.user_id = userId;
     patch.bypass = $("d-bypass").checked;
+    patch.vpn_bypass = $("d-vpn-bypass").checked;
     const topupRaw = parseFloat($("d-topup").value);
     if (!Number.isNaN(topupRaw) && topupRaw > 0) {
       await API.post(`/api/devices/${editDeviceId}/topup`, { extra_gb: topupRaw });
@@ -1693,14 +1669,6 @@ async function submitDevice(ev) {
   if (targetDeviceId != null) {
     try { await API.patch(`/api/devices/${targetDeviceId}/dns`, { dns_server: dnsServer }); }
     catch (e) { alert("Device saved, but the DNS server value was rejected: " + e.message); }
-  }
-  // The router-side access label (WiFi · <SSID> / LAN) — manual pin; blank
-  // clears the pin so the passive probe's auto label takes over again.
-  if (targetDeviceId != null) {
-    try {
-      await API.post(`/api/devices/${targetDeviceId}/access`,
-        { override: $("d-access").value.trim() });
-    } catch (e) { alert("Device saved, but the access label was rejected: " + e.message); }
   }
   closeModal();
   await refreshAll();
@@ -1727,6 +1695,7 @@ function openUserModal(id) {
   $("u-history-days").value = u ? (u.history_days ?? "") : "";
   $("u-dns-server").value = u ? (u.dns_server || "") : "";
   $("u-exempt").checked = u ? !!u.exempt_quota : false;
+  $("u-vpn-bypass").checked = u ? !!u.vpn_bypass : false;
   $("u-fixed-wrap").classList.toggle("hidden", $("u-mode").value !== "fixed");
   $("user-modal-submit").textContent = u ? "Save" : "Add";
   $("user-modal").classList.remove("hidden");
@@ -1752,15 +1721,17 @@ async function submitUser(ev) {
     : Math.max(0, Math.min(365, parseInt(historyDaysField, 10) || 0));
   const dnsServer = $("u-dns-server").value.trim();
   const exemptQuota = $("u-exempt").checked;
+  const vpnBypass = $("u-vpn-bypass").checked;
   let targetUserId = editUserId;
   if (editUserId == null) {
     const created = await API.post("/api/users", { name, quota_mode: mode, fixed_gb: fixed,
-      limit_down_mbps: limitDown, limit_up_mbps: limitUp, exempt_quota: exemptQuota });
+      limit_down_mbps: limitDown, limit_up_mbps: limitUp, exempt_quota: exemptQuota,
+      vpn_bypass: vpnBypass });
     targetUserId = created.id;
   } else {
     await API.patch(`/api/users/${editUserId}`, { name, quota_mode: mode, fixed_gb: fixed,
       limit_down_mbps: limitDown, limit_up_mbps: limitUp, history_days: historyDays,
-      exempt_quota: exemptQuota });
+      exempt_quota: exemptQuota, vpn_bypass: vpnBypass });
   }
   if (targetUserId != null) {
     try { await API.patch(`/api/users/${targetUserId}/dns`, { dns_server: dnsServer }); }
@@ -2019,7 +1990,6 @@ async function refreshNetwork() {
     $("set-total-down").value = n.total_down_mbps || "";
     $("set-total-up").value = n.total_up_mbps || "";
     $("set-lan-rate").value = n.lan_rate_mbps || "";
-    $("aqm-toggle").checked = n.aqm;
     // random-MAC gate: toggle + the one-shot "cut existing" checkbox (the
     // latter only makes sense while the gate is on).
     $("decline-random-toggle").checked = !!n.decline_random_macs;
@@ -2104,7 +2074,6 @@ function renderNetworkPreview(n) {
   $("np-down").textContent = n.total_down_mbps ? `${n.total_down_mbps} Mbps` : "—";
   $("np-up").textContent = n.total_up_mbps ? `${n.total_up_mbps} Mbps` : "—";
   $("np-lan").textContent = n.lan_rate_mbps ? `${n.lan_rate_mbps} Mbps` : "1000 Mbps";
-  $("np-aqm").textContent = n.aqm ? "On" : "Off";
   const capped = (dashboard && dashboard.devices
     ? dashboard.devices : []).filter((d) => d.limit_down_mbps || d.limit_up_mbps);
   $("np-capped").textContent = capped.length;
@@ -2130,7 +2099,6 @@ async function submitNetwork() {
     total_down_mbps: parseFloat($("set-total-down").value) || 0,
     total_up_mbps: parseFloat($("set-total-up").value) || 0,
     lan_rate_mbps: parseFloat($("set-lan-rate").value) || 0,
-    aqm: $("aqm-toggle").checked,
     vpn_share: $("vpn-toggle").checked,
   };
   await API.post("/api/network", body);
@@ -2784,8 +2752,8 @@ async function init() {
   $("mac-lists-btn").addEventListener("click", submitMacLists);
   $("mac-allow-list").addEventListener("input", () => { macListsDirty = true; });
   $("mac-deny-list").addEventListener("input", () => { macListsDirty = true; });
-  // speed shaping: saving sends all four fields; the master + AQM toggles just
-  // mark the current draft — they take effect together on Save.
+  // speed shaping: saving sends all four fields; the master toggle just
+  // marks the current draft — it takes effect together on Save.
   $("shaping-save-btn").addEventListener("click", submitNetwork);
   $("vpn-toggle").addEventListener("change", toggleVpnShare);
   // WAN mode: the toggle picks the desired mode; Apply/Revert do the live

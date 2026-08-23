@@ -358,17 +358,6 @@
               <div class="recharge-row">
                 <input type="number" id="set-lan-rate" min="0" step="any" placeholder="LAN Mbps">
               </div>
-              <div class="toggle-row">
-                <div class="toggle-info">
-                  <span class="toggle-title">Low-latency queues (fq_codel)</span>
-                  <p class="toggle-help">On = pings stay low even when a user saturates
-                    their speed.</p>
-                </div>
-                <label class="switch" title="Bufferbloat avoidance">
-                  <input type="checkbox" id="aqm-toggle">
-                  <span class="slider"></span>
-                </label>
-              </div>
               <button id="shaping-save-btn" class="btn primary small">Save speed settings</button>
             </div>
             <hr class="sep">
@@ -438,10 +427,6 @@
           <div class="stat">
             <span class="stat-label">LAN (pass-through)</span>
             <span id="np-lan" class="stat-value">—</span>
-          </div>
-          <div class="stat">
-            <span class="stat-label">Low-latency queues</span>
-            <span id="np-aqm" class="stat-value">Off</span>
           </div>
           <div class="stat">
             <span class="stat-label">Devices with caps</span>
@@ -1019,6 +1004,10 @@
           <p class="muted small hidden" id="d-bypass-exempt-note">This device's user is
             exempt from quota — the per-device bypass is unnecessary.</p>
         </div>
+        <label class="check" title="This device's traffic skips the shared VPN tunnel and rides the direct connection. Quota, blocks, and speed caps still apply.">
+          <input type="checkbox" id="d-vpn-bypass">
+          <span>Bypass VPN tunnel (direct connection)</span>
+        </label>
         <div id="d-speed-wrap" class="hidden">
           <label>Speed limit (Mbps, 0 = unlimited)</label>
           <div class="speed-grid">
@@ -1039,13 +1028,6 @@
         </div>
         <label for="d-dns-server">Upstream DNS server (blank = inherit)</label>
         <input id="d-dns-server" placeholder="e.g. 1.1.1.1">
-        <label for="d-access">Access (blank = auto-learn from the air)</label>
-        <input id="d-access" list="d-access-list" maxlength="80"
-               placeholder="e.g. WiFi · MyNet, LAN1">
-        <datalist id="d-access-list"></datalist>
-        <p class="muted small">The box's radio probe hears which router SSID a
-          device is really on ("WiFi · &lt;name&gt;") or marks it "LAN". Type
-          a label to pin it (e.g. LAN2); blank = auto.</p>
         <div class="modal-actions">
           <button type="button" id="modal-cancel" class="btn ghost">Cancel</button>
           <button type="submit" id="modal-submit" class="btn primary">Add</button>
@@ -1092,6 +1074,10 @@
         <label class="check" title="Never quota-block this user, however much they use. Manual admin cuts still apply.">
           <input type="checkbox" id="u-exempt">
           <span>Exempt from quota (unlimited usage)</span>
+        </label>
+        <label class="check" title="All of this user's devices skip the shared VPN tunnel and ride the direct connection. Quota, blocks, and speed caps still apply.">
+          <input type="checkbox" id="u-vpn-bypass">
+          <span>Bypass VPN tunnel (all this user's devices)</span>
         </label>
         <div class="modal-actions">
           <button type="button" id="user-modal-cancel" class="btn ghost">Cancel</button>

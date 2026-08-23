@@ -46,6 +46,16 @@ Graceful degradation: no `ip` binary / not root => the manager reports an
 vanishes while enabled, the policy rule is removed so clients fall back to
 the direct uplink (they must never be blackholed by a dead VPN).
 
+Per-device bypass: a device (or a whole user) marked ``vpn_bypass`` rides
+the DIRECT uplink while everyone else shares the tunnel. Implemented as
+per-IP policy rules at ONE priority BEFORE the subnet-wide divert rule
+(``ip rule add pref <rule_pref-1> from <device_ip> lookup main``): the
+excluded device's packets consult the main table first, so they exit via
+the normal gateway. Quota counting/blocks/caps are unaffected (the forward
+chain sees the same packets either way). The exclusion set is reconciled
+parse-based against the live kernel state each tick (one ``ip rule show``,
+add/del only on membership change) and flushed whenever the share turns off.
+
 The command runner is injected (``run_command``) so tests drive a fake
 ``ip`` binary and assert the exact routing programmed.
 """
@@ -263,6 +273,26 @@ class VpnShareManager:
                                        "dev", iface])
         return code == 0 and re.search(r"inet \d", out or "")
 
+    def ifindexes(self) -> dict[str, int]:
+        """Interface name -> ifindex for every link (one ``ip -o link show``).
+
+        A higher ifindex ≈ the device was created later, so a caller ordering
+        multiple live tunnels by it picks the one dialed most recently (the
+        tunnel the operator switched TO, not the stale one left behind).
+        Empty map on failure."""
+        code, out = self._run_command(["ip", "-o", "link", "show"])
+        if code != 0:
+            return {}
+        idx: dict[str, int] = {}
+        for line in (out or "").splitlines():
+            m = re.match(r"(\d+):\s+([^:@\s]+)", line)
+            if m:
+                try:
+                    idx[m.group(2)] = int(m.group(1))
+                except ValueError:
+                    continue
+        return idx
+
     def peer_ip(self, iface: str) -> str:
         """The tunnel's point-to-point peer address, if it has one.
 
@@ -307,18 +337,6 @@ class VpnShareManager:
 
     # -------------------------------------------------------------- actions
 
-    def is_rule_installed(self) -> bool:
-        """Is our client-subnet policy rule present in the kernel?
-
-        One ``ip rule show`` subprocess per call; used at boot (leftover
-        self-heal) and after removals. The rule string is matched loosely
-        (``from <client> lookup <table>``) so formatting differences
-        between iproute2 versions cannot hide it.
-        """
-        code, out = self._run_command(["ip", "rule", "show"])
-        needle = f"from {self.client_subnet} lookup {self.table}"
-        return code == 0 and needle in (out or "")
-
     def apply(self, iface: str = "") -> VpnShareStatus:
         """Program (idempotently) the client-subnet policy routing into the
         tunnel ``iface``. Returns the resulting status; a failure leaves
@@ -335,20 +353,25 @@ class VpnShareManager:
             return VpnShareStatus(STATE_NO_INTERFACE, interface=iface,
                                   message=(f"tunnel {iface} is not present — "
                                            "is the VPN client running?"))
-        # A tunnel with no IPv4 is a dead/junk device (the live-box "evice"):
-        # routing into it would blackhole the whole subnet. A freshly spawned
-        # tun2socks can lag behind the process, so wait within a short settle
-        # window for the address to land; a device that never gains one is
-        # reported as no-interface, never routed into.
+        # A freshly spawned tun2socks can lag behind the process, so wait
+        # within a short settle window for an IPv4 address to land.  Many
+        # real TUN drivers (xray-core, sing-box) work without assigning an
+        # IPv4 to the device — the default-dev route is sufficient — so
+        # after the settle we only reject truly dead devices (link DOWN or
+        # missing), not devices that are functional but address-less.
         if iface:
             deadline = time.monotonic() + 2.0
             while not self._has_ipv4(iface) and time.monotonic() < deadline:
                 time.sleep(0.5)
             if not self._has_ipv4(iface):
-                return VpnShareStatus(
-                    STATE_NO_INTERFACE, interface=iface,
-                    message=(f"tunnel {iface} carries no IPv4 address — "
-                             "is the VPN client running?"))
+                link = self._link_state(iface)
+                if "interface missing" in link or "DOWN" in link:
+                    return VpnShareStatus(
+                        STATE_NO_INTERFACE, interface=iface,
+                        message=(f"tunnel {iface} carries no IPv4 "
+                                 "address — is the VPN client running?"))
+                log.warning("vpn share: %s has no IPv4 — routing with "
+                            "dev-only default route", iface)
         st = VpnShareStatus(STATE_ON, interface=iface, peer=self.peer_ip(iface))
 
         def ok(argv: list[str], tolerate: tuple[str, ...] = ()) -> bool:
@@ -424,7 +447,9 @@ class VpnShareManager:
 
     def remove(self) -> None:
         """Remove the policy rule + empty the VPN table. Idempotent;
-        tolerates a rule/route that is already gone."""
+        tolerates a rule/route that is already gone. Any per-device
+        bypass exclusions are flushed too (they only matter while the
+        share rule exists)."""
         code, out = self._run_command(
             ["ip", "rule", "del", "from", self.client_subnet,
              "lookup", str(self.table), "pref", str(self.rule_pref)])
@@ -436,11 +461,76 @@ class VpnShareManager:
             log.warning("vpn share: route flush: %s", (out or "").strip())
         self._applied = False
         self._iface = None
+        self._sync_exclusions([])
         log.info("vpn share: policy routing removed")
 
     # --------------------------------------------------------------- sync
 
-    def reconcile(self, enabled: bool, interface_pin: str = "") -> VpnShareStatus:
+    @property
+    def excl_pref(self) -> int:
+        """Policy-rule priority for VPN-bypass exclusions: ONE step before
+        the client-subnet divert rule, so an excluded device's packets hit
+        ``lookup main`` first and ride the direct uplink."""
+        return max(self.rule_pref - 1, self.rule_pref // 2)
+
+    def _parse_exclusions(self, rule_output: str) -> set[str]:
+        """Extract our exclusion rules from ``ip rule show`` text."""
+        live: set[str] = set()
+        pattern = re.compile(
+            rf"^\s*{self.excl_pref}:\s+from\s+(\d+(?:\.\d+){{3}})"
+            rf"\s+lookup\s+main\b")
+        for line in (rule_output or "").splitlines():
+            m = pattern.match(line)
+            if m:
+                live.add(m.group(1))
+        return live
+
+    def _live_exclusions(self) -> set[str]:
+        """Exclusion rules currently programmed (one ``ip rule show``).
+
+        Matches our own rule shape — ``<excl_pref>: from <ip> lookup main``
+        — so a stale rule from a crashed previous run is recognized and
+        cleaned like the subnet-wide leftover (same boot-probe contract).
+        """
+        code, out = self._run_command(["ip", "rule", "show"])
+        if code != 0:
+            return set()
+        return self._parse_exclusions(out)
+
+    def _sync_exclusions(self, desired: list[str]) -> None:
+        """Reconcile the per-device bypass rules toward ``desired``.
+
+        Parse-based diff against the LIVE kernel state (one ``ip rule
+        show`` per call): adds missing rules, deletes stale ones, tolerates
+        races ("File exists" / "No such rule"). All exclusions share one
+        priority (:attr:`excl_pref`) — iproute2 allows many selectors under
+        one pref and evaluates top-down, so their relative order is
+        irrelevant. A failure never raises; the next tick retries.
+        """
+        want = sorted({str(ip) for ip in desired if ip})
+        live = self._live_exclusions()
+        for ip in sorted(live - set(want)):
+            code, out = self._run_command(
+                ["ip", "rule", "del", "pref", str(self.excl_pref),
+                 "from", ip, "lookup", "main"])
+            if code != 0 and "no such rule" not in (out or "").lower():
+                log.warning("vpn share: bypass del %s => %s",
+                            ip, (out or "").strip())
+        for ip in want:
+            if ip in live:
+                continue
+            code, out = self._run_command(
+                ["ip", "rule", "add", "pref", str(self.excl_pref),
+                 "from", ip, "lookup", "main"])
+            if code != 0 and "file exists" not in (out or "").lower():
+                log.warning("vpn share: bypass add %s => %s",
+                            ip, (out or "").strip())
+        if want != sorted(live):
+            log.info("vpn share: %d device(s) bypass the tunnel (%s)",
+                     len(want), ", ".join(want) if want else "none")
+
+    def reconcile(self, enabled: bool, interface_pin: str = "",
+                  exclusions: list[str] | None = None) -> VpnShareStatus:
         """Make the kernel match the DESIRED state (dashboard switch).
 
         * enabled + rule missing  -> apply (idempotent, self-heals a reboot
@@ -450,19 +540,18 @@ class VpnShareManager:
           the clients ride the direct uplink).
         * disabled + rule present -> remove it (including leftovers from a
           crashed previous run, probed once on the first disabled call).
+        * ``exclusions`` — client IPs that must keep riding the DIRECT
+          uplink while the share is on (per-device/user ``vpn_bypass``);
+          synced every tick via the parse-based diff.
         """
         if enabled:
             iface = self._cfg_iface or interface_pin
             # A pinned tunnel that vanished is treated like no pin at all:
             # re-detect (the VPN client may have restarted as a new tun
-            # index) rather than route into a dead device. Same for a pinned
-            # device that still EXISTS but carries no IPv4 — a stale/junk
-            # ARPHRD_NONE device (the live-box "evice") is present in sysfs
-            # yet routes nothing; honoring it would blackhole the subnet.
-            if iface and (not self._iface_exists(iface)
-                          or not self._has_ipv4(iface)):
-                log.warning("vpn share: pinned tunnel %s is gone or carries "
-                            "no IPv4 — re-detecting", iface)
+            # index) rather than route into a dead device.
+            if iface and not self._iface_exists(iface):
+                log.warning("vpn share: pinned tunnel %s is gone — "
+                            "re-detecting", iface)
                 iface = ""
             if not iface:
                 cands = self.detect_interfaces()
@@ -475,13 +564,35 @@ class VpnShareManager:
                                       message=("no VPN tunnel interface "
                                                "found — start the VPN "
                                                "client (TUN mode)"))
-            return self.apply(iface)
+            result = self.apply(iface)
+            # If apply() rejected the interface (link DOWN / no IPv4 on a
+            # dead device), try the next detected candidate — the VPN client
+            # may have restarted under a different tun index.
+            if result.state == STATE_NO_INTERFACE and iface:
+                cands = self.detect_interfaces()
+                for alt in cands:
+                    if alt != iface:
+                        result = self.apply(alt)
+                        if result.state != STATE_NO_INTERFACE:
+                            break
+            # Per-device bypass exclusions are independent of which tunnel
+            # got picked: sync them every tick (no-change case costs one
+            # `ip rule show`).
+            self._sync_exclusions(list(exclusions or []))
+            return result
         if self._applied:
             self.remove()
             return VpnShareStatus(STATE_OFF)
-        if not self._clean_checked and self.is_rule_installed():
-            self.remove()
+        if not self._clean_checked:
+            # ONE leftover probe for both rule shapes (subnet divert + bypass
+            # exclusions) — a crashed previous run is cleaned on first sight.
+            code, out = self._run_command(["ip", "rule", "show"])
+            out_l = out or ""
+            dirty = (code == 0 and (
+                f"from {self.client_subnet} lookup {self.table}" in out_l
+                or bool(self._parse_exclusions(out_l))))
             self._clean_checked = True
-            return VpnShareStatus(STATE_OFF)
-        self._clean_checked = True
+            if dirty:
+                self.remove()
+                return VpnShareStatus(STATE_OFF)
         return VpnShareStatus(STATE_OFF)

@@ -97,14 +97,17 @@ silently let downloads bypass the box).
    Lifecycle (verified `[AUDIT 2026-08-19]`): `main()` loads config →
    `setup_logging` → `Gateway(cfg)` → `asyncio.run(_serve())`. `_serve` calls
    `gateway.startup()` FIRST (DB connect → `_apply_topology_override` →
-   TopologyManager → `_seed_bundle_from_cfg` → `ensure_period` → engine start →
-   shaper start → dns_manager → vpn/tun2socks + initial `_sync_vpn_share` →
-   firewall build (config-gated, `load_config` → `load_geo` → initial `apply`) →
-   optional ArpLock/ArpScanner/DnslogTailer/WifiProbe → create the
-   `_maintenance_task`), **then** `create_app(...)` (WAN topology manager +
-   engine's `_client_net` must exist), then uvicorn. Shutdown cancels the
-   maintenance task, then per-subsystem shutdown (engine → firewall watchdog
-   cancel → shaper → arp_lock → dnslog → wifi_probe → DB close).
+   TopologyManager → `_seed_bundle_from_cfg` → `ensure_period` → **startup
+   self-heal** (`quota/startup_health.py`: recreate `quota_nat` table if
+   missing, re-add lost NIC IPs, verify `ip_forward`, repair
+   `/etc/nftables.conf` symlink) → engine start → shaper start →
+   dns_manager → vpn/tun2socks + initial `_sync_vpn_share` → firewall build
+   (config-gated, `load_config` → `load_geo` → initial `apply`) → optional
+   ArpLock/ArpScanner/DnslogTailer/WifiProbe → create the `_maintenance_task`),
+   **then** `create_app(...)` (WAN topology manager + engine's `_client_net`
+   must exist), then uvicorn. Shutdown cancels the maintenance task, then
+   per-subsystem shutdown (engine → firewall watchdog cancel → shaper →
+   arp_lock → dnslog → wifi_probe → DB close).
 3. **nftables engine** (`quota/nftables.py`): one named counter pair per device
    (`q_up_<ip>` / `q_down_<ip>`, dots→underscores) in the `forward` chain + a
    `blocked` set. The kernel counts at line rate; the app only reconciles and
@@ -135,20 +138,14 @@ silently let downloads bypass the box).
    → 6b) `_sync_refuse_fragment` → 7) `_sync_vpn_share` → 8) `firewall.reconcile`
    (signature-gated re-apply + scan-watch/fw_* counter drain). A tick > 1.0 s
    logs a warning; exceptions are swallowed per job.
-   **Router-side WiFi/LAN label** (`quota/latency_probe.py`, ON by default, ANY
-   hardware): the box raw-ARPs every leased client and times the replies —
-   wired answers in well under a millisecond, WiFi pays airtime (≥1 ms), so the
-   FASTEST sample decides `WiFi`/`LAN`; raw AF_PACKET backend with a `ping`
-   parse fallback; interleaved send/drain rounds (power-save devices wake and
-   still get sampled); consecutive-sweep streak guard (`min_consistent`)
-   prevents flapping, a device that stops replying keeps its label. The
+   **Device LED connected status** (`quota/latency_probe.py`, ON by default, ANY
+   hardware): the box raw-ARPs every leased client and times the replies; the
    responder set drives the **device-card LED** (`connected` = answered the
    latest sweep, fresh ≤3×interval; lease-based fallback when the probe isn't
    running) — a leased-but-silent device goes grey, since dnsmasq keeps the
    lease for LEASE_HOURS. When the box HAS a monitor-capable card, the passive
    probe (`quota/wifi_probe.py`, airmon-ng + airodump-ng on a dedicated thread,
-   OFF by default) takes precedence and adds the exact SSID. The manual
-   per-device pin (`POST /api/devices/{id}/access`) always wins the display.
+   OFF by default) collects snapshots for the yield check.
    Every 60 s a **rogue LAN scan** (`quota/arp_scan.py`) raw-ARP-probes both
    subnets; active hosts NOT in the lease file surface in `rogue` (+ `warning`
    event).
@@ -162,13 +159,46 @@ silently let downloads bypass the box).
    at NIC **egress** by `ip dst`. Per-device leaves under per-user classes
    (capped at the user's aggregate) under a download aggregate under a root
    capped at the **real line speed** — effective cap `min(dev, user)`; the
-   default class is capped at the direction total (NOT a pass-through). Tree
-   rebuilt only on a signature change of (enabled, totals, aqm, sorted caps);
-   `totals` of 0.0 are intentionally excluded from the signature. **LAN
-   pass-through**: client↔uplink-subnet and client↔box traffic rides a
-   **prio-1 class `1:99`** at the LAN link rate (`shaping.lan_rate_mbps`,
-   default 1000; NEVER the WAN cap); priorities are deliberately non-zero (tc
-   treats `prio 0` as "no priority").
+    default class is capped at the direction total (NOT a pass-through). Tree
+    rebuilt only on a signature change of (enabled, totals, aqm, margin,
+    ack_filter, vpn_share_active, vpn_share_margin, sorted caps);
+    `totals` of 0.0 are intentionally excluded from the signature. **LAN
+    pass-through**: client↔uplink-subnet and client↔box traffic rides a
+    **prio-1 class `1:99`** at the LAN link rate (`shaping.lan_rate_mbps`,
+    default 1000; NEVER the WAN cap); priorities are deliberately non-zero (tc
+    treats `prio 0` as "no priority"). **Line safety margin**
+    (`shaping.line_margin_pct`, default 93, DB-editable): every WAN-facing rate
+    derived from the totals is programmed at that % so the bottleneck queue
+    forms in the gateway's AQM, not the ISP modem's buffer (explicit
+    per-device/user caps stay exact; root/LAN never scaled; 0 = exact legacy
+    rates). **Upload ACK filtering** (`shaping.ack_filter`, default on):
+    with AQM on, the UPLOAD tree's queues use `cake ack-filter` instead of
+    fq_codel — a download's TCP ACK flood (~3-13% of its own bandwidth)
+    otherwise starves a small uplink and kills everyone else's handshakes/DNS;
+    HTB still shapes, cake only replaces fq_codel as the fair queue.
+    **VPN-share margin** (`shaping.vpn_share_margin_pct`, default 85,
+    DB-editable Network-tab knob): while the VPN share relay is ACTIVE
+    (`run.py:_sync_shaping` feeds `vpn_share_active` from
+    `_last_vpn_status.state == "on"`) every WAN-facing rate pays
+    `line_margin × vpn_margin` (93×85 → ~79%) — a TUN's real capacity sits
+    below the raw line (encryption overhead + v2rayN/xray userspace
+    buffering), so without this the queue forms INSIDE the tunnel where no
+    AQM exists and one bulk download cuts every other device until paused.
+    Tunnel up/down flips the signature → automatic rebuild; `_apply_vpn_now`
+    reshapes immediately after a toggle (no 15 s window at wrong rates);
+    scaling stays inside `_scale()` so root/LAN/explicit caps are untouched;
+    0 = line margin only. **Through-VPN line rates**
+    (`shaping_vpn_total_down_mbps` / `shaping_vpn_total_up_mbps`, DB-editable
+    Network-tab pair, 0 = off): while the relay is ACTIVE and BOTH are > 0,
+    `_sync_shaping` feeds those numbers to the shaper INSTEAD of the WAN
+    totals and skips the composite VPN-share scaling (the operator measured
+    the tunnel's real delivery, so no second margin stacks on top; the line
+    safety margin still applies) — this is the ISP-policing defense: live-box
+    evidence showed the provider punishing the WHOLE international bucket
+    (tunnel AND direct flows) once a sustained VLESS stream ran, so total
+    demand must stay under the trigger; relay off → WAN totals return
+    automatically. A half-set pair never engages (a 0 upload total would
+    program an unlimited shared uplink).
 6b. **Kernel firewall** (`quota/firewall.py`, the separate `inet quota_firewall`
    table) is a third kernel-side stack layered **BEFORE** the quota engine:
    `fw_input`/`fw_forward` (`type filter hook input/forward priority -100`,
@@ -400,13 +430,15 @@ QuotaManager/
 │   ├── totp.py               # opt-in TOTP 2FA (RFC 6238, stdlib: hmac + base32)
 │   ├── arp_scan.py (301)     # rogue static-IP detection
 │   ├── arp_lock.py (157)     # ARP gateway-lock responder (raw socket thread)
-│   ├── latency_probe.py (189)# ARP-RTT WiFi/LAN classification (ON by default)
+│   ├── latency_probe.py (189)# ARP-RTT LED connected-status probe (ON by default)
 │   ├── wifi_probe.py (262)   # passive monitor-mode SSID labels (OFF by default)
 │   ├── dnslog.py             # DNS history tailer + dns_history persistence
 │   ├── dns_rules.py          # DnsRuleManager (host filtering -> dnsmasq conf)
 │   ├── topology.py           # detect_ppp / restart_pppoe / check_internet
 │   ├── updater.py            # GitHub self-update (version compare + .deb install)
 │   ├── netmgr.py             # TopologyManager (live LAN/WAN switch + rollback)
+│   ├── startup_health.py     # startup self-heal: quota_nat table, NIC IPs, ip_forward, symlink
+│   ├── snmp_bridge.py        # SNMP v2c bridge-table query for Wi-Fi/Cable connection-type detection
 │   ├── vendor.py + oui.txt   # MAC OUI -> manufacturer (53.5k prefixes)
 │   └── version.py            # single source of truth for release version
 ├── api/
@@ -428,11 +460,20 @@ QuotaManager/
 ├── data/                     # [AUDIT] gitignored, empty on dev; db_path default "data/quota.db" (config.py:420)
 └── logs/                     # [AUDIT] gitignored runtime artifact (quota.log, rotating)
 ```
-Tests: 24 files (test_run_wiring.py 122 KB, test_api.py 103 KB, test_quota_service.py
-73 KB are the giants pinning the god-object seams); 644 passed (608 at v0.2.1
+Tests: 25 files (test_run_wiring.py 122 KB, test_api.py 103 KB, test_quota_service.py
+73 KB are the giants pinning the god-object seams); 694 passed (608 at v0.2.1
 +36 firewall: tests/test_firewall.py — fake-nft gate over the 9 acceptance
 sections; +31 security: tests/test_security.py — auth core / WAN gate / TOTP /
-CSRF / WAF / SSRF / limiter units / docs-off / no-store / payload minimization).
+CSRF / WAF / SSRF / limiter units / docs-off / no-store / payload minimization;
++10 startup health: tests/test_startup_health.py — NAT table / NIC IP / symlink
+self-heal; +17 SNMP: tests/test_snmp_bridge.py — BER helpers / MAC classification
+/ CLI fallback parsing; +7 shaping latency knobs: tests/test_shaping.py — line
+margin scaling / cake ack-filter split / signature rebuilds; +3 VPN-share
+margin: composite WAN scaling only while the relay is active / clamp helper /
+toggle rebuild; +1 through-VPN totals wiring: the totals-source switch in
+_sync_shaping (relay on + pair set → tunnel rates replace WAN totals, no
+composite margin; relay off → restore; half-set pair never engages). Suite
+689→694.
 
 **`[AUDIT 2026-08-19]` verified orphans / decoupled:**
 - `core/config.py:311` `preset_cache_dir` (DnsFilterConfig + config.yaml:227) —
@@ -631,11 +672,20 @@ the regression net that blocks the breaking change.
   internet down until ppp0 redials.
 - **Speed shaping needs real line rates**: set the Network-tab totals to the
   real line down/up. `tc` rates are approximate; the single-NIC egress tree
-  shares bandwidth between uplink traffic and client downloads.
-- **The ARP-RTT WiFi/LAN label is statistical, not measured**: a fast 5G device
-  can read LAN (lower `threshold_ms`), a loaded 2.4 GHz network can spike both
-  classes, ICMP-blocking clients are unclassified without root. The streak
-  guard kills flapping; the label only drives the display chip — enforcement
+  shares bandwidth between uplink traffic and client downloads. The line
+  safety margin means speed tests read ≈93% of the configured totals by
+  design (that headroom is what keeps the queue inside the gateway); set 0%
+  margin for exact-rate enforcement. With VPN share active the WAN rates drop
+  further to ≈79% (line × `shaping.vpn_share_margin_pct`) unless the
+  through-VPN totals pair is set, which replaces them outright — tune that knob
+  down if the tunnel still bloats, up if the tunnel is near-lossless.
+  Latency under load also depends on the Wi-Fi hop (clients↔router) which the
+  box cannot control.
+- **The ARP-RTT probe is for LED connected status only**: the probe drives the
+  device-card LED (connected NOW vs grey), not a WiFi/LAN label. The LED is
+  statistical — a fast 5G device can be detected, a loaded 2.4 GHz network can
+  spike RTTs, ICMP-blocking clients are unclassified without root. The streak
+  guard kills flapping; the probe only drives the display chip — enforcement
   never depends on it.
 - **The box's own internet is metered by default** (`engine.count_gateway`,
   default ON): box traffic is charged to the protected Gateway user (fixed
@@ -658,6 +708,109 @@ the regression net that blocks the breaking change.
 ---
 
 ## [VERSION HISTORY] (headlines + gotchas; full detail in CHANGELOG.md)
+- **v0.3.1 (2026-08-23)** — unreleased-batch release: VPN bypass
+  (per-device/user direct-uplink exclusions), WAF local-management exemption,
+  startup self-heal (`quota/startup_health.py`), speed-shaping simplification
+  (latency knobs hardwired: fq_codel everywhere + cake ack-filter on upload),
+  SNMP connection-type + NIC tags + WiFi/LAN classification REMOVED, online-LED
+  fixes, and the **VPN-share stale-pin fix** — switching VPN servers used to
+  keep devices routed into the OLD tunnel (box exited via the new one): when
+  several live tunnels exist, run.py `_arbitrate_vpn_tunnel` prefers the
+  NEWEST non-bridge tun by ifindex, moves the DB pin, logs the multi-tunnel
+  state loudly, and turning the share OFF clears `vpn_share_interface` so a
+  dashboard off→on toggle forces fresh detection. Gotcha: release notes are
+  composed from this version's CHANGELOG section at tag time.
+- **(feature)** — **Through-VPN line rates: the ISP-policing defense**
+  (`run.py` + `quota/service.py` + Network tab) — live-box evidence showed
+  the ISP punishing the WHOLE international bucket (tunnel AND direct flows,
+  flat-RTT ~70-85% loss) once a sustained VLESS stream ran, so no margin
+  could help; new `shaping_vpn_total_down_mbps`/`..._up_mbps` pair (Network
+  tab): while the relay is ACTIVE and BOTH are > 0 those numbers REPLACE the
+  WAN totals fed to the shaper (no composite margin on measured values; line
+  margin still applies); relay off → WAN totals return automatically;
+  half-set pair never engages. 1 new test. Suite 693→694.
+- **(fix)** — **VPN share bufferbloat: one downloader cut the whole
+  household's internet** (`quota/shaping.py` + `run.py` + Network tab) — with
+  the relay active, WAN rates now pay an extra `shaping.vpn_share_margin_pct`
+  (default 85%, DB-editable) composed with the line margin (93×85 → ~79%): a
+  TUN's real capacity sits below the raw line, so at full shaped rate the
+  queue formed inside v2rayN/xray's userspace buffers where no AQM exists and
+  a single bulk download starved every other device's DNS/handshakes/ICMP
+  until it was paused. The vpn flag rides `_scale()`'s single choke point +
+  the state signature (tunnel up/down → automatic rebuild); `_apply_vpn_now`
+  reshapes immediately on a toggle; root/LAN/explicit caps never scaled;
+  0 = line margin only. 3 new tests. Suite 689→693.
+- **(feature)** — **Latency kill-switch: line safety margin + upload ACK
+  filtering** (`quota/shaping.py`) — the "one downloader kills everyone's
+  ping" fix at the queue level. WAN rates programmed at 93% of the configured
+  line (margin keeps the queue in the gateway's AQM, not the ISP modem);
+  upload tree queues switch to `cake ack-filter` so a download's TCP ACK
+  flood cannot drown a small uplink. Both DB-editable Network-tab knobs;
+  explicit per-device caps stay exact; 0% margin = exact legacy rates.
+  7 new tests. Suite 682→689.
+- **(feature)** — **Devices connection type (SNMP)** (`quota/snmp_bridge.py`) —
+  opt-in SNMP v2c bridge-table query (``dot1dTpFdbAddress``) to label each
+  device as Wi-Fi or Cable. Enabled from the Network tab; raw UDP with zero
+  external deps; graceful degradation on failure. Not all routers expose the
+  Bridge MIB. 17 new tests. Suite 665→682.
+- **(feature)** — **Startup self-heal** (`quota/startup_health.py`) — the app
+  now verifies critical network infrastructure on every boot and recreates
+  anything missing: the `quota_nat` masquerade table, static IPs on the LAN
+  NIC, `ip_forward`, and the `/etc/nftables.conf` symlink. All best-effort —
+  failures are logged and never prevent startup. Works in both LAN and WAN
+  topologies. Suite 655→665.
+- **(removed)** — **WiFi/LAN classification removed** — the ARP-RTT WiFi/LAN
+  classification, the WiFi probe label writer, the manual access-label pin, and
+  the WiFi/LAN chip on device cards have all been removed. No 100% reliable way
+  to determine a device's connection method from the gateway box; the feature
+  produced inaccurate labels. The ARP probe still runs for the LED connected-
+  status (responder set); `_wifi_probe_tick` still collects the monitor
+  snapshot for the yield check. Removed: `classify_rtts` call + streak guard,
+  `_wifi_probe_tick` label-writing, `POST /api/devices/{id}/access`, `GET
+  /api/wifi/ssids`, `wifi_probe_getter`, `DeviceAccessUpdate` schema,
+  `access_interface`/`access_override` from device view, WiFi/LAN chip +
+  access-label picker from device modal. 4 tests removed, 2 rewritten.
+  Suite 659→655.
+- **(fix)** — **Online LED intermittent gray / "all LEDs gray while traffic
+  flows"** — Two bugs in the connected-status chain: (1) an empty ARP sweep
+  (probe returns `{}` cleanly) wiped `_latency_responders` to `set()`, causing
+  every device to fail the membership test → ALL LEDs gray while the kernel
+  kept counting traffic. Fixed: empty sweep now preserves the old map. (2) a
+  device generating traffic could miss the 6-packet ARP burst (WiFi power-save);
+  fixed: `_collect_interfaces` now also collects IPs with active kernel neighbor
+  states (REACHABLE/STALE) into `_neigh_active_ips`; the latency tick merges
+  this into `_latency_responders`. **(fix)** — **HTTPS reverts on folder copy**
+  — `enforce-https` now persists TLS cert/key paths in the DB as well as
+  config.yaml. On startup, if config.yaml is missing TLS settings but the DB
+  and cert files on disk are present, HTTPS is auto-restored. `remove-https`
+  clears both. Suite 659.
+- **(feature)** — **WAF local-management exemption** — requests from the local
+  network (client subnet, uplink subnet, loopback) are never blocked or
+  auto-banned by the WAF, even in strict (WAN) mode. The panel must stay
+  reachable from the LAN during failures and misconfigurations. Exemption
+  configured via `WafConfig.local_subnets` (defaults to loopback; engine
+  subnets wired in at startup). Local hits are logged for audit but never
+  rejected or kernel-banned. 3 new tests. Suite 651→654.
+- **(fix)** — **VPN share addressless TUN gate + IPv4 settle** —
+  `apply()` no longer hard-rejects a TUN that lacks an IPv4 address (xray-core
+  / sing-box TUN mode). The settle gate now checks link state instead: DOWN →
+  reject, UP/UNKNOWN → route with dev-only default route. `reconcile()` only
+  clears the pin on `_iface_exists()` failure (not missing IPv4), and falls
+  back to the next detected candidate if `apply()` rejects. 1 new test +
+  2 updated. Suite 649→650.
+- **(fix)** — **Online LED detection delay** —
+  When `_sync_dnsmasq_leases` auto-registers a brand-new device, it now resets
+  `_last_latency_sweep` so the ARP probe fires in the same maintenance tick
+  (leases at 1b → sweep at 1b4). Cuts worst-case grey-to-blue from ~50 s to
+  ~20 s. The sweep cadence (30 s) is unchanged for existing devices. 1 new
+  test. Suite 650→651.
+- **(fix)** — **WiFi/LAN classification always reported WiFi** —
+  `_raw_probe` slept `inter_round_s` (20 ms) BEFORE draining ARP replies,
+  inflating every RTT by 20 ms (above the 1.0 ms LAN threshold), so ALL
+  devices were classified WiFi. Fixed by swapping the sleep/drain order: drain
+  first, then sleep before the next sweep round. Also removed the `-q` flag
+  from `ping` in the fallback path which suppressed `time=` output. 0 new
+  tests (existing 10 latency_probe tests pass). Suite 651.
 - **(fix)** — **VPN share TUN detection + existence fallback** —
   `detect_interfaces()` and `_iface_exists()` gained ip-route2 fallbacks
   (`ip -o -d link show` for detection, `ip link show dev` for existence)
