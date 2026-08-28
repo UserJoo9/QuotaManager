@@ -369,6 +369,7 @@ class Gateway:
         self._stop_event = asyncio.Event()
         #: last audit-trail (events table) prune's clock, for the hourly gate
         self._last_events_prune = time.monotonic()
+        self._last_wan_renew = time.monotonic()
         #: last-applied tc state, mirrored out of the shaper for the Network
         #: panel's "applying…" indicator (shaper.applied is a property — read
         #: it once per tick, off the tc call itself). Defaults assume applied
@@ -1181,29 +1182,36 @@ class Gateway:
             snap = await asyncio.to_thread(self.engine.flush)
             live_by_ip = snap.by_ip
             today = _dt.date.today().isoformat()
-            if snap.by_ip:
-                for ip, counters in snap.by_ip.items():
-                    if counters.up == 0 and counters.down == 0:
-                        continue
-                    mac = snap.ip_to_mac.get(ip)
-                    if not mac:
-                        mac = await self.database.get_mac_for_ip(ip)
-                    if not mac:
-                        continue  # IP not tied to a known device
-                    dev = await self.database.get_device(mac=mac)
-                    if dev is None:
-                        continue
-                    await self.database.add_usage(
-                        dev.id, today, counters.up, counters.down)
-            # The box's OWN internet (input/output hooks, q_gw_* counters):
-            # charged to the protected "Gateway" user's device so the machine's
-            # bundle consumption sits inside the quota math. The box's MAC has
-            # no lease, so it never appears in snap.by_ip — only in snap.gateway.
-            if snap.gateway.up or snap.gateway.down:
-                box = await self.database.get_device(mac=GATEWAY_MAC)
-                if box is not None:
-                    await self.database.add_usage(
-                        box.id, today, snap.gateway.up, snap.gateway.down)
+            if snap.by_ip or snap.gateway.up or snap.gateway.down:
+                devices = await self.database.list_devices()
+                devices_by_mac = {d.mac.lower(): d for d in devices}
+                usage_records: list[tuple[int, str, int, int]] = []
+
+                if snap.by_ip:
+                    for ip, counters in snap.by_ip.items():
+                        if counters.up == 0 and counters.down == 0:
+                            continue
+                        mac = snap.ip_to_mac.get(ip)
+                        if not mac:
+                            mac = await self.database.get_mac_for_ip(ip)
+                        if not mac:
+                            continue  # IP not tied to a known device
+                        dev = devices_by_mac.get(mac.lower())
+                        if dev is None:
+                            continue
+                        usage_records.append((dev.id, today, counters.up, counters.down))
+
+                # The box's OWN internet (input/output hooks, q_gw_* counters):
+                # charged to the protected "Gateway" user's device so the machine's
+                # bundle consumption sits inside the quota math. The box's MAC has
+                # no lease, so it never appears in snap.by_ip — only in snap.gateway.
+                if snap.gateway.up or snap.gateway.down:
+                    box = devices_by_mac.get(GATEWAY_MAC.lower())
+                    if box is not None:
+                        usage_records.append((box.id, today, snap.gateway.up, snap.gateway.down))
+
+                if usage_records:
+                    await self.database.add_usage_batch(usage_records)
 
         # 3. Recompute block states from usage vs allowances.
         changes = await self.service.evaluate_blocks()
