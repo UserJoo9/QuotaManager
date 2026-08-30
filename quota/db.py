@@ -1041,6 +1041,20 @@ class Database:
         )
         await self.conn.commit()
 
+    async def add_usage_batch(self, records: list[tuple[int, str, int, int]]) -> None:
+        """Insert or update usage records for multiple devices in a single batch transaction."""
+        if not records:
+            return
+        await self.conn.executemany(
+            """INSERT INTO usage_daily (device_id, date, up_bytes, down_bytes)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(device_id, date) DO UPDATE SET
+                 up_bytes = up_bytes + excluded.up_bytes,
+                 down_bytes = down_bytes + excluded.down_bytes""",
+            records,
+        )
+        await self.conn.commit()
+
     async def get_usage(self, device_id: int, since_date: str = "") -> dict[str, int]:
         """Return {up_bytes, down_bytes, total_bytes} for a device since a date."""
         if since_date:

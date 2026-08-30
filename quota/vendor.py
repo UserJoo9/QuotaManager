@@ -42,7 +42,7 @@ def _load() -> dict[str, str]:
             for line in fh:
                 prefix, _, vendor = line.rstrip("\n").partition("\t")
                 if len(prefix) in (6, 7, 9) and vendor:
-                    vendors[prefix] = vendor
+                    vendors[prefix] = _display(vendor)
     except OSError:
         pass
     _vendors = vendors
@@ -75,5 +75,5 @@ def vendor_for(mac: str) -> str:
         if len(raw) >= cut:
             name = vendors.get(raw[:cut])
             if name:
-                return _display(name)
+                return name
     return ""

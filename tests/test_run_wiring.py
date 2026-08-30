@@ -40,6 +40,14 @@ def _cfg(tmp_path) -> cfg_mod.Config:
     return cfg
 
 
+@pytest.fixture(autouse=True)
+def _setup_event_loop():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    yield loop
+    loop.close()
+
+
 def _cancel_maintenance(gw: Gateway) -> None:
     """Stop the background maintenance loop a test's manual ticks can't race it.
 
