@@ -1,3 +1,4 @@
+from __future__ import annotations
 
 import asyncio
 _cached_loop = None
@@ -14,9 +15,8 @@ then boots uvicorn and exercises the API + WebSocket. Verifies the maintenance
 loop ticks and pushes enforcement state.
 """
 
-from __future__ import annotations
 
-import asyncio
+# import asyncio
 import os
 import time
 from datetime import datetime, timedelta, timezone

@@ -6,7 +6,7 @@ import asyncio
 import time
 
 import pytest
-import asyncio
+# import asyncio
 _cached_loop = None
 def _get_loop():
     global _cached_loop

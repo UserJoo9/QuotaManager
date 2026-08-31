@@ -1,3 +1,4 @@
+from __future__ import annotations
 
 import asyncio
 _cached_loop = None
@@ -27,9 +28,8 @@ Every test shuts the manager down (the safe-apply watchdog schedules an
 at exit) — the ``env`` fixture guarantees it via ``yield``/finally.
 """
 
-from __future__ import annotations
 
-import asyncio
+# import asyncio
 import json
 from typing import Any, NamedTuple
 

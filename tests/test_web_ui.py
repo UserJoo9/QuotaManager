@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-import asyncio
+# import asyncio
 _cached_loop = None
 def _get_loop():
     global _cached_loop
