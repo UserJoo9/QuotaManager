@@ -1,48 +1,48 @@
 /* ============================================================
-   Quota Manager — obsidian glass UI
-   (midnight obsidian, electric-cobalt accent, dark glassmorphism)
+   Quota Manager — Solid Clean UI
+   (midnight obsidian, electric-cobalt accent, modern solid dark)
    ============================================================ */
 
 :root {
   --bg: #07080A;              /* midnight obsidian — page base */
   --bg-2: #0D0E12;            /* elevated obsidian — sidebar / login */
-  --surface: rgba(22, 27, 38, 0.45);   /* main cards & summary cards — frosted */
-  --surface-panel: rgba(13, 16, 23, 0.55); /* sidebar & container panels — frosted */
-  --surface-2: rgba(255, 255, 255, 0.05); /* glass hover / elevated */
-  --surface-3: rgba(255, 255, 255, 0.08); /* subtle glass tint */
-  --border: rgba(255, 255, 255, 0.08);
-  --border-soft: rgba(255, 255, 255, 0.05);
-  --text: #EAEDF2;
-  --text-dim: #A6ADB8;
-  --text-faint: #6B7280;
-  --accent: #3B82F6;          /* electric cobalt — primary / active */
+  --surface: #161B26;         /* main cards & summary cards — solid */
+  --surface-panel: #0D1017;   /* sidebar & container panels — solid */
+  --surface-2: #1E2533;       /* hover / elevated */
+  --surface-3: #2A3347;       /* subtle highlight */
+  --border: #2A3347;
+  --border-soft: #1E2533;
+  --text: #F8FAFC;            /* brighter text for contrast */
+  --text-dim: #CBD5E1;        /* brighter dim text */
+  --text-faint: #94A3B8;
+  --accent: #3B82F6;          
   --accent-hover: #2563EB;
-  --accent-2: #2563EB;        /* deep cobalt (gradient stops) */
-  --accent-3: #60A5FA;        /* light cobalt (text highlights) */
-  --danger: #DC2626;          /* muted crimson — blocked / errors */
-  --warn: #D97706;            /* muted amber */
+  --accent-2: #2563EB;        
+  --accent-3: #60A5FA;        
+  --danger: #EF4444;          /* brighter red */
+  --warn: #F59E0B;            /* brighter amber */
   --ok: #3B82F6;
-  --up: #60A5FA;              /* upload — soft cobalt blue */
-  --down: #22D3EE;            /* download — cyan */
-  --off: #6B7280;             /* idle slate */
-  --glass-filter: blur(16px) saturate(180%); /* strong frosted panel filter */
-  --glass-card-bg: rgba(22, 27, 38, 0.45);   /* main / summary card surface */
-  --glass-panel-bg: rgba(13, 16, 23, 0.55);  /* sidebar / container panel surface */
-  --glass-border: rgba(255, 255, 255, 0.08);
-  --glass-inner: inset 0 1px 0 0 rgba(255, 255, 255, 0.05), 0 8px 32px 0 rgba(0, 0, 0, 0.37);
-  --glow: 0 0 15px rgba(59, 130, 246, 0.25); /* soft cobalt ambient meter glow */
-  --glow-bar: 0 0 12px rgba(59, 130, 246, 0.5);   /* live progress bar glow */
-  --glow-switch: 0 0 10px rgba(59, 130, 246, 0.4); /* active toggle glow */
+  --up: #60A5FA;              
+  --down: #22D3EE;            
+  --off: #64748B;             
+  --glass-filter: none;       /* removed blur */
+  --glass-card-bg: #161B26;   
+  --glass-panel-bg: #0D1017;  
+  --glass-border: #2A3347;
+  --glass-inner: none;        /* removed heavy inset shadows */
+  --glow: none;               /* removed unnecessary glows */
+  --glow-bar: none;           
+  --glow-switch: none;        
   --mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, "Liberation Mono", monospace;
-  /* legacy glass aliases — the /milestone + /report pages still reference them */
-  --glass-bg: rgba(22, 27, 38, 0.45);
-  --glass-bg-2: rgba(255, 255, 255, 0.05);
+  /* legacy glass aliases */
+  --glass-bg: #161B26;
+  --glass-bg-2: #1E2533;
   --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 12px;
   --radius-xl: 14px;
-  --shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.28);
-  --shadow-lg: 0 8px 28px rgba(0, 0, 0, 0.5), 0 24px 60px rgba(3, 8, 20, 0.55);
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 4px 12px rgba(0, 0, 0, 0.2);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
 }
 

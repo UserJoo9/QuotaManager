@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quota Manager</title>
     <link rel="stylesheet" href="/assets/styles.css?v=51">
+  <script src="/assets/purify.min.js"></script>
   <script disable-devtool-auto src='/assets/detector.js'></script>
 </head>
 <body>
@@ -15,13 +16,13 @@
   <div id="login-screen" class="screen hidden">
     <div class="glass card login-card">
       <h1 class="logo">Quota<span>Manager</span></h1>
-      <p class="subtitle">Split your monthly internet fairly between devices.</p>
+      <p class="subtitle">Internet Quota Management</p>
       <form id="login-form" autocomplete="off">
         <label for="login-password">Admin password</label>
         <input type="password" id="login-password" placeholder="••••••••" required>
         <label for="login-totp" id="login-totp-label" class="hidden">Authenticator code</label>
         <input type="text" id="login-totp" inputmode="numeric" autocomplete="one-time-code" placeholder="000 000" class="hidden">
-        <button type="submit" class="btn primary" id="login-submit">Unlock dashboard</button>
+        <button type="submit" class="btn primary" id="login-submit">Login</button>
         <p id="login-error" class="error hidden">Wrong password. Try again.</p>
       </form>
     </div>
@@ -447,11 +448,8 @@
         <div class="two-col">
         <div class="glass card settings-card">
           <div id="wan-restart-banner" class="banner hidden"></div>
-          <h3>WAN mode (strong security)</h3>
-          <p class="muted small">By default the box sits <strong>behind</strong> the
-            router: clients get their own subnet from the quota DHCP and the router
-            keeps WiFi + NAT. A determined user can still bypass the quota by setting
-            a static IP + the router as its gateway.</p>
+          <h3>WAN mode</h3>
+            <p class="muted small">Protect internal network from upstream.</p>
           <p class="muted small">WAN mode closes that hole at the topology level:
             the box itself dials the <strong>PPPoE line</strong> (public IP on
             ppp0) and the router becomes a pure bridge/AP — a static-IP device then
@@ -621,10 +619,8 @@
 
           <!-- SERVICES + PORT FORWARDS + DMZ -->
           <div class="glass card settings-card">
-            <h3>Box services (WAN exposure)</h3>
-            <p class="muted small">Services reachable from the internet on ppp0 under WAN mode.
-              The dashboard port is <strong>never</strong> exposed unless <code>wan_confirmed</code>
-              is enabled. Port forwards + DMZ are WAN-mode only (rejected with 409 in LAN mode).</p>
+            <h3>Box services</h3>
+            <p class="muted small">Services reachable from the internet.</p>
             <div id="fw-services" class="fw-rule-list"></div>
             <div class="section-head" style="margin-top:14px">
               <h3>Port forwards / DMZ</h3>
@@ -743,8 +739,7 @@
           </div>
           <div class="glass card settings-card">
             <h3>Firewall log</h3>
-            <p class="muted small">Ban / drop / config events. Counter-driven drops are
-              aggregated per rule (source IPs are surfaced for bans the box initiates).</p>
+            <p class="muted small">Recent firewall events.</p>
             <div id="fw-log" class="fw-log"></div>
           </div>
         </div>
@@ -759,8 +754,8 @@
           <div class="admin-grid">
             <!-- SECURITY & CREDENTIALS -->
             <div class="glass card">
-              <h3>Security &amp; Credentials</h3>
-              <p class="muted small">Change the dashboard password used to sign in.</p>
+              <h3>Security</h3>
+            <p class="muted small">Manage your password.</p>
               <a id="password-link" class="link">Change password</a>
               <span class="link-sep">·</span>
               <a id="totp-link" class="link">Two-factor (TOTP)</a>
@@ -782,9 +777,8 @@
 
             <!-- SOFTWARE UPDATES -->
             <div class="glass card updates-card">
-              <h3>Software updates</h3>
-              <p class="muted small">Checks the GitHub repo for a newer release every
-                24&nbsp;h and notifies the dashboard when one is available.</p>
+              <h3>Updates</h3>
+            <p class="muted small">System software updates.</p>
               <div class="updates-grid">
                 <div class="about-row">
                   <span class="muted">Current</span>
@@ -891,17 +885,13 @@
       <section id="panel-dns" class="nav-panel hidden">
         <div class="glass card">
           <h3>Blocklist presets</h3>
-          <p class="muted small">Ready-to-use domain lists. Enabling one fetches
-            + compiles its source(s) into rules for the household (or a
-            specific user/device below); disabling removes exactly those
-            rules again.</p>
+            <p class="muted small">Enable automatic domain blocklists.</p>
           <div id="dns-presets-list" class="dns-presets-list"></div>
         </div>
 
         <div class="glass card">
           <h3>Domain rules</h3>
-          <p class="muted small">Block, allow, or redirect a domain (and every
-            subdomain of it) globally, for one user, or for one device.</p>
+            <p class="muted small">Manage custom domain rules.</p>
           <form id="dns-rule-form" class="dns-rule-form">
             <select id="dns-rule-scope" title="Scope">
               <option value="global" selected>Global (everyone)</option>
@@ -932,10 +922,7 @@
 
         <div class="glass card">
           <h3>Import a blocklist</h3>
-          <p class="muted small">Paste a hosts-format (<code>0.0.0.0 domain</code>)
-            or AdBlock-Plus-format (<code>||domain^</code>) list. Only the
-            domain-shaped rules translate to DNS blocking — element-hiding
-            and path rules are skipped.</p>
+            <p class="muted small">Import hosts-format lists.</p>
           <form id="dns-import-form" class="dns-import-form">
             <textarea id="dns-import-text" rows="6"
                       placeholder="0.0.0.0 ads.example.com&#10;||tracker.example.net^"></textarea>
@@ -968,7 +955,7 @@
   <div id="modal" class="modal hidden">
     <div class="glass card modal-card">
       <h3 id="modal-title">Add device</h3>
-      <p id="modal-sub" class="muted">New devices from DHCP appear automatically. Add one by MAC.</p>
+      <p id="modal-sub" class="muted">Add a new device by MAC address.</p>
       <form id="device-form">
         <div id="d-mac-wrap">
           <label for="d-mac">MAC address</label>
@@ -1040,7 +1027,7 @@
   <div id="user-modal" class="modal hidden">
     <div class="glass card modal-card">
       <h3 id="user-modal-title">Add user</h3>
-      <p id="user-modal-sub" class="muted">A user's devices share one allowance.</p>
+      <p id="user-modal-sub" class="muted">Group devices under one user allowance.</p>
       <form id="user-form">
         <label for="u-name">Name</label>
         <input id="u-name" placeholder="e.g. Youssef">
@@ -1091,7 +1078,7 @@
   <div id="pwd-modal" class="modal hidden">
     <div class="glass card modal-card">
       <h3>Change password</h3>
-      <p class="muted small">12+ chars, mix of upper/lower/digit/symbol, not a common password.</p>
+      <p class="muted small">Use a strong password (12+ characters).</p>
       <form id="pwd-form">
         <label for="p-cur">Current password</label>
         <input type="password" id="p-cur" required>
