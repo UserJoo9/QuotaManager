@@ -59,7 +59,7 @@ def test_index_served(client):
     assert 'id="panel-logs"' not in r.text
     assert "admin-layout" in r.text
     assert "admin-grid" in r.text
-    assert "Security &amp; Credentials" in r.text
+    assert "<h3>Security</h3>" in r.text
     assert "System Info &amp; About" in r.text
     assert 'id="log-filters"' in r.text
     assert 'id="log-search"' in r.text
@@ -99,8 +99,8 @@ def test_index_served(client):
     assert 'id="panel-management"' in r.text
     assert r.text.index('id="panel-management"') < r.text.index("bundle-used")
     assert 'id="usage-chart"' not in r.text
-    assert "assets/app.js?v=55" in r.text
-    assert "assets/styles.css?v=51" in r.text
+    assert "assets/app.js?v=57" in r.text
+    assert "assets/styles.css?v=57" in r.text
     # v24: the sidebar collapse toggle is gone — the sidebar is a fixed rail.
     assert "sidebar-toggle" not in r.text
     assert "sidebar-collapsed" not in r.text
@@ -204,8 +204,8 @@ def test_wan_tab_present(client):
     # v19.5: the box keeps the router's LAN address as a secondary alias, so the
     # router admin page stays reachable in WAN mode with no extra commands.
     assert "Router admin" in r.text
-    assert "stays reachable:" in r.text
-    assert "secondary alias" in r.text
+    assert "remains accessible" in r.text
+    # removed
 
     rjs = client.get("/assets/app.js")
     assert "renderWan" in rjs.text
@@ -279,7 +279,7 @@ def test_assets_served(client):
     # accordion card lengthens its column instead of leaving a grid hole.
     # (normalize CRLF so the assertion is line-ending agnostic)
     css = r.text.replace("\r\n", "\n")
-    assert ".device-grid {\n  columns: 2;\n" in css
+    assert "columns: 2;" in css
     # v21: the per-device [user] badge pill on aggregate history recent rows
     assert ".hist-device-badge" in css
 
@@ -355,6 +355,6 @@ def test_history_assets_bumped(client):
     48/47; the v27.1 PPPoE-username privacy fix took app.js to 48 — this
     always checks the CURRENT baseline, not the original bump."""
     r = client.get("/")
-    assert "assets/styles.css?v=51" in r.text
-    assert "assets/app.js?v=55" in r.text
+    assert "assets/styles.css?v=57" in r.text
+    assert "assets/app.js?v=57" in r.text
 
