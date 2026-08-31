@@ -2128,7 +2128,12 @@ def create_app(
         secret is never served again (re-enrollment resets it)."""
         if not await _totp_enabled():
             pending = await database.get_setting("totp_pending", "") == "1"
-            return {"enabled": False, "pending": pending}
+            res: dict[str, Any] = {"enabled": False, "pending": pending}
+            if pending:
+                secret = await database.get_setting("totp_secret", "")
+                res["secret"] = secret
+                res["otpauth_uri"] = _totp.otpauth_uri(secret)
+            return res
         return {"enabled": True}
 
     @app.post("/api/totp/enroll", dependencies=[Depends(_require_auth)])

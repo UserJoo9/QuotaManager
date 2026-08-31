@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quota Manager</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=51">
+    <link rel="stylesheet" href="/assets/styles.css?v=57">
   <script src="/assets/purify.min.js"></script>
   <script disable-devtool-auto src='/assets/detector.js'></script>
 </head>
@@ -44,9 +44,7 @@
     <!-- SECURITY ALERTING (failed logins / weak password / WAN-over-HTTP) -->
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-brand">
-        <span class="brand-badge" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="M3.3 7.4 12 12l8.7-4.6"/><path d="M12 22V12"/></svg>
-        </span>
+        <img src="/assets/logo.png" class="brand-logo" aria-hidden="true" alt="Logo">
         <h1 class="logo">Quota<span>Manager</span></h1>
       </div>
       <nav class="side-nav" aria-label="Sections">
@@ -159,9 +157,14 @@
         </section>
 
         <section class="section">
-          <div class="section-head">
-            <h2>Users &amp; devices</h2>
-            <div class="head-actions">
+          <div class="section-head" style="flex-wrap: wrap; gap: 10px;">
+              <h2>Users &amp; devices</h2>
+              <div class="head-actions" style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                <select id="layout-toggle" class="btn ghost small" style="padding: 4px 10px; height: 32px; font-size: 0.8rem; background: transparent; border: 1px solid var(--border); color: var(--text);" title="Change Layout">
+                  <option value="masonry">Masonry (Columns)</option>
+                  <option value="grid">Grid (Fixed Rows)</option>
+                  <option value="list">List (Single Column)</option>
+                </select>
               <button id="add-user-btn" class="btn ghost small">＋ Add user</button>
               <button id="add-device-btn" class="btn primary small">＋ Add device</button>
             </div>
@@ -282,12 +285,7 @@
             <div class="toggle-row">
               <div class="toggle-info">
                 <span class="toggle-title">Decline random MACs</span>
-                <p class="toggle-help">Randomized (privacy) MAC addresses — the
-                  kind phones and laptops rotate — carry no vendor OUI, so the
-                  box can't identify or budget them. While on, a brand-new
-                  device with a random MAC is refused at the DHCP level: it
-                  never gets an IP to join. Real devices (known vendor MACs)
-                  are never gated.</p>
+                <p class="toggle-help">Block new devices using randomized/privacy MAC addresses from joining the network.</p>
               </div>
               <label class="switch" title="Refuse brand-new devices with randomized MACs">
                 <input type="checkbox" id="decline-random-toggle">
@@ -331,10 +329,7 @@
             <div class="toggle-row">
               <div class="toggle-info">
                 <span class="toggle-title">Speed limits &amp; latency (bufferbloat control)</span>
-                <p class="toggle-help">Master switch for speed shaping. Off = no limits
-                  and no low-latency queues. Caps every device's internet speed (set in
-                  the device/user modals) and keeps game ping low while others upload
-                  or download. Only applies on the Linux gateway.</p>
+                <p class="toggle-help">Enable per-device speed limits and Smart Queue Management (SQM) to keep pings low.</p>
               </div>
               <label class="switch" title="Enable per-device / per-user speed limits">
                 <input type="checkbox" id="shaping-toggle">
@@ -343,19 +338,13 @@
             </div>
             <div class="toggle-sub">
               <p class="muted small"><strong>WAN — internet</strong></p>
-              <p class="muted small">Real line speed — set these to the DOWNLOAD /
-                UPLOAD rate your ISP gives you (e.g. 100 / 20 Mbps). The queue then
-                forms at the gateway where it can keep pings low under load — that's
-                what stops bufferbloat.</p>
+              <p class="muted small">Enter your actual ISP speed to optimize queuing and fix bufferbloat.</p>
               <div class="recharge-row">
                 <input type="number" id="set-total-down" min="0" step="any" placeholder="WAN down Mbps">
                 <input type="number" id="set-total-up" min="0" step="any" placeholder="WAN up Mbps">
               </div>
               <p class="muted small"><strong>LAN — internal transfers</strong></p>
-              <p class="muted small">Traffic between clients and your local network
-                (NAS, router admin, LAN transfers) is <em>not</em> internet — the WAN
-                caps above must never throttle it. This is the LAN link rate the
-                pass-through allows (0 = 1000 Mbps default).</p>
+              <p class="muted small">Maximum allowed speed for internal local network transfers (0 = 1000 Mbps default).</p>
               <div class="recharge-row">
                 <input type="number" id="set-lan-rate" min="0" step="any" placeholder="LAN Mbps">
               </div>
@@ -365,15 +354,7 @@
             <div class="toggle-row">
               <div class="toggle-info">
                 <span class="toggle-title">VPN share (TUN mode)</span>
-                <p class="toggle-help">Routes <strong>every device's</strong> internet
-                  through the box's VPN connection — one VPN for the whole household.
-                  Start the VPN client on the gateway in <strong>TUN mode</strong>
-                  (sing-box / xray / WireGuard / tun2socks over any SOCKS/HTTP proxy)
-                  and flip this on: the box auto-detects the tunnel and policy-routes
-                  the client subnet into it. Quota counting, blocks, and speed caps
-                  keep applying — the bytes just exit at the VPN provider's IP. While
-                  ON, you can cut the Gateway's own internet — the box keeps ONLY its
-                  connection to the VPN server open automatically.</p>
+                <p class="toggle-help">Route all network traffic through the gateway\'s active VPN tunnel (TUN mode).</p>
               </div>
               <label class="switch" title="Share the box's VPN across all devices">
                 <input type="checkbox" id="vpn-toggle">
@@ -450,20 +431,9 @@
           <div id="wan-restart-banner" class="banner hidden"></div>
           <h3>WAN mode</h3>
             <p class="muted small">Protect internal network from upstream.</p>
-          <p class="muted small">WAN mode closes that hole at the topology level:
-            the box itself dials the <strong>PPPoE line</strong> (public IP on
-            ppp0) and the router becomes a pure bridge/AP — a static-IP device then
-            has <strong>no second router to bypass to</strong>, so every byte
-            crosses the box.</p>
-          <p class="muted small" style="margin-top:8px"><strong>Router admin
-            stays reachable:</strong> the box keeps the router's LAN address as a
-            secondary alias, so you (and every device) can still open the router
-            admin page — no extra commands on any device.</p>
+          <p class="muted small">Gateway dials PPPoE directly for maximum security. Router admin page remains accessible.</p>
           <div class="guest-head">
-            <span class="muted small">Select the mode and press <strong>Apply</strong> —
-              the gateway rewires itself (NIC, DHCP/DNS, the PPPoE dial) and
-              <strong>restarts automatically</strong>. No setup script, no terminal.
-              The saved preference also applies on the next restart.</span>
+            <span class="muted small">Select mode and press <strong>Apply</strong> to automatically restart the gateway.</span>
             <label class="switch" title="Desired mode: on = WAN (strong), off = LAN">
               <input type="checkbox" id="wan-toggle">
               <span class="slider"></span>
@@ -495,32 +465,14 @@
           </div>
           <hr class="sep">
           <h3>Guide — how to switch your router</h3>
-          <p class="muted small">Two physical layouts. Both work with the routers
-            most Egyptian homes have (WE ZTE/Huawei, Orange Livebox, Vodafone,
-            e&amp;).</p>
+          <p class="muted small">How to switch:</p>
           <ol class="guide">
-            <li><strong>Put the router in BRIDGE / MODEM mode</strong> (WAN↔LAN
-              bridged, NAT + DHCP off, WiFi on). Look for <code>Bridge</code>,
-              <code>Modem</code> or <code>WAN mode</code> in the router's WAN
-              settings. ISP-locked combos may need a bridge-unlock code or an
-              ISP call.</li>
-            <li><strong>Enter your PPPoE credentials in the fields above</strong>
-              (username + password, from your ISP card or the router's WAN status
-              page). Press <strong>Test PPPoE connection</strong> first — it dials
-              a throwaway link and tells you if the ISP accepts them — then
-              <strong>Apply now</strong>. The gateway dials the line itself and
-              restarts.</li>
-            <li><strong>Two-NIC fallback (universal):</strong> if your router
-              can't bridge, set it to <strong>AP mode</strong> (WiFi only, DHCP
-              off — supported by every router), connect NIC1 of the box straight
-              to the ONT/modem to dial PPPoE, and NIC2 to the AP. Put the second
-              NIC's name (e.g. <code>eth1</code>) in the <strong>WAN
-              interface</strong> field. Needs a cheap USB Ethernet dongle.</li>
+            <li><strong>Put the router in BRIDGE / MODEM mode</strong>.</li>
+            <li><strong>Enter PPPoE credentials</strong> above and click <strong>Apply now</strong>.</li>
+            <li><strong>Two-NIC fallback:</strong> Set AP mode, connect ONT to NIC1, AP to NIC2. Enter NIC2 name in WAN interface.</li>
           </ol>
           <hr class="sep">
-          <p class="muted small"><strong>Reverting:</strong> press <strong>Revert to
-            LAN</strong> above — the gateway restores the router uplink and restarts.
-            The router itself must be back in routed mode first (undo the bridge).</p>
+          <p class="muted small"><strong>Reverting:</strong> Press <strong>Revert to LAN</strong> and undo router bridge mode.</p>
         </div>
 
         <!-- WAN STATUS PREVIEW (right column) -->
@@ -1196,6 +1148,7 @@
     </div>
   </div>
 
-    <script src="/assets/app.js?v=55"></script>
+    <script src="/assets/qrcode.min.js"></script>
+    <script src="/assets/app.js?v=57"></script>
 </body>
 </html>

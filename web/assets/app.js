@@ -2580,34 +2580,50 @@ async function openTotp() {
     const st = await API.get("/api/totp");
     let body;
     if (st.enabled) {
-      body = `<p class="muted small">Two-factor is <strong>enabled</strong> — every login now needs a 6-digit code from your authenticator app.</p>
-        <div class="modal-actions">
+        body = `<p class="muted small">Two-factor is <strong>enabled</strong> — every login now needs a 6-digit code 
+from your authenticator app.</p>
+          <div class="modal-actions">
           <button type="button" id="totp-close" class="btn ghost">Close</button>
           <button type="button" id="totp-disable" class="btn danger">Disable 2FA</button>
-        </div>`;
-    } else if (st.pending) {
-      body = `<p class="muted small">Enrollment pending — enter the code your authenticator app shows to confirm.</p>
+          </div>`;
+        $("totp-body").innerHTML = body;
+      } else {
+        let secret, uri;
+        if (st.pending) {
+            secret = st.secret;
+            uri = st.otpauth_uri;
+        } else {
+            const enr = await API.post("/api/totp/enroll");
+            $("totp-state").textContent = "A pending";
+            secret = enr.secret;
+            uri = enr.otpauth_uri;
+        }
+        body = `<p class="muted small">Scan this QR Code with your authenticator app:</p>
+        <div id="totp-qr" style="margin: 16px auto; width: 200px; height: 200px; background: #fff; padding: 10px; border-radius: 8px; display: flex; align-items: center; justify-content: center;"></div>
+        <p class="muted small">Or type the secret manually:</p>
+        <div class="totp-secret" style="margin-bottom: 14px; word-break: break-all;">${secret}</div>
         <input type="text" id="totp-code" inputmode="numeric" placeholder="000 000" required>
         <p id="totp-err" class="error hidden"></p>
         <div class="modal-actions">
           <button type="button" id="totp-close" class="btn ghost">Cancel</button>
           <button type="button" id="totp-enable" class="btn primary">Enable</button>
         </div>`;
-    } else {
-      const enr = await API.post("/api/totp/enroll");
-      $("totp-state").textContent = "· pending";
-      body = `<p class="muted small">Scan this with your authenticator app (or type the secret manually):</p>
-        <div class="totp-secret">${enr.secret}</div>
-        <p class="muted small">URI: <code>${enr.otpauth_uri}</code></p>
-        <input type="text" id="totp-code" inputmode="numeric" placeholder="000 000" required>
-        <p id="totp-err" class="error hidden"></p>
-        <div class="modal-actions">
-          <button type="button" id="totp-close" class="btn ghost">Cancel</button>
-          <button type="button" id="totp-enable" class="btn primary">Enable</button>
-        </div>`;
-    }
-    $("totp-body").innerHTML = body;
-    $("totp-modal").classList.remove("hidden");
+        
+        $("totp-body").innerHTML = body;
+        
+        const qrEl = document.getElementById("totp-qr");
+        if (qrEl && typeof QRCode !== "undefined") {
+            new QRCode(qrEl, {
+                text: uri,
+                width: 180,
+                height: 180,
+                colorDark: "#000000",
+                colorLight: "#ffffff",
+                correctLevel: QRCode.CorrectLevel.M
+            });
+        }
+      }
+      $("totp-modal").classList.remove("hidden");
     $("totp-close").addEventListener("click", () => $("totp-modal").classList.add("hidden"));
     const enableBtn = $("totp-enable");
     if (enableBtn) enableBtn.addEventListener("click", enableTotp);
@@ -2736,6 +2752,20 @@ async function init() {
   });
   $("setup-period-type").addEventListener("change", updateResetDayAvailability);
   $("add-user-btn").addEventListener("click", () => openUserModal(null));
+
+    const layoutToggle = $("layout-toggle");
+    if (layoutToggle) {
+      const savedLayout = localStorage.getItem("qm-device-layout") || "grid";
+      layoutToggle.value = savedLayout;
+      const deviceList = $("devices-list");
+      deviceList.className = `device-grid layout-${savedLayout}`;
+      
+      layoutToggle.addEventListener("change", (e) => {
+        const val = e.target.value;
+        localStorage.setItem("qm-device-layout", val);
+        deviceList.className = `device-grid layout-${val}`;
+      });
+    }
   $("add-device-btn").addEventListener("click", () => openDeviceModal(null));
   $("modal-cancel").addEventListener("click", closeModal);
   $("user-modal-cancel").addEventListener("click", closeUserModal);

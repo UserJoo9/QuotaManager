@@ -5,6 +5,15 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+import asyncio
+_cached_loop = None
+def _get_loop():
+    global _cached_loop
+    if _cached_loop is None or _cached_loop.is_closed():
+        _cached_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_cached_loop)
+    return _cached_loop
+
 from fastapi.testclient import TestClient
 
 from api.app import create_app
@@ -18,12 +27,12 @@ def client(tmp_path):
     database = _db.Database(tmp_path / "ui.db")
     service = QuotaService(database, timezone="Africa/Cairo")
     holder = SnapshotHolder()
-    asyncio.get_event_loop().run_until_complete(database.connect())
+    _get_loop().run_until_complete(database.connect())
     app = create_app(database, service, holder)
     with TestClient(app) as c:
         c.post("/api/login", json={"password": "admin"})
         yield c
-    asyncio.get_event_loop().run_until_complete(database.close())
+    _get_loop().run_until_complete(database.close())
 
 
 def test_index_served(client):

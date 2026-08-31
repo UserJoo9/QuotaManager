@@ -116,6 +116,13 @@ _register(Preset(
     format="hosts",
 ))
 _register(Preset(
+    id="porn",
+    name="Adult content (Porn)",
+    description="Blocks adult websites and pornographic content (StevenBlack/hosts alternates).",
+    urls=["https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/porn-only/hosts"],
+    format="hosts",
+))
+_register(Preset(
     id="gambling",
     name="Gambling",
     description="Online gambling / betting sites (StevenBlack/hosts alternates).",

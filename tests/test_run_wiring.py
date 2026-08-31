@@ -1,3 +1,12 @@
+
+import asyncio
+_cached_loop = None
+def _get_loop():
+    global _cached_loop
+    if _cached_loop is None or _cached_loop.is_closed():
+        _cached_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_cached_loop)
+    return _cached_loop
 """End-to-end smoke test of the run.py wiring (no admin privileges needed).
 
 Builds a Gateway from config with the packet engine / DHCP subsystems disabled,
@@ -62,7 +71,7 @@ def _cancel_maintenance(gw: Gateway) -> None:
         return
     task.cancel()
     try:
-        asyncio.get_event_loop().run_until_complete(task)
+        _get_loop().run_until_complete(task)
     except asyncio.CancelledError:
         pass
 
@@ -426,19 +435,19 @@ def test_lease_persists_and_device_auto_registered(tmp_path):
     """Simulate a DHCP lease: device should be auto-registered."""
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     try:
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("aa:bb:cc:dd:ee:11", "192.168.1.100"))
-        dev = asyncio.get_event_loop().run_until_complete(
+        dev = _get_loop().run_until_complete(
             gw.database.get_device(mac="aa:bb:cc:dd:ee:11"))
         assert dev is not None, "unknown MAC should be auto-registered"
         assert dev.user_id is not None, "auto-registered device must own a user"
-        ip = asyncio.get_event_loop().run_until_complete(
+        ip = _get_loop().run_until_complete(
             gw.database.get_ip_for_mac("aa:bb:cc:dd:ee:11"))
         assert ip == "192.168.1.100"
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_new_device_auto_registers_disabled_until_admin_assigns(tmp_path):
@@ -447,35 +456,35 @@ def test_new_device_auto_registers_disabled_until_admin_assigns(tmp_path):
     (user/device modal) is the ONLY way it comes online."""
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     try:
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("aa:bb:cc:dd:ee:12", "192.168.1.101"))
-        dev = asyncio.get_event_loop().run_until_complete(
+        dev = _get_loop().run_until_complete(
             gw.database.get_device(mac="aa:bb:cc:dd:ee:12"))
         assert dev is not None
-        user = asyncio.get_event_loop().run_until_complete(
+        user = _get_loop().run_until_complete(
             gw.database.get_user(dev.user_id))
         assert user.quota_mode == _db.QUOTA_DISABLED, \
             "a fresh device must NOT auto-share the bundle"
         assert (user.fixed_gb or 0.0) == 0.0
-        bundle = asyncio.get_event_loop().run_until_complete(
+        bundle = _get_loop().run_until_complete(
             gw.database.get_bundle())
         assert bundle.allowances.get(user.id, -1) == 0.0
         # the enforcement map cuts it: zero usage, zero allowance
-        snap = asyncio.get_event_loop().run_until_complete(
+        snap = _get_loop().run_until_complete(
             gw.service.snapshot_state())
         assert snap[dev.mac]["blocked"] is True
         # the admin assigns shared -> the device comes online (usage under share)
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.database.update_user(user.id, quota_mode=_db.QUOTA_AUTO))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.recompute_allowances())
-        snap = asyncio.get_event_loop().run_until_complete(
+        snap = _get_loop().run_until_complete(
             gw.service.snapshot_state())
         assert snap[dev.mac]["blocked"] is False
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_guest_mode_auto_registers_guest_device(tmp_path):
@@ -485,28 +494,28 @@ def test_guest_mode_auto_registers_guest_device(tmp_path):
 
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     try:
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_guest_mode(True))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("aa:bb:cc:dd:ee:31", "192.168.1.120"))
 
-        dev = asyncio.get_event_loop().run_until_complete(
+        dev = _get_loop().run_until_complete(
             gw.database.get_device(mac="aa:bb:cc:dd:ee:31"))
         assert dev is not None, "unknown MAC must be auto-registered"
-        user = asyncio.get_event_loop().run_until_complete(
+        user = _get_loop().run_until_complete(
             gw.database.get_user(dev.user_id))
         assert user is not None and user.guest, "new device must become a GUEST"
         # guests are fixed users with the guest allowance
         assert user.quota_mode == db_mod.QUOTA_FIXED
         assert user.fixed_gb == 1.0
         # the guest must receive a real allowance (not instantly quota-blocked)
-        bundle = asyncio.get_event_loop().run_until_complete(
+        bundle = _get_loop().run_until_complete(
             gw.database.get_bundle())
         assert bundle.allowances.get(dev.user_id, 0) == pytest.approx(1.0)
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_guest_mode_off_registers_disabled_device(tmp_path):
@@ -517,22 +526,22 @@ def test_guest_mode_off_registers_disabled_device(tmp_path):
 
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     try:
-        assert asyncio.get_event_loop().run_until_complete(
+        assert _get_loop().run_until_complete(
             gw.service.is_guest_mode()) is False
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("aa:bb:cc:dd:ee:32", "192.168.1.121"))
 
-        dev = asyncio.get_event_loop().run_until_complete(
+        dev = _get_loop().run_until_complete(
             gw.database.get_device(mac="aa:bb:cc:dd:ee:32"))
-        user = asyncio.get_event_loop().run_until_complete(
+        user = _get_loop().run_until_complete(
             gw.database.get_user(dev.user_id))
         assert user is not None and not user.guest
         assert user.quota_mode == db_mod.QUOTA_DISABLED
         assert (user.fixed_gb or 0.0) == 0.0
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_guest_device_reconnects_keeps_identity(tmp_path):
@@ -540,27 +549,27 @@ def test_guest_device_reconnects_keeps_identity(tmp_path):
     the existing (guest) user is reused, so its allowance survives."""
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     try:
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_guest_mode(True))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("aa:bb:cc:dd:ee:35", "192.168.1.123"))
-        dev = asyncio.get_event_loop().run_until_complete(
+        dev = _get_loop().run_until_complete(
             gw.database.get_device(mac="aa:bb:cc:dd:ee:35"))
         uid = dev.user_id
 
         # the guest disconnects (lease pruned) and comes back
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.database.delete_lease("aa:bb:cc:dd:ee:35"))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("aa:bb:cc:dd:ee:35", "192.168.1.124"))
 
-        dev2 = asyncio.get_event_loop().run_until_complete(
+        dev2 = _get_loop().run_until_complete(
             gw.database.get_device(mac="aa:bb:cc:dd:ee:35"))
         assert dev2.user_id == uid, "guest must keep its identity across reconnects"
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_guest_limit_blocks_new_guest_after_cap(tmp_path):
@@ -571,54 +580,54 @@ def test_guest_limit_blocks_new_guest_after_cap(tmp_path):
 
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     try:
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_guest_mode(True))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_guest_limit(2))
         # fill the cap with two guests
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("aa:bb:cc:dd:ee:41", "192.168.1.130"))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("aa:bb:cc:dd:ee:42", "192.168.1.131"))
-        assert asyncio.get_event_loop().run_until_complete(
+        assert _get_loop().run_until_complete(
             gw.database.count_guest_users()) == 2
 
         # third brand-new device beyond the cap -> guest but admin-blocked
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("aa:bb:cc:dd:ee:43", "192.168.1.132"))
-        dev = asyncio.get_event_loop().run_until_complete(
+        dev = _get_loop().run_until_complete(
             gw.database.get_device(mac="aa:bb:cc:dd:ee:43"))
         assert dev is not None
-        user = asyncio.get_event_loop().run_until_complete(
+        user = _get_loop().run_until_complete(
             gw.database.get_user(dev.user_id))
         assert user is not None and user.guest
         assert dev.block_state == db_mod.BLOCK_ADMIN, (
             "over-cap guest must be cut immediately")
 
         # raising the cap lets the NEXT brand-new device join normally
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_guest_limit(4))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("aa:bb:cc:dd:ee:44", "192.168.1.133"))
-        dev4 = asyncio.get_event_loop().run_until_complete(
+        dev4 = _get_loop().run_until_complete(
             gw.database.get_device(mac="aa:bb:cc:dd:ee:44"))
         assert dev4.block_state == db_mod.BLOCK_OK
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_guest_limit_default_is_two(tmp_path):
     """The default guest cap is 2 (documented anti-MAC-spam value)."""
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     try:
-        assert asyncio.get_event_loop().run_until_complete(
+        assert _get_loop().run_until_complete(
             gw.service.guest_limit()) == 2
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_lowering_guest_limit_cuts_existing_over_cap(tmp_path):
@@ -630,7 +639,7 @@ def test_lowering_guest_limit_cuts_existing_over_cap(tmp_path):
 
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
-    loop = asyncio.get_event_loop()
+    loop = _get_loop()
     loop.run_until_complete(gw.startup())
     try:
         loop.run_until_complete(gw.service.set_guest_mode(True))
@@ -686,34 +695,34 @@ def test_stop_new_connections_refuses_brand_new_device_at_dhcp(tmp_path):
     cfg.dhcp.ignore_file = str(tmp_path / "dnsmasq.d" / "quota-ignore.conf")
     cfg.dhcp.reload_dnsmasq = False
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     try:
         # an existing device (joined before the gate) keeps its identity
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("aa:bb:cc:dd:ee:51", "192.168.1.140"))
-        dev = asyncio.get_event_loop().run_until_complete(
+        dev = _get_loop().run_until_complete(
             gw.database.get_device(mac="aa:bb:cc:dd:ee:51"))
         uid = dev.user_id
 
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_stop_new_connections(True))
-        assert asyncio.get_event_loop().run_until_complete(
+        assert _get_loop().run_until_complete(
             gw.service.stop_new_connections()) is True
 
         # a brand-new MAC is refused: no row, fragment entry, row-less block
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("aa:bb:cc:dd:ee:52", "192.168.1.141"))
-        assert asyncio.get_event_loop().run_until_complete(
+        assert _get_loop().run_until_complete(
             gw.database.get_device(mac="aa:bb:cc:dd:ee:52")) is None, (
             "refused device must NOT be registered (no 'unsigned user')")
-        refused = asyncio.get_event_loop().run_until_complete(
+        refused = _get_loop().run_until_complete(
             gw.service.refused_macs())
         assert "aa:bb:cc:dd:ee:52" in refused
         fragment = Path(cfg.dhcp.ignore_file)
         assert fragment.exists(), "the DHCP-refusal fragment must be written"
         assert "dhcp-host=aa:bb:cc:dd:ee:52,ignore\n" in fragment.read_text(
             encoding="utf-8"), "the refused MAC must be in the fragment"
-        snap = asyncio.get_event_loop().run_until_complete(
+        snap = _get_loop().run_until_complete(
             gw.service.snapshot_state())
         entry = snap.get("aa:bb:cc:dd:ee:52")
         assert entry is not None and entry["blocked"] is True, (
@@ -721,11 +730,11 @@ def test_stop_new_connections_refuses_brand_new_device_at_dhcp(tmp_path):
         assert entry["block_state"] == _db.BLOCK_ADMIN
 
         # the pre-existing device reconnects normally (identity preserved)
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.database.delete_lease("aa:bb:cc:dd:ee:51"))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("aa:bb:cc:dd:ee:51", "192.168.1.142"))
-        dev3 = asyncio.get_event_loop().run_until_complete(
+        dev3 = _get_loop().run_until_complete(
             gw.database.get_device(mac="aa:bb:cc:dd:ee:51"))
         assert dev3.user_id == uid, "existing device must keep its identity"
         assert dev3.block_state != db_mod.BLOCK_ADMIN, (
@@ -733,20 +742,20 @@ def test_stop_new_connections_refuses_brand_new_device_at_dhcp(tmp_path):
 
         # turning the gate off clears the fragment + refuse list; the next
         # brand-new device registers normally (disabled onboarding)
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_stop_new_connections(False))
-        asyncio.get_event_loop().run_until_complete(gw._sync_refuse_fragment())
+        _get_loop().run_until_complete(gw._sync_refuse_fragment())
         assert fragment.read_text(encoding="utf-8") == "", (
             "gate off must empty the DHCP-refusal fragment")
-        assert not asyncio.get_event_loop().run_until_complete(
+        assert not _get_loop().run_until_complete(
             gw.service.refused_macs())
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("aa:bb:cc:dd:ee:53", "192.168.1.143"))
-        dev4 = asyncio.get_event_loop().run_until_complete(
+        dev4 = _get_loop().run_until_complete(
             gw.database.get_device(mac="aa:bb:cc:dd:ee:53"))
         assert dev4.block_state == db_mod.BLOCK_OK
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_stop_new_falls_back_to_registered_block_when_fragment_unwritable(tmp_path):
@@ -762,19 +771,19 @@ def test_stop_new_falls_back_to_registered_block_when_fragment_unwritable(tmp_pa
     cfg.dhcp.ignore_file = str(blocker / "quota-ignore.conf")
     cfg.dhcp.reload_dnsmasq = False
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     try:
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_stop_new_connections(True))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("aa:bb:cc:dd:ee:61", "192.168.1.151"))
-        dev = asyncio.get_event_loop().run_until_complete(
+        dev = _get_loop().run_until_complete(
             gw.database.get_device(mac="aa:bb:cc:dd:ee:61"))
         assert dev is not None, "fallback must register the device"
         assert dev.block_state == db_mod.BLOCK_ADMIN, (
             "fallback device must be admin-blocked")
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_decline_random_macs_refuses_brand_new_randomized_device(tmp_path):
@@ -791,35 +800,35 @@ def test_decline_random_macs_refuses_brand_new_randomized_device(tmp_path):
     cfg.dhcp.ignore_file = str(tmp_path / "dnsmasq.d" / "quota-ignore.conf")
     cfg.dhcp.reload_dnsmasq = False
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     try:
         # an existing random-MAC device (joined before the gate) keeps identity
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("02:42:ac:11:00:02", "192.168.1.140"))
-        dev = asyncio.get_event_loop().run_until_complete(
+        dev = _get_loop().run_until_complete(
             gw.database.get_device(mac="02:42:ac:11:00:02"))
         uid = dev.user_id
 
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_decline_random_macs(True))
-        assert asyncio.get_event_loop().run_until_complete(
+        assert _get_loop().run_until_complete(
             gw.service.decline_random_macs()) is True
 
         # a brand-new randomized MAC is refused: no row, fragment entry,
         # row-less kernel cut of the lingering lease
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("02:42:ac:11:00:03", "192.168.1.141"))
-        assert asyncio.get_event_loop().run_until_complete(
+        assert _get_loop().run_until_complete(
             gw.database.get_device(mac="02:42:ac:11:00:03")) is None, (
             "declined device must NOT be registered (no 'unsigned user')")
-        refused = asyncio.get_event_loop().run_until_complete(
+        refused = _get_loop().run_until_complete(
             gw.service.refused_random_macs())
         assert "02:42:ac:11:00:03" in refused
         fragment = Path(cfg.dhcp.ignore_file)
         assert fragment.exists(), "the DHCP-refusal fragment must be written"
         assert "dhcp-host=02:42:ac:11:00:03,ignore\n" in fragment.read_text(
             encoding="utf-8"), "the declined random MAC must be in the fragment"
-        snap = asyncio.get_event_loop().run_until_complete(
+        snap = _get_loop().run_until_complete(
             gw.service.snapshot_state())
         entry = snap.get("02:42:ac:11:00:03")
         assert entry is not None and entry["blocked"] is True, (
@@ -827,19 +836,19 @@ def test_decline_random_macs_refuses_brand_new_randomized_device(tmp_path):
         assert entry["block_state"] == _db.BLOCK_ADMIN
 
         # a real-OUI brand-new device joins normally
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("3c:7c:3f:aa:bb:cc", "192.168.1.142"))
-        dev3 = asyncio.get_event_loop().run_until_complete(
+        dev3 = _get_loop().run_until_complete(
             gw.database.get_device(mac="3c:7c:3f:aa:bb:cc"))
         assert dev3.block_state == db_mod.BLOCK_OK, (
             "a real-OUI device is never gated")
 
         # the pre-existing random-MAC device reconnects normally
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.database.delete_lease("02:42:ac:11:00:02"))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("02:42:ac:11:00:02", "192.168.1.143"))
-        dev4 = asyncio.get_event_loop().run_until_complete(
+        dev4 = _get_loop().run_until_complete(
             gw.database.get_device(mac="02:42:ac:11:00:02"))
         assert dev4.user_id == uid, "existing device must keep its identity"
         assert dev4.block_state == db_mod.BLOCK_OK, (
@@ -847,20 +856,20 @@ def test_decline_random_macs_refuses_brand_new_randomized_device(tmp_path):
 
         # turning the gate off clears the fragment + refuse list; the next
         # brand-new random MAC registers normally (disabled onboarding)
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_decline_random_macs(False))
-        asyncio.get_event_loop().run_until_complete(gw._sync_refuse_fragment())
+        _get_loop().run_until_complete(gw._sync_refuse_fragment())
         assert fragment.read_text(encoding="utf-8") == "", (
             "gate off must empty the DHCP-refusal fragment")
-        assert not asyncio.get_event_loop().run_until_complete(
+        assert not _get_loop().run_until_complete(
             gw.service.refused_random_macs())
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("02:42:ac:11:00:04", "192.168.1.144"))
-        dev5 = asyncio.get_event_loop().run_until_complete(
+        dev5 = _get_loop().run_until_complete(
             gw.database.get_device(mac="02:42:ac:11:00:04"))
         assert dev5.block_state == db_mod.BLOCK_OK
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_decline_random_falls_back_to_registered_block_when_fragment_unwritable(tmp_path):
@@ -876,19 +885,19 @@ def test_decline_random_falls_back_to_registered_block_when_fragment_unwritable(
     cfg.dhcp.ignore_file = str(blocker / "quota-ignore.conf")
     cfg.dhcp.reload_dnsmasq = False
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     try:
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_decline_random_macs(True))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease("02:42:ac:11:00:07", "192.168.1.155"))
-        dev = asyncio.get_event_loop().run_until_complete(
+        dev = _get_loop().run_until_complete(
             gw.database.get_device(mac="02:42:ac:11:00:07"))
         assert dev is not None, "fallback must register the device"
         assert dev.block_state == db_mod.BLOCK_ADMIN, (
             "fallback device must be admin-blocked")
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_new_device_quota_blocked_until_admin_assigns(tmp_path):
@@ -901,24 +910,24 @@ def test_new_device_quota_blocked_until_admin_assigns(tmp_path):
 
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     try:
         mac = "e6:2a:b3:09:b4:a8"  # the user's phone MAC
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease(mac, "192.168.1.111"))
 
         # the auto-registered device owns a user with a 0 GB onboarding lock
-        dev = asyncio.get_event_loop().run_until_complete(
+        dev = _get_loop().run_until_complete(
             gw.database.get_device(mac=mac))
         assert dev is not None and dev.user_id is not None, (
             "auto-registered device must own a user")
-        bundle = asyncio.get_event_loop().run_until_complete(
+        bundle = _get_loop().run_until_complete(
             gw.database.get_bundle())
         assert bundle.allowances.get(dev.user_id, -1) == 0.0, (
             "a fresh device must NOT claim an auto share — the admin assigns")
 
         # the engine cuts it: zero usage, zero allowance, disabled user
-        changes = asyncio.get_event_loop().run_until_complete(
+        changes = _get_loop().run_until_complete(
             gw.service.evaluate_blocks())
         assert any(ch.get("mac") == mac
                    and ch.get("state") == db_mod.BLOCK_QUOTA
@@ -926,13 +935,13 @@ def test_new_device_quota_blocked_until_admin_assigns(tmp_path):
             "new device must be quota-blocked until the admin assigns a rule")
 
         # the admin assigns shared (the modal's action) -> the device goes live
-        user = asyncio.get_event_loop().run_until_complete(
+        user = _get_loop().run_until_complete(
             gw.database.get_user(dev.user_id))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.database.update_user(user.id, quota_mode=db_mod.QUOTA_AUTO))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.recompute_allowances())
-        changes = asyncio.get_event_loop().run_until_complete(
+        changes = _get_loop().run_until_complete(
             gw.service.evaluate_blocks())
         for ch in changes:
             assert not (ch.get("mac") == mac
@@ -940,33 +949,33 @@ def test_new_device_quota_blocked_until_admin_assigns(tmp_path):
                 "a shared-assigned device must not be quota-blocked "
                 "before using any data")
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_flush_counts_usage(tmp_path):
     """The maintenance tick drains engine counters into usage_daily."""
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     try:
         mac = "aa:bb:cc:dd:ee:22"
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease(mac, "192.168.1.101"))
-        dev = asyncio.get_event_loop().run_until_complete(
+        dev = _get_loop().run_until_complete(
             gw.database.get_device(mac=mac))
 
         # Seed usage as if the maintenance tick had flushed it.
         gw.engine = None  # engine disabled in this test config
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.database.add_usage(dev.id, time.strftime("%Y-%m-%d"),
                                   5 * 1024 ** 3, 0))
-        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        _get_loop().run_until_complete(gw._maintenance_tick())
 
-        usage = asyncio.get_event_loop().run_until_complete(
+        usage = _get_loop().run_until_complete(
             gw.database.get_usage(dev.id))
         assert usage["up_bytes"] >= 5 * 1024 ** 3
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_make_engine_selects_nftables_backend(tmp_path):
@@ -988,17 +997,17 @@ def test_sync_dnsmasq_leases_registers_devices(tmp_path):
         encoding="utf-8")
     cfg.dhcp.lease_file = str(lease_file)
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     try:
-        asyncio.get_event_loop().run_until_complete(gw._sync_dnsmasq_leases())
-        dev33 = asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(gw._sync_dnsmasq_leases())
+        dev33 = _get_loop().run_until_complete(
             gw.database.get_device(mac="aa:bb:cc:dd:ee:33"))
         assert dev33 is not None, "lease MAC must be auto-registered"
-        ip44 = asyncio.get_event_loop().run_until_complete(
+        ip44 = _get_loop().run_until_complete(
             gw.database.get_ip_for_mac("aa:bb:cc:dd:ee:44"))
         assert ip44 == "192.168.1.112"
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_sync_dnsmasq_leases_schedules_immediate_sweep_on_new_device(tmp_path):
@@ -1041,11 +1050,11 @@ def test_sync_dnsmasq_leases_missing_file_is_safe(tmp_path):
     cfg = _cfg(tmp_path)
     cfg.dhcp.lease_file = str(tmp_path / "does-not-exist.leases")
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     try:
-        asyncio.get_event_loop().run_until_complete(gw._sync_dnsmasq_leases())
+        _get_loop().run_until_complete(gw._sync_dnsmasq_leases())
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_live_counters_flow_into_holder(tmp_path):
@@ -1053,7 +1062,7 @@ def test_live_counters_flow_into_holder(tmp_path):
     live up/down were always zero. The flushed engine delta must reach it."""
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     # The background maintenance loop fires its FIRST tick immediately at
     # startup (with the real, disabled engine), so it could race the manual
     # tick below and clobber the holder with an empty flush — the fake engine's
@@ -1062,7 +1071,7 @@ def test_live_counters_flow_into_holder(tmp_path):
     _cancel_maintenance(gw)
     try:
         mac = "aa:bb:cc:dd:ee:55"
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease(mac, "192.168.1.113"))
 
         # Fake engine that returns a real delta on flush().
@@ -1079,13 +1088,13 @@ def test_live_counters_flow_into_holder(tmp_path):
                 pass
         gw.engine = _FakeEngine()  # type: ignore[assignment]
 
-        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        _get_loop().run_until_complete(gw._maintenance_tick())
         snap = gw.holder.get()
         live = snap.counters_for(mac)
         assert live.up == 1000 and live.down == 2000, \
             "flushed engine deltas must reach the holder for the live UI"
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_holder_carries_rogue_scan(tmp_path):
@@ -1128,7 +1137,7 @@ def test_maintenance_tick_syncs_shaper(tmp_path):
     live device IPs + their caps (Linux only; the shaper is None otherwise)."""
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg, internet_probe=lambda: True)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     # The background maintenance loop fires its FIRST tick immediately at
     # startup, so it would race the manual ticks below and append a second,
     # empty shaper call. Cancel it — this test measures manual ticks only
@@ -1136,16 +1145,16 @@ def test_maintenance_tick_syncs_shaper(tmp_path):
     _cancel_maintenance(gw)
     try:
         mac = "aa:bb:cc:dd:ee:66"
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease(mac, "192.168.2.110"))
 
         # give the device its own cap + enable shaping globally
-        dev = asyncio.get_event_loop().run_until_complete(
+        dev = _get_loop().run_until_complete(
             gw.database.get_device(mac=mac))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.database.update_device(dev.id, limit_down_mbps=10.0,
                                       limit_up_mbps=5.0))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_shaping(enabled=True, total_down_mbps=100.0,
                                    total_up_mbps=20.0))
 
@@ -1163,7 +1172,7 @@ def test_maintenance_tick_syncs_shaper(tmp_path):
                               lan_rate_mbps))
 
         gw.shaper = _FakeShaper()  # type: ignore[assignment]
-        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        _get_loop().run_until_complete(gw._maintenance_tick())
 
         assert len(calls) == 1, "one maintenance tick must sync the shaper"
         rate_map, enabled, total_down, total_up, lan_rate = calls[0]
@@ -1178,18 +1187,18 @@ def test_maintenance_tick_syncs_shaper(tmp_path):
         assert entry["down"] == 10.0 and entry["up"] == 5.0
 
         # disabling shaping + a changed cap feeds the next tick too
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_shaping(enabled=False))
-        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        _get_loop().run_until_complete(gw._maintenance_tick())
         assert calls[-1][1] is False
 
         # a LAN pass-through rate edit flows into the shaper immediately
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_shaping(enabled=True, lan_rate_mbps=250))
-        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        _get_loop().run_until_complete(gw._maintenance_tick())
         assert calls[-1][-1] == 250.0
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_shaper_applies_default_guest_speed_cap(tmp_path):
@@ -1198,22 +1207,22 @@ def test_shaper_applies_default_guest_speed_cap(tmp_path):
     explicit guest cap (min wins); non-guest users are untouched; 0 lifts it."""
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg, internet_probe=lambda: True)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     _cancel_maintenance(gw)
     try:
         mac = "aa:bb:cc:dd:ee:77"
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease(mac, "192.168.2.120"))
-        dev = asyncio.get_event_loop().run_until_complete(
+        dev = _get_loop().run_until_complete(
             gw.database.get_device(mac=mac))
 
         # move the device under a guest account and enable shaping
-        guest = asyncio.get_event_loop().run_until_complete(
+        guest = _get_loop().run_until_complete(
             gw.database.create_user(name="", quota_mode="fixed",
                                     fixed_gb=1.0, guest=True))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.database.update_device(dev.id, user_id=guest.id))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_shaping(enabled=True, total_down_mbps=100.0,
                                    total_up_mbps=20.0))
 
@@ -1233,46 +1242,46 @@ def test_shaper_applies_default_guest_speed_cap(tmp_path):
         gw.shaper = _FakeShaper()  # type: ignore[assignment]
 
         # 1) an unlimited guest is capped at the default guest speed
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_guest_speed_limit(8))
-        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        _get_loop().run_until_complete(gw._maintenance_tick())
         entry = calls[-1][0][0]
         assert entry["user_down"] == 8.0 and entry["user_up"] == 8.0
         assert entry["down"] == 0.0          # device cap untouched (unlimited)
 
         # 2) an explicit guest cap below the default wins (min)
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.database.update_user(guest.id, limit_down_mbps=4.0,
                                     limit_up_mbps=2.0))
-        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        _get_loop().run_until_complete(gw._maintenance_tick())
         entry = calls[-1][0][0]
         assert entry["user_down"] == 4.0 and entry["user_up"] == 2.0
 
         # 3) default 0 = unlimited — no guest cap is applied
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_guest_speed_limit(0))
-        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        _get_loop().run_until_complete(gw._maintenance_tick())
         entry = calls[-1][0][0]
         assert entry["user_down"] == 4.0 and entry["user_up"] == 2.0
 
         # 4) a non-guest user is never clamped by the default guest cap
         other_mac = "aa:bb:cc:dd:ee:88"
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease(other_mac, "192.168.2.121"))
         # lift the explicit guest cap again so the default is the ceiling
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.database.update_user(guest.id, limit_down_mbps=0.0,
                                     limit_up_mbps=0.0))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_guest_speed_limit(8))
-        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        _get_loop().run_until_complete(gw._maintenance_tick())
         entries = {e["ip"]: e for e in calls[-1][0]}
         other = entries["192.168.2.121"]
         assert other["user_down"] == 0.0 and other["user_up"] == 0.0
         # the guest entry carries the default cap once its own cap is lifted
         assert entries["192.168.2.120"]["user_down"] == 8.0
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 # --------------------------------------------------------------------------- #
@@ -2187,44 +2196,44 @@ def test_blacklisted_mac_is_not_re_registered(tmp_path):
     before guest mode), for ANY owner — guest or normal."""
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     # guest mode ON: a new device auto-registers as a GUEST (a delete records
     # the deny list for every owner, guest or normal)
-    asyncio.get_event_loop().run_until_complete(gw.service.set_guest_mode(True))
+    _get_loop().run_until_complete(gw.service.set_guest_mode(True))
     _cancel_maintenance(gw)  # the background loop must not race the manual calls
     try:
         mac = "aa:bb:cc:dd:ee:81"
-        asyncio.get_event_loop().run_until_complete(gw._persist_lease(mac, "192.168.2.41"))
-        dev = asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(gw._persist_lease(mac, "192.168.2.41"))
+        dev = _get_loop().run_until_complete(
             gw.database.get_device(mac=mac))
         assert dev is not None, "first sighting auto-registers as a guest"
         # delete + blacklist, exactly what DELETE /api/devices does
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.database.delete_device(dev.id, deny_list_mac=True))
-        assert asyncio.get_event_loop().run_until_complete(
+        assert _get_loop().run_until_complete(
             gw.database.get_mac_list("deny")) == [mac]
 
         # the device is still connected: another lease tick must NOT resurrect it
-        asyncio.get_event_loop().run_until_complete(gw._persist_lease(mac, "192.168.2.41"))
-        assert asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(gw._persist_lease(mac, "192.168.2.41"))
+        assert _get_loop().run_until_complete(
             gw.database.get_device(mac=mac)) is None, \
             "blacklisted MAC must not be re-registered while still connected"
         # ...and its row-less entry is kernel-blocked through snapshot_state
-        snap = asyncio.get_event_loop().run_until_complete(gw.service.snapshot_state())
+        snap = _get_loop().run_until_complete(gw.service.snapshot_state())
         assert snap[mac]["blocked"] is True
         assert snap[mac]["ip"] == "192.168.2.41"
         # a NORMAL (non-guest) owner's delete blacklists too
-        n = asyncio.get_event_loop().run_until_complete(
+        n = _get_loop().run_until_complete(
             gw.database.create_user(name="Dad", quota_mode=_db.QUOTA_FIXED,
                                     fixed_gb=20.0))
-        ndev = asyncio.get_event_loop().run_until_complete(
+        ndev = _get_loop().run_until_complete(
             gw.database.upsert_device("aa:bb:cc:dd:ee:83", user_id=n.id))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.database.delete_device(ndev.id, deny_list_mac=True))
-        assert asyncio.get_event_loop().run_until_complete(
+        assert _get_loop().run_until_complete(
             gw.database.get_mac_list("deny")) == [mac, "aa:bb:cc:dd:ee:83"]
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_blacklist_survives_lease_drop(tmp_path):
@@ -2239,18 +2248,18 @@ def test_blacklist_survives_lease_drop(tmp_path):
         encoding="utf-8")
     cfg.dhcp.lease_file = str(lease_file)
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
-    asyncio.get_event_loop().run_until_complete(gw.service.set_guest_mode(True))
+    _get_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.service.set_guest_mode(True))
     _cancel_maintenance(gw)  # the background loop must not race the manual calls
     try:
         mac = "aa:bb:cc:dd:ee:82"
-        asyncio.get_event_loop().run_until_complete(gw._sync_dnsmasq_leases())
-        dev = asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(gw._sync_dnsmasq_leases())
+        dev = _get_loop().run_until_complete(
             gw.database.get_device(mac=mac))
         assert dev is not None, "lease device auto-registers as a guest"
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.database.delete_device(dev.id, deny_list_mac=True))
-        assert asyncio.get_event_loop().run_until_complete(
+        assert _get_loop().run_until_complete(
             gw.database.get_mac_list("deny")) == [mac]
 
         # the device leaves the network: the lease file no longer lists it
@@ -2259,17 +2268,17 @@ def test_blacklist_survives_lease_drop(tmp_path):
         lease_file.write_text(
             "1730000000 aa:bb:cc:dd:ee:99 192.168.2.99 tablet 01:aa:bb:cc:dd:ee:99\n",
             encoding="utf-8")
-        asyncio.get_event_loop().run_until_complete(gw._sync_dnsmasq_leases())
-        assert asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(gw._sync_dnsmasq_leases())
+        assert _get_loop().run_until_complete(
             gw.database.get_mac_list("deny")) == [mac]
 
         # reconnecting now does NOT register a fresh account — still blacklisted
-        asyncio.get_event_loop().run_until_complete(gw._persist_lease(mac, "192.168.2.42"))
-        assert asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(gw._persist_lease(mac, "192.168.2.42"))
+        assert _get_loop().run_until_complete(
             gw.database.get_device(mac=mac)) is None, \
             "a blacklisted MAC stays blocked after reconnect"
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_unblacklist_re_registers_device(tmp_path):
@@ -2277,30 +2286,30 @@ def test_unblacklist_re_registers_device(tmp_path):
     the next lease tick mints a fresh account (the ONLY way back in)."""
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
-    asyncio.get_event_loop().run_until_complete(gw.service.set_guest_mode(True))
+    _get_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.service.set_guest_mode(True))
     _cancel_maintenance(gw)
     try:
         mac = "aa:bb:cc:dd:ee:84"
-        asyncio.get_event_loop().run_until_complete(gw._persist_lease(mac, "192.168.2.44"))
-        dev = asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(gw._persist_lease(mac, "192.168.2.44"))
+        dev = _get_loop().run_until_complete(
             gw.database.get_device(mac=mac))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.database.delete_device(dev.id, deny_list_mac=True))
-        assert asyncio.get_event_loop().run_until_complete(
+        assert _get_loop().run_until_complete(
             gw.database.get_device(mac=mac)) is None
 
         # un-blacklist (the Network-tab save replaces the whole deny list)
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.database.set_mac_list("deny", []))
-        asyncio.get_event_loop().run_until_complete(gw._persist_lease(mac, "192.168.2.44"))
-        redev = asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(gw._persist_lease(mac, "192.168.2.44"))
+        redev = _get_loop().run_until_complete(
             gw.database.get_device(mac=mac))
         assert redev is not None, "un-blacklisting must re-register the device"
-        assert asyncio.get_event_loop().run_until_complete(
+        assert _get_loop().run_until_complete(
             gw.service.snapshot_state())[mac]["blocked"] is False
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_gateway_delta_drains_into_box_device(tmp_path):
@@ -2309,7 +2318,7 @@ def test_gateway_delta_drains_into_box_device(tmp_path):
     consumption is inside the quota math."""
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     _cancel_maintenance(gw)
     try:
         class _FakeEngine:
@@ -2326,16 +2335,16 @@ def test_gateway_delta_drains_into_box_device(tmp_path):
                 pass
         gw.engine = _FakeEngine()  # type: ignore[assignment]
 
-        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
-        box = asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(gw._maintenance_tick())
+        box = _get_loop().run_until_complete(
             gw.database.get_device(mac=GATEWAY_MAC))
         assert box is not None
-        usage = asyncio.get_event_loop().run_until_complete(
+        usage = _get_loop().run_until_complete(
             gw.database.get_usage(box.id))
         assert usage["up_bytes"] == 3000
         assert usage["down_bytes"] == 7000
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_set_gateway_blocked_called_with_resolved_state(tmp_path):
@@ -2344,7 +2353,7 @@ def test_set_gateway_blocked_called_with_resolved_state(tmp_path):
     and never enters the per-device forward blocked set."""
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     _cancel_maintenance(gw)
     try:
         calls: list[bool] = []
@@ -2362,7 +2371,7 @@ def test_set_gateway_blocked_called_with_resolved_state(tmp_path):
         gw.engine = _FakeEngine()  # type: ignore[assignment]
 
         # the box's own user: first push at 0 usage -> unblocked
-        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        _get_loop().run_until_complete(gw._maintenance_tick())
         assert calls == [False]
 
         # drop the Gateway user's allowance to 0 -> the box itself is cut.
@@ -2375,11 +2384,11 @@ def test_set_gateway_blocked_called_with_resolved_state(tmp_path):
             await gw.database.update_user(u.id, fixed_gb=0.0)
             await gw.service.recompute_allowances()
             await gw.service.evaluate_blocks()
-        asyncio.get_event_loop().run_until_complete(_cut())
-        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        _get_loop().run_until_complete(_cut())
+        _get_loop().run_until_complete(gw._maintenance_tick())
         assert calls[-1] is True, "0-allowance Gateway must cut the box's internet"
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_tick_copies_engine_gateway_state_into_snapshot(tmp_path):
@@ -2389,7 +2398,7 @@ def test_tick_copies_engine_gateway_state_into_snapshot(tmp_path):
     the toggle."""
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     _cancel_maintenance(gw)
     try:
         # a faithful fake: reports programmed cut + engine live.
@@ -2408,7 +2417,7 @@ def test_tick_copies_engine_gateway_state_into_snapshot(tmp_path):
                 pass
         gw.engine = _FakeEngine()  # type: ignore[assignment]
 
-        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        _get_loop().run_until_complete(gw._maintenance_tick())
         snap = gw.holder.get()
         assert snap.engine_available is True
         assert snap.gateway_blocked is False  # resolved state: 0 usage, 1 GB
@@ -2420,13 +2429,13 @@ def test_tick_copies_engine_gateway_state_into_snapshot(tmp_path):
             await gw.database.update_user(u.id, fixed_gb=0.0)
             await gw.service.recompute_allowances()
             await gw.service.evaluate_blocks()
-        asyncio.get_event_loop().run_until_complete(_cut())
-        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        _get_loop().run_until_complete(_cut())
+        _get_loop().run_until_complete(gw._maintenance_tick())
         snap = gw.holder.get()
         assert snap.gateway_blocked is True
         assert snap.engine_available is True
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_per_device_admin_block_reaches_the_kernel(tmp_path):
@@ -2521,7 +2530,7 @@ def test_per_device_admin_block_reaches_the_kernel(tmp_path):
 
     gw = Gateway(cfg)
     try:
-        asyncio.get_event_loop().run_until_complete(gw.startup())
+        _get_loop().run_until_complete(gw.startup())
         _cancel_maintenance(gw)
 
         nft = _BlockedNft()
@@ -2531,41 +2540,41 @@ def test_per_device_admin_block_reaches_the_kernel(tmp_path):
         # both devices register from the lease file (same user, auto-created
         # in the DISABLED onboarding lock — the admin must assign shared or
         # fixed before anything goes online)
-        asyncio.get_event_loop().run_until_complete(gw._sync_dnsmasq_leases())
-        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        _get_loop().run_until_complete(gw._sync_dnsmasq_leases())
+        _get_loop().run_until_complete(gw._maintenance_tick())
         assert nft.blocked == {"192.168.2.61", "192.168.2.62"}, (
             "fresh devices are kernel-cut until the admin assigns a quota rule")
 
         # the admin assigns shared to the auto-created users -> both go live
-        devs = asyncio.get_event_loop().run_until_complete(gw.database.list_devices())
+        devs = _get_loop().run_until_complete(gw.database.list_devices())
         for uid in {d.user_id for d in devs if d.user_id is not None}:
-            asyncio.get_event_loop().run_until_complete(
+            _get_loop().run_until_complete(
                 gw.database.update_user(uid, quota_mode=_db.QUOTA_AUTO))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.recompute_allowances())
-        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        _get_loop().run_until_complete(gw._maintenance_tick())
         assert not nft.blocked, "shared-assigned devices are online"
 
         # block ONE device (PATCH /api/devices/{id} {block:true} maps to this)
-        devs = asyncio.get_event_loop().run_until_complete(gw.database.list_devices())
+        devs = _get_loop().run_until_complete(gw.database.list_devices())
         target = next(d for d in devs if d.mac == "aa:bb:cc:dd:ee:62")
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_admin_block(target.id, True))
 
-        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        _get_loop().run_until_complete(gw._maintenance_tick())
         assert "192.168.2.62" in nft.blocked, (
             "per-device block must land the device's IP in @blocked")
         assert "192.168.2.61" not in nft.blocked, (
             "the sibling device of the same user must stay online")
 
         # unblock -> the IP leaves the set
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_admin_block(target.id, False))
-        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
+        _get_loop().run_until_complete(gw._maintenance_tick())
         assert "192.168.2.62" not in nft.blocked, (
             "unblock must remove the IP from @blocked")
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_immediate_reshaping_waits_for_shaping_lock(tmp_path):
@@ -2577,18 +2586,18 @@ def test_immediate_reshaping_waits_for_shaping_lock(tmp_path):
     DB, so serializing the whole sync makes both orderings end fresh."""
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg, internet_probe=lambda: True)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     _cancel_maintenance(gw)
     try:
         mac = "aa:bb:cc:dd:ee:77"
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease(mac, "192.168.2.130"))
-        dev = asyncio.get_event_loop().run_until_complete(
+        dev = _get_loop().run_until_complete(
             gw.database.get_device(mac=mac))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.database.update_device(dev.id, limit_down_mbps=10.0,
                                       limit_up_mbps=5.0))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.service.set_shaping(enabled=True, total_down_mbps=100.0,
                                    total_up_mbps=20.0))
 
@@ -2613,20 +2622,20 @@ def test_immediate_reshaping_waits_for_shaping_lock(tmp_path):
         # simulate the tick holding the lock mid-sync, then start the API's
         # immediate re-sync — it must block until the lock frees.
         lock = gw._shaping_lock
-        asyncio.get_event_loop().run_until_complete(lock.acquire())
-        task = asyncio.get_event_loop().create_task(gw._reshaping_now())
-        asyncio.get_event_loop().run_until_complete(asyncio.sleep(0))
+        _get_loop().run_until_complete(lock.acquire())
+        task = _get_loop().create_task(gw._reshaping_now())
+        _get_loop().run_until_complete(asyncio.sleep(0))
         assert calls == [], ("re-sync must wait for the tick's sync — it "
                              "cannot program tc mid-way through")
         lock.release()  # synchronous in 3.10+ (only acquire() is a coroutine)
-        asyncio.get_event_loop().run_until_complete(task)
+        _get_loop().run_until_complete(task)
         assert len(calls) == 1, "re-sync programs the tree once the lock frees"
         rate_map, enabled, total_down, total_up, lan_rate = calls[0]
         assert enabled is True and total_down == 100.0 and total_up == 20.0
         assert lan_rate == 1000.0
         assert rate_map[0]["ip"] == "192.168.2.130"
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 # ---------------------------------------------------------------------------
@@ -2659,12 +2668,12 @@ def test_dns_history_tick_drains_and_upserts(tmp_path):
     Path(dnslog).write_bytes(b"")
     cfg = _history_cfg(tmp_path, dnslog)
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     _cancel_maintenance(gw)
     try:
         assert gw.dnslog is not None
         mac = "aa:bb:cc:dd:ee:55"
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease(mac, "192.168.2.155"))
         with open(dnslog, "a", encoding="utf-8") as fh:
             fh.write("query[A] example.com from 192.168.2.155\n"
@@ -2672,17 +2681,17 @@ def test_dns_history_tick_drains_and_upserts(tmp_path):
                      "query[AAAA] example.com from 192.168.2.155\n"
                      "query[A] other.net from 192.168.2.155\n")
         _wait_for_events(gw.dnslog, 4)
-        asyncio.get_event_loop().run_until_complete(gw._dns_history_tick())
-        dev = asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(gw._dns_history_tick())
+        dev = _get_loop().run_until_complete(
             gw.database.get_device(mac=mac))
-        hist = asyncio.get_event_loop().run_until_complete(
+        hist = _get_loop().run_until_complete(
             gw.database.get_dns_history(dev.id, "2020-01-01 00:00"))
         assert hist["total"] == 4
         top = {t["domain"]: t["hits"] for t in hist["top_domains"]}
         assert top["example.com"] == 3
         assert top["other.net"] == 1
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_dns_history_tick_persists_offset_state(tmp_path):
@@ -2692,21 +2701,21 @@ def test_dns_history_tick_persists_offset_state(tmp_path):
     Path(dnslog).write_bytes(b"")
     cfg = _history_cfg(tmp_path, dnslog)
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     _cancel_maintenance(gw)
     try:
         with open(dnslog, "a", encoding="utf-8") as fh:
             fh.write("query[A] one.com from 192.168.2.155\n")
         _wait_for_events(gw.dnslog, 1)
-        asyncio.get_event_loop().run_until_complete(gw._dns_history_tick())
-        state = asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(gw._dns_history_tick())
+        state = _get_loop().run_until_complete(
             gw.database.get_setting("dnslog_state", "{}"))
         import json as _json
         saved = _json.loads(state)
         assert saved["inode"] == os.stat(dnslog).st_ino
         assert saved["offset"] == os.stat(dnslog).st_size
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_dns_history_prune_runs_on_hourly_gate(tmp_path):
@@ -2716,25 +2725,25 @@ def test_dns_history_prune_runs_on_hourly_gate(tmp_path):
     Path(dnslog).write_bytes(b"")
     cfg = _history_cfg(tmp_path, dnslog)
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     _cancel_maintenance(gw)
     try:
         # a user with a shorter per-user retention (1 day) — set via
         # update_user (create_user has no history_days kwarg)
-        uid = asyncio.get_event_loop().run_until_complete(
+        uid = _get_loop().run_until_complete(
             gw.database.create_user("short")).id
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.database.update_user(uid, history_days=1))
         mac = "aa:bb:cc:dd:ee:56"
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw._persist_lease(mac, "192.168.2.156"))
-        dev = asyncio.get_event_loop().run_until_complete(
+        dev = _get_loop().run_until_complete(
             gw.database.get_device(mac=mac))
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.database.update_device(dev.id, user_id=uid))
         # a row far older than the 1-day retention + one at "now"
         now_minute = time.strftime("%Y-%m-%d %H:%M")
-        asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(
             gw.database.batch_add_dns_history(
                 [(dev.id, "2026-07-31 10:00", "old.com", 1),
                  (dev.id, now_minute, "new.com", 1)]))
@@ -2744,14 +2753,14 @@ def test_dns_history_prune_runs_on_hourly_gate(tmp_path):
             fh.write("query[A] live.com from 192.168.2.156\n")
         _wait_for_events(gw.dnslog, 1)
         gw._last_dns_prune = time.monotonic() - 3601.0
-        asyncio.get_event_loop().run_until_complete(gw._dns_history_tick())
-        hist = asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(gw._dns_history_tick())
+        hist = _get_loop().run_until_complete(
             gw.database.get_dns_history(dev.id, "2026-01-01 00:00"))
         domains = {t["domain"] for t in hist["top_domains"]}
         assert "old.com" not in domains, "the stale row is pruned"
         assert "new.com" in domains and "live.com" in domains
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_dns_history_disabled_does_nothing(tmp_path):
@@ -2760,13 +2769,13 @@ def test_dns_history_disabled_does_nothing(tmp_path):
     cfg = _cfg(tmp_path)
     assert cfg.history.enabled is False
     gw = Gateway(cfg)
-    asyncio.get_event_loop().run_until_complete(gw.startup())
+    _get_loop().run_until_complete(gw.startup())
     _cancel_maintenance(gw)
     try:
         assert gw.dnslog is None, "no tailer is built when history is disabled"
-        asyncio.get_event_loop().run_until_complete(gw._maintenance_tick())
-        state = asyncio.get_event_loop().run_until_complete(
+        _get_loop().run_until_complete(gw._maintenance_tick())
+        state = _get_loop().run_until_complete(
             gw.database.get_setting("dnslog_state", "{}"))
         assert state == "{}", "no read cursor is persisted when disabled"
     finally:
-        asyncio.get_event_loop().run_until_complete(gw.shutdown())
+        _get_loop().run_until_complete(gw.shutdown())

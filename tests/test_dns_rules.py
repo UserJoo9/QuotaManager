@@ -1,3 +1,12 @@
+
+import asyncio
+_cached_loop = None
+def _get_loop():
+    global _cached_loop
+    if _cached_loop is None or _cached_loop.is_closed():
+        _cached_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_cached_loop)
+    return _cached_loop
 """Tests for quota/dns_rules.py: hosts/AdBlock-Plus parsing, wildcard
 normalization, and the dnsmasq tag/rule renderer + file-writing manager.
 
@@ -231,7 +240,7 @@ from quota import db as _db  # noqa: E402
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return _get_loop().run_until_complete(coro)
 
 
 def test_domain_rule_crud_roundtrip(tmp_path: Path):

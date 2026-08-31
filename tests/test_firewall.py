@@ -1,3 +1,12 @@
+
+import asyncio
+_cached_loop = None
+def _get_loop():
+    global _cached_loop
+    if _cached_loop is None or _cached_loop.is_closed():
+        _cached_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_cached_loop)
+    return _cached_loop
 """Firewall module tests (``quota.firewall``).
 
 Covers the 9 acceptance sections with a fake ``nft`` binary (same pattern as
@@ -55,7 +64,7 @@ BOX_IPS = ["192.168.2.1", "192.168.1.1"]
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return _get_loop().run_until_complete(coro)
 
 
 class FakeNft:

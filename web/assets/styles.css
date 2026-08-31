@@ -432,10 +432,42 @@ select option { background: var(--bg-2); }
 
 /* CSS-column masonry: cards flow into two balanced columns; an expanded
    accordion card simply lengthens its column — no empty grid holes. */
+/* Layout methods for users/devices */
 .device-grid {
+  /* Default to masonry for backward compatibility, overridden by JS classes */
   columns: 2;
   column-gap: 20px;
 }
+
+.device-grid.layout-masonry {
+  display: block;
+  columns: 2;
+  column-gap: 20px;
+}
+.device-grid.layout-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+  gap: 20px;
+  align-items: start;
+}
+.device-grid.layout-list {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 20px;
+}
+
+/* Ensure break-inside works for masonry */
+.layout-masonry .user-card, .layout-masonry .device-card {
+  break-inside: avoid;
+  margin-bottom: 20px;
+}
+.layout-grid .user-card, .layout-grid .device-card {
+  margin-bottom: 0; /* grid gap handles this */
+}
+.layout-list .user-card, .layout-list .device-card {
+  margin-bottom: 0;
+}
+
 
 /* a user owns the allowance bar; devices nest beneath */
 .user-card {
@@ -1331,18 +1363,17 @@ select option { background: var(--bg-2); }
 .btn.danger { color: var(--danger); border: 1px solid rgba(220, 38, 38, 0.3); }
 .btn.danger:hover { background: rgba(220, 38, 38, 0.12); }
 
-/* ---------- component vitality: hover lift + brighten ---------- */
-.glass.card, .bundle-card, .user-card {
-  transition: transform 0.25s ease, background 0.25s ease, box-shadow 0.25s ease;
-}
-.glass.card:hover,
-.bundle-card:hover,
-.user-card:hover {
-  transform: translateY(-2px);
-  background: rgba(25, 31, 44, 0.65) !important;
-}
+/* ---------- component vitality: hover brighten ---------- */
+  .glass.card, .bundle-card, .user-card {
+    transition: background 0.25s ease, box-shadow 0.25s ease;
+  }
+  .glass.card:hover,
+  .bundle-card:hover,
+  .user-card:hover {
+    background: var(--surface-2) !important;
+  }
 
-/* ---------- notification bell + dropdown ---------- */
+  /* ---------- notification bell + dropdown ---------- */
 .notif-bell-wrap { position: fixed; top: 14px; right: 24px; z-index: 46; }
 .notif-badge {
   position: absolute; top: -4px; right: -4px;
@@ -1381,3 +1412,5 @@ select option { background: var(--bg-2); }
 /* ---------- firewall rule + forward form modals ---------- */
 .fw-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .fw-form-row .field { margin-top: 0; }
+
+.brand-logo { flex: 0 0 auto; width: 32px; height: 32px; border-radius: var(--radius-lg); object-fit: cover; }

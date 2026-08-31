@@ -6,6 +6,15 @@ import asyncio
 import time
 
 import pytest
+import asyncio
+_cached_loop = None
+def _get_loop():
+    global _cached_loop
+    if _cached_loop is None or _cached_loop.is_closed():
+        _cached_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_cached_loop)
+    return _cached_loop
+
 from starlette.testclient import TestClient
 
 from api.app import create_app
@@ -37,7 +46,7 @@ def client(tmp_path):
         await database.connect()
         return database, service
 
-    asyncio.get_event_loop().run_until_complete(_init())
+    _get_loop().run_until_complete(_init())
 
     def _make(waf_config=None, web_config=None):
         return create_app(database, service, holder,
@@ -46,7 +55,7 @@ def client(tmp_path):
     app = _make()
     with TestClient(app) as c:
         yield c, database, service, holder, _make
-    asyncio.get_event_loop().run_until_complete(database.close())
+    _get_loop().run_until_complete(database.close())
 
 
 def _login(c: TestClient) -> None:
@@ -111,7 +120,7 @@ def test_setup_change_clears_default_flag(client):
     _login(c)
     assert c.post("/api/setup/complete", json={
         "current_password": "admin", "new_password": WEAK}).status_code == 200
-    flag = asyncio.get_event_loop().run_until_complete(
+    flag = _get_loop().run_until_complete(
         database.get_setting("admin_password_default", "1"))
     assert flag == "0"
 
@@ -125,7 +134,7 @@ def test_unknown_account_and_wrong_password_identical(client):
     # wrong password: the response never reveals which part failed
     r_none = c.post("/api/login", json={"password": "AdminWrong"})
     assert r_none.status_code == 401
-    asyncio.get_event_loop().run_until_complete(
+    _get_loop().run_until_complete(
         database.set_setting("admin_password", _hash("s3cret")))
     r_wrong = c.post("/api/login", json={"password": "AdminWrong"})
     assert r_wrong.status_code == 401
@@ -402,7 +411,7 @@ def test_waf_strict_blocks_on_wan(client):
                         "content-type": "text/plain"})
         assert r.status_code == 403
         assert "WAF" in r.json()["detail"]
-        events = asyncio.get_event_loop().run_until_complete(
+        events = _get_loop().run_until_complete(
             database.list_events())
         assert any("WAF" in e["message"] for e in events)
 
@@ -418,7 +427,7 @@ def test_waf_log_only_on_lan(client):
                     data="total_gb=<script>alert(1)</script>", headers={
                         "content-type": "text/plain"})
         assert r.status_code == 401  # passed through WAF, hit auth
-        events = asyncio.get_event_loop().run_until_complete(
+        events = _get_loop().run_until_complete(
             database.list_events())
         assert any("WAF xss" in e["message"] for e in events)
 

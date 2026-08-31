@@ -6,9 +6,23 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
-## [Unreleased]
+## [0.3.2] - 2026-08-31
 
-Nothing yet.
+### Added
+- **UI Layout Picker**: Added a dropdown to the Users & devices panel allowing you to choose between Masonry, Grid, and List layouts. This fixes the annoying jumping behavior when expanding device cards.
+- **Adult Content Blocklist**: Added a new DNS filtering preset (Porn-only) using the StevenBlack list to completely block adult content at the router level.
+- **QR Code for 2FA**: The TOTP/2FA setup now renders an actual QR code instead of a raw URI text, making enrollment much easier.
+- **Mac Vendor Pre-computation**: MAC address vendor lookups are now pre-computed during the airmon-ng scan phase, greatly reducing CPU overhead.
+
+### Changed
+- **UI Streamlining**: Stripped out all massive paragraph-length descriptions in the dashboard, replacing them with clean, single-sentence summaries.
+- **Branding**: Replaced the generic sidebar globe icon with the official QuotaManager logo with soft rounded corners.
+- **Removed Animations**: Removed the bouncy translateY hover animations on dashboard cards for a more stable and professional feel.
+- **DB Optimization**: Batched daily usage DB updates to minimize SQLite transaction overhead.
+
+### Fixed
+- **2FA Stuck State**: Fixed a bug where closing the 2FA setup popup before verifying the first PIN would permanently hide the QR code and lock the setup in a pending state.
+- **Pytest 3.12 Compatibility**: Fixed \RuntimeError: Event loop is closed\ errors happening in the CI test suite when running with Python 3.12.
 
 ## [0.3.1] — 2026-08-23
 

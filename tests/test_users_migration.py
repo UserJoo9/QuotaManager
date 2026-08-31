@@ -68,8 +68,16 @@ CREATE TABLE events (
 """
 
 
+_cached_loop = None
+def _get_loop():
+    global _cached_loop
+    if _cached_loop is None or _cached_loop.is_closed():
+        _cached_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_cached_loop)
+    return _cached_loop
+
 def run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return _get_loop().run_until_complete(coro)
 
 
 def test_connect_migrates_legacy_db(tmp_path):
