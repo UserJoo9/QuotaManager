@@ -5,16 +5,6 @@
 
 "use strict";
 
-/* ---------------- security override ---------------- */
-// Globally sanitize all innerHTML assignments to prevent XSS.
-// This allows legacy code to keep using .innerHTML safely.
-const originalSetHTML = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML').set;
-Object.defineProperty(Element.prototype, 'innerHTML', {
-  set(value) {
-    originalSetHTML.call(this, DOMPurify.sanitize(value, { USE_PROFILES: { html: true, svg: true } }));
-  }
-});
-
 /* ---------------- helpers ---------------- */
 
 const $ = (id) => document.getElementById(id);

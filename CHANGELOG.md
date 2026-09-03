@@ -13,6 +13,7 @@ match it. Release notes are composed from a version's section below.)_
 - **Two-Layer Adult Content Protection**: Switched the Porn blocker preset to leverage Cloudflare Family DNS (`1.1.1.3` / `1.0.0.3`) for real-time dynamic adult filtering and mandatory SafeSearch enforcement across all search engines, backed by a fast, offline-curated local blocklist (`PORN_DOMAINS`) for instant zero-latency local blackholing.
 - **Rule List Performance**: Fixed `/api/dns/rules` to exclude internal preset-generated rules by default, preventing the browser table from attempting to render tens of thousands of rows and crashing the frontend.
 - **UI State & Error Handling**: Presets now disable the switch input while applying to prevent race conditions and report errors directly under the presets card.
+- **Browsing History & Table Layout Fix**: Fixed broken layout and scrambled text in the History tab (`Top domains`) and DNS rules table caused by an overly aggressive global `innerHTML` sanitizer stripping `<tr>` and `<td>` elements and button `onclick` handlers.
 
 ## [0.3.2] - 2026-08-31
 
