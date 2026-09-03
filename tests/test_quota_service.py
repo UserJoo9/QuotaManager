@@ -11,7 +11,13 @@ import pytest
 from core import timeutil
 from quota import db as _db
 from quota.engine import GATEWAY_MAC
-from quota.service import GB, QuotaService
+from quota.service import GB, QuotaService as _OriginalQuotaService
+
+class QuotaService(_OriginalQuotaService):
+    def __init__(self, db, timezone="Africa/Cairo", clock=None):
+        if clock is None:
+            clock = make_clock(_dt.datetime(2026, 8, 15, 12, 0, tzinfo=TZ))
+        super().__init__(db, timezone=timezone, clock=clock)
 
 TZ = ZoneInfo("Africa/Cairo")
 

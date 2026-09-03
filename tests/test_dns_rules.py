@@ -225,6 +225,12 @@ def test_streaming_preset_has_no_urls_and_uses_curated_list():
     assert dr.fetch_preset(preset) == dr.STREAMING_DOMAINS
 
 
+def test_porn_preset_has_no_urls_and_uses_curated_list():
+    preset = dr.PRESETS["porn"]
+    assert preset.urls == []
+    assert dr.fetch_preset(preset) == dr.PORN_DOMAINS
+
+
 def test_social_media_preset_lists_cyb3rko_sources():
     preset = dr.PRESETS["social-media"]
     assert any("cyb3rko/social-media-hosts-blocklists" in u for u in preset.urls)

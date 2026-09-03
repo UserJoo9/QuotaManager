@@ -1558,8 +1558,11 @@ def create_app(
 
     @app.get("/api/dns/rules", dependencies=[Depends(_require_auth)])
     async def list_dns_rules(scope: Optional[str] = None,
-                             scope_id: Optional[int] = None) -> list[dict[str, Any]]:
+                             scope_id: Optional[int] = None,
+                             include_presets: bool = False) -> list[dict[str, Any]]:
         rules = await database.list_domain_rules(scope, scope_id)
+        if not include_presets:
+            rules = [r for r in rules if not (r.source and r.source.startswith("preset:"))]
         return [_rule_view(r) for r in rules]
 
     @app.post("/api/dns/rules", status_code=201, dependencies=[Depends(_require_auth)])

@@ -118,8 +118,9 @@ _register(Preset(
 _register(Preset(
     id="porn",
     name="Adult content (Porn)",
-    description="Blocks adult websites and pornographic content (StevenBlack/hosts alternates).",
-    urls=["https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/porn-only/hosts"],
+    description=("Blocks adult websites using Cloudflare Family DNS (1.1.1.3) "
+                 "+ curated adult domain blocklists."),
+    urls=[],
     format="hosts",
 ))
 _register(Preset(
@@ -140,6 +141,53 @@ STREAMING_DOMAINS: set[str] = {
     "disneyplus.com", "dssott.com",
     "hulu.com", "hbomax.com", "max.com",
     "spotify.com", "scdn.co",
+}
+
+#: Curated inline list for the "porn" preset — top adult platforms, networks,
+#: cam sites, and tubes blackholed at the local resolver level.
+PORN_DOMAINS: set[str] = {
+    # Major global tubes & networks
+    "pornhub.com", "phncdn.com", "pornhubpremium.com",
+    "xvideos.com", "xvideos-cdn.com", "xvideos2.com", "xvideos3.com",
+    "xnxx.com", "xnxx-cdn.com", "xnxx2.com", "xnxx3.com",
+    "xhamster.com", "xhamsterlive.com", "xhamster2.com", "xhamster3.com",
+    "redtube.com", "youporn.com", "spankbang.com", "eporner.com",
+    "tube8.com", "fuq.com", "beeg.com", "thumbzilla.com",
+    "txxx.com", "vporn.com", "upornia.com", "drtuber.com",
+    "sunporno.com", "nuvid.com", "zbporn.com", "porn300.com",
+    "viptube.com", "yespornplease.com", "porndig.com", "pornone.com",
+    "youjizz.com", "hqporner.com", "pornmd.com", "pornbox.com",
+    "tnaflix.com", "empflix.com", "extremetube.com", "slutload.com",
+    "fapello.com", "erome.com", "daftsex.com", "motherless.com",
+    "heavy-r.com", "xcafe.com", "hclips.com", "tubez.com",
+    # Major adult cam & live sites
+    "chaturbate.com", "stripchat.com", "camsoda.com", "bongacams.com",
+    "livejasmin.com", "streamate.com", "myfreecams.com", "flirt4free.com",
+    "imlive.com", "cam4.com", "jasmin.com", "cams.com", "amateur.tv",
+    "liveprivates.com", "faphouse.com",
+    # Subscription, fan & dating platforms
+    "onlyfans.com", "fansly.com", "manyvids.com", "clips4sale.com",
+    "adultfriendfinder.com", "ashleymadison.com", "fetlife.com",
+    "coomer.party", "coomer.su", "kemono.party", "kemono.su",
+    # Production studios & networks
+    "brazzers.com", "bangbros.com", "realitykings.com", "naughtyamerica.com",
+    "twistys.com", "digitalplayground.com", "evilangel.com", "mofos.com",
+    "babes.com", "kink.com", "vixen.com", "tushy.com", "blacked.com",
+    "deeper.com", "teamskeet.com", "faketaxi.com", "propertysex.com",
+    "playboy.com", "penthouse.com", "hustler.com", "scoreland.com",
+    # VR adult
+    "badoinkvr.com", "wankzvr.com", "vrporn.com", "sexlikereal.com",
+    # Anime / Hentai / Art
+    "nhentai.net", "hanime.tv", "rule34.xxx", "rule34.paheal.net",
+    "e621.net", "gelbooru.com", "danbooru.donmai.us", "tbib.org",
+    "sankakucomplex.com", "hentaihaven.xxx", "multporn.net",
+    # Asian / JAV networks
+    "javlibrary.com", "javmost.cx", "javbus.com", "missav.com",
+    "javdb.com", "supjav.com", "7mmtv.tv", "netflav.com",
+    "tokyo-hot.com", "caribbeancom.com", "heyzo.com", "1pondo.tv",
+    # Adult ad networks and trackers
+    "trafficjunky.com", "exoclick.com", "juicyads.com", "ero-advertising.com",
+    "plugrush.com", "reporno.com", "sex.com", "xxx.com",
 }
 
 
@@ -279,6 +327,8 @@ def fetch_preset(preset: Preset) -> set[str]:
     if not preset.urls:
         if preset.id == "streaming":
             return set(STREAMING_DOMAINS)
+        if preset.id == "porn":
+            return set(PORN_DOMAINS)
         return set()
     domains: set[str] = set()
     for url in preset.urls:

@@ -1,8 +1,9 @@
-﻿"""API integration tests (FastAPI TestClient + real temp SQLite DB)."""
+"""API integration tests (FastAPI TestClient + real temp SQLite DB)."""
 
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -47,7 +48,8 @@ def _login_wan(c: TestClient) -> None:
 def client(tmp_path):
     """A TestClient wired to a temp database and quota service."""
     database = _db.Database(tmp_path / "api.db")
-    service = QuotaService(database, timezone="Africa/Cairo")
+    service = QuotaService(database, timezone="Africa/Cairo",
+                           clock=lambda: datetime(2026, 8, 15, 12, 0, tzinfo=TZ))
     holder = SnapshotHolder()
 
     async def _init():
@@ -2299,3 +2301,43 @@ def test_updates_round_trip(tmp_path):
             assert st["last_install"]
     finally:
         _get_loop().run_until_complete(database.close())
+
+
+def test_porn_preset_enable_disable(client):
+    c, database, service = client
+    _login(c)
+
+    # Initially disabled
+    r = c.get("/api/dns/presets")
+    assert r.status_code == 200
+    porn = next(p for p in r.json() if p["id"] == "porn")
+    assert porn["enabled"] is False
+
+    # Enable porn preset
+    r = c.post("/api/dns/presets/porn/enable", json={"scope": "global"})
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["id"] == "porn"
+    assert data["enabled"] is True
+    assert data["domain_count"] > 0
+
+    # Verify preset list reports enabled
+    r = c.get("/api/dns/presets")
+    porn = next(p for p in r.json() if p["id"] == "porn")
+    assert porn["enabled"] is True
+    assert porn["domain_count"] == data["domain_count"]
+
+    # Verify GET /api/dns/rules excludes preset rules by default
+    r_rules = c.get("/api/dns/rules")
+    assert r_rules.status_code == 200
+    assert r_rules.json() == []
+
+    # Disable porn preset
+    r = c.post("/api/dns/presets/porn/disable", json={"scope": "global"})
+    assert r.status_code == 200
+    assert r.json()["enabled"] is False
+
+    r = c.get("/api/dns/presets")
+    porn = next(p for p in r.json() if p["id"] == "porn")
+    assert porn["enabled"] is False
+

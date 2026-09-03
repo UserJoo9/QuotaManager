@@ -1405,6 +1405,15 @@ class Gateway:
                 # Rendered as (scope, scope_id, ip) triples, same shape as a
                 # domain rule's scope so render_rules' _tags_for is reused.
                 dns_servers: list[tuple[str, int | None, str]] = []
+                # When the adult content preset is enabled, route DNS through
+                # Cloudflare Family DNS (1.1.1.3 / 1.0.0.3) for live adult blocking
+                # and mandatory SafeSearch enforcement across all search engines.
+                porn_state = await self.database.get_preset_state("porn")
+                if porn_state and porn_state.get("enabled"):
+                    p_scope = porn_state.get("scope", _db.DNS_SCOPE_GLOBAL)
+                    p_sid = porn_state.get("scope_id")
+                    dns_servers.append((p_scope, p_sid, "1.1.1.3"))
+                    dns_servers.append((p_scope, p_sid, "1.0.0.3"))
                 for user in users.values():
                     if user.dns_server:
                         dns_servers.append((_db.DNS_SCOPE_USER, user.id, user.dns_server))

@@ -6,6 +6,14 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## [0.3.3] - 2026-09-04
+
+### Fixed
+- **DNS Adult Content / Porn Blocker Fix**: Fixed an issue where enabling the Adult Content (Porn) blocker would fail or revert back to disabled after refresh due to failing GitHub blocklist downloads, massive table DOM blow-up, and dnsmasq reload timeouts.
+- **Two-Layer Adult Content Protection**: Switched the Porn blocker preset to leverage Cloudflare Family DNS (`1.1.1.3` / `1.0.0.3`) for real-time dynamic adult filtering and mandatory SafeSearch enforcement across all search engines, backed by a fast, offline-curated local blocklist (`PORN_DOMAINS`) for instant zero-latency local blackholing.
+- **Rule List Performance**: Fixed `/api/dns/rules` to exclude internal preset-generated rules by default, preventing the browser table from attempting to render tens of thousands of rows and crashing the frontend.
+- **UI State & Error Handling**: Presets now disable the switch input while applying to prevent race conditions and report errors directly under the presets card.
+
 ## [0.3.2] - 2026-08-31
 
 ### Added
