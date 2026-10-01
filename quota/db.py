@@ -467,7 +467,9 @@ class Database:
     async def connect(self) -> None:
         try:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-            self._conn = await aiosqlite.connect(self.path)
+            conn = aiosqlite.connect(self.path)
+            conn._thread.daemon = True
+            self._conn = await conn
         except (PermissionError, OSError) as exc:
             raise RuntimeError(
                 f"cannot open database {self.path}: {exc}. Ensure the directory "
