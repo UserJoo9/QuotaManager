@@ -1,11 +1,11 @@
-<div align="center">
-  <img src="docs/logo/favicon.png" width="140" alt="Quota Manager logo">
-  <h1>Quota Manager</h1>
-  <p>
-    <a href="README_AR.md"><img src="https://img.shields.io/badge/%D8%A7%D9%84%D8%B9%D8%B1%D8%A8%D9%8A%D8%A9-Arabic-green" alt="العربية"></a>
-    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
-  </p>
-</div>
+<h1 align="center">
+  <img src="docs/logo/favicon.png" width="56" height="56" valign="middle" style="vertical-align: middle;" alt="Quota Manager logo">&nbsp;Quota Manager
+</h1>
+
+<p align="center">
+  <a href="README_AR.md"><img src="https://img.shields.io/badge/%D8%A7%D9%84%D8%B9%D8%B1%D8%A8%D9%8A%D8%A9-Arabic-green" alt="العربية"></a>
+  <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
+</p>
 
 
 Split your metered internet bundle fairly across every person in the house. Each
