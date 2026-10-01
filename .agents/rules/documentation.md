@@ -15,3 +15,9 @@ description: Documentation writing rules and audience targeting for QuotaManager
 
 - **README.md and README_AR.md**:
   - User-facing manual and quick start guide in English and Arabic.
+
+- **Git Tags & Releases**:
+  - NEVER modify or force-push existing version tags (`v*`) for minor fixes or doc updates.
+  - Doing so destroys release assets and clears GitHub download counters.
+  - Tags are strictly created only when issuing a new official release.
+

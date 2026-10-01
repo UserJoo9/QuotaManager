@@ -15,3 +15,10 @@
 3. **User Guides (`README.md` & `README_AR.md`)**:
    - **Target Audience**: General users and operators.
    - **Content**: High-level overview, screenshots, installation guides, dashboard usage guides, feature overviews, and day-to-day tips in both English and Arabic.
+
+## Git Tags & Releases Policy
+
+- **NEVER modify or force-push existing release tags (`v*`)** for small fixes, cosmetic changes, or documentation edits.
+- Modifying or re-creating existing tags resets GitHub Release assets and removes download counts/statistics.
+- Version tags must ONLY be created when explicitly preparing and publishing a brand new official release version.
+
