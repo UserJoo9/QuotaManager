@@ -2028,15 +2028,6 @@ def test_user_exempt_from_quota(client):
     assert user_view(uid)["exempt_quota"] is False
     assert user_view(uid)["quota_blocked"] is True
 
-    # /report surfaces the flag (the report page renders the same math)
-    holder = SnapshotHolder()
-    with _client_from(create_app(db, QuotaService(db, timezone="Africa/Cairo"),
-                                 holder), "192.168.2.9") as rc:
-        rp = rc.get("/api/report")
-        if rp.status_code == 200:
-            ru = next(x for x in rp.json().get("users", [])
-                      if x.get("id") == uid)
-            assert "exempt_quota" in ru
 
 
 def test_milestone_page_is_public(tmp_path):

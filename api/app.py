@@ -2825,15 +2825,17 @@ def create_app(
         await service.ensure_period()
         push_task = asyncio.get_running_loop().create_task(_push_loop())
         # Auto-restore persistent VPN tunnel if previously connected
-        asyncio.get_running_loop().create_task(_vpn_manager.auto_restore())
+        restore_task = asyncio.get_running_loop().create_task(_vpn_manager.auto_restore())
         try:
             yield
         finally:
             push_task.cancel()
-            try:
-                await asyncio.wait_for(_vpn_manager.disconnect(user_initiated=False), timeout=3.0)
-            except Exception as e:
-                log.debug("VPN shutdown disconnect notice: %s", e)
+            restore_task.cancel()
+            if _vpn_manager.state != "disconnected" or _vpn_manager._proc is not None:
+                try:
+                    await asyncio.wait_for(_vpn_manager.disconnect(user_initiated=False), timeout=2.0)
+                except Exception as e:
+                    log.debug("VPN shutdown disconnect notice: %s", e)
 
     app.router.lifespan_context = _lifespan
 

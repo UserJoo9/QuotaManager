@@ -309,6 +309,7 @@ class VpnManager:
             self._monitor_task.cancel()
             self._monitor_task = None
 
+        had_proc = self._proc is not None
         if self._proc:
             self._append_log("[INFO] Stopping VPN process...")
             try:
@@ -326,8 +327,9 @@ class VpnManager:
             finally:
                 self._proc = None
 
-        # Clean any remaining sing-box instances
-        kill_stale_sing_box_processes()
+        # Clean any remaining sing-box instances only if a process was active
+        if had_proc:
+            kill_stale_sing_box_processes()
 
         # Clean up temp config file
         if self._config_file:
