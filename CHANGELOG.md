@@ -6,48 +6,35 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
-## [0.4.0] - 2026-09-30
+## [0.4.0] — 2026-10-01
 
 ### Added
-- **Native VPN Subsystem (sing-box Engine & Clash API)**:
-  - Integrated high-performance `sing-box` core process supervisor with automatic dynamic config generation and validation.
-  - Full support for VLESS, VMess, Shadowsocks, Trojan, and WireGuard links with QR and clipboard link parsing.
-  - Interactive **Proxy Node Editor**: dynamically inspect and edit outbound settings (server, port, UUID/key, TLS/reality, ALPN, transport type, path, and host headers) directly in the UI.
-  - Global **"Allow Insecure TLS"** master switch to enable/disable certificate verification across all configs with one click.
-  - Real-time Clash API metrics integration (`127.0.0.1:9090`): live upload/download speed gauges, session transfer totals, and active connections count.
-  - Granular **VPN Policy Routing**: selectively route or bypass any user or individual device through the VPN tunnel.
-  - Live in-memory core log viewer with auto-scroll and log level filtering.
-- **VPN Connection Persistence & Auto-Healing**:
-  - Connection state and active node ID are now permanently persisted in SQLite (`vpn_auto_connect`, `vpn_active_node_id`).
-  - VPN connections stay connected across browser refreshes (F5), page navigation, and gateway reboots with automatic tunnel restoration.
-  - Automatic reconnect loop if the sing-box process terminates unexpectedly.
-- **Telegram WAN IP Notification Trigger**:
-  - Added Telegram Bot trigger in the WAN tab for remote gateway management from outside the home.
-  - Automatically detects public IP changes (from PPPoE `ppp0` or external probe) and sends formatted HTML alerts with timestamp, interface, and direct clickable dashboard URL.
-  - Real-time Firewall remote access status banner (verifying whether WAN port access is open or blocked in the firewall) and shortcut to Firewall configuration.
-  - Instant **⚡ Send Test Message** button to verify bot credentials.
-- **Ultra Network-Level Ad-Blocker & Cleaned DNS Tab**:
-  - Centralized hardware-level ad & tracker blocking shield with zero software or extensions needed on client devices.
-  - Streamlined 2-tier protection intensity selector: 🔥 **Ultra PRO** (HaGeZi Multi PRO + AdGuard + Anudeep) vs ⚡ **Standard** (StevenBlack).
-  - Dedicated **Category & Content Filters** card for parental controls (Adult Content, Gambling, Social Media, Streaming Platforms) with redundant blocklists removed.
-- **Browsing History & Real-Time Domain Analytics**:
-  - Added `quota/history_analytics.py` for real-time DNS query timeline analysis, top queried domains, and per-client resolution statistics.
-- **Static DHCP Reservations**:
-  - Added ability to assign fixed IP reservations to managed devices and custom MAC addresses directly from the Network tab.
-- **Usage Calibration Studio**:
-  - Added administrative usage calibration endpoint and standalone studio to adjust, calibrate, or test consumption numbers per device or user.
+- **Built-in VPN Service**: You can now connect your whole network — or select devices — to a VPN directly from the dashboard, without needing any VPN apps installed on your phones, TVs, or computers.
+  - **One-Click Link Import**: Easily paste standard VPN links or scan QR codes (supports VLESS, VMess, Shadowsocks, Trojan, and WireGuard).
+  - **Live Speed Meters**: Watch live download and upload speeds and track total data transferred through the VPN.
+  - **Choose Who Uses the VPN**: Selectively route specific family members or devices through the VPN while keeping gaming consoles or work laptops on your regular internet line.
+  - **Proxy Settings Editor**: Edit server addresses, ports, and connection settings right inside the dashboard.
+  - **Always Connected**: The VPN automatically reconnects if the gateway restarts, the internet blips, or you refresh your browser.
+- **Telegram Alerts on Public IP Changes**:
+  - Receive an instant message on your phone via Telegram whenever your home router gets a new public IP address from your provider.
+  - Each alert includes the new IP address, timestamp, and a clickable link to open your dashboard from outside your home.
+  - Includes a "Send Test Message" button in the WAN tab to verify your bot instantly.
+- **Network-Wide Ad Blocker & Family Safety Shield**:
+  - Block ads, trackers, and popup banners across all connected devices in your home — including smart TVs and mobile apps — with zero client software needed.
+  - Two simple protection levels: **Standard** (everyday fast ad blocking) and **Ultra PRO** (maximum shield against aggressive ads, telemetry, and tracking).
+  - Built-in parental control switches to block adult websites, gambling, social media, or streaming video across the house or on specific devices.
+- **Browsing History & Activity Insights**:
+  - Visual charts showing the most visited apps and websites (like YouTube, TikTok, Netflix, Facebook) and daily activity timelines per device.
+- **Fixed Device IP Reservations**:
+  - Permanently reserve specific IP addresses for your printers, servers, or gaming consoles directly from the Network tab with a single click.
 
 ### Fixed
-- **VPN Core Service Restart Hang**: Fixed service restart hang by bridging asyncio `_stop_event` directly to `uvicorn.Server.should_exit`, adding timeouts on sing-box process termination, and killing orphaned processes cleanly.
-- **VPN Policy Routing & Network Traffic Blackholing**: Fixed complete internet loss when connecting to VPN by switching sing-box TUN inbound to `stack: "gvisor"` with 1500 MTU, prioritizing private LAN subnets ahead of DNS hijack rules, and adopting sing-box 1.14+ modern DNS server format.
-- **VPN Process Search Log Spam**: Disabled `find_process` in sing-box router configuration to eliminate repeated `router: failed to search process: process not found` log messages on the gateway.
-- **VPN Ping Latency Test**: Fixed server and port extraction from full config formats, added active ping spinner, and ensured latency results are persisted and reflected immediately in the UI without getting overwritten.
-- **Browsing History Loading Animation**: Added smooth loading spinner animation in the Browsing History tab to prevent blank screen display while DNS analytics are compiling.
-- **Notification Spam**: Fixed notification buffer duplicates and dismiss state persistence in frontend toast system.
-- **DNS UI Layout**: Fixed broken layout where radio buttons expanded to 100% width causing large empty gaps.
-- **VPN Web UI Race Condition**: Fixed a frontend race condition where refreshing the page briefly caused VPN nodes to display as "Idle" before the status payload arrived.
-- **sing-box Outbound DNS Deprecation**: Fixed validation error in sing-box 1.12+ regarding deprecated outbound DNS rule item syntax.
-- **Revert to LAN & WAN Applier Fix**: Fixed `$'\r': command not found` and `set: pipefail: invalid option name` errors when switching between WAN and LAN topologies. Converted all shell scripts and Debian packaging files to LF, enforced `eol=lf` in `.gitattributes`, and added automatic runtime CRLF normalization in `TopologyManager` before invoking `topology.sh` or `test_pppoe.sh`.
+- **Seamless VPN Internet Connection**: Fixed an issue where connecting to a VPN could freeze network traffic or temporarily cut internet access across the house.
+- **VPN Latency & Ping Tests**: Fixed ping tests so response times update accurately and display an active testing spinner.
+- **Browsing History Loading Spinner**: Added a smooth loading indicator when opening the History tab so you know data is loading right away instead of seeing an empty screen.
+- **Cleaner Notifications**: Fixed an issue where alert notifications could repeat or stack on top of each other.
+- **Mode Switching Reliability**: Switching between Direct Internet (WAN) mode and Standard Router (LAN) mode is now completely seamless and error-free.
+- **Reduced Log Clutter**: Removed repeated background log warnings, keeping the system logs clean and readable.
 
 ## [0.3.3] - 2026-09-04
 

@@ -31,6 +31,10 @@ gateway:
   (Adult content, Gambling, Social media, Streaming) with zero client apps needed
 - **Telegram WAN IP Change Trigger**: Automatic alerts to your Telegram bot whenever
   the ISP-assigned public IP changes, with direct dashboard URLs for effortless remote management
+- **Browsing History & Domain Analytics**: Real-time traffic breakdowns showing the most
+  active websites and apps (YouTube, TikTok, Netflix, Facebook) and per-device daily timelines
+- **Static DHCP IP Reservations**: Assign fixed IP addresses to servers, printers, or
+  gaming consoles directly from the dashboard with one click
 - Serves a **dark obsidian-glass dashboard** you can open from any phone on
   the LAN — the whole UI (dashboard, the household milestone page, and the
   consumption report) is phone-friendly and touch-first
@@ -226,7 +230,7 @@ See [Structure_README.md](Structure_README.md) → *Running from source*.
 
 | Tab | What it does |
 |---|---|
-| **Management** | the bundle ring (used / remaining / days left) and a card per **user** (features a Layout Toggle for Grid/Masonry/List views) — allowance, usage bar, block toggle, top-up, edit, delete — with their devices listed underneath (name, MAC, manufacturer, its own quota bar + up/down split). Each device card also shows **how it's connected** (WiFi / LAN chip) and a **presence LED** that goes grey when the device stops answering. A user can be flagged **Exempt from quota** (never quota-blocked, however much they use — manual blocks still work) |
+| **Management** | the bundle ring (used / remaining / days left) and a card per **user** (features a Layout Toggle for Grid/Masonry/List views) — allowance, usage bar, block toggle, top-up, edit, delete — with their devices listed underneath (name, MAC, manufacturer, its own quota bar + up/down split). Each device card also features a **presence LED** that goes grey when the device stops answering. A user can be flagged **Exempt from quota** (never quota-blocked, however much they use — manual blocks still work) |
 | **Network** | bundle settings, **Guest mode** (auto-register new devices with a small allowance + speed limit + guest cap + **STOP NEW CONNECTIONS**), **Reset month now**, speed shaping master switch (set your real line rates), **Static DHCP IP reservations**, **Decline random MACs**, **MAC whitelist / blacklist**, and a live network overview |
 | **VPN** | **Built-in sing-box Manager**: Import VLESS, VMess, Shadowsocks, Trojan, and WireGuard links with QR / clipboard support, test latency, edit outbound protocols & transport settings via the Interactive Proxy Editor modal, monitor real-time Clash API speed meters & session traffic, and selectively route or bypass individual users and devices |
 | **WAN** | direct PPPoE dialing ("strong" mode) with automated periodic IP renewal schedule and **Telegram Bot notification trigger** on public IP changes |

@@ -18,9 +18,11 @@ the project layout, tests, and the release process.
 - [Quota model](#quota-model)
 - [Speed shaping](#speed-shaping)
 - [DNS filtering (domain rules, presets, per-client DNS servers)](#dns-filtering-domain-rules-presets-per-client-dns-servers)
-- [Rogue devices & the ARP gateway-lock](#rogue-devices--the-arp-gateway-lock)
-- [Strong (WAN) mode](#strong-wan-mode)
+- [Strong (WAN) mode & Telegram IP Engine](#strong-wan-mode)
 - [VPN share](#vpn-share)
+- [Native VPN Subsystem (sing-box Core & Clash API)](#native-vpn-subsystem-sing-box-core--clash-api)
+- [Ultra Ad-Blocker & History Analytics Engine](#ultra-ad-blocker--history-analytics-engine)
+- [Software updates](#software-updates)
 - [Key design decisions](#key-design-decisions)
 - [Known bottlenecks & technical debt](#known-bottlenecks--technical-debt)
 - [Requirements](#requirements)
@@ -676,6 +678,41 @@ drops internet briefly) re-dials on its own. Both only run while ppp0 is
 actually **up** (a dead dial has nothing to renew into), and the last-renewed
 timestamp is persisted so a gateway restart never re-renews mid-schedule.
 
+### Telegram WAN IP Detection & Notification Engine
+
+`quota/wan_telegram.py` provides an asynchronous public IP monitoring and alert
+subsystem for remote gateway administration:
+
+- **Detection Strategy (`get_current_public_ip`)**:
+  - In **Strong (WAN) mode**, reads the kernel's local address assigned to `ppp0`
+    via `detect_ppp` in `quota/topology.py` (instantaneous sysfs/netlink query,
+    zero network latency, no external dependencies).
+  - When running in LAN mode or during PPPoE initialization, falls back to external
+    probes: HTTP GET to `https://api.ipify.org?format=json` via `httpx.AsyncClient`
+    (6.0s timeout), followed by `https://icanhazip.com` via threaded `urllib.request`.
+- **State Machine & Notification Deduplication**:
+  - Polled periodically during the maintenance cycle (`quota/netmgr.py`).
+  - IP changes are compared against the SQLite setting `wan_telegram_last_ip`.
+  - When an IP change is detected and Telegram notifications are enabled
+    (`wan_telegram_enabled == 1`), `send_telegram_message` is invoked with an
+    escaped HTML payload formatted by `format_wan_ip_message`.
+  - The notification includes:
+    - Current Public IPv4 address wrapped in `<code>` tags.
+    - Timestamp formatted as `%Y-%m-%d %H:%M:%S`.
+    - Active egress interface name (e.g. `ppp0`).
+    - **Firewall WAN Remote Access Status**: dynamically queries `FirewallConfig.wan_web_access`.
+      If remote WAN port access is open, outputs a clickable URL
+      (`{web_proto}://{ip}:{web_port}`); if blocked by nftables input policy,
+      outputs a warning banner alerting the operator that remote management must
+      be unblocked in the Firewall tab.
+- **Resilience**:
+  - Primary network requests utilize `httpx.AsyncClient` with a 10.0s timeout.
+  - Automatic runtime fallback to a daemon thread running `urllib.request.urlopen`
+    with JSON payload serialization if `httpx` is missing or uninstalled.
+  - Endpoints: `POST /api/wan/telegram` (updates token/chat_id/enabled),
+    `POST /api/wan/telegram/test` (synchronously triggers test alert). Tokens are
+    masked (`1234...wxyz`) in UI API responses via `mask_bot_token`.
+
 ---
 
 ## VPN share
@@ -800,6 +837,153 @@ the tunnel drops, the subnet is blackholed on purpose — never silently
 re-routed around the quota; while relaying, the box's own internet flows (and
 stays metered into the Gateway user) UNLESS you cut it — the whitelist only
 keeps the VPN-server endpoints reachable under that cut.
+
+---
+
+## Native VPN Subsystem (sing-box Core & Clash API)
+
+Quota Manager v0.4.0 integrates a native, production-grade VPN core supervisor
+(`quota/vpn_manager.py` and `quota/vpn_parser.py`) powered by the `sing-box` engine
+(v1.10+ / v1.14+). This subsystem runs on the gateway box, eliminating third-party
+desktop or mobile VPN clients on end-user devices.
+
+### Architecture & Process Supervision (`quota/vpn_manager.py`)
+
+- **Subprocess Supervision Lifecycle**:
+  - The `VpnManager` class manages the lifecycle of the underlying `sing-box` binary.
+  - Automatically discovers the binary using `find_sing_box_binary` across system paths
+    (`/usr/local/bin/sing-box`, `/usr/bin/sing-box`, `/opt/sing-box/sing-box`, and PATH).
+  - Generates a standalone configuration JSON (`tempfile.NamedTemporaryFile`) on connect.
+  - Spawns the supervisor process via `asyncio.create_subprocess_exec("sing-box", "run", "-c", config_path)`
+    with stdout and stderr piped to a circular in-memory buffer (`collections.deque(maxlen=500)`).
+  - State transitions: `STATE_DISCONNECTED` → `STATE_CONNECTING` → `STATE_CONNECTED` (or `STATE_ERROR`).
+- **Clean Signal Handling & Process Termination**:
+  - Stopping or reconnecting sends `SIGTERM` to the process group.
+  - Accompanied by an asynchronous timeout grace period (2.0s). If the process fails
+    to terminate within 2 seconds, escalates to `SIGKILL` (`proc.kill()`) to prevent
+    zombie processes or locked tun interfaces.
+  - In `run.py`, the supervisor bridges asyncio `_stop_event` directly to
+    `uvicorn.Server.should_exit`, preventing event-loop hangs during service restarts.
+- **Auto-Healing & State Persistence**:
+  - The active node ID and auto-connect state are persisted in SQLite:
+    `vpn_auto_connect = "1"`, `vpn_active_node_id = <node_id>`.
+  - On gateway reboot or service startup, `VpnManager.initialize()` detects the saved
+    state and automatically spins up the tunnel in the background.
+  - A background health check monitors `proc.returncode`. If the process unexpectedly
+    exits (e.g., remote server crash or network drop), the daemon logs an error and
+    initiates an automatic reconnect backoff sequence.
+
+### Configuration Synthesis & Parser Engine (`quota/vpn_parser.py`)
+
+- **Supported Link Protocols**:
+  - **VLESS**: Parses UUID, remote host, port, flow (`xtls-rprx-vision`), and security settings.
+    Supports **Reality** (`security=reality&pbk=...&sid=...&sni=...`) with UTLS client
+    fingerprinting (e.g. `chrome`, `firefox`), and standard TLS with ALPN negotiation.
+  - **VMess**: Decodes base64-encoded JSON schemes extracting server, port, UUID, alterId,
+    cipher security (`auto`, `aes-128-gcm`, `chacha20-poly1305`), and transport layer
+    (`ws` with HTTP request headers/path, or TCP).
+  - **Shadowsocks**: Supports SIP002 URIs (`ss://<base64>@host:port#name`) with AEAD ciphers
+    (`aes-128-gcm`, `aes-256-gcm`, `chacha20-ietf-poly1305`), custom password parsing,
+    and UDP over TCP (`uot`).
+  - **Trojan**: Parses password, server, port, and SNI/TLS configurations.
+  - **WireGuard**: Parses private key, peer public key, preshared key, endpoint, MTU,
+    and interface address allocations.
+- **Inbound TUN Configuration (`quota-vpn`)**:
+  - Type: `tun`, Interface name: `quota-vpn`.
+  - **Stack: `gvisor`**: The network stack is explicitly configured to `gvisor` with MTU `1500`.
+    This userspace TCP/IP stack eliminates kernel TUN fragmentation bugs, MTU clipping,
+    and connection freezes on high-bandwidth links.
+  - `auto_route: true`, `strict_route: true`.
+- **Preventing Network Blackholing & Route Loops**:
+  - Local LAN and management subnets (`192.168.1.0/24`, `192.168.2.0/24`, `127.0.0.0/8`)
+    are prioritized in the router rules and assigned to `outbound: "direct"`. This ensures
+    that LAN traffic, gateway dashboard management (`:8080`), and local DNS queries
+    are never diverted into the VPN tunnel.
+  - **Process-Search Suppression**:
+    `find_process: false` is explicitly set in the sing-box router block. Because forwarded
+    gateway packets traversing nftables do not have local Linux socket owners, disabling
+    process search eliminates thousands of `router: failed to search process: process not found`
+    log warnings per hour.
+  - Modern sing-box 1.14+ DNS format: Uses top-level `dns.servers` array with standard
+    `address` fields instead of deprecated outbound syntax.
+- **Global Certificate Insecurity Switch**:
+  - `vpn_allow_insecure` setting: When enabled, `generate_sing_box_config` sets
+    `tls.insecure: true` across all generated outbounds, permitting connections to
+    self-signed or dynamic testing proxies.
+
+### Clash API Telemetry Integration
+
+- Sing-box is configured with an embedded Clash external controller on `127.0.0.1:9090`.
+- The web dashboard and Python API poll this controller asynchronously:
+  - `GET /traffic`: Real-time instantaneous uplink and downlink byte counters (Bps).
+  - `GET /connections`: Granular inspection of all active sockets passing through the proxy,
+    displaying source IP, destination domain/IP, connection duration, and cumulative upload/download metrics.
+- **Latency Testing (`ping_node`)**:
+  - Connects directly to the proxy node's endpoint using socket TCP handshakes or HTTP HEAD
+    probes through the proxy.
+  - UI triggers an active testing spinner and persists round-trip time (RTT in ms) to the
+    `vpn_nodes` SQLite record for display in node cards.
+
+### Granular Policy Routing
+
+- Allows selective per-user and per-device VPN tunneling.
+- Backed by SQLite settings: `vpn_routing_users` (JSON array of user IDs) and
+  `vpn_routing_devices` (JSON array of device MACs).
+- Devices or users assigned to the VPN are matched in nftables (`meta mark set 0x100`)
+  and routed through Linux routing table `100` (`ip rule add fwmark 0x100 lookup 100`),
+  while unassigned devices fall through to the default gateway (WAN/uplink), providing
+  frictionless split-tunneling across the household.
+
+---
+
+## Ultra Ad-Blocker & History Analytics Engine
+
+### Multi-Engine Ad & Threat Blocker
+
+`quota/dns_rules.py` provides high-performance, centralized hardware-level DNS
+filtering running directly on top of `dnsmasq`:
+
+- **Tiered Protection Engines**:
+  - **🔥 Ultra PRO**: Aggregates three industry-standard threat and ad-blocking feeds:
+    1. *HaGeZi Multi PRO*: Massive coverage of telemetry, spyware, trackers, and ad networks.
+    2. *AdGuard Mobile & Web Filter*: Targeted blocking of mobile in-app banners and video tracking.
+    3. *Anudeep White/Blacklists*: Curated protection against telemetry and phishing.
+    - Yields over 180,000 distinct domains. Compiles in memory, deduplicates via set union,
+      and writes directly into `/etc/dnsmasq.d/quota-dns-rules.conf` as `address=/domain/`.
+  - **⚡ Standard**: StevenBlack unified hosts blocklist (~45,000 domains), optimized for
+    minimal memory footprint and zero false positives on common streaming services.
+- **Parental Controls & Category Blocking**:
+  - **Adult Content / Porn Filter**: Two-layer hybrid protection:
+    - Layer 1: Cloudflare Family upstream DNS (`1.1.1.3` / `1.0.0.3`) for dynamic real-time
+      categorization and hard SafeSearch enforcement on Google, Bing, and YouTube.
+    - Layer 2: Fast local blocklist (`PORN_DOMAINS`) compiled directly into zero-route directives.
+  - **Social Media Blocklist**: Blocks TikTok, Instagram, Facebook, Twitter/X, Reddit, Snapchat, Discord.
+  - **Gambling & Crypto Scams**: Curated blocklist of online casinos and crypto phishing vectors.
+  - **Streaming Throttling**: Restricts access to YouTube, Netflix, Prime Video, Twitch.
+
+### Real-Time Browsing History & Domain Analytics (`quota/history_analytics.py`)
+
+- **DNS Log Ingestion (`quota/dnslog.py`)**:
+  - Asynchronously tails the dnsmasq log buffer or SQLite event store.
+  - Extracts timestamp, requesting client IP (mapped to managed device/user), queried domain,
+    and return response code.
+- **Categorization & Service Identification Engine**:
+  - Maps incoming queries against `KNOWN_SERVICES` regex / prefix trees:
+    - *YouTube*: `googlevideo.com`, `youtube.com`, `youtu.be`, `ytimg.com`.
+    - *Facebook / Meta*: `fbcdn.net`, `facebook.com`, `meta.com`, `fbsbx.com`.
+    - *WhatsApp*: `whatsapp.net`, `whatsapp.com`.
+    - *TikTok*: `tiktokcdn.com`, `tiktokv.com`, `byteoversea.com`.
+    - *ChatGPT / AI*: `chatgpt.com`, `oaistatic.com`, `oaiusercontent.com`, `anthropic.com`.
+  - Assigns brand colors (e.g. `#FF0000` for YouTube, `#0084FF` for Facebook) and icon tags.
+- **Base Domain Parsing (`get_base_domain`)**:
+  - Strips subdomains and CDNs down to canonical root domains using multi-part TLD parsing
+    (handling `.com.eg`, `.co.uk`, `.gov.eg`, etc.).
+- **Interactive UI Timeline**:
+  - Provides REST endpoint `GET /api/history/analytics` delivering:
+    - Total DNS queries count.
+    - Hourly time-series distribution histogram for activity heatmaps.
+    - Top 10 identified web services with usage percentages.
+    - Top 10 base domains.
 
 ---
 
@@ -958,6 +1142,29 @@ breaking-change baseline.
   `quota/db.py` (872), `quota/nftables.py` (751), `run.py` (672) — each a god
   module; `quota/engine.py` is the cross-cutting type hub (a field rename ripples
   through every consumer).
+
+**Architectural Resolutions (v0.4.0 Baseline):**
+- **Subsystem Lifecycle & Event Loop Shutdown Bridge**:
+  Service restart hangs previously occurred when asyncio background workers or the
+  sing-box daemon remained alive while Uvicorn's event loop attempted to drain.
+  Resolved by bridging `_stop_event` directly to `uvicorn.Server.should_exit` and
+  enforcing a hard 2-second SIGTERM timeout escalating to SIGKILL on proxy child
+  processes.
+- **gVisor Network Stack for Sing-Box Inbound (`stack: "gvisor"`)**:
+  Default system TUN drivers suffered from MTU clipping and complete packet blackholing
+  under forwarded routing topologies. Standardizing on `gvisor` user-space TCP/IP
+  stack with MTU 1500 resolved packet loss and allowed concurrent LAN-to-VPN
+  routing without kernel interface lockups.
+- **Forwarded Packet Process-Search Log Flood**:
+  Gateway routing forwards packets from `192.168.2.0/24` that lack local Linux socket
+  owners. Sing-box's default router emitted repeated `router: failed to search process:
+  process not found` messages. Disabling `find_process: false` in generated
+  router configurations eliminated this CPU and log overhead.
+- **CRLF vs LF Runtime Normalization**:
+  To protect against cross-platform Windows development artifacts, all shell scripts
+  and packaging templates enforce `eol=lf` via `.gitattributes`. In addition,
+  `TopologyManager` executes runtime in-memory CRLF normalization prior to invoking
+  `topology.sh` or `test_pppoe.sh`.
 
 ---
 
