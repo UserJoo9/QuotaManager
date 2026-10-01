@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import collections
 import datetime as _dt
-import re
 from typing import Any
 
 from quota.db import Database

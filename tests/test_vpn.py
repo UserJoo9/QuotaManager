@@ -1,13 +1,12 @@
 import json
 import pytest
-from unittest.mock import AsyncMock, patch
 
 from quota.vpn_parser import (
     parse_vpn_link,
     generate_sing_box_config,
     validate_sing_box_config,
 )
-from quota.history_analytics import classify_domain, get_base_domain, get_history_analytics
+from quota.history_analytics import classify_domain, get_base_domain
 
 
 def test_vless_reality_parser():
@@ -300,7 +299,6 @@ def test_vpn_node_patch_and_delete(tmp_path):
         "transport": "TCP",
     })
     assert r.status_code == 200
-    import json
     cfg = json.loads(r.json()["config_json"])
     assert cfg["server"] == "yax.ddns.net"
     assert cfg["server_port"] == 443

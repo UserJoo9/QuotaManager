@@ -1692,7 +1692,7 @@ def test_recharge_pack_user_targeted(database):
         assert b.allowances[u2.id] == 49.5
 
         # Add 10 GB dedicated pack to Ahmed
-        pack = await svc.add_recharge_pack(gb=10.0, target_type="user", target_id=u1.id)
+        await svc.add_recharge_pack(gb=10.0, target_type="user", target_id=u1.id)
         b = await d.get_bundle()
         # Ahmed's allowance increases by 10 GB; Ali's is unchanged
         assert b.allowances[u1.id] == 59.5
@@ -1723,7 +1723,7 @@ def test_recharge_pack_device_targeted_bypass(database):
         assert st_laptop.block_state == _db.BLOCK_QUOTA
 
         # Add a 10 GB dedicated booster pack to the study laptop
-        pack = await svc.add_recharge_pack(gb=10.0, target_type="device", target_id=laptop.id)
+        await svc.add_recharge_pack(gb=10.0, target_type="device", target_id=laptop.id)
 
         # Laptop now bypasses user quota block because it has an active device booster!
         await svc.evaluate_blocks()

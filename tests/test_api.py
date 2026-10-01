@@ -1781,8 +1781,6 @@ def test_speed_cap_edit_triggers_immediate_shaping_sync(tmp_path):
     shaper re-sync — the tc tree changes in the kernel right away instead of
     waiting up to 15 s for the next maintenance tick (the "needs a page
     refresh" lag)."""
-#     import asyncio
-    import time
     database = _db.Database(tmp_path / "api.db")
     service = QuotaService(database, timezone="Africa/Cairo")
     holder = SnapshotHolder()

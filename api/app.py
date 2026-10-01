@@ -27,7 +27,7 @@ from typing import Any, Callable, Optional
 import yaml
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
@@ -60,7 +60,7 @@ from quota.history_analytics import get_history_analytics
 from quota.service import GB, QuotaService
 from quota.vendor import vendor_for
 from quota.version import __version__
-from quota.vpn_manager import VpnManager, VpnManagerStatus
+from quota.vpn_manager import VpnManager
 from quota.vpn_parser import generate_sing_box_config, parse_vpn_link, validate_sing_box_config
 
 log = logging.getLogger("quota.api")

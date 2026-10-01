@@ -12,7 +12,6 @@ import datetime as _dt
 import json
 import logging
 import urllib.request
-from typing import Any, Optional
 
 log = logging.getLogger("quota.wan_telegram")
 
@@ -51,8 +50,8 @@ def format_wan_ip_message(
         )
     else:
         fw_status = (
-            f"⚠️ <b>Remote Web Access:</b> BLOCKED in Firewall\n"
-            f"<i>(Enable 'WAN Web Access' in Firewall tab to access remotely)</i>"
+            "⚠️ <b>Remote Web Access:</b> BLOCKED in Firewall\n"
+            "<i>(Enable 'WAN Web Access' in Firewall tab to access remotely)</i>"
         )
 
     msg = (
