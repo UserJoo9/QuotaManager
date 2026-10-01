@@ -4,39 +4,39 @@ Hash: SHA512
 Architectures: all
 Codename: stable
 Components: main
-Date: Thu, 01 Oct 2026 11:26:32 +0000
+Date: Thu, 01 Oct 2026 11:35:38 +0000
 Label: Quota Manager
 Origin: Quota Manager
 Suite: stable
 MD5Sum:
- ecca7d81d335b13daabff2a7ec3a0d84              148 Release
- 78509cd9b363cc875679d065b2be9c37            10908 main/binary-all/Packages
- a07fa0daf685e188faec9f794881396b             2264 main/binary-all/Packages.gz
+ 6044b731a8581709b38b5cf0f73b1039              148 Release
+ be83c904e79c15d215d663728fd4a2cb            10908 main/binary-all/Packages
+ 3d7ef134a0eb212ed7ab0ea32ed1d84a             2267 main/binary-all/Packages.gz
 SHA1:
- 90c5fa178c276c960f1178893764e4b4612751a1              148 Release
- 5bc1bfc9f4a10be2f5847745ba6fab7f2abb9120            10908 main/binary-all/Packages
- 6707097368793ac13a77aebbbdac3a3d82827a0b             2264 main/binary-all/Packages.gz
+ 128c52a7cf3fdbbe1cf70c95610b963120bec95b              148 Release
+ f5bf725d7108936fb069f1ae0c97583ee971d7ae            10908 main/binary-all/Packages
+ c0cab60f73208c53fa1ed6cfedf878a534799a72             2267 main/binary-all/Packages.gz
 SHA256:
- 6b74fddd9ba947e4a80bc42af5e993fd1ab20c120968087fd02c2dd8e73adc7f              148 Release
- fbd2555fd1854979ac232258b984249eea7e541642e16762d046458eb807bf2f            10908 main/binary-all/Packages
- 0e416579a11ed98e3c8bec2398101437b86d1e44c5d642ed03695bf7297ad5f8             2264 main/binary-all/Packages.gz
+ 14c8f02d8cd11ab4f51c4ed4bef67db75e3c3011708b53376c7ad4038b90e616              148 Release
+ cf96386eee79690446cf83ba96b2837911a6d5cfc4489f8c33b3db855ae15850            10908 main/binary-all/Packages
+ d1453327056c469c562c65b5b14e4f54ef19929649ebfb646f1acde963171deb             2267 main/binary-all/Packages.gz
 SHA512:
- 3cbc55935074217ae988a9a9125da4bbcf7d65bd1e9f0b7ca99cd116d389965da8a053e25948dd3f356a3c43cba78a0e9d83816d41ac22b6fb511dc635858cc3              148 Release
- 2bd2fe36114e27f543c2126934fe85ce463ad193021c897c698c0c2b02f4bfb0dde70b671e57c341020de46c7a450103199ca8fe2b2676df1ddc75bfc2a6f9fb            10908 main/binary-all/Packages
- 684de7d534a554c3006e8ec5594606238016c831b0fac4fbd6cab85ed19efb9779e643d5a180fb5381bae04f3c7d1a437f776469fba6f99e1402bd8f74993768             2264 main/binary-all/Packages.gz
+ 1ee5a041adcf00cff43d651e081f52c842a1e981ce0fc083f04254241e4f126d071bc08e1efe3af001e1346d123b7362fe099e3361a5136daa8c504997a57a7a              148 Release
+ 8613000403a7cb215fc68b4d42c765b5cca417e29f8c05534afcf77b42e217d08ece2cd129c383745f8b30da90013b1a275f705610096bc7f1f4f15e93ab78f2            10908 main/binary-all/Packages
+ 3d8012c9873123cd36f1d5958a3b7b8ecdbe20d8924cb767fab85500fceba60f34bcf87cff5183aa7a1b0d5f61add7e5e47d36a3ab21928b2b8499d6abe4b76c             2267 main/binary-all/Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iQIzBAEBCgAdFiEESu78Dvvp7eMq+CUSN9CBZLuxUT8FAmq+Q2gACgkQN9CBZLux
-UT8mGw/+OaNgsQ9dlLpJgXoGK5X4wd7BCKfXQxwrmhrmeNGghakCRD9i5Lq7WHW9
-fF0erDG0cliT+shBtWWfJJrasxAY4BAJe7q9FX87jwvmaMToXWt+5S9JUxn/FHK5
-oxY+pRqnjIononBOB+Tz8wQu6qLbtgXfI+0aURSW/NQTbpILofFgLblaD597+t7H
-dMprL7nMIzfAsoJPICMtOfZc83CPbm68WJ1WeaxS7X+l1y3o5KjHl6wLwRS0okQP
-fiJI9pTxf/Y8927HIbWRVlKx+Y7cwXkGV/Q7EF56AKwfuW4glCLxCUxptoBthl0J
-9FJAKdayhnfBhrOOgbVUqmHJa9uLtD2+5Rb4waLF9O30s27q4VHArZtzud8fUW+Q
-SGStRDR9dYP6idPQJL5+gpUQ219HsqGpvjvpBiHiJee+XxD+Toi3cYwRWLYVwHu5
-OlgblAUMBIAHP9PH/tdEPv5JWxcCtrcFR2KsQc4Al9oX4EVJ17VnEqFfHXN/hT84
-npKJ8PyjlfXx7IGEZLlCsNVnxaprr6ZeecyYW8CbL27/n59zkKYSFAGzEGSu865D
-sPiwWaQkNtfFnEC4FnmFyt7Cn8/amfLT0P5hQIyYi8O+1f6qGEt7CgQk7o9UHjUJ
-JQmz7kx+fC2Ic/4/vCE+o6kQata5sLbRtsf3QkGxffSWNEM/fbc=
-=U7Yr
+iQIzBAEBCgAdFiEESu78Dvvp7eMq+CUSN9CBZLuxUT8FAmq+RYoACgkQN9CBZLux
+UT/TOg//dehvigxBGpRsLIvsS58sXVNq48X/UB7kcYXNy3TmodJajF+8Rb1oq9o8
+BQXDzYfWV9AjtL0PdySC1dZs7yg3aoaLfBd9Tk2c3aE7gENKidjArmmAhUgAUg+N
+KChnruSRzmmV0EgcSB3ubfDQbaaCr2A2pmJGrawDyZ3XJnZquEqPWsHtWdLqxt67
+lhY7foTO9sfQKZdLhloEELL+1f1hgKcy5fqysdOW3MsgQHLyLGtw3LF8uoCZUuB9
+ZU4q7qIkKGZ5V39SqeTO/0kyKOxD9flQhf3rb7Boji5GaIdzvl0yQAoirlIrFIe6
+AQAQ64FjyJ1L+FofCcslxfIdWQoHaMOYeHzGDmfBhKz33PkfjvVqnapx4ASqU18X
+h1uiFAHmjavxdRBHa1ZNzQxxC0SZXNWTJm1CDRbE2hbxlFzburr7VUQH1uBF/+2c
+ROLyx9i4SDsVpxtTmBlgiLpfDUQZc9LOWrcb+q0QJW1+IzkBgaSrOFC4HisxRaMC
+E0zV6M0QFY8I+AEQvIYxKiN3Nx/uVemYOkRuaVwm4/sBeBRA6p2Dg6lZTbjVHGFb
+ArtFMp7JVrKAot8HnM69EO+AmuAWX97APUSMuIzntIjt/uKjo8q/qgPLBpr6iM+h
+djvbc3krr7SMeHhToXBNvbzo0Joe0wJSqiaAfFWMBbGI/0fLewE=
+=lKYL
 -----END PGP SIGNATURE-----
