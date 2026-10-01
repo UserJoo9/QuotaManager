@@ -465,6 +465,8 @@ class Database:
         self._conn: aiosqlite.Connection | None = None
 
     async def connect(self) -> None:
+        if self._conn is not None:
+            return
         try:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
             conn = aiosqlite.connect(self.path)

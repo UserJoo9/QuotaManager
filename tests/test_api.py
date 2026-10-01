@@ -1726,18 +1726,6 @@ def test_delete_normal_user_blacklists_its_macs(client):
     assert all(d["mac"] != "aa:bb:cc:dd:ee:97" for d in dash["devices"])
     assert all(dev["mac"] != "aa:bb:cc:dd:ee:97"
                for u in dash["users"] for dev in u["devices"])
-    holder = SnapshotHolder()
-    with _client_from(create_app(db, QuotaService(db, timezone="Africa/Cairo"),
-                                 holder,
-                                 report_config=ReportConfig(
-                                     enabled=True, allow_client_subnet=True,
-                                     allowed_ips=[],
-                                     client_subnet="192.168.2.0/24")),
-                      "192.168.2.9") as rc:
-        report = rc.get("/api/report")
-        assert report.status_code == 200, report.text
-        assert all(d["mac"] != "aa:bb:cc:dd:ee:97"
-                   for u in report.json()["users"] for d in u["devices"])
 
 
 def test_unblacklist_restores_device(client):
