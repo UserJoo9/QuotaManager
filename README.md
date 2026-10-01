@@ -1,6 +1,12 @@
-# <img src="docs/logo/favicon.png" width="48" height="48" valign="middle" alt="Quota Manager logo"> Quota Manager
+<div align="center">
+  <img src="docs/logo/favicon.png" width="140" alt="Quota Manager logo">
+  <h1>Quota Manager</h1>
+  <p>
+    <a href="README_AR.md"><img src="https://img.shields.io/badge/%D8%A7%D9%84%D8%B9%D8%B1%D8%A8%D9%8A%D8%A9-Arabic-green" alt="العربية"></a>
+    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
+  </p>
+</div>
 
-<a href="README_AR.md"><img src="https://img.shields.io/badge/%D8%A7%D9%84%D8%B9%D8%B1%D8%A8%D9%8A%D8%A9-Arabic-green" alt="العربية"></a> ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 
 Split your metered internet bundle fairly across every person in the house. Each
 **user** gets an allowance (fixed GB, or an equal share of what's left), their

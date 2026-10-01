@@ -1,6 +1,12 @@
-# <img src="docs/logo/favicon.png" width="48" height="48" valign="middle" alt="شعار Quota Manager"> Quota Manager
- 
-<a href="README.md"><img src="https://img.shields.io/badge/English-English-blue" alt="English"></a> ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+<div align="center">
+  <img src="docs/logo/favicon.png" width="140" alt="شعار Quota Manager">
+  <h1>Quota Manager</h1>
+  <p>
+    <a href="README.md"><img src="https://img.shields.io/badge/English-English-blue" alt="English"></a>
+    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
+  </p>
+</div>
+
 
 وزّع حزمة الإنترنت المحدودة بشكل عادل بين كل شخص في المنزل. يحصل كل **مستخدم**
 على حصة (بجيجابايت ثابت، أو حصة متساوية من المتبقي)، وتتقاسمها أجهزته كلها
