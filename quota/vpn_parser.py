@@ -492,7 +492,7 @@ def validate_sing_box_config(config_dict: dict[str, Any],
         # Binary not found in local environment: do basic JSON structure validation
         if not config_dict.get("outbounds"):
             return False, "Configuration missing 'outbounds'"
-        return True, "Validated basic structure (sing-box binary not present for deep check)"
+        return True, ""
 
     if os.name == "posix" and not os.access(bin_path, os.X_OK):
         try:
