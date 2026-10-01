@@ -101,6 +101,23 @@ def _parse_ip_addr_out(text: str) -> list[tuple[str, int]]:
     return out
 
 
+def _normalize_script_crlf(path: Path) -> None:
+    """Ensure a bash script has Unix (LF) line endings before execution.
+
+    Protects against '$'\\r': command not found' errors if the repo was cloned,
+    extracted, or edited on a Windows machine before being run on Linux.
+    """
+    try:
+        if path.exists() and path.is_file():
+            raw = path.read_bytes()
+            if b"\r" in raw:
+                cleaned = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+                path.write_bytes(cleaned)
+                log.info("normalized Windows CRLF line endings to LF for %s", path.name)
+    except Exception as exc:
+        log.warning("failed to normalize line endings for %s: %s", path, exc)
+
+
 class TopologyManager:
     """Owns the runtime LAN/WAN switch. One long-lived instance per process.
 
@@ -133,6 +150,9 @@ class TopologyManager:
         self.database = database
         self.config_path = Path(config_path) if config_path else None
         self.script_path = Path(script_path) if script_path else None
+        if self.script_path and self.script_path.parent.is_dir():
+            for sh_file in self.script_path.parent.glob("*.sh"):
+                _normalize_script_crlf(sh_file)
         self.run_command = run_command or self._default_run_command
         self.spawn_restart = spawn_restart or self._default_spawn_restart
         self.addr_cmd = addr_cmd or self._default_addr_cmd
@@ -368,6 +388,7 @@ class TopologyManager:
             raise RuntimeError("topology.sh path unknown — cannot apply topology")
         if not script.exists():
             raise RuntimeError(f"topology applier not found: {script}")
+        _normalize_script_crlf(script)
         log.info("running %s (TOPO=%s)", script.name, env.get("TOPO"))
         return self.run_command(["bash", str(script)], env)
 
@@ -398,6 +419,7 @@ class TopologyManager:
         script = self.test_script_path()
         if not script.exists():
             raise RuntimeError(f"PPPoE test script not found: {script}")
+        _normalize_script_crlf(script)
         env = {
             "PPP_IF": wan_if or self.lan_interface(),
             "PPPOE_USER": pppoe_user or "",

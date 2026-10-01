@@ -10,3 +10,4 @@ PyYAML==6.0.3
 pytest==9.1.1           # dev/tests only
 httpx==0.28.1           # fastapi TestClient
 pyflakes>=3.2,<4       # lint (README Tests section)
+aiohttp>=3.9.0         # optional / compatibility

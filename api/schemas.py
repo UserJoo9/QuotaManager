@@ -367,6 +367,21 @@ class WanRenewConfig(BaseModel):
     minutes: int
 
 
+class WanTelegramUpdate(BaseModel):
+    """Configuration for WAN public-IP Telegram change trigger."""
+
+    enabled: bool = False
+    bot_token: Optional[str] = None
+    chat_id: str = Field("", max_length=128)
+
+
+class WanTelegramTest(BaseModel):
+    """Payload to test Telegram bot credentials."""
+
+    bot_token: Optional[str] = None
+    chat_id: Optional[str] = None
+
+
 class FirewallRule(BaseModel):
     """One ordered custom firewall rule (Firewall tab).
 
@@ -472,3 +487,94 @@ class UpdateSettings(BaseModel):
 
     enabled: Optional[bool] = None
     auto_install: Optional[bool] = None
+
+
+class ConsumptionSpoofRequest(BaseModel):
+    """Admin consumption spoofing/manipulation request."""
+
+    user_id: int
+    device_id: Optional[int] = None
+    mode: str = Field("set", description="'set' to force exact total GB, or 'delta' to add/subtract GB")
+    gb: float = Field(..., ge=0, description="GB amount to set or delta by")
+    delta_sign: str = Field("+", description="'+' or '-' when mode is delta")
+    log_event: bool = Field(True, description="Whether to record an audit log event")
+
+
+class StaticLeaseCreate(BaseModel):
+    """DHCP reservation request model."""
+
+    mac: str = Field(..., description="Device MAC address")
+    ip: str = Field(..., description="Static IP address to assign")
+    hostname: Optional[str] = Field("", description="Optional device name or comment")
+
+    @field_validator("mac")
+    @classmethod
+    def validate_mac(cls, v: str) -> str:
+        clean = v.strip().lower().replace("-", ":")
+        parts = clean.split(":")
+        if len(parts) != 6 or not all(len(p) == 2 and all(c in "0123456789abcdef" for c in p) for p in parts):
+            raise ValueError("Invalid MAC address format (expected e.g. aa:bb:cc:dd:ee:ff)")
+        return clean
+
+    @field_validator("ip")
+    @classmethod
+    def validate_ip(cls, v: str) -> str:
+        clean = v.strip()
+        try:
+            addr = ipaddress.IPv4Address(clean)
+            if addr.is_loopback or addr.is_multicast or addr.is_reserved:
+                raise ValueError("IP address must be a usable unicast IPv4 host address")
+        except ipaddress.AddressValueError:
+            raise ValueError("Invalid IPv4 address") from None
+        return clean
+
+
+class RechargeCreate(BaseModel):
+    """Bundle recharge / booster pack request model."""
+    gb: float = Field(..., gt=0, description="Amount of extra GB to add")
+    expires_at: Optional[float] = Field(None, description="Unix timestamp for expiration. If omitted, defaults to 30 days.")
+    recurring: bool = Field(False, description="Whether this pack auto-renews when depleted")
+    target_type: str = Field("all", description="'all', 'user', or 'device'")
+    target_id: Optional[int] = Field(None, description="user_id or device_id when target_type is user or device")
+    comment: Optional[str] = Field("", description="Optional label or note")
+
+
+class VpnNodeCreate(BaseModel):
+    """Create a VPN node from a V2Ray link or raw JSON."""
+    raw: str = Field(..., min_length=5, description="vless://, vmess://, trojan://, ss://, or JSON")
+    name: Optional[str] = Field(None, description="Optional custom name for the node")
+
+
+class VpnNodeUpdate(BaseModel):
+    """Update an existing VPN node."""
+    name: Optional[str] = Field(None, description="Optional custom name for the node")
+    raw: Optional[str] = Field(None, description="Updated raw link or JSON config")
+    server: Optional[str] = Field(None, description="Server IP or domain")
+    server_port: Optional[int] = Field(None, description="Server port")
+    uuid: Optional[str] = Field(None, description="UUID or password")
+    sni: Optional[str] = Field(None, description="SNI server name")
+    flow: Optional[str] = Field(None, description="Flow mode (e.g. xtls-rprx-vision)")
+    pbk: Optional[str] = Field(None, description="Reality public key")
+    sid: Optional[str] = Field(None, description="Short ID")
+    transport: Optional[str] = Field(None, description="Transport type: TCP, WS, gRPC")
+    path: Optional[str] = Field(None, description="WS path or gRPC service name")
+
+
+class VpnConnectRequest(BaseModel):
+    """Connect to a specific VPN node."""
+    node_id: int
+
+
+class VpnRoutingUpdateRequest(BaseModel):
+    """Toggle VPN routing for a specific user or device."""
+    target_type: str = Field(..., pattern="^(user|device)$")
+    target_id: int
+    route_vpn: bool = True
+
+
+class VpnSettingsUpdate(BaseModel):
+    """VPN subsystem settings."""
+    allow_insecure: bool = False
+
+
+

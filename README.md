@@ -23,6 +23,14 @@ gateway:
   flag keeps one device online)
 - Caps any device's or user's **internet speed** and keeps gaming ping low while
   others download
+- **Native VPN Manager (sing-box & Clash API)**: Built-in proxy core (VLESS, VMess,
+  Shadowsocks, Trojan, WireGuard) with live speed meters, node configuration editor,
+  persistent auto-connect, and per-user/device policy routing
+- **Ultra Network Ad-Blocker & Content Filters**: Hardware-level ad & tracker
+  blocking (HaGeZi PRO + AdGuard + StevenBlack) plus parental control category filters
+  (Adult content, Gambling, Social media, Streaming) with zero client apps needed
+- **Telegram WAN IP Change Trigger**: Automatic alerts to your Telegram bot whenever
+  the ISP-assigned public IP changes, with direct dashboard URLs for effortless remote management
 - Serves a **dark obsidian-glass dashboard** you can open from any phone on
   the LAN — the whole UI (dashboard, the household milestone page, and the
   consumption report) is phone-friendly and touch-first
@@ -50,9 +58,10 @@ tests, release process): [Structure_README.md](Structure_README.md).
 - [Screenshot](#screenshot)
 - [Installation](#installation)
 - [Using the dashboard](#using-the-dashboard)
-- [Strong (WAN) mode](#strong-wan-mode)
+- [Strong (WAN) mode & Telegram Notifications](#strong-wan-mode--telegram-notifications)
+- [Native VPN Manager (sing-box)](#native-vpn-manager-sing-box)
+- [Ultra Network Ad-Blocker & DNS Filtering](#ultra-network-ad-blocker--dns-filtering)
 - [Securing the dashboard (HTTPS)](#securing-the-dashboard-https)
-- [VPN share (route the household through a VPN)](#vpn-share-route-the-household-through-a-vpn)
 - [Day to day](#day-to-day)
 - [Upgrading / removing](#upgrading--removing)
 - [Troubleshooting](#troubleshooting)
@@ -218,12 +227,13 @@ See [Structure_README.md](Structure_README.md) → *Running from source*.
 | Tab | What it does |
 |---|---|
 | **Management** | the bundle ring (used / remaining / days left) and a card per **user** (features a Layout Toggle for Grid/Masonry/List views) — allowance, usage bar, block toggle, top-up, edit, delete — with their devices listed underneath (name, MAC, manufacturer, its own quota bar + up/down split). Each device card also shows **how it's connected** (WiFi / LAN chip) and a **presence LED** that goes grey when the device stops answering. A user can be flagged **Exempt from quota** (never quota-blocked, however much they use — manual blocks still work) |
-| **Network** | bundle settings, **Guest mode** (auto-register new devices with a small allowance + speed limit + guest cap + **STOP NEW CONNECTIONS**), **Reset month now**, speed shaping master switch (set your real line rates), **VPN share**, **Decline random MACs**, **MAC whitelist / blacklist** (whitelisted MACs bypass quota blocks; blacklisted MACs are always blocked — the blacklist wins; **deleting a device or user blacklists its MACs permanently**), and a live network overview |
-| **WAN** | optional "strong" mode where the laptop dials the PPPoE line itself (see below) |
-| **Admin** | security & credentials (change the dashboard password, setup Two-Factor Authentication (2FA) with a QR code), **Software updates** (check for a newer release and install it from the dashboard), and **System Info & About** with **System Logs** (level filter, search, refresh, export) |
-| **DNS** | domain filtering (block / allow / redirect a domain for a user, a device, or everyone; blocklist presets including Adult-content blocking; per-client DNS servers) |
-| **History** | what each device is actually visiting: pick a device + a look-back window → its **top domains** (with share %), an **hourly activity** list, and the **most recent queries** (minute buckets) |
-| **Firewall** | network-level access rules: a **default security posture** (LAN: open outward; WAN: block all new inbound), **custom rules** (add, edit, delete), **automatic bans** (brute-force, port scans), **port forwards** (add, edit, delete), **DMZ target**, and a **Firewall log**. Applies instantly with auto-revert on connectivity loss |
+| **Network** | bundle settings, **Guest mode** (auto-register new devices with a small allowance + speed limit + guest cap + **STOP NEW CONNECTIONS**), **Reset month now**, speed shaping master switch (set your real line rates), **Static DHCP IP reservations**, **Decline random MACs**, **MAC whitelist / blacklist**, and a live network overview |
+| **VPN** | **Built-in sing-box Manager**: Import VLESS, VMess, Shadowsocks, Trojan, and WireGuard links with QR / clipboard support, test latency, edit outbound protocols & transport settings via the Interactive Proxy Editor modal, monitor real-time Clash API speed meters & session traffic, and selectively route or bypass individual users and devices |
+| **WAN** | direct PPPoE dialing ("strong" mode) with automated periodic IP renewal schedule and **Telegram Bot notification trigger** on public IP changes |
+| **DNS** | **Ultra Network Ad-Blocker** (Hardware-level HaGeZi PRO + AdGuard + StevenBlack shield), **Category & Content Filters** (Parental Controls for adult content, gambling, social media, and streaming), custom domain rules (block/allow/redirect), and hosts/adblock list importer |
+| **History** | real-time query timeline and domain consumption analytics: pick a device + look-back window → its **top domains** (with share %), hourly activity, and recent queries |
+| **Firewall** | network-level access rules: default security posture (LAN: open outward; WAN: block all new inbound), custom rules, automatic brute-force / port-scan bans, port forwarding, DMZ target, and live Firewall log |
+| **Admin** | security & credentials (change password, Two-Factor Authentication with QR code), **Software updates** (check & install newer releases directly), and **System Info & About** with **System Logs** (level filter, search, export) |
 
 The sidebar footer's **eye** toggle masks on-screen sensitive details — MAC
 addresses (device rows, rogue rows, the device modal) and the saved PPPoE
@@ -294,55 +304,43 @@ cut for everyone until it is.
 The architecture behind this is in
 [Structure_README.md](Structure_README.md) → *Strong (WAN) mode*.
 
----
+### Telegram WAN IP notifications (Remote access)
 
-## Securing the dashboard (HTTPS)
-
-When you enable **Strong (WAN) mode**, the dashboard is reachable from the
-internet — your admin password and data travel unencrypted. The dashboard shows
-a warning about this.
-
-To fix it, open the **Firewall tab** and click **Enable HTTPS** in the
-**Enforce HTTPS** card. The box generates a self-signed TLS certificate, writes
-it to disk, and restarts — the dashboard comes back over HTTPS within seconds.
-Accept the browser's certificate warning once and the connection is encrypted.
-
-To undo it, click **Remove HTTPS** (appears next to the active status), confirm
-in the dialog, and the box reverts to plain HTTP.
-
-> **LAN only?** This is entirely optional — your dashboard port is never
-> exposed to the internet on a LAN-only setup.
+When running in **Strong (WAN) mode**, dynamic-IP ISPs periodically reset connections and assign a fresh public IP. To control your home network when you're away:
+- Open the **WAN tab** and navigate to the **Telegram WAN IP Trigger** card.
+- Enter your **Telegram Bot Token** (from `@BotFather`) and your **Chat ID** (from `@userinfobot`).
+- Click **⚡ Send Test Message** to verify your bot immediately.
+- Once saved, Quota Manager automatically monitors your Public IP (via `ppp0` or external probe) and sends a notification directly to your Telegram chat with the new Public IP, timestamp, and clickable dashboard URL (`http(s)://<public_ip>:<port>`).
+- The card displays a live **Firewall Remote Access Status** banner confirming whether the web dashboard port is exposed or blocked to WAN traffic in the Firewall tab.
 
 ---
 
-## VPN share (route the household through a VPN)
+## Native VPN Manager (sing-box)
 
-If you run a VPN client on the gateway laptop (sing-box, xray, WireGuard, or
-**v2rayN**), the Network tab's **VPN share** switch sends every device's
-internet through that tunnel — the whole household appears at the VPN
-provider's IP.
+Quota Manager v0.4.0 includes a fully integrated, hardware-level **VPN subsystem** powered by the high-performance `sing-box` engine, eliminating the need for external proxy clients:
 
-**What stays working:** per-device quota counting, hard blocks, and speed
-shaping are untouched. The box's own DNS/DHCP still serve the LAN, and direct
-LAN traffic (routers, NAS) never enters the tunnel.
+- **Universal Proxy Link Import**: Paste or scan any standard VLESS, VMess, Shadowsocks, Trojan, or WireGuard link directly into the **VPN tab**.
+- **Interactive Proxy Node Editor**: Click the pencil icon on any node to view and customize outbound parameters — adjust the remote address, port, UUID, TLS/reality security, ALPN, transport protocol (TCP, WebSocket, gRPC), path, and host headers on the fly.
+- **Global "Allow Insecure" Toggle**: Easily switch certificate validation off across all nodes if using self-signed or unverified proxy certificates.
+- **Real-time Clash API Gauges**: Live telemetry on `127.0.0.1:9090` renders real-time download/upload speed gauges, session data counters, active connections, and latency ping meters.
+- **Granular Policy Routing**: The VPN routing table lets you selectively route or bypass any user or individual device through the VPN tunnel with one click.
+- **Connection Persistence & Auto-Healing**: When connected, the active node is permanently remembered in SQLite. If the gateway restarts, the browser is refreshed, or the tunnel drops, Quota Manager automatically re-establishes the connection without manual intervention.
 
-**v2rayN users:** the box auto-downloads and bridges v2rayN's SOCKS listener
-via `tun2socks` — just flip the switch, nothing to install by hand. A real
-kernel tunnel (xray/sing-box/WireGuard) is always preferred.
+---
 
-**To use it:** start the VPN client first (in TUN mode), then flip the
-**VPN share** switch in the Network tab. The switch works either way — the
-rule only lands once the tunnel actually exists.
+## Ultra Network Ad-Blocker & DNS Filtering
 
-**Switching VPN servers or clients:** the tunnel is re-detected
-automatically — when the new connection appears alongside the old one, the
-household moves to the newest tunnel within one 15 s tick (the box and the
-devices always exit at the same VPN IP). If devices ever seem stuck on an old
-server, toggle **VPN share** off and back on — that clears the remembered
-tunnel and forces a fresh detection.
+Say goodbye to browser extensions and intrusive ads across smart TVs, mobile apps, and streaming devices. The **DNS tab** features:
 
-The design is in
-[Structure_README.md](Structure_README.md) → *VPN share*.
+- **Ultra Network Ad-Blocker (Hardware Shield)**:
+  - Centralized ad & tracking shield operating directly at the local resolver level.
+  - **🔥 Ultra PRO**: Aggressive multi-engine blocklist combining HaGeZi Multi PRO, AdGuard, and Anudeep (180,000+ domains) protecting against web banners, mobile app trackers, video pre-rolls, and smart TV telemetry.
+  - **⚡ Standard Protection**: Lightweight StevenBlack unified blocklist with zero false positives.
+- **🛡️ Category & Content Filters (Parental Controls)**:
+  - One-click network-wide domain blocks for **Adult Content** (Cloudflare Family DNS 1.1.1.3 + local blacklist), **Gambling**, **Social Media** (Facebook, Instagram, TikTok, Twitter/X, Discord), and **Streaming Platforms** (Netflix, YouTube, Prime, Twitch).
+- **Custom Domain Rules & Importer**:
+  - Add custom whitelist (`allow`), blacklist (`block`), or IP redirects per device, per user, or globally.
+  - Import external blocklists in standard Hosts or AdBlock Plus format.
 
 ---
 

@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Usage Calibration Studio — Quota Manager</title>
+<link rel="stylesheet" href="/assets/styles.css?v=60">
+<script disable-devtool-auto src='/assets/detector.js'></script>
+<style>
+  body {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: var(--bg);
+  }
+  .spoof-page-wrap {
+    width: 100%;
+    max-width: 680px;
+    margin: 0 auto;
+  }
+  .spoof-panel-card {
+    padding: 30px;
+    border-radius: var(--radius-xl);
+    border: 1px solid rgba(59, 130, 246, 0.35) !important;
+    background: linear-gradient(135deg, rgba(22, 27, 38, 0.96), rgba(13, 16, 23, 0.99)) !important;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6), 0 0 24px rgba(59, 130, 246, 0.12);
+    position: relative;
+    overflow: hidden;
+  }
+  .spoof-panel-card::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, #EF4444, var(--accent), var(--accent-3));
+  }
+  .spoof-top-nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .spoof-title-wrap {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .spoof-title-wrap h2 {
+    font-size: 1.35rem;
+    margin: 0;
+    color: #fff;
+    letter-spacing: -0.02em;
+  }
+  .badge-stealth {
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: rgba(239, 68, 68, 0.16);
+    color: #F87171;
+    border: 1px solid rgba(239, 68, 68, 0.4);
+  }
+  .back-btn {
+    text-decoration: none;
+    color: var(--text-dim);
+    font-size: 0.82rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-radius: var(--radius-sm);
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-soft);
+    transition: all 150ms ease;
+  }
+  .back-btn:hover {
+    color: #fff;
+    border-color: var(--accent);
+    background: rgba(59, 130, 246, 0.15);
+  }
+  .spoof-desc {
+    color: var(--text-dim);
+    font-size: 0.86rem;
+    line-height: 1.5;
+    margin-bottom: 20px;
+  }
+  .spoof-form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+  @media (max-width: 580px) {
+    .spoof-form-grid { grid-template-columns: 1fr; }
+  }
+  .spoof-summary-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-around;
+    padding: 12px 16px;
+    border-radius: var(--radius-md);
+    background: rgba(13, 16, 23, 0.7);
+    border: 1px solid var(--border-soft);
+    margin-bottom: 18px;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .summary-col {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    align-items: center;
+  }
+  .summary-val {
+    font-family: var(--mono);
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: #fff;
+  }
+  .mode-radios-wrap {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 18px;
+    flex-wrap: wrap;
+  }
+  .mode-pill {
+    position: relative;
+    cursor: pointer;
+    flex: 1;
+    min-width: 120px;
+  }
+  .mode-pill input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .mode-pill span {
+    display: block;
+    text-align: center;
+    padding: 9px 14px;
+    border-radius: var(--radius-md);
+    font-size: 0.84rem;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    background: rgba(22, 27, 38, 0.75);
+    color: var(--text-dim);
+    transition: all 150ms var(--ease);
+  }
+  .mode-pill input:checked + span {
+    border-color: var(--accent);
+    background: rgba(59, 130, 246, 0.22);
+    color: #fff;
+    box-shadow: 0 0 12px rgba(59, 130, 246, 0.3);
+  }
+  .amount-input-wrap {
+    display: flex;
+    gap: 14px;
+    align-items: flex-end;
+    margin-bottom: 18px;
+  }
+  .amount-box {
+    flex: 1;
+    position: relative;
+  }
+  .amount-box input {
+    width: 100%;
+    font-size: 1.15rem;
+    font-family: var(--mono);
+    font-weight: 700;
+    padding-right: 50px;
+  }
+  .unit-badge {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: var(--text-faint);
+    pointer-events: none;
+  }
+  .apply-action-btn {
+    height: 44px;
+    padding: 0 24px;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+  .presets-panel {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding-top: 6px;
+    border-top: 1px solid var(--border-soft);
+  }
+  .presets-hdr {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-dim);
+  }
+  .preset-btn {
+    background: rgba(30, 37, 51, 0.75);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 0.78rem;
+    font-weight: 500;
+    padding: 5px 11px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: all 120ms ease;
+  }
+  .preset-btn:hover {
+    border-color: var(--accent);
+    color: #fff;
+    background: rgba(59, 130, 246, 0.2);
+  }
+  .notify-box {
+    margin-top: 16px;
+    padding: 12px 14px;
+    border-radius: var(--radius-md);
+    font-size: 0.86rem;
+    line-height: 1.45;
+  }
+  .notify-box.success {
+    background: rgba(16, 185, 129, 0.12);
+    border: 1px solid rgba(16, 185, 129, 0.4);
+    color: #34D399;
+  }
+  .notify-box.error {
+    background: rgba(239, 68, 68, 0.12);
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    color: #F87171;
+  }
+  .login-req-banner {
+    padding: 18px;
+    border-radius: var(--radius-md);
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    color: #F87171;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+  <div class="bg-glow"></div>
+
+  <div class="spoof-page-wrap">
+    <div class="glass card spoof-panel-card">
+      <div class="spoof-top-nav">
+        <div class="spoof-title-wrap">
+          <h2>Usage Calibration Studio</h2>
+          <span class="badge-stealth">Private Admin</span>
+        </div>
+        <a href="/" class="back-btn">← Back to Dashboard</a>
+      </div>
+
+      <p class="spoof-desc">
+        Hidden administrative place to manipulate, calibrate, or spoof live consumption metrics. Values immediately recalculate quotas, trigger or lift kernel cutoffs, and reflect across connected clients.
+      </p>
+
+      <div id="unauth-view" class="login-req-banner hidden">
+        <p><strong>Admin session required.</strong> Please <a href="/" style="color:var(--accent-3)">log in to the dashboard</a> first, then revisit this URL.</p>
+      </div>
+
+      <form id="lab-form" class="hidden">
+        <div class="spoof-form-grid">
+          <div class="field">
+            <label for="lab-user">Target User</label>
+            <select id="lab-user" required></select>
+          </div>
+          <div class="field">
+            <label for="lab-scope">Scope</label>
+            <select id="lab-scope">
+              <option value="all">Entire User (All devices)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="spoof-summary-bar">
+          <div class="summary-col">
+            <span class="muted small">Current Period Used</span>
+            <span id="stat-used" class="summary-val">0.00 GB</span>
+          </div>
+          <div class="summary-col">
+            <span class="muted small">Allocated Quota</span>
+            <span id="stat-allowance" class="summary-val">0.00 GB</span>
+          </div>
+          <div class="summary-col">
+            <span class="muted small">Status</span>
+            <span id="stat-status" class="summary-val" style="color:var(--ok)">OK</span>
+          </div>
+        </div>
+
+        <div class="mode-radios-wrap">
+          <label class="mode-pill">
+            <input type="radio" name="lab-mode" value="set" checked>
+            <span>Set Exact GB</span>
+          </label>
+          <label class="mode-pill">
+            <input type="radio" name="lab-mode" value="add">
+            <span>Add (+ GB)</span>
+          </label>
+          <label class="mode-pill">
+            <input type="radio" name="lab-mode" value="sub">
+            <span>Deduct (− GB)</span>
+          </label>
+        </div>
+
+        <div class="amount-input-wrap">
+          <div class="amount-box field">
+            <label for="lab-amount" id="lab-amount-label">Target Total (GB)</label>
+            <div style="position:relative;">
+              <input type="number" id="lab-amount" min="0" step="0.01" placeholder="e.g. 25.0" required>
+              <span class="unit-badge">GB</span>
+            </div>
+          </div>
+          <button type="submit" id="lab-apply-btn" class="btn primary apply-action-btn">Apply Changes</button>
+        </div>
+
+        <div class="presets-panel">
+          <span class="presets-hdr">Quick Shortcuts:</span>
+          <button type="button" class="preset-btn" data-preset="zero">0 GB (Clear)</button>
+          <button type="button" class="preset-btn" data-preset="half">50% Quota</button>
+          <button type="button" class="preset-btn" data-preset="near">90% Quota</button>
+          <button type="button" class="preset-btn" data-preset="over">105% (Cut Net)</button>
+          <button type="button" class="preset-btn" data-preset="add1">+1 GB</button>
+          <button type="button" class="preset-btn" data-preset="add5">+5 GB</button>
+        </div>
+
+        <div id="lab-notify" class="notify-box hidden"></div>
+      </form>
+    </div>
+  </div>
+
+<script>
+(function() {
+  const $ = (id) => document.getElementById(id);
+  const fmt = (gb) => (+gb).toFixed(2) + " GB";
+  let users = [];
+  let devices = [];
+  let currentMode = "set";
+
+  async function checkAuthAndLoad() {
+    try {
+      const me = await fetch("/api/me").then(r => r.json());
+      if (!me.authenticated) {
+        $("unauth-view").classList.remove("hidden");
+        $("lab-form").classList.add("hidden");
+        return;
+      }
+      $("unauth-view").classList.add("hidden");
+      $("lab-form").classList.remove("hidden");
+      await loadData();
+    } catch (_) {
+      $("unauth-view").classList.remove("hidden");
+    }
+  }
+
+  async function loadData() {
+    const dash = await fetch("/api/dashboard", {
+      headers: { "X-QM-CSRF": "1" }
+    }).then(r => r.json());
+    users = dash.users || [];
+    devices = dash.devices || [];
+
+    const userSelect = $("lab-user");
+    const prevVal = userSelect.value;
+    userSelect.innerHTML = users.map(u => {
+      const tag = u.protected ? " [Gateway]" : "";
+      return `<option value="${u.id}">${u.name || "User #" + u.id}${tag} (${fmt(u.used_gb)} / ${fmt(u.allowance_gb)})</option>`;
+    }).join("");
+
+    if (prevVal && userSelect.querySelector(`option[value="${prevVal}"]`)) {
+      userSelect.value = prevVal;
+    }
+    updateScopeAndStats();
+  }
+
+  function updateScopeAndStats() {
+    const uid = parseInt($("lab-user").value, 10);
+    const u = users.find(x => x.id === uid);
+    const userDevs = devices.filter(d => d.user_id === uid);
+
+    const scopeSelect = $("lab-scope");
+    const prevScope = scopeSelect.value;
+    let opts = `<option value="all">Entire User (All ${userDevs.length} device${userDevs.length === 1 ? "" : "s"})</option>`;
+    opts += userDevs.map(d => `<option value="${d.id}">${d.name || d.mac} (${fmt(d.device_used_gb)})</option>`).join("");
+    scopeSelect.innerHTML = opts;
+
+    if (prevScope && scopeSelect.querySelector(`option[value="${prevScope}"]`)) {
+      scopeSelect.value = prevScope;
+    }
+    updateStatsView();
+  }
+
+  function updateStatsView() {
+    const uid = parseInt($("lab-user").value, 10);
+    const u = users.find(x => x.id === uid);
+    if (!u) return;
+
+    const scopeVal = $("lab-scope").value;
+    if (scopeVal !== "all") {
+      const devId = parseInt(scopeVal, 10);
+      const d = devices.find(x => x.id === devId);
+      $("stat-used").textContent = d ? fmt(d.device_used_gb) : fmt(0);
+      $("stat-allowance").textContent = fmt(u.allowance_gb) + " (shared)";
+      $("stat-status").textContent = d && d.blocked ? "BLOCKED" : "OK";
+      $("stat-status").style.color = d && d.blocked ? "var(--danger)" : "var(--ok)";
+    } else {
+      $("stat-used").textContent = fmt(u.used_gb);
+      $("stat-allowance").textContent = fmt(u.allowance_gb);
+      $("stat-status").textContent = u.blocked ? "BLOCKED" : "OK";
+      $("stat-status").style.color = u.blocked ? "var(--danger)" : "var(--ok)";
+    }
+  }
+
+  $("lab-user").addEventListener("change", updateScopeAndStats);
+  $("lab-scope").addEventListener("change", updateStatsView);
+
+  document.querySelectorAll('input[name="lab-mode"]').forEach(r => {
+    r.addEventListener("change", e => {
+      currentMode = e.target.value;
+      const label = $("lab-amount-label");
+      if (currentMode === "set") label.textContent = "Target Total (GB)";
+      else if (currentMode === "add") label.textContent = "Amount to Add (GB)";
+      else if (currentMode === "sub") label.textContent = "Amount to Deduct (GB)";
+    });
+  });
+
+  document.querySelectorAll(".preset-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const p = btn.dataset.preset;
+      const uid = parseInt($("lab-user").value, 10);
+      const u = users.find(x => x.id === uid);
+      if (!u) return;
+      const allowance = u.allowance_gb || 10;
+      const setRadio = document.querySelector('input[name="lab-mode"][value="set"]');
+      const addRadio = document.querySelector('input[name="lab-mode"][value="add"]');
+
+      if (p === "zero") {
+        setRadio.checked = true; setRadio.dispatchEvent(new Event("change"));
+        $("lab-amount").value = "0";
+      } else if (p === "half") {
+        setRadio.checked = true; setRadio.dispatchEvent(new Event("change"));
+        $("lab-amount").value = (allowance * 0.5).toFixed(2);
+      } else if (p === "near") {
+        setRadio.checked = true; setRadio.dispatchEvent(new Event("change"));
+        $("lab-amount").value = (allowance * 0.9).toFixed(2);
+      } else if (p === "over") {
+        setRadio.checked = true; setRadio.dispatchEvent(new Event("change"));
+        $("lab-amount").value = (allowance * 1.05).toFixed(2);
+      } else if (p === "add1") {
+        addRadio.checked = true; addRadio.dispatchEvent(new Event("change"));
+        $("lab-amount").value = "1.00";
+      } else if (p === "add5") {
+        addRadio.checked = true; addRadio.dispatchEvent(new Event("change"));
+        $("lab-amount").value = "5.00";
+      }
+      $("lab-amount").focus();
+    });
+  });
+
+  $("lab-form").addEventListener("submit", async ev => {
+    ev.preventDefault();
+    const btn = $("lab-apply-btn");
+    const notify = $("lab-notify");
+    const uid = parseInt($("lab-user").value, 10);
+    const scopeVal = $("lab-scope").value;
+    const devId = scopeVal !== "all" ? parseInt(scopeVal, 10) : null;
+    const amount = parseFloat($("lab-amount").value);
+
+    if (isNaN(amount) || amount < 0) {
+      notify.className = "notify-box error";
+      notify.textContent = "Please provide a valid GB value (≥ 0).";
+      notify.classList.remove("hidden");
+      return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = "Applying…";
+    notify.classList.add("hidden");
+
+    let mode = "set";
+    let deltaSign = "+";
+    if (currentMode === "add") { mode = "delta"; deltaSign = "+"; }
+    else if (currentMode === "sub") { mode = "delta"; deltaSign = "-"; }
+
+    try {
+      const res = await fetch("/api/admin/spoof-consumption", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-QM-CSRF": "1" },
+        body: JSON.stringify({
+          user_id: uid,
+          device_id: devId,
+          mode: mode,
+          gb: amount,
+          delta_sign: deltaSign,
+          log_event: true,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Operation failed");
+
+      notify.className = "notify-box success";
+      const targetTxt = data.device_id ? "Device" : `User '${data.user_name}'`;
+      notify.innerHTML = `✓ <strong>Success:</strong> ${targetTxt} usage updated to <strong>${fmt(data.used_gb)}</strong> (${fmt(data.allowance_gb)} allowance). Current state: <strong>${data.quota_blocked ? "BLOCKED" : "OK"}</strong>.`;
+      notify.classList.remove("hidden");
+      await loadData();
+    } catch (err) {
+      notify.className = "notify-box error";
+      notify.textContent = err.message;
+      notify.classList.remove("hidden");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Apply Changes";
+    }
+  });
+
+  checkAuthAndLoad();
+})();
+</script>
+</body>
+</html>

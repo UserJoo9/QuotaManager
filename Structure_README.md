@@ -1286,6 +1286,17 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | GET | `/api/security/tls` | check whether HTTPS is currently enforced (TLS certs present + secure_cookies enabled); read-only |
 | POST | `/api/security/enforce-https` | one-click HTTPS: generate self-signed cert, write to disk, update config.yaml (tls_certfile + tls_keyfile + secure_cookies: true), schedule service restart. Config path is resolved from the running topology manager (not the project root). Returns cert paths + user-facing message |
 | POST | `/api/security/remove-https` | rollback HTTPS: delete cert files, clear TLS settings from config.yaml, set secure_cookies: false, schedule restart. Same config path resolution as enforce-https. Returns deleted files + message |
+| GET | `/api/vpn/status` | live sing-box status (state, uptime, speeds, session traffic, active connections, clients) |
+| POST | `/api/vpn/connect` | connect to a VPN node by id (`{"node_id": int}`), updates DB persistence and policy routing |
+| POST | `/api/vpn/disconnect` | disconnect active VPN tunnel, restore default routing |
+| GET/POST | `/api/vpn/nodes` | list saved VPN nodes / create node from link (`{"name": "...", "raw": "..."}`) |
+| PATCH/DELETE | `/api/vpn/nodes/{id}` | update node name or proxy outbound parameters / delete node |
+| POST | `/api/vpn/nodes/{id}/ping` | measure TCP handshake latency to remote proxy server |
+| GET/POST | `/api/vpn/routing` | fetch / update per-user or per-device VPN policy routing rule (`{"target_type", "target_id", "route_vpn"}`) |
+| GET/POST | `/api/vpn/settings` | read / update global VPN settings (`{"allow_insecure": bool}`) |
+| GET | `/api/vpn/logs?limit=150` | tail of in-memory sing-box process log ring buffer |
+| GET/POST | `/api/wan/telegram` | read / save Telegram WAN IP change notification trigger (`{"enabled", "bot_token", "chat_id"}`) |
+| POST | `/api/wan/telegram/test` | send immediate test notification to configured Telegram bot |
 | WS | `/ws` | pushes `{"type":"snapshot","data":{...}}` every 5 s |
 
 Interactive docs: `http://<gateway-ip>:8080/api/docs` (Swagger UI) — OFF by
@@ -1358,10 +1369,19 @@ QuotaManager/
 │   │                         #   monitor-capable spare card
 │   ├── dnslog.py             # DNS browsing history: dnsmasq query-log parser +
 │   │                         #   DnslogTailer thread (bounded queue) -> dns_history
+│   ├── history_analytics.py  # DNS query analytics, timeline, and domain aggregation
 │   ├── dns_rules.py          # DnsRuleManager: domain blacklist/allow/redirect rules,
 │   │                         #   blocklist presets, per-client DNS-server overrides,
 │   │                         #   resolve_domain_status (History-tab filter badges) —
 │   │                         #   generated dnsmasq config, no new service
+│   ├── vpn_manager.py        # VpnManager: sing-box process supervisor, Clash API (9090),
+│   │                         #   traffic metrics, policy routing, persistent auto-healing
+│   ├── vpn_parser.py         # parse_vpn_link (VLESS/VMess/Trojan/Shadowsocks/WireGuard),
+│   │                         #   sing-box config generator, validation via sing-box check
+│   ├── wan_telegram.py       # Telegram WAN IP change trigger: ppp0 / external probe,
+│   │                         #   token masking, Telegram HTML messaging, firewall check
+│   ├── startup_health.py     # startup self-heal: ensure NAT table, ip forwarding,
+│   │                         #   nftables.conf, DNS routing
 │   ├── topology.py           # WAN-topology detection: is ppp0 up (for the WAN tab)?
 │   │                         #   restart_pppoe() = public-IP renewal (v24)
 │   ├── updater.py            # self-update checks (Admin tab): version compare vs the
@@ -1402,6 +1422,9 @@ QuotaManager/
     ├── test_config.py        # typed config parsing (Linux settings)
     ├── test_netmgr.py        # TopologyManager WAN/LAN apply + rollback + PPPoE test
     ├── test_topology.py      # detect_ppp / check_internet probes (fake `ip`)
+    ├── test_vpn.py           # VpnManager, link parsing, config generation, and REST API
+    ├── test_wan_telegram.py  # WAN Telegram IP trigger, token masking, message formatting
+    ├── test_startup_health.py# startup self-heal (NAT table, sysctl forwarding, nftables config)
     ├── test_vpnshare.py      # VpnShareManager vs a fake `ip`: rule/route program,
     │                         #   peer.parse, pin, reconcile, teardown
     ├── test_tun2socks.py     # Tun2socksManager vs fakes: download+verify, proxy

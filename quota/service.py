@@ -71,17 +71,22 @@ class QuotaService:
         """Compute per-USER allowances using the hybrid model above.
 
         Each user's allowance = their fixed/auto share PLUS the per-period
-        top-up the admin granted (``users.topup_gb``). Persisting top-ups on
-        the user row (not the snapshot dict) is what lets a top-up survive
-        ``recompute_allowances`` — otherwise the next user edit, bundle
-        change, or new-device auto-registration silently wiped it and re-blocked
-        the user the admin had just unblocked.
+        top-up the admin granted (``users.topup_gb``) PLUS any active
+        user-targeted booster packs. Active general booster packs expand
+        the pool available to auto users.
         """
         users = await self.db.list_users()
         fixed_total = sum((u.fixed_gb or 0.0) for u in users
                           if u.quota_mode == _db.QUOTA_FIXED)
         auto_users = [u for u in users if u.quota_mode == _db.QUOTA_AUTO]
-        remaining = max(0.0, (await self.db.get_bundle()).total_gb - fixed_total)
+
+        # General active recharges expand the available pool for auto users
+        now_ts = self._now().timestamp()
+        packs = await self.db.list_recharges(active_only=True)
+        gen_extra = sum(p.remaining_gb for p in packs if p.target_type == "all" and p.expires_at > now_ts)
+        bundle = await self.db.get_bundle()
+        effective_bundle_gb = bundle.total_gb + gen_extra
+        remaining = max(0.0, effective_bundle_gb - fixed_total)
         auto_share = remaining / len(auto_users) if auto_users else 0.0
 
         allowances: dict[int, float] = {}
@@ -95,7 +100,10 @@ class QuotaService:
                 base = u.fixed_gb or 0.0
             else:
                 base = auto_share
-            allowances[u.id] = round(base + (u.topup_gb or 0.0), 3)
+            # Dedicated user booster packs:
+            user_extra = sum(p.remaining_gb for p in packs
+                             if p.target_type == "user" and p.target_id == u.id and p.expires_at > now_ts)
+            allowances[u.id] = round(base + (u.topup_gb or 0.0) + user_extra, 3)
         return allowances
 
     def _next_period_end(self, bundle: _db.Bundle, now: _dt.datetime) -> str:
@@ -123,6 +131,7 @@ class QuotaService:
         # Milestone notices (50/75/100%) are period-scoped: a fresh period
         # re-arms them so each threshold is surfaced again in the new month.
         await self.db.reset_milestone_flags()
+        await self._rollover_recharges(now)
         start, end = timeutil.period_bounds(now, effective)
         bundle.allowances = await self.compute_allowances()
         # effective<=0 -> period_bounds returns "today"; period_end stays "".
@@ -148,21 +157,7 @@ class QuotaService:
         log.info("allowances recomputed (%d users)", len(bundle.allowances))
 
     async def ensure_period(self) -> None:
-        """Roll the period if stale, open if missing.
-
-        ``reset_day <= 0`` (with period type ``renew_day``) disables the
-        automatic roll: the period is opened once (on first boot) and
-        afterwards only advances via an explicit admin action
-        (:meth:`reset_month`).
-
-        With a monthly boundary the roll triggers when the recorded
-        ``period_end`` has actually passed — NOT by comparing ``period_start``
-        against the reset-day grid. A mid-month admin edit that moves the
-        reset day re-anchors ``period_end`` (see ``recompute_allowances``)
-        without rolling, so changing the renew day never skips the current
-        month or zeroes the recorded usage; the manual-reset period (started
-        mid-month) stands until its own end passes.
-        """
+        """Roll the period if stale, open if missing."""
         bundle = await self.db.get_bundle()
         now = self._now()
         effective = bundle.effective_reset_day
@@ -180,11 +175,169 @@ class QuotaService:
             if now >= end:
                 await self.open_period()
             return
-        # Legacy DB carrying a period_start but no recorded end: fall back to
-        # the boundary heuristic so an unrollable state still corrects itself.
         start, _ = timeutil.period_bounds(now, effective)
         if bundle.period_start < start.date().isoformat():
             await self.open_period()
+
+    async def _rollover_recharges(self, now: _dt.datetime) -> None:
+        """Handle recharge packs on period rollover (automatic and manual reset)."""
+        now_ts = now.timestamp()
+        packs = await self.db.list_recharges(active_only=False)
+        for p in packs:
+            if not p.active:
+                continue
+            if p.expires_at <= now_ts:
+                await self.db.update_recharge(p.id, active=False)
+                await self.db.add_event(f"Recharge pack #{p.id} expired", "info")
+            elif p.remaining_gb <= 0:
+                if p.recurring:
+                    new_exp = now_ts + 30 * 86400
+                    await self.db.update_recharge(p.id, used_gb=0.0, expires_at=new_exp)
+                    await self.db.add_event(f"Recurring recharge pack #{p.id} renewed (+{p.gb:g} GB)", "info")
+                else:
+                    await self.db.update_recharge(p.id, active=False)
+            else:
+                # Survives reset month!
+                rem = p.remaining_gb
+                await self.db.update_recharge(p.id, gb=rem, used_gb=0.0)
+                await self.db.add_event(f"Recharge pack #{p.id} carried over ({rem:g} GB remaining)", "info")
+
+    async def add_recharge_pack(self, gb: float,
+                                expires_at: Optional[float] = None,
+                                recurring: bool = False,
+                                target_type: str = "all",
+                                target_id: Optional[int] = None,
+                                comment: str = "") -> _db.RechargePack:
+        if gb <= 0:
+            raise ValueError("GB must be positive")
+        now_ts = self._now().timestamp()
+        if not expires_at or expires_at <= now_ts:
+            expires_at = now_ts + 30 * 86400
+        pack = await self.db.create_recharge(
+            gb=gb,
+            expires_at=expires_at,
+            recurring=recurring,
+            target_type=target_type or "all",
+            target_id=target_id,
+            comment=comment or "",
+            created_at=now_ts,
+        )
+        await self.sync_recharges()
+        await self.recompute_allowances()
+        await self.db.add_event(
+            f"Add-on pack #{pack.id} added (+{gb:g} GB, target={target_type}, recurring={recurring})", "info")
+        return pack
+
+    async def delete_recharge_pack(self, recharge_id: int) -> bool:
+        pack = await self.db.get_recharge(recharge_id)
+        if pack is None:
+            return False
+        await self.db.delete_recharge(recharge_id)
+        await self.sync_recharges()
+        await self.recompute_allowances()
+        await self.db.add_event(f"Add-on pack #{recharge_id} deleted", "info")
+        return True
+
+    async def sync_recharges(self, now: Optional[float] = None) -> list[_db.RechargePack]:
+        """Synchronize recharge pack usage and expiration."""
+        now_ts = now if now is not None else self._now().timestamp()
+        packs = await self.db.list_recharges(active_only=False)
+        if not packs:
+            return []
+
+        bundle = await self.db.get_bundle()
+        users = await self.db.list_users()
+        usage_by_user = await self.db.get_period_usage_by_user()
+        usage_by_device = await self.db.get_period_usage_by_device()
+
+        total_used_gb = sum((u["up"] + u["down"]) for u in usage_by_user.values()) / GB
+
+        # 1. Base bundle excess for general packs
+        excess_general = max(0.0, total_used_gb - bundle.total_gb)
+
+        # 2. Base allowances for users (without user packs)
+        fixed_total = sum((u.fixed_gb or 0.0) for u in users if u.quota_mode == _db.QUOTA_FIXED)
+        auto_users = [u for u in users if u.quota_mode == _db.QUOTA_AUTO]
+        base_auto_share = max(0.0, bundle.total_gb - fixed_total) / len(auto_users) if auto_users else 0.0
+
+        user_excess_map: dict[int, float] = {}
+        for u in users:
+            u_base = 0.0 if u.quota_mode == _db.QUOTA_DISABLED else (u.fixed_gb if u.quota_mode == _db.QUOTA_FIXED else base_auto_share)
+            u_base += (u.topup_gb or 0.0)
+            u_used = (usage_by_user.get(u.id, {}).get("up", 0) + usage_by_user.get(u.id, {}).get("down", 0)) / GB
+            user_excess_map[u.id] = max(0.0, u_used - u_base)
+
+        active_packs = [p for p in packs if p.active]
+
+        # General packs
+        for p in [p for p in active_packs if p.target_type == "all"]:
+            if p.expires_at <= now_ts:
+                await self.db.update_recharge(p.id, active=False)
+                continue
+            draw = min(p.gb, excess_general)
+            excess_general -= draw
+            draw = round(draw, 3)
+            if draw >= p.gb:
+                if p.recurring:
+                    new_exp = now_ts + 30 * 86400
+                    await self.db.update_recharge(p.id, used_gb=0.0, expires_at=new_exp)
+                    await self.db.add_event(f"Recurring recharge pack #{p.id} auto-renewed (+{p.gb:g} GB)", "info")
+                else:
+                    await self.db.update_recharge(p.id, used_gb=p.gb, active=False)
+            else:
+                if round(p.used_gb, 3) != draw:
+                    await self.db.update_recharge(p.id, used_gb=draw)
+
+        # User packs
+        for u in users:
+            u_packs = [p for p in active_packs if p.target_type == "user" and p.target_id == u.id]
+            u_excess = user_excess_map.get(u.id, 0.0)
+            for p in u_packs:
+                if p.expires_at <= now_ts:
+                    await self.db.update_recharge(p.id, active=False)
+                    continue
+                draw = min(p.gb, u_excess)
+                u_excess -= draw
+                draw = round(draw, 3)
+                if draw >= p.gb:
+                    if p.recurring:
+                        new_exp = now_ts + 30 * 86400
+                        await self.db.update_recharge(p.id, used_gb=0.0, expires_at=new_exp)
+                        await self.db.add_event(f"Recurring pack #{p.id} for user {u.name or u.id} auto-renewed", "info")
+                    else:
+                        await self.db.update_recharge(p.id, used_gb=p.gb, active=False)
+                else:
+                    if round(p.used_gb, 3) != draw:
+                        await self.db.update_recharge(p.id, used_gb=draw)
+
+        # Device packs
+        devices = await self.db.list_devices()
+        for d in devices:
+            d_packs = [p for p in active_packs if p.target_type == "device" and p.target_id == d.id]
+            if not d_packs:
+                continue
+            d_usage = usage_by_device.get(d.id, {"up": 0, "down": 0})
+            d_used_gb = (d_usage["up"] + d_usage["down"]) / GB
+            d_excess = d_used_gb
+            for p in d_packs:
+                if p.expires_at <= now_ts:
+                    await self.db.update_recharge(p.id, active=False)
+                    continue
+                draw = min(p.gb, d_excess)
+                d_excess -= draw
+                draw = round(draw, 3)
+                if draw >= p.gb:
+                    if p.recurring:
+                        new_exp = now_ts + 30 * 86400
+                        await self.db.update_recharge(p.id, used_gb=0.0, expires_at=new_exp)
+                        await self.db.add_event(f"Recurring pack #{p.id} for device {d.name or d.mac} auto-renewed", "info")
+                    else:
+                        await self.db.update_recharge(p.id, used_gb=p.gb, active=False)
+                else:
+                    if round(p.used_gb, 3) != draw:
+                        await self.db.update_recharge(p.id, used_gb=draw)
+
+        return await self.db.list_recharges(active_only=False)
 
     async def recharge(self, add_gb: float) -> dict[str, Any]:
         """Add GB to the current bundle (ISP re-charge) and recompute quotas.
@@ -200,11 +353,14 @@ class QuotaService:
         await self.db.set_bundle(bundle)
         await self.recompute_allowances()
         await self.db.add_event(f"Bundle recharged +{add_gb:g} GB", "warn")
+        bundle = await self.db.get_bundle()
         return {
             "total_gb": bundle.total_gb,
+            "base_total_gb": bundle.total_gb,
             "added_gb": add_gb,
             "allowances": bundle.allowances,
         }
+
 
     # -- enforcement state -----------------------------------------------------
 
@@ -247,7 +403,8 @@ class QuotaService:
     def resolve_device_state(user: _db.User | None, dev: _db.Device,
                              user_quota_blocked: bool,
                              allow_listed: bool = False,
-                             deny_listed: bool = False) -> str:
+                             deny_listed: bool = False,
+                             has_device_booster: bool = False) -> str:
         """Resolve a device's effective block state through its owner user.
 
         Precedence (highest wins):
@@ -255,17 +412,8 @@ class QuotaService:
           2. user admin_off -> admin_off  (user-level cut covers all devices)
           3. device admin_off -> admin_off (per-device manual cut)
           4. MAC allow-list -> ok         (whitelist: never quota-blocked)
-          5. user quota-block -> quota    (unless the device has ``bypass``)
+          5. user quota-block -> quota    (unless the device has ``bypass`` or active device booster)
           6. otherwise      -> ok
-
-        This is the single source of truth for a device's state; it is used by
-        the API views and :meth:`snapshot_state` (enforcement map), so a
-        user-level cut reaches every one of the user's device MACs. The
-        user-level cut is deliberately NOT written to ``devices.block_state`` —
-        that would be lossy (you couldn't tell a user-fan-out from a genuine
-        per-device toggle, and clearing the user cut would strand devices in
-        ``admin_off`` forever). The MAC lists are also resolved, never
-        persisted — removing a MAC from a list restores it immediately.
         """
         if deny_listed:
             return _db.BLOCK_ADMIN
@@ -275,7 +423,7 @@ class QuotaService:
             return _db.BLOCK_ADMIN
         if allow_listed:
             return _db.BLOCK_OK
-        if user_quota_blocked and not dev.bypass:
+        if user_quota_blocked and not dev.bypass and not has_device_booster:
             return _db.BLOCK_QUOTA
         return _db.BLOCK_OK
 
@@ -290,10 +438,14 @@ class QuotaService:
         users = {u.id: u for u in await self.db.list_users()}
         usage_by_user = await self.db.get_period_usage_by_user()
         out: dict[int, bool] = {}
-        for uid, allowance in allowances.items():
+        for uid, user in users.items():
+            allowance = allowances.get(uid)
+            if allowance is None:
+                allowance = (user.fixed_gb or 0.0) if user.quota_mode == _db.QUOTA_FIXED else 0.0
+                allowance += (user.topup_gb or 0.0)
             u = usage_by_user.get(uid, {"up": 0, "down": 0})
             used_gb = (u["up"] + u["down"]) / GB
-            out[uid] = self.user_quota_blocked(users.get(uid), allowance, used_gb)
+            out[uid] = self.user_quota_blocked(user, allowance, used_gb)
         return out
 
     async def evaluate_blocks(self) -> list[dict[str, Any]]:
@@ -311,6 +463,14 @@ class QuotaService:
         user_quota = await self._user_quota_map(allowances)
         changes: list[dict[str, Any]] = []
 
+        now_ts = self._now().timestamp()
+        packs = await self.db.list_recharges(active_only=True)
+        device_booster_ids = {
+            p.target_id for p in packs
+            if p.target_type == "device" and p.target_id is not None
+            and p.remaining_gb > 0 and p.expires_at > now_ts
+        }
+
         for dev in devices:
             user = users.get(dev.user_id)
             if user is None:
@@ -324,7 +484,8 @@ class QuotaService:
                 continue  # per-device manual override stays until lifted
             if user.block_state == _db.BLOCK_ADMIN:
                 continue  # user-level cut resolved at render time, not persisted
-            new_state = (_db.BLOCK_QUOTA if user_quota.get(dev.user_id, False)
+            has_booster = dev.id in device_booster_ids
+            new_state = (_db.BLOCK_QUOTA if (user_quota.get(dev.user_id, False) and not dev.bypass and not has_booster)
                          else _db.BLOCK_OK)
             if new_state != dev.block_state:
                 await self.db.set_device_state(dev.id, new_state)
@@ -349,6 +510,13 @@ class QuotaService:
         allowances = (await self.db.get_bundle()).allowances
         allow_set = set(await self.db.get_mac_list("allow"))
         deny_set = set(await self.db.get_mac_list("deny"))
+        now_ts = self._now().timestamp()
+        packs = await self.db.list_recharges(active_only=True)
+        device_booster_ids = {
+            p.target_id for p in packs
+            if p.target_type == "device" and p.target_id is not None
+            and p.remaining_gb > 0 and p.expires_at > now_ts
+        }
         out: dict[str, dict[str, Any]] = {}
         for dev in devices:
             user = users.get(dev.user_id)
@@ -362,7 +530,8 @@ class QuotaService:
             state = self.resolve_device_state(
                 user, dev, quota_blocked,
                 allow_listed=dev.mac in allow_set,
-                deny_listed=dev.mac in deny_set)
+                deny_listed=dev.mac in deny_set,
+                has_device_booster=dev.id in device_booster_ids)
             out[dev.mac] = {
                 "ip": leases.get(dev.mac, ""),
                 "name": dev.name,
@@ -982,9 +1151,132 @@ class QuotaService:
         old_start = bundle.period_start
         if old_start:
             await self.db.clear_usage(old_start)
+        await self._rollover_recharges(now)
         bundle.allowances = await self.compute_allowances()
         bundle.period_start = now.date().isoformat()
         bundle.period_end = self._next_period_end(bundle, now)
         await self.db.set_bundle(bundle)
         await self.db.add_event("Monthly quota period reset", "info")
         log.info("manual reset: period restarted %s (usage zeroed)", bundle.period_start)
+
+    async def spoof_consumption(self, user_id: int, mode: str, gb: float,
+                                device_id: Optional[int] = None,
+                                delta_sign: str = "+",
+                                log_event: bool = True) -> dict[str, Any]:
+        """Spoof, calibrate, or adjust consumption for a user or a specific device.
+
+        Parameters:
+          user_id: Target user.
+          mode: 'set' (exact consumption in GB) or 'delta' (add/subtract GB).
+          gb: Quantity in GB.
+          device_id: Optional specific device to target. If None, targets or distributes across
+                     the user's devices.
+          delta_sign: '+' or '-' (used when mode == 'delta').
+          log_event: If True, writes an audit event to the events log.
+
+        Returns a dictionary summarizing updated user and device states.
+        """
+        user = await self.db.get_user(user_id)
+        if user is None:
+            raise ValueError(f"User {user_id} not found")
+
+        user_devices = [d for d in await self.db.list_devices() if d.user_id == user_id]
+        if not user_devices:
+            raise ValueError(f"User '{user.name or user_id}' has no registered devices to record usage on")
+
+        target_device = None
+        if device_id is not None:
+            target_device = next((d for d in user_devices if d.id == device_id), None)
+            if target_device is None:
+                raise ValueError(f"Device {device_id} does not belong to user {user_id}")
+
+        today = self._now().date().isoformat()
+        period_usage_by_user = await self.db.get_period_usage_by_user()
+        current_user_usage = period_usage_by_user.get(user_id, {"up": 0, "down": 0})
+        current_user_bytes = current_user_usage["up"] + current_user_usage["down"]
+
+        period_usage_by_dev = await self.db.get_period_usage()
+
+        if target_device is not None:
+            # Single-device target
+            cur_dev_usage = period_usage_by_dev.get(target_device.id, {"up": 0, "down": 0})
+            cur_dev_bytes = cur_dev_usage["up"] + cur_dev_usage["down"]
+
+            if mode == "set":
+                target_dev_bytes = max(0, int(round(gb * GB)))
+            elif mode == "delta":
+                delta_bytes = int(round(gb * GB))
+                if delta_sign == "-":
+                    target_dev_bytes = max(0, cur_dev_bytes - delta_bytes)
+                else:
+                    target_dev_bytes = cur_dev_bytes + delta_bytes
+            else:
+                raise ValueError(f"Invalid mode '{mode}', expected 'set' or 'delta'")
+
+            await self.db.set_device_period_usage(target_device.id, target_dev_bytes, today)
+        else:
+            # Entire user target
+            if mode == "set":
+                target_user_bytes = max(0, int(round(gb * GB)))
+            elif mode == "delta":
+                delta_bytes = int(round(gb * GB))
+                if delta_sign == "-":
+                    target_user_bytes = max(0, current_user_bytes - delta_bytes)
+                else:
+                    target_user_bytes = current_user_bytes + delta_bytes
+            else:
+                raise ValueError(f"Invalid mode '{mode}', expected 'set' or 'delta'")
+
+            delta_total = target_user_bytes - current_user_bytes
+
+            if target_user_bytes == 0:
+                # Zero out every device of this user for the current period
+                bundle = await self.db.get_bundle()
+                since = bundle.period_start or ""
+                for d in user_devices:
+                    await self.db.conn.execute(
+                        "DELETE FROM usage_daily WHERE device_id=? AND date>=?",
+                        (d.id, since),
+                    )
+                await self.db.conn.commit()
+            elif len(user_devices) == 1:
+                # Only 1 device, set it directly
+                await self.db.set_device_period_usage(user_devices[0].id, target_user_bytes, today)
+            else:
+                # Distribute target: put delta into the first device or proportionally
+                # Safest & simplest: adjust the primary (first) device to absorb the delta
+                primary = user_devices[0]
+                cur_primary = period_usage_by_dev.get(primary.id, {"up": 0, "down": 0})
+                cur_primary_bytes = cur_primary["up"] + cur_primary["down"]
+                target_primary_bytes = max(0, cur_primary_bytes + delta_total)
+                await self.db.set_device_period_usage(primary.id, target_primary_bytes, today)
+
+        # Re-evaluate blocks immediately
+        block_changes = await self.evaluate_blocks()
+
+        # Fetch new state
+        new_user_usage_map = await self.db.get_period_usage_by_user()
+        new_user_usage = new_user_usage_map.get(user_id, {"up": 0, "down": 0})
+        new_user_bytes = new_user_usage["up"] + new_user_usage["down"]
+        new_user_gb = round(new_user_bytes / GB, 3)
+
+        bundle = await self.db.get_bundle()
+        allowance_gb = bundle.allowances.get(user_id, 0.0)
+        is_blocked = self.user_quota_blocked(user, allowance_gb, new_user_gb) or (user.block_state == _db.BLOCK_ADMIN)
+
+        if log_event:
+            target_str = f"device '{target_device.name or target_device.mac}'" if target_device else f"user '{user.name}'"
+            action_str = f"set to {new_user_gb} GB" if mode == "set" else f"{delta_sign}{gb} GB (now {new_user_gb} GB)"
+            await self.db.add_event(f"Admin calibrated consumption: {target_str} {action_str}", "warn", user_id=user.id)
+
+        return {
+            "user_id": user_id,
+            "user_name": user.name,
+            "device_id": target_device.id if target_device else None,
+            "used_gb": new_user_gb,
+            "used_bytes": new_user_bytes,
+            "allowance_gb": allowance_gb,
+            "quota_blocked": is_blocked,
+            "block_changes": block_changes,
+        }
+

@@ -94,6 +94,7 @@ const API = {
   post: (p, b) => API.req("POST", p, b),
   patch: (p, b) => API.req("PATCH", p, b),
   del: (p) => API.req("DELETE", p),
+  delete: (p) => API.req("DELETE", p),
 };
 
 /* ---------------- state ---------------- */
@@ -139,6 +140,7 @@ function render(data) {
   renderNetStatus(data.internet);
   renderNetworkPreview(networkConfig); // null-safe — refreshed by refreshNetwork()
   renderVpnShare(data); // live status rides the WS snapshot so "applying…" advances
+  if (data.vpn) renderVpnStatus(data.vpn);
   renderUpdate(data.update); // null-safe — no updater wired (tests / degraded boot)
   renderSecurity(data.security); // auth-hardening alerting banner
   const v = $("app-version");
@@ -148,6 +150,9 @@ function render(data) {
 /* ---------------- security alerting banner ---------------- */
 
 function renderSecurity(sec) {
+  /* ---- notification center ---- */
+  _pushNotifs(sec);
+
   const el = $("security-banner");
   if (!el || !sec) return;
   const msgs = [];
@@ -175,8 +180,6 @@ function renderSecurity(sec) {
   } else {
     el.classList.add("hidden");
   }
-  /* ---- notification center ---- */
-  _pushNotifs(sec);
 }
 
 /* ---------------- notification center ---------------- */
@@ -184,25 +187,72 @@ function renderSecurity(sec) {
 const _notifSeenKey = "quota_notifs_seen";
 const _notifBuf = [];
 
+function _upsertNotif(id, type, msg) {
+  const existing = _notifBuf.find((n) => n.id === id);
+  if (existing) {
+    if (existing.msg !== msg) {
+      existing.msg = msg;
+      existing.time = Date.now();
+      try {
+        const seen = JSON.parse(localStorage.getItem(_notifSeenKey) || "[]");
+        const idx = seen.indexOf(id);
+        if (idx !== -1) {
+          seen.splice(idx, 1);
+          localStorage.setItem(_notifSeenKey, JSON.stringify(seen));
+        }
+      } catch (e) {}
+    }
+  } else {
+    _notifBuf.push({ id, type, time: Date.now(), msg });
+  }
+}
+
+function _removeNotif(id) {
+  const idx = _notifBuf.findIndex((n) => n.id === id);
+  if (idx !== -1) {
+    _notifBuf.splice(idx, 1);
+  }
+  try {
+    const seen = JSON.parse(localStorage.getItem(_notifSeenKey) || "[]");
+    const sIdx = seen.indexOf(id);
+    if (sIdx !== -1) {
+      seen.splice(sIdx, 1);
+      localStorage.setItem(_notifSeenKey, JSON.stringify(seen));
+    }
+  } catch (e) {}
+}
+
 function _pushNotifs(sec) {
   if (!sec) return;
-  const now = Date.now();
+
   if (sec.failed_logins_1h > 0) {
-    _notifBuf.push({ id: "logins", type: "danger", time: now,
-      msg: `${sec.failed_logins_1h} failed login attempt${sec.failed_logins_1h === 1 ? "" : "s"} in the last hour.` });
+    _upsertNotif("logins", "danger",
+      `${sec.failed_logins_1h} failed login attempt${sec.failed_logins_1h === 1 ? "" : "s"} in the last hour.`);
+  } else {
+    _removeNotif("logins");
   }
+
   if (sec.waf_blocks_1h > 0) {
-    _notifBuf.push({ id: "waf", type: "warn", time: now,
-      msg: `${sec.waf_blocks_1h} request${sec.waf_blocks_1h === 1 ? "" : "s"} blocked by the WAF in the last hour.` });
+    _upsertNotif("waf", "warn",
+      `${sec.waf_blocks_1h} request${sec.waf_blocks_1h === 1 ? "" : "s"} blocked by the WAF in the last hour.`);
+  } else {
+    _removeNotif("waf");
   }
+
   if (sec.default_password) {
-    _notifBuf.push({ id: "default_pw", type: "danger", time: now,
-      msg: "Default admin password is still active." });
+    _upsertNotif("default_pw", "danger",
+      "Default admin password is still active.");
+  } else {
+    _removeNotif("default_pw");
   }
+
   if (sec.wan_http) {
-    _notifBuf.push({ id: "wan_http", type: "warn", time: now,
-      msg: "WAN mode running over plain HTTP — credentials unencrypted." });
+    _upsertNotif("wan_http", "warn",
+      "WAN mode running over plain HTTP — credentials unencrypted.");
+  } else {
+    _removeNotif("wan_http");
   }
+
   _renderNotifDropdown();
 }
 
@@ -210,19 +260,29 @@ function _renderNotifDropdown() {
   const badge = $("notif-badge");
   const list = $("notif-list");
   if (!badge || !list) return;
-  const seen = JSON.parse(localStorage.getItem(_notifSeenKey) || "[]");
-  const unseen = _notifBuf.filter((n) => !seen.includes(n.id));
-  if (unseen.length) {
-    badge.textContent = unseen.length > 9 ? "9+" : String(unseen.length);
+
+  let seen = [];
+  try {
+    seen = JSON.parse(localStorage.getItem(_notifSeenKey) || "[]");
+  } catch (e) {
+    seen = [];
+  }
+
+  const activeNotifs = _notifBuf.filter((n) => !seen.includes(n.id));
+
+  if (activeNotifs.length) {
+    badge.textContent = activeNotifs.length > 9 ? "9+" : String(activeNotifs.length);
     badge.classList.remove("hidden");
   } else {
     badge.classList.add("hidden");
   }
-  if (!_notifBuf.length) {
+
+  if (!activeNotifs.length) {
     list.innerHTML = `<p class="muted small notif-empty">No notifications.</p>`;
     return;
   }
-  list.innerHTML = _notifBuf.map((n) => {
+
+  list.innerHTML = activeNotifs.map((n) => {
     const t = new Date(n.time);
     const ts = t.getHours().toString().padStart(2, "0") + ":" + t.getMinutes().toString().padStart(2, "0");
     return `<div class="notif-item ${esc(n.type)}">
@@ -235,9 +295,10 @@ function _renderNotifDropdown() {
 function _notifDismissAll() {
   const seen = _notifBuf.map((n) => n.id);
   localStorage.setItem(_notifSeenKey, JSON.stringify(seen));
-  $("notif-badge").classList.add("hidden");
-  $("notif-dropdown").classList.add("hidden");
-  _notifBuf.length = 0;
+  const badge = $("notif-badge");
+  if (badge) badge.classList.add("hidden");
+  const dropdown = $("notif-dropdown");
+  if (dropdown) dropdown.classList.add("hidden");
   _renderNotifDropdown();
 }
 
@@ -352,6 +413,9 @@ function renderBundle(b, devices, users) {
   $("bundle-users").textContent = (users || []).length;
   $("bundle-devices").textContent = devices.length;
   $("bundle-blocked").textContent = devices.filter((d) => d.blocked).length;
+
+  renderRecharges(b.recharges, users, devices);
+  updateRechargeTargetOptions();
 
   // keep settings form in sync — but NEVER clobber an input the admin is
   // editing. A WS snapshot arrives every 5 s; the old per-field focus guard
@@ -502,7 +566,14 @@ function userCard(u, udevs, gw, ghost) {
   // internet with the block toggle + edit, but it can never be deleted.
   const delBtn = u.protected ? "" : `
       <button class="icon-btn danger" data-ua="delete" data-uid="${u.id}" title="Remove user + devices">🗑</button>`;
+  const guestActions = u.guest ? (
+    u.blocked ? `
+      <button class="btn ok small" data-ua="guest-accept" data-uid="${u.id}" title="Accept guest — unblock and grant quota">Accept</button>
+      <button class="btn danger small" data-ua="guest-reject" data-uid="${u.id}" title="Reject guest — keep blocked">Reject</button>` : `
+      <button class="btn danger small" data-ua="guest-reject" data-uid="${u.id}" title="Cut / block guest access">Reject</button>`
+  ) : "";
   const actions = ghost ? "" : `
+      ${guestActions}
       <label class="switch" title="Cut / restore all of this user's devices">
         <input type="checkbox" class="toggle-user" data-uid="${u.id}" ${u.blocked ? "" : "checked"}>
         <span class="slider"></span>
@@ -511,7 +582,10 @@ function userCard(u, udevs, gw, ghost) {
       ${delBtn}`;
   const devHtml = udevs.map(deviceRow).join("");
   const guestTag = u.guest
-    ? ` <span class="guest-tag" title="Guest account — auto-created, deleted on month reset">guest</span>` : "";
+    ? (u.blocked
+        ? ` <span class="guest-tag" title="Guest account — pending approval">guest (pending)</span>`
+        : ` <span class="status-tag ok" title="Guest account — approved">guest (approved)</span>`)
+    : "";
   // the box itself: its own internet consumption is charged here, and it is
   // permanent (edit + block work, delete does not)
   const gatewayTag = u.protected
@@ -558,16 +632,16 @@ function userCard(u, udevs, gw, ghost) {
 function deviceRow(d) {
   const bypassTag = d.bypass
     ? `<span class="bypass-tag" title="Exempt from this user's quota block">bypass</span>` : "";
-  // effective VPN-share exclusion (own flag OR the user's flag) — a tag only;
-  // the checkbox in the edit modal controls the device's OWN flag.
-  const vpnBypassTag = d.vpn_bypass_effective
-    ? `<span class="vpn-bypass-tag" title="Rides the direct connection — excluded from the shared VPN tunnel">direct</span>` : "";
+  const vpnBypassTag = "";
   // per-device internet speed caps (Mbps; shown only when one is set)
   const speedTag = (d.limit_down_mbps || d.limit_up_mbps)
     ? ` <span class="speed-tag" title="This device's speed limit">↓${d.limit_down_mbps || "∞"} ↑${d.limit_up_mbps || "∞"}</span>` : "";
   // guests are auto-created period-scoped accounts (deleted on month reset)
   const guestTag = d.guest
-    ? `<span class="guest-tag" title="Guest account — auto-created, deleted on month reset">guest</span>` : "";
+    ? (d.blocked
+        ? `<span class="guest-tag" title="Guest device — pending approval">guest (pending)</span>`
+        : `<span class="status-tag ok" title="Guest device — approved">guest (approved)</span>`)
+    : "";
   // the box's own device — controlled from its user card (no per-device block
   // toggle, no delete; edit/top-up stays)
   const gatewayTag = d.gateway
@@ -595,6 +669,12 @@ function deviceRow(d) {
         <input type="checkbox" class="toggle-block" data-id="${d.id}" ${d.blocked ? "" : "checked"}>
         <span class="slider"></span>
       </label>`;
+  const guestDevActions = d.guest ? (
+    d.blocked ? `
+      <button class="btn ok small" data-act="guest-accept" data-id="${d.id}" title="Accept guest — unblock and grant quota">Accept</button>
+      <button class="btn danger small" data-act="guest-reject" data-id="${d.id}" title="Reject guest — keep blocked">Reject</button>` : `
+      <button class="btn danger small" data-act="guest-reject" data-id="${d.id}" title="Cut / block guest access">Reject</button>`
+  ) : "";
   const deleteBtn = d.gateway ? "" : `
       <button class="icon-btn danger" data-act="delete" data-id="${d.id}" title="Remove">🗑</button>`;
   return `
@@ -611,6 +691,7 @@ function deviceRow(d) {
       <span class="live-up">Upload <b>${fmtBytes(d.live_up)}</b></span>
     </div>
     <div class="device-actions actions">
+      ${guestDevActions}
       ${blockSwitch}
       <button class="icon-btn" data-act="edit" data-id="${d.id}" title="Edit / top up">✎</button>
       ${deleteBtn}
@@ -632,6 +713,12 @@ function switchPanel(name) {
   if (name === "firewall") refreshFirewall();
   if (name === "history") refreshHistory();
   if (name === "dns") refreshDns();
+  if (name === "vpn") {
+    refreshVpn();
+    startVpnLogPolling();
+  } else {
+    stopVpnLogPolling();
+  }
 }
 
 async function refreshLogs() {
@@ -1132,96 +1219,196 @@ function dnsQuickActions(domain, deviceId) {
     </div>`;
 }
 
+let historyAnalyticsCache = null;
+let currentHistoryView = "apps";
+
 async function refreshHistory() {
   const sel = $("hist-device");
   syncHistoryDeviceSelect();
   const id = sel.value;   // "all" (household) or a device id string
   if (id === "") {
     historyCache = null;
-    renderHistory(null);
+    historyAnalyticsCache = null;
+    renderHistory(null, null);
     return;
   }
+  const windowHours = Number($("hist-window").value) || 24;
+  const loading = $("hist-loading");
+  const empty = $("hist-empty");
+  if (loading) loading.classList.remove("hidden");
+  if (empty) empty.classList.add("hidden");
+  if (!historyCache) {
+    document.querySelectorAll(".hist-view").forEach((v) => v.classList.add("hidden"));
+  }
+
   try {
-    const windowHours = Number($("hist-window").value) || 24;
-    historyCache = await API.get(`/api/history/${id}?window=${windowHours}&limit=200`);
-  } catch (_) { historyCache = null; }
-  renderHistory(historyCache);
+    const [raw, analytics] = await Promise.all([
+      API.get(`/api/history/${id}?window=${windowHours}&limit=200`),
+      API.get(`/api/history/${id}/analytics?window=${windowHours}`),
+    ]);
+    historyCache = raw;
+    historyAnalyticsCache = analytics;
+  } catch (_) {
+    historyCache = null;
+    historyAnalyticsCache = null;
+  } finally {
+    if (loading) loading.classList.add("hidden");
+  }
+  renderHistory(historyCache, historyAnalyticsCache);
 }
 
-function renderHistory(d) {
-  const empty = $("hist-empty"), body = $("hist-body"), summary = $("hist-summary");
+function renderHistory(d, analytics) {
+  const empty = $("hist-empty"), summary = $("hist-summary"), loading = $("hist-loading");
+  if (loading) loading.classList.add("hidden");
   if (!d || !d.top_domains || !d.top_domains.length) {
     empty.classList.remove("hidden");
-    body.classList.add("hidden");
-    summary.classList.add("hidden");
+    if ($("hist-stat-cards")) $("hist-stat-cards").classList.add("hidden");
+    document.querySelectorAll(".hist-view").forEach((v) => v.classList.add("hidden"));
+    if (summary) summary.classList.add("hidden");
     empty.textContent = d && d.device_id === "all"
       ? "No browsing history recorded for the household in this window yet."
       : "No browsing history recorded for this device in this window yet.";
     return;
   }
   empty.classList.add("hidden");
-  body.classList.remove("hidden");
+  if ($("hist-stat-cards")) $("hist-stat-cards").classList.remove("hidden");
 
   const total = d.total_queries || 0;
-  summary.classList.remove("hidden");
-  if (d.device_id === "all") {
-    // household aggregate: sum the bandwidth across every managed device
-    const devs = (dashboard.users || []).flatMap((u) => u.devices || []);
-    const pDown = devs.reduce((s, x) => s + (x.device_down_gb || 0), 0);
-    const pUp = devs.reduce((s, x) => s + (x.device_up_gb || 0), 0);
-    const lDown = devs.reduce((s, x) => s + (x.live_down || 0), 0);
-    const lUp = devs.reduce((s, x) => s + (x.live_up || 0), 0);
-    summary.textContent =
-      `All devices — ${total.toLocaleString()} queries in the last ${d.window_hours} h · ↓ ${fmt(pDown)} ↑ ${fmt(pUp)} this period · live ${fmtBytes(lDown)}/s ↓ ${fmtBytes(lUp)}/s ↑.`;
-  } else {
-    // bandwidth from the cached dashboard payload — no extra call (same format
-    // as the device card: live down/up + period down/up)
-    const device = histDevices().find((x) => String(x.id) === String(d.device_id));
-    const dev = (dashboard.users || [])
-      .flatMap((u) => u.devices || [])
-      .find((x) => x.id === d.device_id);
-    const bw = dev
-      ? ` · ↓ ${fmt(dev.device_down_gb)} ↑ ${fmt(dev.device_up_gb)} this period · live ${fmtBytes(dev.live_down)}/s ↓ ${fmtBytes(dev.live_up)}/s ↑`
-      : "";
-    summary.textContent =
-      `Device: ${device ? device.label : "#" + d.device_id} — ${total.toLocaleString()} queries in the last ${d.window_hours} h${bw}.`;
+  if (summary) {
+    summary.classList.remove("hidden");
+    if (d.device_id === "all") {
+      summary.textContent = `All devices — ${total.toLocaleString()} queries in the last ${d.window_hours} h.`;
+    } else {
+      const device = histDevices().find((x) => String(x.id) === String(d.device_id));
+      summary.textContent = `Device: ${device ? device.label : "#" + d.device_id} — ${total.toLocaleString()} queries in the last ${d.window_hours} h.`;
+    }
   }
 
-  // top domains
-  const curDeviceId = d.device_id === "all" ? null : d.device_id;
-  $("hist-top").innerHTML = d.top_domains.map((t) => `
-    <tr>
-      <td class="domain">${esc(t.domain)}</td>
-      <td class="num">${t.hits.toLocaleString()}</td>
-      <td class="num">${total ? ((t.hits / total) * 100).toFixed(1) : "0.0"}%</td>
-      <td>${dnsStatusBadge(t.status)} ${dnsQuickActions(t.domain, curDeviceId)}</td>
-    </tr>`).join("");
+  // Summary Tiles
+  if ($("hist-total-queries")) $("hist-total-queries").textContent = total.toLocaleString();
+  const topApp = (analytics && analytics.top_apps && analytics.top_apps[0]) ? analytics.top_apps[0] : null;
+  if ($("hist-top-app")) $("hist-top-app").textContent = topApp ? `${topApp.name} (${topApp.percentage}%)` : "—";
+  const topWeb = (analytics && analytics.top_websites && analytics.top_websites[0]) ? analytics.top_websites[0] : null;
+  if ($("hist-top-web")) $("hist-top-web").textContent = topWeb ? `${topWeb.domain} (${topWeb.percentage}%)` : "—";
+  if ($("hist-domains-count")) $("hist-domains-count").textContent = (d.top_domains || []).length.toLocaleString();
 
-  // activity: group the per-minute buckets into hourly bars (no chart.js)
+  // Render Apps View
+  const appsList = $("hist-apps-list");
+  if (appsList && analytics && analytics.top_apps) {
+    if (!analytics.top_apps.length) {
+      appsList.innerHTML = `<p class="muted small" style="text-align: center; padding: 16px;">No recognized application traffic in this window.</p>`;
+    } else {
+      appsList.innerHTML = analytics.top_apps.map((app) => `
+        <div class="hist-bar-item">
+          <div class="hist-bar-header">
+            <div class="hist-bar-left">
+              <span class="hist-bar-indicator" style="background: ${app.color || '#38BDF8'}"></span>
+              <span class="hist-bar-name">${esc(app.name)}</span>
+              <span class="hist-bar-category">${esc(app.category)}</span>
+            </div>
+            <div class="hist-bar-right">
+              <span class="hist-bar-queries">${app.queries.toLocaleString()} queries</span>
+              <span class="hist-bar-pct">${app.percentage}%</span>
+            </div>
+          </div>
+          <div class="hist-progress-bg">
+            <div class="hist-progress-fill" style="width: ${app.percentage}%; background: ${app.color || '#38BDF8'}"></div>
+          </div>
+        </div>
+      `).join("");
+    }
+  }
+
+  // Render Websites View
+  const webList = $("hist-websites-list");
+  if (webList && analytics && analytics.top_websites) {
+    if (!analytics.top_websites.length) {
+      webList.innerHTML = `<p class="muted small" style="text-align: center; padding: 16px;">No websites recorded in this window.</p>`;
+    } else {
+      webList.innerHTML = analytics.top_websites.map((web) => `
+        <div class="hist-bar-item">
+          <div class="hist-bar-header">
+            <div class="hist-bar-left">
+              <span class="hist-bar-indicator" style="background: #38BDF8"></span>
+              <span class="hist-bar-name">${esc(web.domain)}</span>
+            </div>
+            <div class="hist-bar-right">
+              <span class="hist-bar-queries">${web.queries.toLocaleString()} queries</span>
+              <span class="hist-bar-pct">${web.percentage}%</span>
+            </div>
+          </div>
+          <div class="hist-progress-bg">
+            <div class="hist-progress-fill" style="width: ${web.percentage}%; background: #38BDF8"></div>
+          </div>
+        </div>
+      `).join("");
+    }
+  }
+
+  // Render Timeline View
+  const timelineChart = $("hist-timeline-chart");
+  if (timelineChart && analytics && analytics.timeline) {
+    const maxQ = Math.max(1, ...analytics.timeline.map((t) => t.queries));
+    timelineChart.innerHTML = analytics.timeline.map((item) => `
+      <div class="hist-timeline-col" title="${item.slot}: ${item.queries} queries">
+        <div class="hist-timeline-bar" style="height: ${Math.max(4, Math.round((item.queries / maxQ) * 100))}%"></div>
+        <span class="hist-timeline-label">${item.label}</span>
+      </div>
+    `).join("");
+  }
+
+  // Render Raw Table View
+  const curDeviceId = d.device_id === "all" ? null : d.device_id;
+  if ($("hist-top")) {
+    $("hist-top").innerHTML = d.top_domains.map((t) => `
+      <tr>
+        <td class="domain">${esc(t.domain)}</td>
+        <td class="num">${t.hits.toLocaleString()}</td>
+        <td class="num">${total ? ((t.hits / total) * 100).toFixed(1) : "0.0"}%</td>
+        <td>${dnsStatusBadge(t.status)} ${dnsQuickActions(t.domain, curDeviceId)}</td>
+      </tr>`).join("");
+  }
+
   const hours = new Map();
   (d.activity || []).forEach((a) => {
-    const h = a.bucket_minute.slice(0, 13) + "00"; // "YYYY-MM-DD HH:MM" -> "YYYY-MM-DD HH:00"
+    const h = a.bucket_minute.slice(0, 13) + "00";
     hours.set(h, (hours.get(h) || 0) + a.count);
   });
   const maxHits = Math.max(1, ...hours.values());
-  $("hist-activity").innerHTML = [...hours.entries()].map(([h, c]) => `
-    <li>
-      <span>${esc(h)}</span>
-      <span class="num">${c.toLocaleString()} <b style="opacity:.35">${"█".repeat(Math.round((c / maxHits) * 20))}</b></span>
-    </li>`).join("");
+  if ($("hist-activity")) {
+    $("hist-activity").innerHTML = [...hours.entries()].map(([h, c]) => `
+      <li>
+        <span>${esc(h)}</span>
+        <span class="num">${c.toLocaleString()} <b style="opacity:.35">${"█".repeat(Math.round((c / maxHits) * 20))}</b></span>
+      </li>`).join("");
+  }
 
-  // recent queries: minute-bucket lines, newest first; aggregate rows carry the
-  // owning device_id and get a [name] badge before the domain.
-  $("hist-recent").innerHTML = (d.recent || []).map((r) => {
-    const badge = r.device_id
-      ? `<b class="hist-device-badge">[${esc(histDeviceName(r.device_id))}]</b> `
-      : "";
-    return `
-    <li>
-      <span class="domain">${badge}${esc(r.domain)} ${dnsStatusBadge(r.status)}</span>
-      <span class="num">${esc(r.bucket_minute)} × ${r.count}</span>
-    </li>`;
-  }).join("");
+  if ($("hist-recent")) {
+    $("hist-recent").innerHTML = (d.recent || []).map((r) => {
+      const badge = r.device_id
+        ? `<b class="hist-device-badge">[${esc(histDeviceName(r.device_id))}]</b> `
+        : "";
+      return `
+      <li>
+        <span class="domain">${badge}${esc(r.domain)} ${dnsStatusBadge(r.status)}</span>
+        <span class="num">${esc(r.bucket_minute)} × ${r.count}</span>
+      </li>`;
+    }).join("");
+  }
+
+  switchHistoryView(currentHistoryView);
+}
+
+function switchHistoryView(view) {
+  currentHistoryView = view;
+  document.querySelectorAll(".hist-tab").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.view === view);
+  });
+  document.querySelectorAll(".hist-view").forEach((el) => {
+    el.classList.add("hidden");
+  });
+  const target = $(`hist-view-${view}`);
+  if (target) target.classList.remove("hidden");
 }
 
 /* level filter + search are applied client-side to the raw /api/logs lines;
@@ -1282,7 +1469,14 @@ function renderDnsRules() {
 }
 
 function renderDnsPresets() {
-  $("dns-presets-list").innerHTML = dnsPresetsCache.map((p) => `
+  const listEl = $("dns-presets-list");
+  if (!listEl) return;
+  const contentPresets = dnsPresetsCache.filter((p) => p.id !== "adblock-ultra" && p.id !== "ads-tracking");
+  if (!contentPresets.length) {
+    listEl.innerHTML = '<div class="muted small" style="padding: 10px 0;">No additional category filters available.</div>';
+    return;
+  }
+  listEl.innerHTML = contentPresets.map((p) => `
     <div class="dns-preset-row">
       <div>
         <b>${esc(p.name)}</b>
@@ -1296,6 +1490,131 @@ function renderDnsPresets() {
     </div>`).join("");
 }
 
+function renderAdblockHero() {
+  const masterSwitch = $("adblock-master-switch");
+  const statusBadge = $("adblock-status-badge");
+  const shieldIcon = $("adblock-shield-icon");
+  const toggleLabel = $("adblock-toggle-label");
+  const domainsCount = $("adblock-domains-count");
+  const modeVal = $("adblock-mode-val");
+
+  if (!masterSwitch) return;
+
+  const ultraPreset = dnsPresetsCache.find((p) => p.id === "adblock-ultra");
+  const stdPreset = dnsPresetsCache.find((p) => p.id === "ads-tracking");
+
+  const ultraActive = ultraPreset && ultraPreset.enabled;
+  const stdActive = stdPreset && stdPreset.enabled;
+  const isEnabled = ultraActive || stdActive;
+
+  // Selected tier
+  let activeTier = "adblock-ultra";
+  if (stdActive && !ultraActive) {
+    activeTier = "ads-tracking";
+  }
+
+  // Update radios
+  const radio = document.querySelector(`input[name="adblock-tier"][value="${activeTier}"]`);
+  if (radio && (ultraActive || stdActive)) {
+    radio.checked = true;
+  }
+  document.querySelectorAll(".adblock-tier-card").forEach((card) => {
+    const r = card.querySelector('input[type="radio"]');
+    card.classList.toggle("active", r && r.checked);
+  });
+
+  masterSwitch.checked = !!isEnabled;
+
+  if (toggleLabel) {
+    toggleLabel.textContent = isEnabled ? "Active" : "Disabled";
+  }
+
+  if (statusBadge) {
+    if (isEnabled) {
+      statusBadge.className = "badge ok";
+      statusBadge.textContent = "● Shield Active";
+    } else {
+      statusBadge.className = "badge off";
+      statusBadge.textContent = "Protection Off";
+    }
+  }
+
+  if (shieldIcon) {
+    shieldIcon.classList.toggle("active", !!isEnabled);
+  }
+
+  if (domainsCount) {
+    const totalBlocked = (ultraActive ? (ultraPreset.domain_count || 0) : 0) + (stdActive ? (stdPreset.domain_count || 0) : 0);
+    domainsCount.textContent = isEnabled ? `${totalBlocked.toLocaleString()} domains` : "0 (Disabled)";
+  }
+
+  if (modeVal) {
+    modeVal.textContent = ultraActive ? "🔥 Ultra PRO" : (stdActive ? "⚡ Standard" : "—");
+  }
+}
+
+async function toggleAdblockMaster(enable) {
+  const selectedRadio = document.querySelector('input[name="adblock-tier"]:checked');
+  const tier = (selectedRadio && selectedRadio.value) || "adblock-ultra";
+  const otherTier = tier === "adblock-ultra" ? "ads-tracking" : "adblock-ultra";
+
+  const sw = $("adblock-master-switch");
+  if (sw) sw.disabled = true;
+
+  try {
+    if (enable) {
+      const otherPreset = dnsPresetsCache.find((p) => p.id === otherTier);
+      if (otherPreset && otherPreset.enabled) {
+        await API.post(`/api/dns/presets/${otherTier}/disable`, { scope: "global" }).catch(() => {});
+      }
+      await API.post(`/api/dns/presets/${tier}/enable`, { scope: "global" });
+    } else {
+      await API.post(`/api/dns/presets/adblock-ultra/disable`, { scope: "global" }).catch(() => {});
+      await API.post(`/api/dns/presets/ads-tracking/disable`, { scope: "global" }).catch(() => {});
+    }
+  } catch (err) {
+    alert("Ad-blocker update failed: " + err.message);
+  } finally {
+    if (sw) sw.disabled = false;
+    await refreshDns();
+  }
+}
+
+async function updateAdblockFeeds() {
+  const btn = $("adblock-update-btn");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Updating…";
+  }
+  try {
+    const selectedRadio = document.querySelector('input[name="adblock-tier"]:checked');
+    const tier = (selectedRadio && selectedRadio.value) || "adblock-ultra";
+    await API.post(`/api/dns/presets/${tier}/enable`, { scope: "global" });
+    await refreshDns();
+  } catch (err) {
+    alert("Failed to update ad feeds: " + err.message);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "⟳ Update Feeds";
+    }
+  }
+}
+
+function openAdblockWhitelist() {
+  const ruleForm = $("dns-rule-form");
+  const actionSel = $("dns-rule-action");
+  const domainInp = $("dns-rule-domain");
+  if (actionSel) actionSel.value = "allow";
+  if (domainInp) {
+    domainInp.focus();
+    domainInp.placeholder = "e.g. ads.google.com";
+  }
+  if (ruleForm) {
+    ruleForm.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+}
+
 async function refreshDns() {
   try {
     [dnsPresetsCache, dnsRulesCache] = await Promise.all([
@@ -1304,6 +1623,7 @@ async function refreshDns() {
     ]);
   } catch (_) { dnsPresetsCache = []; dnsRulesCache = []; }
   renderDnsPresets();
+  renderAdblockHero();
   renderDnsRules();
   populateDnsTargetSelect($("dns-rule-target"), $("dns-rule-scope"));
   populateDnsTargetSelect($("dns-import-target"), $("dns-import-scope"));
@@ -1487,40 +1807,56 @@ function scheduleWsRetry() {
 /* ---------------- actions ---------------- */
 
 async function doAction(act, id) {
-  if (act === "toggle") {
-    // switch reflects current state; we want the NEW value
-    const checkbox = document.querySelector(`.toggle-block[data-id="${id}"]`);
-    const blocked = !checkbox.checked;
-    await API.patch(`/api/devices/${id}`, { block: blocked });
-  } else if (act === "delete") {
-    const dev = (dashboard.devices || []).find((d) => d.id === id);
-    if (dev && dev.gateway) return;  // the box cannot be deleted (API 400s too)
-    if (!confirm(`Remove ${dev && dev.name ? `“${dev.name}”` : "this device"}?`)) return;
-    await API.del(`/api/devices/${id}`);
-  } else if (act === "edit") {
-    openDeviceModal(id);
-    return;
+  try {
+    if (act === "toggle") {
+      // switch reflects current state; we want the NEW value
+      const checkbox = document.querySelector(`.toggle-block[data-id="${id}"]`);
+      const blocked = !checkbox.checked;
+      await API.patch(`/api/devices/${id}`, { block: blocked });
+    } else if (act === "delete") {
+      const dev = (dashboard.devices || []).find((d) => d.id === id);
+      if (dev && dev.gateway) return;  // the box cannot be deleted (API 400s too)
+      if (!confirm(`Remove ${dev && dev.name ? `“${dev.name}”` : "this device"}?`)) return;
+      await API.del(`/api/devices/${id}`);
+    } else if (act === "edit") {
+      openDeviceModal(id);
+      return;
+    } else if (act === "guest-accept") {
+      await API.post(`/api/guest/${id}/approve`);
+    } else if (act === "guest-reject") {
+      await API.post(`/api/guest/${id}/reject`);
+    }
+  } catch (err) {
+    alert("Action failed: " + (err.message || String(err)));
   }
   await refreshAll();
 }
 
 async function doUserAction(act, uid) {
-  if (act === "toggle") {
-    const checkbox = document.querySelector(`.toggle-user[data-uid="${uid}"]`);
-    const blocked = !checkbox.checked;
-    await API.patch(`/api/users/${uid}`, { block: blocked });
-  } else if (act === "delete") {
-    const user = (dashboard.users || []).find((x) => x.id === uid);
-    if (user && user.protected) return;  // the Gateway user is permanent (API 400s too)
-    const names = ((user && user.devices) || [])
-      .map((d) => `“${d.name || d.mac}”`).join(", ");
-    const msg = `Remove ${user && user.name ? `“${user.name}”` : `user #${uid}`}` +
-      `${names ? ` and their device(s): ${names}` : ""}? This also deletes their usage history.`;
-    if (!confirm(msg)) return;
-    await API.del(`/api/users/${uid}`);
-  } else if (act === "edit") {
-    openUserModal(uid);
-    return;
+  try {
+    if (act === "toggle") {
+      const checkbox = document.querySelector(`.toggle-user[data-uid="${uid}"]`);
+      const blocked = !checkbox.checked;
+      await API.patch(`/api/users/${uid}`, { block: blocked });
+    } else if (act === "delete") {
+      const user = (dashboard.users || []).find((x) => x.id === uid);
+      if (user && user.protected) return;  // the Gateway user is permanent (API 400s too)
+      const names = ((user && user.devices) || [])
+        .map((d) => `“${d.name || d.mac}”`).join(", ");
+      const msg = `Remove ${user && user.name ? `“${user.name}”` : `user #${uid}`}` +
+        `${names ? ` and their device(s): ${names}` : ""}? This also deletes their usage history.`;
+      if (!confirm(msg)) return;
+      await API.del(`/api/users/${uid}`);
+    } else if (act === "edit") {
+      openUserModal(uid);
+      return;
+    } else if (act === "guest-accept") {
+      await API.post(`/api/guest/user/${uid}/approve`);
+    } else if (act === "guest-reject") {
+      await API.post(`/api/guest/user/${uid}/reject`);
+    }
+  } catch (err) {
+    alert("Action failed: " + (err.message || String(err)));
   }
   await refreshAll();
 }
@@ -1582,7 +1918,8 @@ function openDeviceModal(id) {
   $("d-fixed").value = dev && dev.quota_mode === "fixed"
     ? (dev.fixed_gb ?? dev.allowance_gb ?? 10) : "";
   $("d-bypass").checked = dev ? !!dev.bypass : false;
-  $("d-vpn-bypass").checked = dev ? !!dev.vpn_bypass : false;
+  const dVpn = $("d-vpn-bypass");
+  if (dVpn) dVpn.checked = dev ? !!dev.vpn_bypass : false;
   $("d-topup").value = "";
   // per-device speed caps (Mbps, 0 = unlimited)
   $("d-limit-down").value = dev ? (dev.limit_down_mbps || 0) : 0;
@@ -1656,7 +1993,8 @@ async function submitDevice(ev) {
     const patch = { name, limit_down_mbps: limitDown, limit_up_mbps: limitUp };
     if (userId != null && userId !== originalUserId) patch.user_id = userId;
     patch.bypass = $("d-bypass").checked;
-    patch.vpn_bypass = $("d-vpn-bypass").checked;
+    const dVpn = $("d-vpn-bypass");
+    if (dVpn) patch.vpn_bypass = dVpn.checked;
     const topupRaw = parseFloat($("d-topup").value);
     if (!Number.isNaN(topupRaw) && topupRaw > 0) {
       await API.post(`/api/devices/${editDeviceId}/topup`, { extra_gb: topupRaw });
@@ -1700,7 +2038,8 @@ function openUserModal(id) {
   $("u-history-days").value = u ? (u.history_days ?? "") : "";
   $("u-dns-server").value = u ? (u.dns_server || "") : "";
   $("u-exempt").checked = u ? !!u.exempt_quota : false;
-  $("u-vpn-bypass").checked = u ? !!u.vpn_bypass : false;
+  const uVpn = $("u-vpn-bypass");
+  if (uVpn) uVpn.checked = u ? !!u.vpn_bypass : false;
   $("u-fixed-wrap").classList.toggle("hidden", $("u-mode").value !== "fixed");
   $("user-modal-submit").textContent = u ? "Save" : "Add";
   $("user-modal").classList.remove("hidden");
@@ -1726,7 +2065,8 @@ async function submitUser(ev) {
     : Math.max(0, Math.min(365, parseInt(historyDaysField, 10) || 0));
   const dnsServer = $("u-dns-server").value.trim();
   const exemptQuota = $("u-exempt").checked;
-  const vpnBypass = $("u-vpn-bypass").checked;
+  const uVpn = $("u-vpn-bypass");
+  const vpnBypass = uVpn ? uVpn.checked : false;
   let targetUserId = editUserId;
   if (editUserId == null) {
     const created = await API.post("/api/users", { name, quota_mode: mode, fixed_gb: fixed,
@@ -1842,13 +2182,120 @@ async function submitSettings(ev) {
   await refreshAll();
 }
 
+function updateRechargeTargetOptions() {
+  const typeEl = $("recharge-target-type");
+  const fieldEl = $("recharge-target-id-field");
+  const labelEl = $("recharge-target-id-label");
+  const selectEl = $("recharge-target-id");
+  if (!typeEl || !fieldEl || !selectEl) return;
+
+  const mode = typeEl.value;
+  if (mode === "all") {
+    fieldEl.classList.add("hidden");
+    return;
+  }
+  fieldEl.classList.remove("hidden");
+  const curVal = selectEl.value;
+  const users = (dashboard && dashboard.users) || [];
+  const devices = (dashboard && dashboard.devices) || [];
+
+  if (mode === "user") {
+    if (labelEl) labelEl.textContent = "Select User";
+    selectEl.innerHTML = users.map(u => `<option value="${u.id}">${esc(u.name || "User #" + u.id)}</option>`).join("");
+  } else if (mode === "device") {
+    if (labelEl) labelEl.textContent = "Select Device";
+    selectEl.innerHTML = devices.map(d => `<option value="${d.id}">${esc(d.name || d.mac)} (${esc(d.mac)})</option>`).join("");
+  }
+  if (curVal) selectEl.value = curVal;
+}
+
+function renderRecharges(packs, users, devices) {
+  const tbody = $("recharges-queue-tbody");
+  if (!tbody) return;
+  const userMap = {};
+  for (const u of (users || [])) userMap[u.id] = u.name || `User #${u.id}`;
+  const devMap = {};
+  for (const d of (devices || [])) devMap[d.id] = d.name || d.mac;
+
+  const activePacks = (packs || []).filter(p => p.active);
+  if (!activePacks.length) {
+    tbody.innerHTML = `<tr><td colspan="5" class="muted small" style="text-align: center; padding: 10px;">No add-on packs in queue.</td></tr>`;
+    return;
+  }
+
+  const now = Date.now() / 1000;
+  tbody.innerHTML = activePacks.map(p => {
+    let targetLabel = "All (General)";
+    if (p.target_type === "user") targetLabel = `👤 ${esc(userMap[p.target_id] || "User #" + p.target_id)}`;
+    else if (p.target_type === "device") targetLabel = `📱 ${esc(devMap[p.target_id] || "Device #" + p.target_id)}`;
+
+    const expDate = new Date(p.expires_at * 1000);
+    const daysLeft = Math.ceil((p.expires_at - now) / 86400);
+    const expText = daysLeft <= 0 ? "Expired" : `${expDate.toLocaleDateString()} (${daysLeft}d left)`;
+
+    const typeBadge = p.recurring 
+      ? `<span class="status-tag ok" style="font-size: 10px; padding: 2px 6px;">Recurring</span>`
+      : `<span class="status-tag" style="font-size: 10px; padding: 2px 6px;">One-time</span>`;
+
+    const note = p.comment ? `<br><span class="muted tiny">${esc(p.comment)}</span>` : "";
+
+    return `<tr>
+      <td><strong>${targetLabel}</strong>${note}</td>
+      <td><b>${fmt(p.remaining_gb)}</b> / ${fmt(p.gb)} GB</td>
+      <td>${typeBadge}</td>
+      <td class="small">${expText}</td>
+      <td class="num">
+        <button type="button" class="btn warning tiny" onclick="deleteRechargePack(${p.id})">Delete</button>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
 async function submitRecharge(ev) {
-  ev.preventDefault();
+  if (ev) ev.preventDefault();
   const addGb = parseFloat($("set-recharge").value);
-  if (!(addGb > 0)) { alert("Enter how many GB were added to the bundle."); return; }
-  if (!confirm(`Add ${addGb} GB to the bundle and recalculate every user's share?`)) return;
-  await API.post("/api/bundle", { add_gb: addGb });
+  if (!(addGb > 0)) { alert("Enter how many GB to add to the bundle."); return; }
+
+  const targetType = $("recharge-target-type") ? $("recharge-target-type").value : "all";
+  let targetId = null;
+  if (targetType === "user" || targetType === "device") {
+    const val = $("recharge-target-id") ? $("recharge-target-id").value : "";
+    targetId = val ? parseInt(val, 10) : null;
+    if (!targetId) {
+      alert(`Please select a ${targetType} to assign this pack to.`);
+      return;
+    }
+  }
+
+  const expDateVal = $("recharge-expiry") ? $("recharge-expiry").value : "";
+  let expiresAt = null;
+  if (expDateVal) {
+    const d = new Date(expDateVal + "T23:59:59");
+    expiresAt = d.getTime() / 1000;
+  }
+
+  const recurring = $("recharge-recurring") ? $("recharge-recurring").value === "1" : false;
+  const comment = $("recharge-comment") ? $("recharge-comment").value.trim() : "";
+
+  const payload = {
+    gb: addGb,
+    target_type: targetType,
+    target_id: targetId,
+    expires_at: expiresAt,
+    recurring: recurring,
+    comment: comment,
+  };
+
+  await API.post("/api/bundle/recharges", payload);
   $("set-recharge").value = "";
+  if ($("recharge-expiry")) $("recharge-expiry").value = "";
+  if ($("recharge-comment")) $("recharge-comment").value = "";
+  await refreshAll();
+}
+
+async function deleteRechargePack(packId) {
+  if (!confirm(`Delete add-on pack #${packId}?`)) return;
+  await API.delete(`/api/bundle/recharges/${packId}`);
   await refreshAll();
 }
 
@@ -1866,8 +2313,7 @@ async function refreshGuest() {
     $("guest-mode-toggle").checked = g.enabled;
     $("guest-quota").value = g.quota_gb;
     $("guest-speed-limit").value = g.speed_limit_mbps;
-    $("guest-limit").value = g.limit;
-    $("stop-new-toggle").checked = g.stop_new;
+    if ($("guest-limit")) $("guest-limit").value = g.limit;
   } catch (_) { /* guest panel is not critical */ }
 }
 
@@ -1985,6 +2431,103 @@ async function submitMacLists() {
   }
 }
 
+/* ---------------- static IP reservations (Network tab) ---------------- */
+
+let staticLeasesList = [];
+
+function populateStaticLeaseDeviceSelect() {
+  const sel = $("sl-device-select");
+  if (!sel) return;
+  const curVal = sel.value;
+  let html = `<option value="">Custom MAC address…</option>`;
+  const devs = dashboard && dashboard.devices ? dashboard.devices : [];
+  for (const d of devs) {
+    const label = d.name ? `${d.name} (${d.mac})` : d.mac;
+    html += `<option value="${esc(d.mac)}">${esc(label)}</option>`;
+  }
+  sel.innerHTML = html;
+  sel.value = curVal || "";
+}
+
+function renderStaticLeases() {
+  const tbody = $("static-leases-tbody");
+  if (!tbody) return;
+  if (!staticLeasesList.length) {
+    tbody.innerHTML = `<tr><td colspan="4" class="muted small" style="text-align: center; padding: 12px;">No static reservations configured yet.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = staticLeasesList.map((item) => {
+    const devLabel = item.device_name || item.hostname || "—";
+    const sub = (item.device_name && item.hostname && item.device_name !== item.hostname)
+      ? `<br><span class="muted small">${esc(item.hostname)}</span>` : "";
+    return `<tr>
+      <td><strong>${esc(devLabel)}</strong>${sub}</td>
+      <td><code>${esc(macText(item.mac))}</code></td>
+      <td><code>${esc(item.ip)}</code></td>
+      <td class="num">
+        <button type="button" class="btn warning tiny" onclick="deleteStaticLease('${esc(item.mac)}')">Delete</button>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+async function refreshStaticLeases() {
+  try {
+    populateStaticLeaseDeviceSelect();
+    const data = await API.get("/api/network/static-leases");
+    staticLeasesList = Array.isArray(data) ? data : [];
+    renderStaticLeases();
+  } catch (_) { /* non-critical */ }
+}
+
+async function submitStaticLease(ev) {
+  ev.preventDefault();
+  const msg = $("sl-form-msg");
+  if (msg) { msg.classList.add("hidden"); msg.textContent = ""; }
+
+  const macRaw = $("sl-mac").value.trim();
+  const mac = normalizeMac(macRaw);
+  if (!mac) {
+    if (msg) { msg.textContent = "Invalid MAC address format."; msg.classList.remove("hidden"); }
+    return;
+  }
+  const ip = $("sl-ip").value.trim();
+  if (!ip) {
+    if (msg) { msg.textContent = "Static IP is required."; msg.classList.remove("hidden"); }
+    return;
+  }
+  const hostname = $("sl-hostname").value.trim();
+
+  try {
+    await API.post("/api/network/static-leases", { mac, ip, hostname });
+    if (msg) {
+      msg.textContent = "Reservation saved!";
+      msg.classList.remove("hidden");
+      setTimeout(() => { if (msg) msg.classList.add("hidden"); }, 3000);
+    }
+    $("sl-mac").value = "";
+    $("sl-ip").value = "";
+    $("sl-hostname").value = "";
+    $("sl-device-select").value = "";
+    await refreshStaticLeases();
+  } catch (e) {
+    if (msg) {
+      msg.textContent = `Error: ${e.message}`;
+      msg.classList.remove("hidden");
+    }
+  }
+}
+
+async function deleteStaticLease(mac) {
+  if (!confirm(`Delete static reservation for ${mac}?`)) return;
+  try {
+    await API.del(`/api/network/static-leases/${encodeURIComponent(mac)}`);
+    await refreshStaticLeases();
+  } catch (e) {
+    alert(`Could not delete reservation: ${e.message}`);
+  }
+}
+
 /* ---------------- speed shaping (Network tab) ---------------- */
 
 async function refreshNetwork() {
@@ -2002,6 +2545,7 @@ async function refreshNetwork() {
     renderVpnShare(n);
     renderNetworkPreview(n);
     refreshMacLists(); // prefill the allow/deny textareas (non-critical)
+    refreshStaticLeases(); // load DHCP static IP reservations
   } catch (_) { /* network panel is not critical */ }
 }
 
@@ -2104,8 +2648,9 @@ async function submitNetwork() {
     total_down_mbps: parseFloat($("set-total-down").value) || 0,
     total_up_mbps: parseFloat($("set-total-up").value) || 0,
     lan_rate_mbps: parseFloat($("set-lan-rate").value) || 0,
-    vpn_share: $("vpn-toggle").checked,
   };
+  const vpnToggle = $("vpn-toggle");
+  if (vpnToggle) body.vpn_share = vpnToggle.checked;
   await API.post("/api/network", body);
   await refreshAll();
 }
@@ -2310,6 +2855,7 @@ async function refreshWan() {
     if (wanif && !wanToggleDirty) wanif.value = w.wan_if || "";
     renderWan(w);
     await maybeAutoDiagnose(w);
+    await refreshWanTelegram();
   } catch (_) { /* wan panel is not critical */ }
 }
 
@@ -2542,6 +3088,139 @@ async function submitWanRenew(ev) {
   }
 }
 
+/* ---------------- Telegram WAN IP Trigger ---------------- */
+
+let wanTelegramConfig = null;
+
+async function refreshWanTelegram() {
+  try {
+    const data = await API.get("/api/wan/telegram");
+    wanTelegramConfig = data;
+    renderWanTelegram(data);
+  } catch (_) {}
+}
+
+function renderWanTelegram(data) {
+  if (!data) return;
+  const toggle = $("wan-tg-toggle");
+  const tokenInp = $("wan-tg-token");
+  const chatInp = $("wan-tg-chat");
+  const lastIp = $("wan-tg-last-ip");
+  const lastSent = $("wan-tg-last-sent");
+  const fwBanner = $("wan-tg-firewall-banner");
+  const fwIcon = $("wan-tg-fw-icon");
+  const fwText = $("wan-tg-fw-text");
+
+  if (toggle) toggle.checked = !!data.enabled;
+  if (tokenInp && data.has_token && !tokenInp.value) {
+    tokenInp.placeholder = data.bot_token || "Token saved (type to replace)";
+  }
+  if (chatInp && !chatInp.value) {
+    chatInp.value = data.chat_id || "";
+  }
+  if (lastIp) {
+    lastIp.textContent = data.last_ip || "—";
+  }
+  if (lastSent) {
+    if (data.last_sent) {
+      try {
+        const d = new Date(data.last_sent);
+        lastSent.textContent = d.toLocaleString();
+      } catch (_) {
+        lastSent.textContent = data.last_sent;
+      }
+    } else {
+      lastSent.textContent = "—";
+    }
+  }
+
+  // Firewall status banner
+  if (fwBanner && fwText && fwIcon) {
+    if (data.wan_exposed) {
+      fwBanner.className = "banner ok";
+      fwIcon.textContent = "✅";
+      fwText.innerHTML = `<strong>WAN Remote Web Access is OPEN</strong> on port ${data.web_port}. You can access the dashboard remotely from outside home.`;
+    } else {
+      fwBanner.className = "banner warn";
+      fwIcon.textContent = "⚠️";
+      fwText.innerHTML = `<strong>WAN Remote Web Access is BLOCKED</strong> in Firewall. Telegram IP notifications will work, but remote dashboard access from outside home will be rejected until enabled in Firewall.`;
+    }
+  }
+}
+
+async function saveWanTelegram() {
+  const toggle = $("wan-tg-toggle");
+  const tokenInp = $("wan-tg-token");
+  const chatInp = $("wan-tg-chat");
+  const msg = $("wan-tg-msg");
+  const saveBtn = $("wan-tg-save-btn");
+
+  const enabled = toggle ? toggle.checked : false;
+  const bot_token = tokenInp ? tokenInp.value.trim() : "";
+  const chat_id = chatInp ? chatInp.value.trim() : "";
+
+  if (saveBtn) saveBtn.disabled = true;
+  if (msg) {
+    msg.className = "test-msg loading";
+    msg.textContent = "Saving…";
+  }
+
+  try {
+    const payload = { enabled, chat_id };
+    if (bot_token) payload.bot_token = bot_token;
+    const res = await API.post("/api/wan/telegram", payload);
+    wanTelegramConfig = res;
+    renderWanTelegram(res);
+    if (tokenInp && bot_token) tokenInp.value = "";
+    if (msg) {
+      msg.className = "test-msg ok";
+      msg.textContent = enabled ? "Telegram trigger saved and active!" : "Telegram trigger disabled.";
+      setTimeout(() => { if (msg) msg.textContent = ""; }, 4000);
+    }
+  } catch (err) {
+    if (msg) {
+      msg.className = "test-msg fail";
+      msg.textContent = `Save failed: ${err.message}`;
+    }
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+  }
+}
+
+async function testWanTelegram() {
+  const tokenInp = $("wan-tg-token");
+  const chatInp = $("wan-tg-chat");
+  const msg = $("wan-tg-msg");
+  const testBtn = $("wan-tg-test-btn");
+
+  const bot_token = tokenInp ? tokenInp.value.trim() : "";
+  const chat_id = chatInp ? chatInp.value.trim() : "";
+
+  if (testBtn) testBtn.disabled = true;
+  if (msg) {
+    msg.className = "test-msg loading";
+    msg.textContent = "Sending test message to Telegram…";
+  }
+
+  try {
+    const payload = {};
+    if (bot_token) payload.bot_token = bot_token;
+    if (chat_id) payload.chat_id = chat_id;
+    const res = await API.post("/api/wan/telegram/test", payload);
+    if (msg) {
+      msg.className = "test-msg ok";
+      msg.textContent = res.message || "Test message sent! Check your Telegram.";
+    }
+  } catch (err) {
+    if (msg) {
+      msg.className = "test-msg fail";
+      msg.textContent = `Test failed: ${err.message}`;
+    }
+  } finally {
+    if (testBtn) testBtn.disabled = false;
+  }
+}
+
 async function submitPassword(ev) {
   ev.preventDefault();
   const cur = $("p-cur").value;
@@ -2652,6 +3331,494 @@ async function logout() {
   await API.post("/api/logout").catch(() => {});
   showLogin();
 }
+
+/* ==========================================================================
+   VPN SUBSYSTEM LOGIC (sing-box + Clash API)
+   ========================================================================== */
+
+let vpnStatusCache = null;
+let vpnNodesCache = [];
+let vpnRoutingCache = { users: [], devices: [] };
+let editingVpnNodeId = null;
+
+async function refreshVpn() {
+  await loadVpnStatus();
+  await Promise.allSettled([
+    loadVpnNodes(),
+    loadVpnRouting(),
+    loadVpnSettings(),
+    loadVpnLogs(),
+  ]);
+}
+
+async function loadVpnSettings() {
+  try {
+    const s = await API.get("/api/vpn/settings");
+    const sw = $("vpn-allow-insecure-switch");
+    if (sw) sw.checked = !!s.allow_insecure;
+  } catch (_) {}
+}
+
+async function loadVpnStatus() {
+  try {
+    vpnStatusCache = await API.get("/api/vpn/status");
+    renderVpnStatus(vpnStatusCache);
+  } catch (e) {
+    console.debug("Failed to load VPN status:", e);
+  }
+}
+
+function renderVpnStatus(st) {
+  if (!st) return;
+  vpnStatusCache = st;
+  const dot = $("vpn-status-dot");
+  const txt = $("vpn-status-text");
+  const sub = $("vpn-node-subtext");
+  const btn = $("vpn-toggle-btn");
+  const err = $("vpn-error-banner");
+
+  if (err) {
+    if (st.last_error) {
+      err.textContent = st.last_error;
+      err.classList.remove("hidden");
+    } else {
+      err.classList.add("hidden");
+    }
+  }
+
+  if (dot) {
+    dot.className = "vpn-badge-dot " + (st.state === "connected" ? "on" : (st.state === "connecting" ? "connecting" : (st.state === "error" ? "error" : "off")));
+  }
+  if (txt) {
+    txt.textContent = st.state === "connected" ? "Connected" : (st.state === "connecting" ? "Connecting…" : (st.state === "error" ? "Error" : "Disconnected"));
+  }
+  if (sub) {
+    sub.textContent = st.active_node_name ? `${st.active_node_name} (${(st.protocol || "vless").toUpperCase()}) · ${st.interface}` : "No active VPN node selected";
+  }
+
+  if (btn) {
+    btn.textContent = st.state === "connected" ? "Disconnect VPN" : (st.state === "connecting" ? "Cancel" : "Connect VPN");
+    btn.className = st.state === "connected" ? "btn ghost danger" : "btn primary";
+  }
+
+  // Speed meters
+  if ($("vpn-speed-down")) $("vpn-speed-down").textContent = fmtBytes(st.speed_down_bps / 8) + "/s";
+  if ($("vpn-speed-up")) $("vpn-speed-up").textContent = fmtBytes(st.speed_up_bps / 8) + "/s";
+  if ($("vpn-total-down")) $("vpn-total-down").textContent = fmt(st.total_down_bytes / (1024 * 1024 * 1024)) + " GB";
+  if ($("vpn-total-up")) $("vpn-total-up").textContent = fmt(st.total_up_bytes / (1024 * 1024 * 1024)) + " GB";
+  if ($("vpn-conns-count")) $("vpn-conns-count").textContent = (st.active_connections || 0).toLocaleString();
+
+  // Uptime format
+  if ($("vpn-uptime")) {
+    if (st.state === "connected" && st.uptime_seconds) {
+      const s = st.uptime_seconds;
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      $("vpn-uptime").textContent = `${h}h ${m}m`;
+    } else {
+      $("vpn-uptime").textContent = "—";
+    }
+  }
+
+  // Always update the nodes table so active node badge and connect/disconnect buttons reflect current state
+  if (vpnNodesCache && vpnNodesCache.length) {
+    renderVpnNodes(vpnNodesCache);
+  }
+}
+
+async function loadVpnNodes() {
+  try {
+    vpnNodesCache = await API.get("/api/vpn/nodes");
+    renderVpnNodes(vpnNodesCache);
+  } catch (e) {
+    console.debug("Failed to load VPN nodes:", e);
+  }
+}
+
+function renderVpnNodes(nodes) {
+  const tbody = $("vpn-nodes-tbody");
+  if (!tbody) return;
+  if (!nodes || !nodes.length) {
+    tbody.innerHTML = `<tr><td colspan="5" class="muted small" style="text-align: center; padding: 16px;">No VPN nodes added yet. Click "Add Node" to import a link.</td></tr>`;
+    return;
+  }
+  const activeId = (vpnStatusCache && vpnStatusCache.active_node_id != null) ? Number(vpnStatusCache.active_node_id) : null;
+  const isConnected = vpnStatusCache && vpnStatusCache.state === "connected";
+
+  tbody.innerHTML = nodes.map((n) => {
+    const isActive = activeId !== null && activeId === Number(n.id);
+    let pingText = "—";
+    let pingCls = "";
+    if (n.ping_ms != null && n.ping_ms > 0) {
+      pingText = `${n.ping_ms} ms`;
+      pingCls = n.ping_ms < 150 ? "text-accent" : "";
+    } else if (n.ping_ms != null && n.ping_ms < 0) {
+      pingText = "Timeout";
+      pingCls = "text-danger";
+    }
+    return `
+      <tr class="${isActive ? "active-node-row" : ""}">
+        <td>
+          ${isActive ? '<span class="status-tag ok">Active</span>' : '<span class="status-tag off">Idle</span>'}
+        </td>
+        <td><strong>${esc(n.name)}</strong></td>
+        <td><span class="vpn-node-proto-tag">${esc((n.protocol || "vless").toUpperCase())}</span></td>
+        <td>
+          <span class="${pingCls}" id="vpn-ping-val-${n.id}">${pingText}</span>
+          <button type="button" id="vpn-ping-btn-${n.id}" class="btn ghost tiny" onclick="pingVpnNode(${n.id})" title="Test latency">⚡</button>
+        </td>
+        <td class="num">
+          ${isActive && isConnected
+            ? `<button type="button" class="btn ghost danger tiny" onclick="disconnectVpn()">Disconnect</button>`
+            : `<button type="button" class="btn primary tiny" onclick="connectVpn(${n.id})">Connect</button>`}
+          <button type="button" class="btn ghost tiny" onclick="editVpnNode(${n.id})" title="Edit node">✎</button>
+          <button type="button" class="btn ghost danger tiny" onclick="deleteVpnNode(${n.id})" title="Delete node">✕</button>
+        </td>
+      </tr>
+    `;
+  }).join("");
+}
+
+async function loadVpnRouting() {
+  try {
+    vpnRoutingCache = await API.get("/api/vpn/routing");
+    renderVpnRouting(vpnRoutingCache);
+  } catch (e) {
+    console.debug("Failed to load VPN routing:", e);
+  }
+}
+
+let currentVpnRoutingTab = "users";
+
+function getDeviceIcon(name) {
+  const n = (name || "").toLowerCase();
+  if (n.includes("pc") || n.includes("laptop") || n.includes("computer") || n.includes("macbook") || n.includes("desktop")) return "💻";
+  if (n.includes("phone") || n.includes("iphone") || n.includes("android") || n.includes("mobile") || n.includes("samsung") || n.includes("xiaomi")) return "📱";
+  if (n.includes("tv") || n.includes("smart") || n.includes("screen")) return "📺";
+  if (n.includes("pad") || n.includes("tablet") || n.includes("ipad")) return "📟";
+  if (n.includes("box") || n.includes("gateway") || n.includes("server") || n.includes("router")) return "🖧";
+  return "📱";
+}
+
+function renderVpnRouting(data) {
+  const container = $("vpn-routing-list");
+  if (!container) return;
+  const searchInput = $("vpn-routing-search");
+  const search = (searchInput && searchInput.value || "").toLowerCase().trim();
+  const users = data.users || [];
+  const devices = data.devices || [];
+
+  const userMap = new Map();
+  users.forEach((u) => {
+    userMap.set(u.id, { ...u, devices: [] });
+  });
+
+  devices.forEach((d) => {
+    if (d.user_id != null && userMap.has(d.user_id)) {
+      userMap.get(d.user_id).devices.push(d);
+    }
+  });
+
+  let html = "";
+
+  if (currentVpnRoutingTab === "users") {
+    const matchingUsers = users.filter((u) => !search || u.name.toLowerCase().includes(search));
+
+    if (matchingUsers.length === 0) {
+      html = `<p class="muted small" style="text-align: center; padding: 20px;">No matching users found.</p>`;
+    } else {
+      html = matchingUsers.map((u) => {
+        const devCount = (userMap.get(u.id) || {}).devices?.length || 0;
+        const devText = devCount === 1 ? "1 device" : `${devCount} devices`;
+        const initials = (u.name || "U").substring(0, 2).toUpperCase();
+
+        return `
+          <div class="vpn-user-group-card">
+            <div class="vpn-user-group-header">
+              <div class="vpn-user-meta-left">
+                <span class="vpn-user-avatar-badge">${esc(initials)}</span>
+                <div class="vpn-user-titles">
+                  <span class="vpn-user-name">${esc(u.name)}</span>
+                  <span class="vpn-user-count">${devText}</span>
+                </div>
+              </div>
+              <div class="vpn-user-controls">
+                <span class="vpn-route-badge ${u.route_vpn ? "routed" : "direct"}">${u.route_vpn ? "VPN" : "Direct"}</span>
+                <label class="switch" title="Route all devices of ${esc(u.name)} via VPN">
+                  <input type="checkbox" ${u.route_vpn ? "checked" : ""} onchange="setVpnRouting('user', ${u.id}, this.checked)">
+                  <span class="slider"></span>
+                </label>
+              </div>
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+  } else if (currentVpnRoutingTab === "devices") {
+    const matchingDevices = devices.filter(
+      (d) => !search || d.name.toLowerCase().includes(search) || d.mac.toLowerCase().includes(search)
+    );
+
+    if (matchingDevices.length === 0) {
+      html = `<p class="muted small" style="text-align: center; padding: 20px;">No matching devices found.</p>`;
+    } else {
+      html = matchingDevices.map((d) => {
+        const owner = d.user_id != null && userMap.has(d.user_id) ? userMap.get(d.user_id).name : null;
+        const ownerBadge = owner
+          ? `<span class="vpn-owner-badge" title="Owned by ${esc(owner)}">👤 ${esc(owner)}</span>`
+          : `<span class="vpn-unassigned-badge">Unassigned</span>`;
+
+        return `
+          <div class="vpn-flat-device-card">
+            <div class="vpn-dev-info">
+              <span class="vpn-dev-icon">${getDeviceIcon(d.name)}</span>
+              <div>
+                <span class="vpn-dev-name">${esc(d.name)}</span>
+                ${ownerBadge}
+                <div class="vpn-dev-mac">${esc(d.mac)}</div>
+              </div>
+            </div>
+            <div class="vpn-dev-action">
+              <span class="vpn-dev-status-tag ${d.route_vpn ? "routed" : "direct"}">${d.route_vpn ? "VPN" : "Direct"}</span>
+              <label class="switch tiny" title="Route this device via VPN">
+                <input type="checkbox" ${d.route_vpn ? "checked" : ""} onchange="setVpnRouting('device', ${d.id}, this.checked)">
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+  }
+
+  container.innerHTML = html;
+}
+
+async function setVpnRouting(type, id, routeVpn) {
+  try {
+    await API.post("/api/vpn/routing", { target_type: type, target_id: id, route_vpn: routeVpn });
+    await loadVpnRouting();
+  } catch (e) {
+    alert("Failed to update routing rule: " + e.message);
+  }
+}
+
+async function connectVpn(nodeId) {
+  try {
+    await API.post("/api/vpn/connect", { node_id: nodeId });
+    await loadVpnStatus();
+    await loadVpnNodes();
+    await loadVpnLogs();
+  } catch (e) {
+    alert("Connection failed: " + e.message);
+    await loadVpnStatus();
+    await loadVpnLogs();
+  }
+}
+
+async function disconnectVpn() {
+  try {
+    await API.post("/api/vpn/disconnect");
+    await loadVpnStatus();
+    await loadVpnNodes();
+    await loadVpnLogs();
+  } catch (e) {
+    alert("Disconnect failed: " + e.message);
+    await loadVpnLogs();
+  }
+}
+
+async function pingVpnNode(nodeId) {
+  const el = $(`vpn-ping-val-${nodeId}`);
+  const btn = $(`vpn-ping-btn-${nodeId}`);
+  if (el) el.innerHTML = '<span class="vpn-ping-spinner"></span>';
+  if (btn) btn.disabled = true;
+  try {
+    const res = await API.post(`/api/vpn/nodes/${nodeId}/ping`);
+    const ms = Number(res.ping_ms);
+    if (vpnNodesCache) {
+      const target = vpnNodesCache.find((n) => Number(n.id) === Number(nodeId));
+      if (target) target.ping_ms = ms;
+    }
+    if (el) {
+      if (ms > 0) {
+        el.textContent = `${ms} ms`;
+        el.className = ms < 150 ? "text-accent" : "";
+      } else {
+        el.textContent = "Timeout";
+        el.className = "text-danger";
+      }
+    }
+  } catch (e) {
+    if (el) {
+      el.textContent = "Error";
+      el.className = "text-danger";
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function deleteVpnNode(nodeId) {
+  if (!confirm("Are you sure you want to delete this VPN node?")) return;
+  try {
+    await API.delete(`/api/vpn/nodes/${nodeId}`);
+    await loadVpnNodes();
+    await loadVpnStatus();
+  } catch (e) {
+    alert("Failed to delete node: " + e.message);
+  }
+}
+
+function getNodeParams(node) {
+  let cfg = {};
+  try { cfg = JSON.parse(node.config_json || "{}"); } catch (_) {}
+  const tls = cfg.tls || {};
+  const reality = tls.reality || {};
+  const transport = cfg.transport || {};
+
+  let uriParams = {};
+  let uriHost = "";
+  let uriPort = 443;
+  let uriUuid = "";
+  if (node.raw_uri && node.raw_uri.includes("://")) {
+    try {
+      const rest = node.raw_uri.split("://")[1];
+      const atIdx = rest.indexOf("@");
+      if (atIdx !== -1) {
+        uriUuid = decodeURIComponent(rest.substring(0, atIdx));
+        const hostPortAndRest = rest.substring(atIdx + 1);
+        const qIdx = hostPortAndRest.indexOf("?");
+        const hashIdx = hostPortAndRest.indexOf("#");
+        const hostPort = hostPortAndRest.substring(0, qIdx !== -1 ? qIdx : (hashIdx !== -1 ? hashIdx : undefined));
+        if (hostPort.includes(":")) {
+          uriHost = hostPort.split(":")[0];
+          uriPort = parseInt(hostPort.split(":")[1]) || 443;
+        } else {
+          uriHost = hostPort;
+        }
+      }
+      if (node.raw_uri.includes("?")) {
+        const qStr = node.raw_uri.split("?")[1].split("#")[0];
+        const sp = new URLSearchParams(qStr);
+        uriParams = Object.fromEntries(sp.entries());
+      }
+    } catch (_) {}
+  }
+
+  return {
+    name: node.name || "",
+    server: cfg.server || uriHost || "",
+    server_port: cfg.server_port || uriPort || 443,
+    uuid: cfg.uuid || cfg.password || uriUuid || "",
+    sni: tls.server_name || uriParams.sni || "",
+    flow: cfg.flow || uriParams.flow || "",
+    pbk: reality.public_key || uriParams.pbk || "",
+    sid: reality.short_id || uriParams.sid || "",
+    transport: (transport.type || uriParams.type || "tcp").toUpperCase(),
+    path: transport.path || transport.service_name || uriParams.path || "",
+  };
+}
+
+function editVpnNode(nodeId) {
+  try {
+    const node = (vpnNodesCache || []).find((n) => n.id == nodeId);
+    if (!node) {
+      console.warn("VPN node not found for editing:", nodeId, vpnNodesCache);
+      return;
+    }
+    editingVpnNodeId = node.id;
+    const p = getNodeParams(node);
+
+    if ($("ve-name")) $("ve-name").value = p.name || "";
+    if ($("ve-server")) $("ve-server").value = p.server || "";
+    if ($("ve-port")) $("ve-port").value = p.server_port || 443;
+    if ($("ve-uuid")) $("ve-uuid").value = p.uuid || "";
+    if ($("ve-sni")) $("ve-sni").value = p.sni || "";
+    if ($("ve-flow")) $("ve-flow").value = p.flow || "";
+    if ($("ve-pbk")) $("ve-pbk").value = p.pbk || "";
+    if ($("ve-sid")) $("ve-sid").value = p.sid || "";
+    if ($("ve-transport")) $("ve-transport").value = p.transport === "WS" || p.transport === "GRPC" ? p.transport : "TCP";
+    if ($("ve-path")) $("ve-path").value = p.path || "";
+
+    const errEl = $("ve-error");
+    if (errEl) errEl.classList.add("hidden");
+    const modal = $("vpn-edit-proxy-modal");
+    if (modal) modal.classList.remove("hidden");
+  } catch (err) {
+    console.error("Failed to open edit modal:", err);
+  }
+}
+
+let vpnLogPollTimer = null;
+
+function startVpnLogPolling() {
+  if (vpnLogPollTimer) return;
+  vpnLogPollTimer = setInterval(async () => {
+    const vpnPanel = $("panel-vpn");
+    if (vpnPanel && !vpnPanel.classList.contains("hidden")) {
+      await loadVpnLogs();
+      await loadVpnStatus();
+    } else {
+      stopVpnLogPolling();
+    }
+  }, 2500);
+}
+
+function stopVpnLogPolling() {
+  if (vpnLogPollTimer) {
+    clearInterval(vpnLogPollTimer);
+    vpnLogPollTimer = null;
+  }
+}
+
+async function loadVpnLogs() {
+  const container = $("vpn-logs-view");
+  if (!container) return;
+  try {
+    const data = await API.get("/api/vpn/logs?limit=300");
+    if (!data.logs || !data.logs.length) {
+      container.innerHTML = '<div class="muted small" style="padding: 12px 0;">(no VPN core logs recorded yet)</div>';
+      return;
+    }
+    // Auto-scroll to bottom if user is already near bottom (within 80px)
+    const isAtBottom = (container.scrollHeight - container.scrollTop - container.clientHeight) < 80;
+
+    const rows = data.logs.map((l) => {
+      // Strip ANSI escape codes
+      const clean = (l.text || "").replace(/\u001b\[[0-9;]*m/g, "");
+      let colorStyle = "color: #94a3b8;";
+      if (/FATAL|panic/i.test(clean)) {
+        colorStyle = "color: #ef4444; font-weight: 700;";
+      } else if (/ERROR|failed|failure|validation failed/i.test(clean)) {
+        colorStyle = "color: #f87171; font-weight: 600;";
+      } else if (/WARN/i.test(clean)) {
+        colorStyle = "color: #fbbf24;";
+      } else if (/INFO/i.test(clean)) {
+        colorStyle = "color: #38bdf8;";
+      } else if (/DEBUG/i.test(clean)) {
+        colorStyle = "color: #64748b;";
+      }
+
+      const timeHtml = l.time ? `<span class="vpn-log-time">[${esc(l.time)}]</span>` : "";
+      return `<div class="vpn-log-row">${timeHtml}<span class="vpn-log-text" style="${colorStyle}">${esc(clean)}</span></div>`;
+    }).join("");
+
+    container.innerHTML = rows;
+    if (isAtBottom) {
+      container.scrollTop = container.scrollHeight;
+    }
+  } catch (_) {}
+}
+
+window.connectVpn = connectVpn;
+window.disconnectVpn = disconnectVpn;
+window.pingVpnNode = pingVpnNode;
+window.deleteVpnNode = deleteVpnNode;
+window.editVpnNode = editVpnNode;
+window.setVpnRouting = setVpnRouting;
+
+
 
 /* ---------------- ambient particle layer ---------------- */
 
@@ -2775,11 +3942,13 @@ async function init() {
   $("privacy-eye").addEventListener("click", togglePrivacy);
   $("reset-month-btn").addEventListener("click", doResetMonth);
   $("recharge-btn").addEventListener("click", submitRecharge);
+  if ($("recharge-target-type")) $("recharge-target-type").addEventListener("change", updateRechargeTargetOptions);
+  window.deleteRechargePack = deleteRechargePack;
   document.querySelectorAll(".nav-tab").forEach((b) =>
     b.addEventListener("click", () => switchPanel(b.dataset.panel)));
   $("guest-mode-toggle").addEventListener("change", toggleGuestMode);
   $("guest-quota-btn").addEventListener("click", submitGuestQuota);
-  $("guest-limit-btn").addEventListener("click", submitGuestLimit);
+  if ($("guest-limit-btn")) $("guest-limit-btn").addEventListener("click", submitGuestLimit);
   $("guest-speed-btn").addEventListener("click", submitGuestSpeed);
   $("stop-new-toggle").addEventListener("change", toggleStopNew);
   $("decline-random-toggle").addEventListener("change", toggleDeclineRandom);
@@ -2787,10 +3956,22 @@ async function init() {
   $("mac-lists-btn").addEventListener("click", submitMacLists);
   $("mac-allow-list").addEventListener("input", () => { macListsDirty = true; });
   $("mac-deny-list").addEventListener("input", () => { macListsDirty = true; });
+  $("sl-device-select").addEventListener("change", (ev) => {
+    const val = ev.target.value;
+    if (val) {
+      $("sl-mac").value = val;
+      const dev = (dashboard && dashboard.devices || []).find((d) => d.mac.toLowerCase() === val.toLowerCase());
+      if (dev && dev.name && !$("sl-hostname").value) {
+        $("sl-hostname").value = dev.name;
+      }
+    }
+  });
+  $("static-lease-form").addEventListener("submit", submitStaticLease);
   // speed shaping: saving sends all four fields; the master toggle just
   // marks the current draft — it takes effect together on Save.
   $("shaping-save-btn").addEventListener("click", submitNetwork);
-  $("vpn-toggle").addEventListener("change", toggleVpnShare);
+  const vpnTgl = $("vpn-toggle");
+  if (vpnTgl) vpnTgl.addEventListener("change", toggleVpnShare);
   // WAN mode: the toggle picks the desired mode; Apply/Revert do the live
   // switch (the gateway rewires itself and restarts automatically). A flip is
   // a DRAFT until Apply/Revert succeeds — wanToggleDirty freezes the 5 s WS
@@ -2806,6 +3987,19 @@ async function init() {
   $("wan-revert-btn").addEventListener("click", revertWan);
   $("wan-restart-btn").addEventListener("click", renewWanIp);
   $("wan-renew-save").addEventListener("click", submitWanRenew);
+  const wanTgSave = $("wan-tg-save-btn");
+  if (wanTgSave) wanTgSave.addEventListener("click", saveWanTelegram);
+  const wanTgTest = $("wan-tg-test-btn");
+  if (wanTgTest) wanTgTest.addEventListener("click", testWanTelegram);
+  const wanTgFwLink = $("wan-tg-fw-link");
+  if (wanTgFwLink) {
+    wanTgFwLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      switchPanel("firewall");
+    });
+  }
+  const wanTgToggle = $("wan-tg-toggle");
+  if (wanTgToggle) wanTgToggle.addEventListener("change", saveWanTelegram);
   $("fw-apply").addEventListener("click", fwApply);
   $("fw-revert").addEventListener("click", fwRevert);
   $("fw-enforce-https").addEventListener("click", fwEnforceHttps);
@@ -2894,6 +4088,192 @@ async function init() {
   $("hist-device").addEventListener("change", refreshHistory);
   $("hist-window").addEventListener("change", refreshHistory);
   $("hist-refresh").addEventListener("click", refreshHistory);
+
+  // browsing history view tabs
+  document.querySelectorAll(".hist-tab").forEach((btn) => {
+    btn.addEventListener("click", () => switchHistoryView(btn.dataset.view));
+  });
+
+  // VPN subsystem event listeners
+  const vpnToggleBtn = $("vpn-toggle-btn");
+  if (vpnToggleBtn) {
+    vpnToggleBtn.addEventListener("click", () => {
+      if (vpnStatusCache && vpnStatusCache.state === "connected") {
+        disconnectVpn();
+      } else if (vpnStatusCache && vpnStatusCache.active_node_id) {
+        connectVpn(vpnStatusCache.active_node_id);
+      } else if (vpnNodesCache && vpnNodesCache.length) {
+        connectVpn(vpnNodesCache[0].id);
+      } else {
+        const modal = $("vpn-node-modal");
+        if (modal) modal.classList.remove("hidden");
+      }
+    });
+  }
+  const vpnAddBtn = $("vpn-add-node-btn");
+  if (vpnAddBtn) vpnAddBtn.addEventListener("click", () => {
+    editingVpnNodeId = null;
+    const title = $("vpn-node-modal-title");
+    if (title) title.textContent = "Add VPN Node";
+    const subBtn = $("vpn-node-submit");
+    if (subBtn) subBtn.textContent = "Save & Verify Node";
+    const errEl = $("vpn-node-error");
+    if (errEl) errEl.classList.add("hidden");
+    const form = $("vpn-node-form");
+    if (form) form.reset();
+    const modal = $("vpn-node-modal");
+    if (modal) modal.classList.remove("hidden");
+  });
+  const vpnCancelBtn = $("vpn-node-cancel");
+  if (vpnCancelBtn) vpnCancelBtn.addEventListener("click", () => {
+    const modal = $("vpn-node-modal");
+    if (modal) modal.classList.add("hidden");
+  });
+  const vpnForm = $("vpn-node-form");
+  if (vpnForm) {
+    vpnForm.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const errEl = $("vpn-node-error");
+      if (errEl) errEl.classList.add("hidden");
+      const name = $("vpn-node-name").value.trim();
+      const raw = $("vpn-node-raw").value.trim();
+      try {
+        await API.post("/api/vpn/nodes", { name: name || null, raw });
+        $("vpn-node-modal").classList.add("hidden");
+        await loadVpnNodes();
+        await loadVpnStatus();
+      } catch (err) {
+        if (errEl) {
+          errEl.textContent = err.message || "Failed to add node";
+          errEl.classList.remove("hidden");
+        }
+      }
+    });
+  }
+  const veForm = $("vpn-edit-proxy-form");
+  if (veForm) {
+    veForm.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const errEl = $("ve-error");
+      if (errEl) errEl.classList.add("hidden");
+      if (!editingVpnNodeId) return;
+
+      const payload = {
+        name: $("ve-name").value.trim() || null,
+        server: $("ve-server").value.trim(),
+        server_port: parseInt($("ve-port").value) || 443,
+        uuid: $("ve-uuid").value.trim(),
+        sni: $("ve-sni").value.trim() || null,
+        flow: $("ve-flow").value.trim() || null,
+        pbk: $("ve-pbk").value.trim() || null,
+        sid: $("ve-sid").value.trim() || null,
+        transport: $("ve-transport").value,
+        path: $("ve-path").value.trim() || null,
+      };
+
+      try {
+        await API.patch(`/api/vpn/nodes/${editingVpnNodeId}`, payload);
+        $("vpn-edit-proxy-modal").classList.add("hidden");
+        await loadVpnNodes();
+        await loadVpnStatus();
+      } catch (err) {
+        if (errEl) {
+          errEl.textContent = err.message || "Failed to update proxy configuration";
+          errEl.classList.remove("hidden");
+        }
+      }
+    });
+  }
+  const veCloseBtn = $("ve-close-btn");
+  if (veCloseBtn) veCloseBtn.addEventListener("click", () => {
+    $("vpn-edit-proxy-modal").classList.add("hidden");
+  });
+  const veCancelBtn = $("ve-cancel");
+  if (veCancelBtn) veCancelBtn.addEventListener("click", () => {
+    $("vpn-edit-proxy-modal").classList.add("hidden");
+  });
+  const vpnInsecureSw = $("vpn-allow-insecure-switch");
+  if (vpnInsecureSw) {
+    vpnInsecureSw.addEventListener("change", async (ev) => {
+      try {
+        await API.post("/api/vpn/settings", { allow_insecure: ev.target.checked });
+        await loadVpnStatus();
+      } catch (e) {
+        alert("Failed to update VPN settings: " + e.message);
+        ev.target.checked = !ev.target.checked;
+      }
+    });
+  }
+  const vpnLogRefresh = $("vpn-log-refresh");
+  if (vpnLogRefresh) vpnLogRefresh.addEventListener("click", loadVpnLogs);
+  const vpnLogClear = $("vpn-log-clear");
+  if (vpnLogClear) vpnLogClear.addEventListener("click", () => {
+    const pre = $("vpn-logs-view");
+    if (pre) pre.innerHTML = '<div class="muted small" style="padding: 12px 0;">(view cleared)</div>';
+  });
+  const vpnRouteAll = $("vpn-route-all-btn");
+  if (vpnRouteAll) {
+    vpnRouteAll.addEventListener("click", async () => {
+      for (const u of vpnRoutingCache.users || []) {
+        await API.post("/api/vpn/routing", { target_type: "user", target_id: u.id, route_vpn: true }).catch(() => {});
+      }
+      for (const d of vpnRoutingCache.devices || []) {
+        await API.post("/api/vpn/routing", { target_type: "device", target_id: d.id, route_vpn: true }).catch(() => {});
+      }
+      await loadVpnRouting();
+    });
+  }
+  const vpnRouteNone = $("vpn-route-none-btn");
+  if (vpnRouteNone) {
+    vpnRouteNone.addEventListener("click", async () => {
+      for (const u of vpnRoutingCache.users || []) {
+        await API.post("/api/vpn/routing", { target_type: "user", target_id: u.id, route_vpn: false }).catch(() => {});
+      }
+      for (const d of vpnRoutingCache.devices || []) {
+        await API.post("/api/vpn/routing", { target_type: "device", target_id: d.id, route_vpn: false }).catch(() => {});
+      }
+      await loadVpnRouting();
+    });
+  }
+  const vpnSearch = $("vpn-routing-search");
+  if (vpnSearch) vpnSearch.addEventListener("input", () => renderVpnRouting(vpnRoutingCache));
+  const vpnTabGroup = $("vpn-routing-tab-group");
+  if (vpnTabGroup) {
+    vpnTabGroup.addEventListener("click", (e) => {
+      const btn = e.target.closest(".vpn-tab-btn");
+      if (!btn) return;
+      vpnTabGroup.querySelectorAll(".vpn-tab-btn").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      currentVpnRoutingTab = btn.dataset.vtab || "users";
+      renderVpnRouting(vpnRoutingCache);
+    });
+  }
+
+  const adblockSw = $("adblock-master-switch");
+  if (adblockSw) {
+    adblockSw.addEventListener("change", (ev) => toggleAdblockMaster(ev.target.checked));
+  }
+  document.querySelectorAll('input[name="adblock-tier"]').forEach((radio) => {
+    radio.addEventListener("change", async () => {
+      document.querySelectorAll(".adblock-tier-card").forEach((card) => {
+        const r = card.querySelector('input[type="radio"]');
+        card.classList.toggle("active", r && r.checked);
+      });
+      const sw = $("adblock-master-switch");
+      if (sw && sw.checked) {
+        await toggleAdblockMaster(true);
+      }
+    });
+  });
+  const adblockUpdateBtn = $("adblock-update-btn");
+  if (adblockUpdateBtn) {
+    adblockUpdateBtn.addEventListener("click", updateAdblockFeeds);
+  }
+  const adblockWhitelistBtn = $("adblock-whitelist-btn");
+  if (adblockWhitelistBtn) {
+    adblockWhitelistBtn.addEventListener("click", openAdblockWhitelist);
+  }
+
   $("dns-rule-form").addEventListener("submit", submitDnsRule);
   $("dns-import-form").addEventListener("submit", submitDnsImport);
   $("dns-rule-scope").addEventListener("change", () =>
@@ -2943,6 +4323,7 @@ async function init() {
   $("d-mode").addEventListener("change", () => {
     $("d-fixed-wrap").classList.toggle("hidden", $("d-mode").value !== "fixed");
   });
+
 
   // event delegation for dynamic device/user buttons
   $("devices-list").addEventListener("change", (ev) => {

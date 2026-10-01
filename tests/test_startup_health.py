@@ -274,13 +274,15 @@ class TestEnsureNftablesConf:
         target.write_text("#!/usr/sbin/nft -f\ntable inet quota_nat { }\n")
         symlink = tmp_path / "nftables.conf"
 
-        # Point at wrong target first
-        symlink.symlink_to(tmp_path / "wrong.nft")
+        # Point at wrong target first (skip on Windows if unprivileged)
+        try:
+            symlink.symlink_to(tmp_path / "wrong.nft")
+        except OSError:
+            pytest.skip("symlinks require admin privileges on Windows")
 
         monkeypatch.setattr(mod, "_CONF_SYMLINK", symlink)
         monkeypatch.setattr(mod, "_CONF_TARGET", target)
 
-        # On Windows, symlinks require admin. Skip if OSError.
         try:
             result = ensure_nftables_conf()
         except OSError:

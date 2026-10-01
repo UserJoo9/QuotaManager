@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import time
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -828,6 +829,73 @@ def test_guest_quota_updates_existing_guest(client):
     assert guest["allowance_gb"] == 3.0   # existing guest updated immediately
     by_mac = {d["mac"]: d for d in dash["devices"]}
     assert by_mac["aa:bb:cc:dd:ee:91"]["guest"] is True
+
+
+def test_guest_admin_approve_and_reject(client):
+    """Admin can approve and reject guest devices and guest users via the API."""
+    c, database, service = client
+    _login(c)
+
+    # 1. Seed a guest device in pending (blocked) state
+    async def _seed():
+        u = await database.create_user(name="Pending Guest", quota_mode=_db.QUOTA_FIXED,
+                                       fixed_gb=0.0, guest=True)
+        await database.update_user(u.id, block_state=_db.BLOCK_ADMIN)
+        d = await database.upsert_device("aa:bb:cc:dd:ee:88", name="Guest Phone",
+                                         quota_mode=_db.QUOTA_FIXED, fixed_gb=0.0,
+                                         user_id=u.id, guest=True)
+        await database.set_device_state(d.id, _db.BLOCK_ADMIN)
+        return u.id, d.id
+
+    uid, did = _get_loop().run_until_complete(_seed())
+
+    # Check dashboard shows blocked
+    dash = c.get("/api/dashboard").json()
+    dev_view = next(d for d in dash["devices"] if d["id"] == did)
+    assert dev_view["blocked"] is True
+    assert dev_view["block_state"] == "admin_off"
+
+    # Approve device
+    r = c.post(f"/api/guest/{did}/approve")
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert r.json()["block_state"] == "ok"
+    assert r.json()["quota_gb"] >= 1.0
+
+    dash = c.get("/api/dashboard").json()
+    dev_view = next(d for d in dash["devices"] if d["id"] == did)
+    assert dev_view["blocked"] is False
+    assert dev_view["block_state"] == "ok"
+
+    # Reject device
+    r = c.post(f"/api/guest/{did}/reject")
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert r.json()["block_state"] == "admin_off"
+
+    dash = c.get("/api/dashboard").json()
+    dev_view = next(d for d in dash["devices"] if d["id"] == did)
+    assert dev_view["blocked"] is True
+
+    # Approve user
+    r = c.post(f"/api/guest/user/{uid}/approve")
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert r.json()["block_state"] == "ok"
+
+    dash = c.get("/api/dashboard").json()
+    user_view = next(u for u in dash["users"] if u["id"] == uid)
+    assert user_view["blocked"] is False
+
+    # Reject user
+    r = c.post(f"/api/guest/user/{uid}/reject")
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert r.json()["block_state"] == "admin_off"
+
+    dash = c.get("/api/dashboard").json()
+    user_view = next(u for u in dash["users"] if u["id"] == uid)
+    assert user_view["blocked"] is True
 
 
 def test_connected_follows_arp_responders(tmp_path):
@@ -2340,4 +2408,234 @@ def test_porn_preset_enable_disable(client):
     r = c.get("/api/dns/presets")
     porn = next(p for p in r.json() if p["id"] == "porn")
     assert porn["enabled"] is False
+
+
+def test_admin_spoof_consumption(client):
+    c, database, service = client
+    _login(c)
+
+    # Create a user and a device
+    r_user = c.post("/api/users", json={"name": "Alice", "quota_mode": "fixed", "fixed_gb": 10.0})
+    assert r_user.status_code == 201
+    uid = r_user.json()["id"]
+
+    r_dev = c.post("/api/devices", json={"mac": "00:11:22:33:44:55", "name": "Alice Phone", "user_id": uid})
+    assert r_dev.status_code == 201
+    dev_id = r_dev.json()["id"]
+
+    # 1. Spoof set exact to 4.5 GB
+    r_spoof = c.post("/api/admin/spoof-consumption", json={
+        "user_id": uid,
+        "mode": "set",
+        "gb": 4.5,
+    })
+    assert r_spoof.status_code == 200, r_spoof.text
+    res = r_spoof.json()
+    assert res["used_gb"] == 4.5
+    assert res["quota_blocked"] is False
+
+    # Check dashboard reflection
+    dash = c.get("/api/dashboard").json()
+    alice = next(u for u in dash["users"] if u["id"] == uid)
+    assert alice["used_gb"] == 4.5
+    assert alice["blocked"] is False
+
+    # 2. Spoof delta +6.0 GB (total becomes 10.5 GB, which exceeds 10.0 GB fixed allowance -> quota blocked!)
+    r_delta = c.post("/api/admin/spoof-consumption", json={
+        "user_id": uid,
+        "mode": "delta",
+        "gb": 6.0,
+        "delta_sign": "+",
+    })
+    assert r_delta.status_code == 200
+    res = r_delta.json()
+    assert res["used_gb"] == 10.5
+    assert res["quota_blocked"] is True
+
+    dash = c.get("/api/dashboard").json()
+    alice = next(u for u in dash["users"] if u["id"] == uid)
+    assert alice["used_gb"] == 10.5
+    assert alice["blocked"] is True
+
+    # 3. Spoof delta -8.0 GB (total becomes 2.5 GB -> unblocked!)
+    r_sub = c.post("/api/admin/spoof-consumption", json={
+        "user_id": uid,
+        "mode": "delta",
+        "gb": 8.0,
+        "delta_sign": "-",
+    })
+    assert r_sub.status_code == 200
+    res = r_sub.json()
+    assert res["used_gb"] == 2.5
+    assert res["quota_blocked"] is False
+
+    # 4. Target specific device spoofing
+    r_dev_spoof = c.post("/api/admin/spoof-consumption", json={
+        "user_id": uid,
+        "device_id": dev_id,
+        "mode": "set",
+        "gb": 1.2,
+    })
+    assert r_dev_spoof.status_code == 200
+    assert r_dev_spoof.json()["used_gb"] == 1.2
+
+    # 5. Invalid user validation
+    r_bad = c.post("/api/admin/spoof-consumption", json={
+        "user_id": 99999,
+        "mode": "set",
+        "gb": 1.0,
+    })
+    assert r_bad.status_code == 400
+
+
+def test_static_leases_crud(client):
+    c, db, _ = client
+    _login(c)
+
+    # Initially empty
+    r = c.get("/api/network/static-leases")
+    assert r.status_code == 200
+    assert r.json() == []
+
+    # Create static lease for unmanaged MAC
+    r_create = c.post("/api/network/static-leases", json={
+        "mac": "11:22:33:44:55:66",
+        "ip": "192.168.2.55",
+        "hostname": "Laser Printer",
+    })
+    assert r_create.status_code == 200
+    res = r_create.json()
+    assert res["mac"] == "11:22:33:44:55:66"
+    assert res["ip"] == "192.168.2.55"
+    assert res["hostname"] == "Laser Printer"
+    assert res["device_name"] == ""
+
+    # Create device with MAC 11:22:33:44:55:77
+    r_dev = c.post("/api/devices", json={
+        "mac": "11:22:33:44:55:77",
+        "name": "Admin Laptop",
+    })
+    assert r_dev.status_code == 201
+
+    # Reserve IP for the managed device
+    r_dev_lease = c.post("/api/network/static-leases", json={
+        "mac": "11:22:33:44:55:77",
+        "ip": "192.168.2.77",
+        "hostname": "Admin Lap",
+    })
+    assert r_dev_lease.status_code == 200
+    assert r_dev_lease.json()["device_name"] == "Admin Laptop"
+
+    # Conflicting IP to a different MAC should fail (HTTP 400)
+    r_conflict = c.post("/api/network/static-leases", json={
+        "mac": "aa:bb:cc:dd:ee:ff",
+        "ip": "192.168.2.55",
+    })
+    assert r_conflict.status_code == 400
+
+    # Invalid MAC format
+    r_bad_mac = c.post("/api/network/static-leases", json={
+        "mac": "invalid-mac",
+        "ip": "192.168.2.88",
+    })
+    assert r_bad_mac.status_code == 422
+
+    # Invalid IP format
+    r_bad_ip = c.post("/api/network/static-leases", json={
+        "mac": "00:11:22:33:44:55",
+        "ip": "999.999.999.999",
+    })
+    assert r_bad_ip.status_code == 422
+
+    # List static leases
+    r_list = c.get("/api/network/static-leases")
+    assert r_list.status_code == 200
+    leases = r_list.json()
+    assert len(leases) == 2
+    assert any(l["mac"] == "11:22:33:44:55:66" and l["ip"] == "192.168.2.55" for l in leases)
+    assert any(l["mac"] == "11:22:33:44:55:77" and l["device_name"] == "Admin Laptop" for l in leases)
+
+    # Delete static lease
+    r_del = c.delete("/api/network/static-leases/11:22:33:44:55:66")
+    assert r_del.status_code == 200
+    assert r_del.json()["deleted"] is True
+
+    # Check after delete
+    r_list2 = c.get("/api/network/static-leases")
+    assert len(r_list2.json()) == 1
+
+    # Deleting non-existent should 404
+    r_del404 = c.delete("/api/network/static-leases/11:22:33:44:55:66")
+    assert r_del404.status_code == 404
+
+
+def test_bundle_recharges_api_crud_and_dashboard(client):
+    c, db, svc = client
+    _login(c)
+
+    # 1. Create a user and device to test targeting
+    r_user = c.post("/api/users", json={"name": "TestStudent", "quota_mode": "auto"})
+    assert r_user.status_code == 201
+    user_id = r_user.json()["id"]
+
+    r_dev = c.post("/api/devices", json={"mac": "02:11:22:33:44:55", "name": "StudyTab", "user_id": user_id})
+    assert r_dev.status_code == 201
+    dev_id = r_dev.json()["id"]
+
+    # 2. Add pack without expiry -> should default to 30 days
+    now = svc._now().timestamp()
+    r_pack1 = c.post("/api/bundle/recharges", json={
+        "gb": 15.0,
+        "recurring": True,
+        "target_type": "user",
+        "target_id": user_id,
+        "comment": "Study pack"
+    })
+    assert r_pack1.status_code == 201
+    p1 = r_pack1.json()
+    assert p1["gb"] == 15.0
+    assert p1["remaining_gb"] == 15.0
+    assert p1["recurring"] is True
+    assert p1["target_type"] == "user"
+    assert p1["target_id"] == user_id
+    assert abs(p1["expires_at"] - (now + 30 * 86400)) < 10.0
+
+    # 3. Add pack targeted to device
+    r_pack2 = c.post("/api/bundle/recharges", json={
+        "gb": 5.0,
+        "recurring": False,
+        "target_type": "device",
+        "target_id": dev_id,
+    })
+    assert r_pack2.status_code == 201
+    p2 = r_pack2.json()
+    assert p2["gb"] == 5.0
+    assert p2["target_type"] == "device"
+    assert p2["target_id"] == dev_id
+
+    # 4. List packs
+    r_list = c.get("/api/bundle/recharges")
+    assert r_list.status_code == 200
+    packs = r_list.json()
+    assert len(packs) >= 2
+    assert any(p["id"] == p1["id"] for p in packs)
+    assert any(p["id"] == p2["id"] for p in packs)
+
+    # 5. Dashboard includes recharges list in bundle
+    r_dash = c.get("/api/dashboard")
+    assert r_dash.status_code == 200
+    dash = r_dash.json()
+    assert "recharges" in dash["bundle"]
+    assert any(p["id"] == p1["id"] for p in dash["bundle"]["recharges"])
+
+    # 6. Delete pack
+    r_del = c.delete(f"/api/bundle/recharges/{p2['id']}")
+    assert r_del.status_code == 200
+    assert r_del.json()["deleted"] is True
+
+    # 7. Check list after delete
+    r_list2 = c.get("/api/bundle/recharges")
+    assert not any(p["id"] == p2["id"] for p in r_list2.json())
+
+
 

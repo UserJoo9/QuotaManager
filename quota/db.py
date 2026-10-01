@@ -172,6 +172,18 @@ class DomainRule:
 
 
 @dataclass
+class GuestVoucher:
+    """A single-use or expiring access code for guest authentication."""
+    code: str
+    quota_gb: float
+    created_at: float
+    expires_at: Optional[float] = None
+    used_at: Optional[float] = None
+    used_mac: str = ""
+    comment: str = ""
+
+
+@dataclass
 class Lease:
     mac: str
     ip: str
@@ -202,6 +214,42 @@ class Bundle:
         if self.period_type == "end_of_month":
             return self.reset_day if self.reset_day > 0 else 1
         return self.reset_day
+
+
+@dataclass
+class RechargePack:
+    id: int
+    gb: float
+    used_gb: float = 0.0
+    created_at: float = 0.0
+    expires_at: float = 0.0
+    recurring: bool = False
+    target_type: str = "all"  # 'all', 'user', 'device'
+    target_id: Optional[int] = None
+    comment: str = ""
+    active: bool = True
+
+    @property
+    def remaining_gb(self) -> float:
+        return max(0.0, round(self.gb - self.used_gb, 3))
+
+
+@dataclass
+class VpnNode:
+    id: int
+    name: str
+    protocol: str = "vless"
+    raw_uri: str = ""
+    config_json: str = "{}"
+    ping_ms: float = -1.0
+    created_at: float = 0.0
+
+
+@dataclass
+class VpnRoutingRule:
+    target_type: str   # 'user' | 'device'
+    target_id: int
+    route_vpn: bool = True
 
 
 SCHEMA = """
@@ -353,7 +401,60 @@ CREATE TABLE IF NOT EXISTS dns_presets (
     domain_count INTEGER NOT NULL DEFAULT 0,
     updated_at   REAL NOT NULL DEFAULT 0
 );
+
+-- Static DHCP reservations (MAC <-> fixed IP mapping)
+CREATE TABLE IF NOT EXISTS static_leases (
+    mac        TEXT PRIMARY KEY,
+    ip         TEXT NOT NULL UNIQUE,
+    hostname   TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+
+-- Guest access codes / vouchers for Captive Portal
+CREATE TABLE IF NOT EXISTS guest_vouchers (
+    code       TEXT PRIMARY KEY,
+    quota_gb   REAL NOT NULL,
+    created_at REAL NOT NULL,
+    expires_at REAL,
+    used_at    REAL,
+    used_mac   TEXT NOT NULL DEFAULT '',
+    comment    TEXT NOT NULL DEFAULT ''
+);
+
+-- Bundle recharges queue (add-on packs)
+CREATE TABLE IF NOT EXISTS bundle_recharges (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    gb          REAL NOT NULL,
+    used_gb     REAL NOT NULL DEFAULT 0.0,
+    created_at  REAL NOT NULL,
+    expires_at  REAL NOT NULL,
+    recurring   INTEGER NOT NULL DEFAULT 0,
+    target_type TEXT NOT NULL DEFAULT 'all',
+    target_id   INTEGER,
+    comment     TEXT NOT NULL DEFAULT '',
+    active      INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_bundle_recharges_active ON bundle_recharges(active);
+
+-- VPN nodes and per-user/per-device routing
+CREATE TABLE IF NOT EXISTS vpn_nodes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    protocol    TEXT NOT NULL DEFAULT 'vless',
+    raw_uri     TEXT NOT NULL DEFAULT '',
+    config_json TEXT NOT NULL DEFAULT '{}',
+    ping_ms     REAL NOT NULL DEFAULT -1.0,
+    created_at  REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS vpn_routing (
+    target_type TEXT NOT NULL,
+    target_id   INTEGER NOT NULL,
+    route_vpn   INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (target_type, target_id)
+);
 """
+
 
 
 class Database:
@@ -986,7 +1087,60 @@ class Database:
         )
         await self.conn.commit()
 
+    # -- static DHCP reservations (MAC <-> IP) ------------------------------
+
+    async def list_static_leases(self) -> list[dict[str, Any]]:
+        """Return all static lease reservations ordered by IP."""
+        rows = await self.conn.execute_fetchall(
+            "SELECT mac, ip, hostname, created_at FROM static_leases ORDER BY ip"
+        )
+        return [dict(r) for r in rows]
+
+    async def get_static_lease(self, mac: str) -> dict[str, Any] | None:
+        """Get static lease reservation for a MAC address."""
+        row = await self._fetch_one(
+            "SELECT mac, ip, hostname, created_at FROM static_leases WHERE mac=?",
+            (mac.lower(),),
+        )
+        return dict(row) if row else None
+
+    async def get_static_lease_by_ip(self, ip: str) -> dict[str, Any] | None:
+        """Get static lease reservation for an IP address (conflict check)."""
+        row = await self._fetch_one(
+            "SELECT mac, ip, hostname, created_at FROM static_leases WHERE ip=?",
+            (ip.strip(),),
+        )
+        return dict(row) if row else None
+
+    async def set_static_lease(self, mac: str, ip: str, hostname: str = "") -> dict[str, Any]:
+        """Insert or update a static lease reservation."""
+        mac_clean = mac.lower().strip()
+        ip_clean = ip.strip()
+        now = time.time()
+        await self.conn.execute(
+            """INSERT INTO static_leases (mac, ip, hostname, created_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(mac) DO UPDATE SET ip=excluded.ip,
+                 hostname=excluded.hostname""",
+            (mac_clean, ip_clean, hostname.strip(), now),
+        )
+        # Also update the active lease table so it reflects immediately
+        await self.set_lease(mac_clean, ip_clean)
+        await self.conn.commit()
+        row = await self._fetch_one("SELECT * FROM static_leases WHERE mac=?", (mac_clean,))
+        return dict(row) if row else {}
+
+    async def delete_static_lease(self, mac: str) -> bool:
+        """Remove a static lease reservation."""
+        cur = await self.conn.execute(
+            "DELETE FROM static_leases WHERE mac=?",
+            (mac.lower().strip(),),
+        )
+        await self.conn.commit()
+        return cur.rowcount > 0
+
     # -- bundle config ------------------------------------------------------
+
 
     async def get_bundle(self) -> Bundle:
         row = await self._fetch_one("SELECT * FROM bundle_config WHERE id=1")
@@ -1027,6 +1181,132 @@ class Database:
         )
         await self.conn.commit()
 
+    # -- bundle recharges (add-on packs) --------------------------------------
+
+    async def create_recharge(self, gb: float,
+                              expires_at: float | None = None,
+                              recurring: bool = False,
+                              target_type: str = "all",
+                              target_id: int | None = None,
+                              comment: str = "",
+                              created_at: float | None = None) -> RechargePack:
+        now = created_at if created_at is not None else time.time()
+        exp = float(expires_at) if expires_at is not None else now + 30 * 86400
+        cursor = await self.conn.execute(
+            """INSERT INTO bundle_recharges (gb, used_gb, created_at, expires_at, recurring, target_type, target_id, comment, active)
+               VALUES (?, 0.0, ?, ?, ?, ?, ?, ?, 1)""",
+            (gb, now, exp, 1 if recurring else 0, target_type, target_id, comment)
+        )
+        await self.conn.commit()
+        row = await self._fetch_one("SELECT * FROM bundle_recharges WHERE id=?", (cursor.lastrowid,))
+        return _row_to_recharge(row)  # type: ignore[return-value]
+
+    async def list_recharges(self, active_only: bool = False) -> list[RechargePack]:
+        if active_only:
+            sql = "SELECT * FROM bundle_recharges WHERE active = 1 ORDER BY expires_at ASC, id ASC"
+        else:
+            sql = "SELECT * FROM bundle_recharges ORDER BY active DESC, expires_at ASC, id ASC"
+        rows = await self.conn.execute_fetchall(sql)
+        return [_row_to_recharge(r) for r in rows if r is not None]
+
+    async def get_recharge(self, recharge_id: int) -> RechargePack | None:
+        row = await self._fetch_one("SELECT * FROM bundle_recharges WHERE id=?", (recharge_id,))
+        return _row_to_recharge(row) if row is not None else None
+
+    async def update_recharge(self, recharge_id: int, **fields: Any) -> RechargePack | None:
+        allowed = {"gb", "used_gb", "expires_at", "recurring", "target_type", "target_id", "comment", "active"}
+        sets, args = [], []
+        for key, value in fields.items():
+            if key in allowed:
+                sets.append(f"{key}=?")
+                if key in ("recurring", "active"):
+                    args.append(1 if value else 0)
+                else:
+                    args.append(value)
+        if not sets:
+            return await self.get_recharge(recharge_id)
+        args.append(recharge_id)
+        await self.conn.execute(f"UPDATE bundle_recharges SET {', '.join(sets)} WHERE id=?", args)
+        await self.conn.commit()
+        return await self.get_recharge(recharge_id)
+
+    async def delete_recharge(self, recharge_id: int) -> None:
+        await self.conn.execute("DELETE FROM bundle_recharges WHERE id=?", (recharge_id,))
+        await self.conn.commit()
+
+    # -- VPN nodes and routing ------------------------------------------------
+
+    async def create_vpn_node(self, name: str, protocol: str = "vless",
+                              raw_uri: str = "", config_json: str = "{}",
+                              ping_ms: float = -1.0) -> VpnNode:
+        now = time.time()
+        cursor = await self.conn.execute(
+            """INSERT INTO vpn_nodes (name, protocol, raw_uri, config_json, ping_ms, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (name.strip(), protocol.strip().lower(), raw_uri.strip(), config_json, ping_ms, now)
+        )
+        await self.conn.commit()
+        row = await self._fetch_one("SELECT * FROM vpn_nodes WHERE id=?", (cursor.lastrowid,))
+        return _row_to_vpn_node(row)  # type: ignore[return-value]
+
+    async def get_vpn_node(self, node_id: int) -> VpnNode | None:
+        row = await self._fetch_one("SELECT * FROM vpn_nodes WHERE id=?", (node_id,))
+        return _row_to_vpn_node(row) if row is not None else None
+
+    async def list_vpn_nodes(self) -> list[VpnNode]:
+        rows = await self.conn.execute_fetchall("SELECT * FROM vpn_nodes ORDER BY id ASC")
+        return [_row_to_vpn_node(r) for r in rows if r is not None]
+
+    async def update_vpn_node(self, node_id: int, **fields: Any) -> VpnNode | None:
+        allowed = {"name", "protocol", "raw_uri", "config_json", "ping_ms"}
+        sets, args = [], []
+        for key, value in fields.items():
+            if key in allowed:
+                sets.append(f"{key}=?")
+                args.append(value)
+        if not sets:
+            return await self.get_vpn_node(node_id)
+        args.append(node_id)
+        await self.conn.execute(f"UPDATE vpn_nodes SET {', '.join(sets)} WHERE id=?", args)
+        await self.conn.commit()
+        return await self.get_vpn_node(node_id)
+
+    async def delete_vpn_node(self, node_id: int) -> bool:
+        cur = await self.conn.execute("DELETE FROM vpn_nodes WHERE id=?", (node_id,))
+        await self.conn.commit()
+        return cur.rowcount > 0
+
+    async def get_vpn_routing_rules(self) -> list[VpnRoutingRule]:
+        rows = await self.conn.execute_fetchall("SELECT * FROM vpn_routing")
+        return [_row_to_vpn_routing_rule(r) for r in rows if r is not None]
+
+    async def get_vpn_routing_rule(self, target_type: str, target_id: int) -> VpnRoutingRule | None:
+        row = await self._fetch_one(
+            "SELECT * FROM vpn_routing WHERE target_type=? AND target_id=?",
+            (target_type, target_id)
+        )
+        return _row_to_vpn_routing_rule(row) if row is not None else None
+
+    async def set_vpn_routing_rule(self, target_type: str, target_id: int, route_vpn: bool) -> VpnRoutingRule:
+        await self.conn.execute(
+            """INSERT INTO vpn_routing (target_type, target_id, route_vpn)
+               VALUES (?, ?, ?)
+               ON CONFLICT(target_type, target_id) DO UPDATE SET route_vpn=excluded.route_vpn""",
+            (target_type, target_id, 1 if route_vpn else 0)
+        )
+        await self.conn.commit()
+        rule = await self.get_vpn_routing_rule(target_type, target_id)
+        assert rule is not None
+        return rule
+
+    async def delete_vpn_routing_rule(self, target_type: str, target_id: int) -> bool:
+        cur = await self.conn.execute(
+            "DELETE FROM vpn_routing WHERE target_type=? AND target_id=?",
+            (target_type, target_id)
+        )
+        await self.conn.commit()
+        return cur.rowcount > 0
+
     # -- usage ----------------------------------------------------------------
 
     async def add_usage(self, device_id: int, date: str,
@@ -1055,6 +1335,68 @@ class Database:
         )
         await self.conn.commit()
 
+    async def set_usage(self, device_id: int, date: str,
+                        up_bytes: int, down_bytes: int) -> None:
+        """Set (upsert/override) exact usage for a device on a given date."""
+        await self.conn.execute(
+            """INSERT INTO usage_daily (device_id, date, up_bytes, down_bytes)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(device_id, date) DO UPDATE SET
+                 up_bytes = excluded.up_bytes,
+                 down_bytes = excluded.down_bytes""",
+            (device_id, date, max(0, int(up_bytes)), max(0, int(down_bytes))),
+        )
+        await self.conn.commit()
+
+    async def set_device_period_usage(self, device_id: int, target_total_bytes: int,
+                                      today_date: str) -> dict[str, int]:
+        """Calibrate a device's usage so total period usage equals target_total_bytes.
+
+        Adjusts today's usage_daily entry (or inserts one) by calculating the delta
+        needed beyond usage recorded on prior dates in the current period.
+        Returns the updated device period usage {up_bytes, down_bytes, total_bytes}.
+        """
+        bundle = await self.get_bundle()
+        since = bundle.period_start or ""
+        target_total_bytes = max(0, int(target_total_bytes))
+
+        # Sum prior dates in this period (excluding today)
+        rows_prior = await self.conn.execute_fetchall(
+            "SELECT up_bytes, down_bytes FROM usage_daily WHERE device_id=? AND date>=? AND date<?",
+            (device_id, since, today_date),
+        )
+        prior_up = sum(r["up_bytes"] for r in rows_prior)
+        prior_down = sum(r["down_bytes"] for r in rows_prior)
+        prior_total = prior_up + prior_down
+
+        # Calculate needed bytes for today
+        if target_total_bytes <= prior_total:
+            # Target is less than prior records: clear prior records in period and put everything in today
+            await self.conn.execute(
+                "DELETE FROM usage_daily WHERE device_id=? AND date>=? AND date<?",
+                (device_id, since, today_date),
+            )
+            needed_today = target_total_bytes
+            today_down = int(needed_today * 0.85)
+            today_up = needed_today - today_down
+        else:
+            needed_today = target_total_bytes - prior_total
+            # Use ~85% download, 15% upload standard ratio
+            today_down = int(needed_today * 0.85)
+            today_up = needed_today - today_down
+
+        await self.set_usage(device_id, today_date, today_up, today_down)
+
+        # Re-fetch period usage
+        rows_all = await self.conn.execute_fetchall(
+            "SELECT up_bytes, down_bytes FROM usage_daily WHERE device_id=? AND date>=?",
+            (device_id, since),
+        )
+        tot_up = sum(r["up_bytes"] for r in rows_all)
+        tot_down = sum(r["down_bytes"] for r in rows_all)
+        return {"up_bytes": tot_up, "down_bytes": tot_down, "total_bytes": tot_up + tot_down}
+
+
     async def get_usage(self, device_id: int, since_date: str = "") -> dict[str, int]:
         """Return {up_bytes, down_bytes, total_bytes} for a device since a date."""
         if since_date:
@@ -1077,6 +1419,10 @@ class Database:
             "SELECT device_id, SUM(up_bytes) up, SUM(down_bytes) down FROM usage_daily "
             "WHERE date>=? GROUP BY device_id", (since,))
         return {r["device_id"]: {"up": r["up"], "down": r["down"]} for r in rows}
+
+    async def get_period_usage_by_device(self) -> dict[int, dict[str, int]]:
+        """Alias for get_period_usage(): aggregate usage since period_start, keyed by device_id."""
+        return await self.get_period_usage()
 
     async def get_period_usage_by_user(self) -> dict[int, dict[str, int]]:
         """Aggregate usage since period_start, keyed by user_id."""
@@ -1395,6 +1741,72 @@ class Database:
             "DELETE FROM dns_presets WHERE preset_id=?", (preset_id,))
         await self.conn.commit()
 
+    # -- Guest vouchers / access codes (Captive Portal) -----------------------
+
+    async def create_guest_voucher(self, code: str, quota_gb: float,
+                                   expires_at: Optional[float] = None,
+                                   comment: str = "") -> GuestVoucher:
+        code_clean = code.strip().upper()
+        now = time.time()
+        await self.conn.execute(
+            """INSERT INTO guest_vouchers (code, quota_gb, created_at, expires_at, comment)
+               VALUES (?, ?, ?, ?, ?)""",
+            (code_clean, round(max(0.01, float(quota_gb)), 3), now, expires_at, comment.strip()))
+        await self.conn.commit()
+        res = await self.get_guest_voucher(code_clean)
+        assert res is not None
+        return res
+
+    async def get_guest_voucher(self, code: str) -> Optional[GuestVoucher]:
+        row = await self._fetch_one(
+            "SELECT * FROM guest_vouchers WHERE code=?", (code.strip().upper(),))
+        return _row_to_guest_voucher(row) if row else None
+
+    async def list_guest_vouchers(self, active_only: bool = False) -> list[GuestVoucher]:
+        if active_only:
+            now = time.time()
+            rows = await self.conn.execute_fetchall(
+                """SELECT * FROM guest_vouchers
+                   WHERE used_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
+                   ORDER BY created_at DESC""",
+                (now,))
+        else:
+            rows = await self.conn.execute_fetchall(
+                "SELECT * FROM guest_vouchers ORDER BY created_at DESC")
+        return [_row_to_guest_voucher(r) for r in rows]
+
+    async def redeem_guest_voucher(self, code: str, mac: str) -> tuple[bool, str, Optional[float]]:
+        """Attempt to redeem voucher ``code`` for ``mac``.
+
+        Returns: (success: bool, message: str, quota_gb: Optional[float])
+        """
+        code_clean = code.strip().upper()
+        mac_clean = mac.strip().lower()
+        now = time.time()
+        v = await self.get_guest_voucher(code_clean)
+        if v is None:
+            return False, "Invalid access code", None
+        if v.used_at is not None:
+            return False, "This code has already been used", None
+        if v.expires_at is not None and v.expires_at <= now:
+            return False, "This access code has expired", None
+
+        cur = await self.conn.execute(
+            """UPDATE guest_vouchers
+               SET used_at = ?, used_mac = ?
+               WHERE code = ? AND used_at IS NULL""",
+            (now, mac_clean, code_clean))
+        await self.conn.commit()
+        if cur.rowcount == 0:
+            return False, "Code already redeemed", None
+        return True, "Redeemed successfully", v.quota_gb
+
+    async def delete_guest_voucher(self, code: str) -> bool:
+        cur = await self.conn.execute(
+            "DELETE FROM guest_vouchers WHERE code=?", (code.strip().upper(),))
+        await self.conn.commit()
+        return cur.rowcount > 0
+
 
 def _row_to_device(row: Any) -> Device:
     return Device(
@@ -1452,3 +1864,51 @@ def _row_to_domain_rule(row: Any) -> DomainRule:
         source=row["source"],
         created_at=row["created_at"],
     )
+
+
+def _row_to_guest_voucher(row: Any) -> GuestVoucher:
+    return GuestVoucher(
+        code=row["code"],
+        quota_gb=float(row["quota_gb"]),
+        created_at=float(row["created_at"]),
+        expires_at=float(row["expires_at"]) if row["expires_at"] is not None else None,
+        used_at=float(row["used_at"]) if row["used_at"] is not None else None,
+        used_mac=row["used_mac"] or "",
+        comment=row["comment"] or "",
+    )
+
+
+def _row_to_recharge(row: Any) -> RechargePack:
+    return RechargePack(
+        id=int(row["id"]),
+        gb=float(row["gb"]),
+        used_gb=float(row["used_gb"]),
+        created_at=float(row["created_at"]),
+        expires_at=float(row["expires_at"]),
+        recurring=bool(row["recurring"]),
+        target_type=str(row["target_type"] or "all"),
+        target_id=int(row["target_id"]) if row["target_id"] is not None else None,
+        comment=str(row["comment"] or ""),
+        active=bool(row["active"]),
+    )
+
+
+def _row_to_vpn_node(row: Any) -> VpnNode:
+    return VpnNode(
+        id=int(row["id"]),
+        name=str(row["name"] or ""),
+        protocol=str(row["protocol"] or "vless"),
+        raw_uri=str(row["raw_uri"] or ""),
+        config_json=str(row["config_json"] or "{}"),
+        ping_ms=float(row["ping_ms"] if row["ping_ms"] is not None else -1.0),
+        created_at=float(row["created_at"] or 0.0),
+    )
+
+
+def _row_to_vpn_routing_rule(row: Any) -> VpnRoutingRule:
+    return VpnRoutingRule(
+        target_type=str(row["target_type"]),
+        target_id=int(row["target_id"]),
+        route_vpn=bool(row["route_vpn"]),
+    )
+

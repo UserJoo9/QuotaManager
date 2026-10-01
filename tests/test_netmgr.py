@@ -628,3 +628,30 @@ def test_parse_pppoe_test_error_on_rc():
     assert result["status"] == "error"
     assert result["ok"] is False
     assert "command not found" in result["script_output"]
+
+
+def test_normalize_script_crlf():
+    """Scripts with Windows CRLF endings are rewritten to Unix LF in-place."""
+    from quota.netmgr import _normalize_script_crlf
+    with tempfile.TemporaryDirectory() as td:
+        script = Path(td) / "test.sh"
+        script.write_bytes(b"#!/bin/bash\r\nset -euo pipefail\r\necho hi\r\n")
+        assert b"\r" in script.read_bytes()
+        _normalize_script_crlf(script)
+        assert b"\r" not in script.read_bytes()
+        assert script.read_bytes() == b"#!/bin/bash\nset -euo pipefail\necho hi\n"
+
+
+def test_topology_manager_normalizes_crlf_on_apply():
+    """TopologyManager normalizes scripts on disk before executing them."""
+    with tempfile.TemporaryDirectory() as td:
+        cfg = _cfg(Path(td))
+        script = Path(td) / "topology.sh"
+        script.write_bytes(b"#!/bin/bash\r\nset -euo pipefail\r\n")
+        manager, applier, restarts, database = _make_manager(cfg, Path(td), rc=0)
+        _loop_run(database.connect())
+        try:
+            assert b"\r" not in script.read_bytes()
+        finally:
+            _loop_run(database.close())
+

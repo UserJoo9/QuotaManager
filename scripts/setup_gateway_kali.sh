@@ -566,6 +566,9 @@ table inet quota_nat {
         # Clients (192.168.2.0/24) exit through this box -> masquerade as the
         # uplink IP so the router answers them.
         ip saddr $CLIENT_NET masquerade
+        # PPPoE (MTU 1492): clamp TCP MSS to Path MTU on ppp0 so clients sending
+        # 1500-byte packets never get silently dropped by DF (Don't Fragment).
+        oifname "ppp0" tcp flags syn tcp option maxseg size set rt mtu
     }
 }
 EOF

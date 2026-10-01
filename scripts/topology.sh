@@ -301,6 +301,10 @@ EOF
     systemctl restart quota-wan-ppp >/dev/null 2>&1 \
         || warn "could not start quota-wan-ppp.service — check 'journalctl -u quota-wan-ppp -f'"
     log "   quota-wan-ppp.service enabled + started"
+    # Clamp TCP MSS to Path MTU on ppp0 (MTU 1492) so forwarded TCP traffic is never dropped
+    if command -v nft >/dev/null 2>&1 && nft list table inet quota_nat >/dev/null 2>&1; then
+        nft add rule inet quota_nat postrouting oifname "ppp0" tcp flags syn tcp option maxseg size set rt mtu 2>/dev/null || true
+    fi
 }
 
 _pppoe_lan() {

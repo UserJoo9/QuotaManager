@@ -25,6 +25,10 @@ fi
 "$APP_DIR/.venv/bin/python" -m pip install --disable-pip-version-check --no-input \
     --quiet --upgrade -r "$APP_DIR/requirements-linux.txt"
 
+if [ -f "$APP_DIR/bin/sing-box" ]; then
+    chmod +x "$APP_DIR/bin/sing-box"
+fi
+
 # Re-run the setup script so this install (re)applies sysctl, the client-subnet
 # NAT, dnsmasq, the ifb module, the app config and the systemd unit. It is
 # idempotent and refuses to run while the service is live. We stop it first so

@@ -780,24 +780,19 @@ class Gateway:
                                 f"refusal unavailable)", "warn", dev.id)
                     return
                 elif await self.service.is_guest_mode():
-                    gq = await self.service.guest_quota_gb()
+                    # Guest mode is active: new guest devices are registered in the
+                    # pending lock (0 GB allowance, admin-cut) until admin approves.
                     dev = await self.database.upsert_device(
                         mac, name="", quota_mode=_db.QUOTA_FIXED,
-                        fixed_gb=gq, guest=True)
-                    limit = await self.service.guest_limit()
-                    if await self.database.count_guest_users() > limit:
-                        # Guest cap reached: the account is still minted (so
-                        # the MAC is visible + counted) but immediately cut —
-                        # a MAC-changer can't spam fresh allowances forever.
-                        await self.database.set_device_state(
-                            dev.id, _db.BLOCK_ADMIN)
-                        await self.database.add_event(
-                            f"New GUEST blocked: {dev.mac} ({ip}) — "
-                            f"guest limit ({limit}) reached", "warn", dev.id)
-                    else:
-                        await self.database.add_event(
-                            f"New GUEST device on network: {dev.mac} ({ip}) — "
-                            f"{gq:g} GB allowance", "info", dev.id)
+                        fixed_gb=0.0, guest=True)
+                    await self.database.set_device_state(
+                        dev.id, _db.BLOCK_ADMIN)
+                    if dev.user_id:
+                        await self.database.update_user(
+                            dev.user_id, block_state=_db.BLOCK_ADMIN)
+                    await self.database.add_event(
+                        f"New GUEST on network: {dev.mac} ({ip}) — "
+                        f"awaiting admin approval", "info", dev.id)
                 else:
                     # Brand-new device: mint its user in the DISABLED
                     # onboarding lock — 0 GB, no auto share, kernel-cut until
@@ -1163,7 +1158,10 @@ class Gateway:
         #     isn't working, and renewing into a dead line is pointless.
         await self._wan_ip_renew_tick()
 
-        # 1g. GitHub self-update check (24 h gate lives inside the updater —
+        # 1g. Telegram WAN IP change trigger (notifies admin whenever public IP changes).
+        await self._wan_telegram_ip_tick()
+
+        # 1h. GitHub self-update check (24 h gate lives inside the updater —
         #     maybe_check is a no-op until the interval elapses). A failure is
         #     swallowed inside; the state surfaces in the Admin tab. None when
         #     cfg.updates.enabled=false (master switch / hermetic tests).
@@ -1420,10 +1418,14 @@ class Gateway:
                 for dev in devices:
                     if dev.dns_server:
                         dns_servers.append((_db.DNS_SCOPE_DEVICE, dev.id, dev.dns_server))
+                static_leases_list = await self.database.list_static_leases()
+                static_map = {r["mac"]: r["ip"] for r in static_leases_list}
                 await asyncio.to_thread(
-                    manager.apply, devices, rules, dns_servers, device_ids_by_user)
+                    manager.apply, devices, rules, dns_servers, device_ids_by_user,
+                    static_map)
         except Exception:  # noqa: BLE001
             log.exception("failed to sync DNS filtering rules")
+
 
     async def _apply_dns_now(self) -> None:
         """Apply a domain-rule / preset / DNS-server edit immediately instead
@@ -1783,6 +1785,66 @@ class Gateway:
         if elapsed >= cfg_["minutes"] * 60:
             await self._renew_wan_ip()
 
+    async def _wan_telegram_ip_tick(self) -> None:
+        """Check for WAN public IP changes and notify Telegram bot if trigger is armed."""
+        try:
+            enabled = (await self.database.get_setting("wan_telegram_enabled", "0")) == "1"
+            if not enabled:
+                return
+
+            bot_token = await self.database.get_setting("wan_telegram_bot_token", "")
+            chat_id = await self.database.get_setting("wan_telegram_chat_id", "")
+            if not bot_token or not chat_id:
+                return
+
+            effective = getattr(self.cfg.engine, "topology", "lan") or "lan"
+            from quota import wan_telegram as _wan_tg
+            current_ip = await _wan_tg.get_current_public_ip(effective)
+            if not current_ip:
+                return
+
+            last_ip = (await self.database.get_setting("wan_telegram_last_ip", "") or "").strip()
+            if current_ip == last_ip:
+                return
+
+            # IP changed (or first detection)! Send Telegram notification
+            wan_exposed = False
+            if self.firewall is not None:
+                try:
+                    fw_cfg = await self.firewall.load_config()
+                    wan_exposed = bool(fw_cfg.get("wan_confirmed"))
+                except Exception:
+                    pass
+
+            web_port = int(getattr(self.cfg.web, "port", 8080) or 8080)
+            web_proto = "https" if getattr(self.cfg.web, "tls_certfile", None) else "http"
+
+            msg = _wan_tg.format_wan_ip_message(
+                ip=current_ip,
+                web_port=web_port,
+                web_proto=web_proto,
+                wan_exposed=wan_exposed,
+                interface="ppp0" if effective == "wan" else "eth0",
+                is_test=False,
+            )
+
+            ok, err_desc = await _wan_tg.send_telegram_message(bot_token, chat_id, msg)
+            if ok:
+                await self.database.set_setting("wan_telegram_last_ip", current_ip)
+                await self.database.set_setting(
+                    "wan_telegram_last_sent",
+                    _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                )
+                await self.database.add_event(
+                    f"Telegram WAN IP notification sent (New IP: {current_ip})",
+                    "info",
+                )
+                log.info("Telegram notification sent for new WAN IP: %s", current_ip)
+            else:
+                log.warning("Failed to send Telegram WAN notification: %s", err_desc)
+        except Exception as e:
+            log.exception("Error in Telegram WAN IP tick: %s", e)
+
     async def _wan_status(self) -> dict[str, object]:
         """Live WAN-mode status for the dashboard/API (cheap, every 15 s tick).
 
@@ -1904,6 +1966,11 @@ class Gateway:
         if self.wifi_probe is not None:
             # Stops the thread + tears down monitor mode (airmon-ng stop).
             self.wifi_probe.stop()
+        if hasattr(self, "vpn_core") and self.vpn_core is not None:
+            try:
+                await asyncio.wait_for(self.vpn_core.disconnect(user_initiated=False), timeout=3.0)
+            except Exception as e:
+                log.debug("VPN core shutdown notice: %s", e)
         await self.database.close()
         log.info("shutdown complete")
 
@@ -1978,6 +2045,7 @@ def main() -> None:
                          firewall=gateway.firewall,
                          firewall_wan_preapply=gateway._firewall_wan_preapply,
                          updater=gateway.updater,
+                         vpn_manager=gateway.vpn_manager,
                          web_config=cfg.web,
                          waf_config=cfg.waf)
         # TLS (web.tls_certfile / web.tls_keyfile): uvicorn terminates HTTPS
@@ -1991,10 +2059,18 @@ def main() -> None:
             ssl_certfile=cfg.web.tls_certfile or None,
             ssl_keyfile=cfg.web.tls_keyfile or None,
         )
+        gateway.vpn_core = getattr(app.state, "vpn_manager", None)
         server = uvicorn.Server(server_config)
+
+        async def _stop_listener() -> None:
+            await gateway._stop_event.wait()
+            server.should_exit = True
+
+        stop_task = asyncio.create_task(_stop_listener())
         try:
             await server.serve()
         finally:
+            stop_task.cancel()
             await gateway.shutdown()
 
     try:

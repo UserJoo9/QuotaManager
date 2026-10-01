@@ -72,10 +72,12 @@ jobs:
           # the repo must never ship.
           cp run.py requirements-linux.txt LICENSE "$STAGE/opt/quota-manager/"
           cp -r core quota api web scripts "$STAGE/opt/quota-manager/"
+          [ -d bin ] && cp -r bin "$STAGE/opt/quota-manager/" || true
           # Scripts are only useful with executable bits; dpkg preserves them.
           # Name the lifecycle scripts explicitly — a *install glob never
           # matches "postinst" (and an unmatched glob fails under -e).
           chmod 755 "$STAGE/DEBIAN/postinst" "$STAGE/DEBIAN/prerm" "$STAGE/opt/quota-manager/scripts"/*.sh
+          [ -f "$STAGE/opt/quota-manager/bin/sing-box" ] && chmod 755 "$STAGE/opt/quota-manager/bin/sing-box" || true
           # No source-control noise on the box.
           rm -rf "$STAGE/opt/quota-manager/api/__pycache__" "$STAGE/opt/quota-manager/core/__pycache__" \
                  "$STAGE/opt/quota-manager/quota/__pycache__" "$STAGE/opt/quota-manager/web/__pycache__" \

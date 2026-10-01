@@ -488,8 +488,9 @@ def test_new_device_auto_registers_disabled_until_admin_assigns(tmp_path):
 
 
 def test_guest_mode_auto_registers_guest_device(tmp_path):
-    """With guest mode on, a NEW device joining the network becomes a guest
-    (fixed 1 GB allowance) instead of a normal auto user."""
+    """With guest mode on, a NEW device joining the network becomes a guest,
+    initially admin-blocked with 0 GB allowance awaiting admin approval.
+    When the admin approves the guest, they receive the guest quota and are unblocked."""
     from quota import db as db_mod
 
     cfg = _cfg(tmp_path)
@@ -507,13 +508,28 @@ def test_guest_mode_auto_registers_guest_device(tmp_path):
         user = _get_loop().run_until_complete(
             gw.database.get_user(dev.user_id))
         assert user is not None and user.guest, "new device must become a GUEST"
-        # guests are fixed users with the guest allowance
+        # Pending admin approval: device & user are admin-blocked with 0 allowance
+        assert dev.block_state == db_mod.BLOCK_ADMIN
+        assert user.block_state == db_mod.BLOCK_ADMIN
         assert user.quota_mode == db_mod.QUOTA_FIXED
-        assert user.fixed_gb == 1.0
-        # the guest must receive a real allowance (not instantly quota-blocked)
+        assert (user.fixed_gb or 0.0) == 0.0
+
+        # Now simulate admin approval
+        gq = _get_loop().run_until_complete(gw.service.guest_quota_gb())
+        _get_loop().run_until_complete(
+            gw.database.update_device(dev.id, quota_mode=db_mod.QUOTA_FIXED,
+                                     fixed_gb=gq, block_state=db_mod.BLOCK_OK))
+        _get_loop().run_until_complete(
+            gw.database.update_user(user.id, quota_mode=db_mod.QUOTA_FIXED,
+                                   fixed_gb=gq, block_state=db_mod.BLOCK_OK, guest=True))
+        _get_loop().run_until_complete(gw.service.recompute_allowances())
+
+        approved_dev = _get_loop().run_until_complete(
+            gw.database.get_device(dev.id))
+        assert approved_dev.block_state == db_mod.BLOCK_OK
         bundle = _get_loop().run_until_complete(
             gw.database.get_bundle())
-        assert bundle.allowances.get(dev.user_id, 0) == pytest.approx(1.0)
+        assert bundle.allowances.get(dev.user_id, 0) == pytest.approx(gq)
     finally:
         _get_loop().run_until_complete(gw.shutdown())
 
@@ -573,9 +589,7 @@ def test_guest_device_reconnects_keeps_identity(tmp_path):
 
 
 def test_guest_limit_blocks_new_guest_after_cap(tmp_path):
-    """When the guest limit is reached, a NEW device is still registered as a
-    guest (visible + counted) but is immediately admin-blocked — a MAC-changer
-    can't mint a fresh allowance forever."""
+    """All guests join pending admin approval (admin_off)."""
     from quota import db as db_mod
 
     cfg = _cfg(tmp_path)
@@ -586,7 +600,7 @@ def test_guest_limit_blocks_new_guest_after_cap(tmp_path):
             gw.service.set_guest_mode(True))
         _get_loop().run_until_complete(
             gw.service.set_guest_limit(2))
-        # fill the cap with two guests
+        # two guests join
         _get_loop().run_until_complete(
             gw._persist_lease("aa:bb:cc:dd:ee:41", "192.168.1.130"))
         _get_loop().run_until_complete(
@@ -594,7 +608,7 @@ def test_guest_limit_blocks_new_guest_after_cap(tmp_path):
         assert _get_loop().run_until_complete(
             gw.database.count_guest_users()) == 2
 
-        # third brand-new device beyond the cap -> guest but admin-blocked
+        # brand-new device -> guest and admin-blocked
         _get_loop().run_until_complete(
             gw._persist_lease("aa:bb:cc:dd:ee:43", "192.168.1.132"))
         dev = _get_loop().run_until_complete(
@@ -603,17 +617,7 @@ def test_guest_limit_blocks_new_guest_after_cap(tmp_path):
         user = _get_loop().run_until_complete(
             gw.database.get_user(dev.user_id))
         assert user is not None and user.guest
-        assert dev.block_state == db_mod.BLOCK_ADMIN, (
-            "over-cap guest must be cut immediately")
-
-        # raising the cap lets the NEXT brand-new device join normally
-        _get_loop().run_until_complete(
-            gw.service.set_guest_limit(4))
-        _get_loop().run_until_complete(
-            gw._persist_lease("aa:bb:cc:dd:ee:44", "192.168.1.133"))
-        dev4 = _get_loop().run_until_complete(
-            gw.database.get_device(mac="aa:bb:cc:dd:ee:44"))
-        assert dev4.block_state == db_mod.BLOCK_OK
+        assert dev.block_state == db_mod.BLOCK_ADMIN
     finally:
         _get_loop().run_until_complete(gw.shutdown())
 
@@ -631,10 +635,8 @@ def test_guest_limit_default_is_two(tmp_path):
 
 
 def test_lowering_guest_limit_cuts_existing_over_cap(tmp_path):
-    """Lowering the guest cap admin-blocks the NEWEST guests already over the
-    new cap (oldest ``n`` stay online) — "set to 1" actually leaves one guest
-    connected even when several joined earlier. Raising the cap never
-    un-blocks anyone."""
+    """Lowering the guest cap admin-blocks the NEWEST approved guests already over the
+    new cap (oldest ``n`` stay online)."""
     from quota import db as db_mod
 
     cfg = _cfg(tmp_path)
@@ -650,10 +652,15 @@ def test_lowering_guest_limit_cuts_existing_over_cap(tmp_path):
                 gw._persist_lease("aa:bb:cc:dd:ee:5%d" % i, ip))
         assert loop.run_until_complete(
             gw.database.count_guest_users()) == 3
+        # simulate admin approving all 3 guests
         for i in range(1, 4):
             dev = loop.run_until_complete(
                 gw.database.get_device(mac="aa:bb:cc:dd:ee:5%d" % i))
-            assert dev.block_state == db_mod.BLOCK_OK
+            loop.run_until_complete(
+                gw.database.set_device_state(dev.id, db_mod.BLOCK_OK))
+            dev_updated = loop.run_until_complete(
+                gw.database.get_device(mac="aa:bb:cc:dd:ee:5%d" % i))
+            assert dev_updated.block_state == db_mod.BLOCK_OK
 
         # lower the cap to 1 -> exactly the OLDEST guest survives
         loop.run_until_complete(gw.service.set_guest_limit(1))
@@ -801,6 +808,7 @@ def test_decline_random_macs_refuses_brand_new_randomized_device(tmp_path):
     cfg.dhcp.reload_dnsmasq = False
     gw = Gateway(cfg)
     _get_loop().run_until_complete(gw.startup())
+    _cancel_maintenance(gw)
     try:
         # an existing random-MAC device (joined before the gate) keeps identity
         _get_loop().run_until_complete(
@@ -911,6 +919,7 @@ def test_new_device_quota_blocked_until_admin_assigns(tmp_path):
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
     _get_loop().run_until_complete(gw.startup())
+    _cancel_maintenance(gw)
     try:
         mac = "e6:2a:b3:09:b4:a8"  # the user's phone MAC
         _get_loop().run_until_complete(
@@ -2306,6 +2315,11 @@ def test_unblacklist_re_registers_device(tmp_path):
         redev = _get_loop().run_until_complete(
             gw.database.get_device(mac=mac))
         assert redev is not None, "un-blacklisting must re-register the device"
+        # Admin approves the re-registered guest
+        _get_loop().run_until_complete(
+            gw.database.set_device_state(redev.id, _db.BLOCK_OK))
+        _get_loop().run_until_complete(
+            gw.database.update_user(redev.user_id, block_state=_db.BLOCK_OK, fixed_gb=1.0))
         assert _get_loop().run_until_complete(
             gw.service.snapshot_state())[mac]["blocked"] is False
     finally:

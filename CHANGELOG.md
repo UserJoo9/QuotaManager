@@ -6,6 +6,49 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## [0.4.0] - 2026-09-30
+
+### Added
+- **Native VPN Subsystem (sing-box Engine & Clash API)**:
+  - Integrated high-performance `sing-box` core process supervisor with automatic dynamic config generation and validation.
+  - Full support for VLESS, VMess, Shadowsocks, Trojan, and WireGuard links with QR and clipboard link parsing.
+  - Interactive **Proxy Node Editor**: dynamically inspect and edit outbound settings (server, port, UUID/key, TLS/reality, ALPN, transport type, path, and host headers) directly in the UI.
+  - Global **"Allow Insecure TLS"** master switch to enable/disable certificate verification across all configs with one click.
+  - Real-time Clash API metrics integration (`127.0.0.1:9090`): live upload/download speed gauges, session transfer totals, and active connections count.
+  - Granular **VPN Policy Routing**: selectively route or bypass any user or individual device through the VPN tunnel.
+  - Live in-memory core log viewer with auto-scroll and log level filtering.
+- **VPN Connection Persistence & Auto-Healing**:
+  - Connection state and active node ID are now permanently persisted in SQLite (`vpn_auto_connect`, `vpn_active_node_id`).
+  - VPN connections stay connected across browser refreshes (F5), page navigation, and gateway reboots with automatic tunnel restoration.
+  - Automatic reconnect loop if the sing-box process terminates unexpectedly.
+- **Telegram WAN IP Notification Trigger**:
+  - Added Telegram Bot trigger in the WAN tab for remote gateway management from outside the home.
+  - Automatically detects public IP changes (from PPPoE `ppp0` or external probe) and sends formatted HTML alerts with timestamp, interface, and direct clickable dashboard URL.
+  - Real-time Firewall remote access status banner (verifying whether WAN port access is open or blocked in the firewall) and shortcut to Firewall configuration.
+  - Instant **⚡ Send Test Message** button to verify bot credentials.
+- **Ultra Network-Level Ad-Blocker & Cleaned DNS Tab**:
+  - Centralized hardware-level ad & tracker blocking shield with zero software or extensions needed on client devices.
+  - Streamlined 2-tier protection intensity selector: 🔥 **Ultra PRO** (HaGeZi Multi PRO + AdGuard + Anudeep) vs ⚡ **Standard** (StevenBlack).
+  - Dedicated **Category & Content Filters** card for parental controls (Adult Content, Gambling, Social Media, Streaming Platforms) with redundant blocklists removed.
+- **Browsing History & Real-Time Domain Analytics**:
+  - Added `quota/history_analytics.py` for real-time DNS query timeline analysis, top queried domains, and per-client resolution statistics.
+- **Static DHCP Reservations**:
+  - Added ability to assign fixed IP reservations to managed devices and custom MAC addresses directly from the Network tab.
+- **Usage Calibration Studio**:
+  - Added administrative usage calibration endpoint and standalone studio to adjust, calibrate, or test consumption numbers per device or user.
+
+### Fixed
+- **VPN Core Service Restart Hang**: Fixed service restart hang by bridging asyncio `_stop_event` directly to `uvicorn.Server.should_exit`, adding timeouts on sing-box process termination, and killing orphaned processes cleanly.
+- **VPN Policy Routing & Network Traffic Blackholing**: Fixed complete internet loss when connecting to VPN by switching sing-box TUN inbound to `stack: "gvisor"` with 1500 MTU, prioritizing private LAN subnets ahead of DNS hijack rules, and adopting sing-box 1.14+ modern DNS server format.
+- **VPN Process Search Log Spam**: Disabled `find_process` in sing-box router configuration to eliminate repeated `router: failed to search process: process not found` log messages on the gateway.
+- **VPN Ping Latency Test**: Fixed server and port extraction from full config formats, added active ping spinner, and ensured latency results are persisted and reflected immediately in the UI without getting overwritten.
+- **Browsing History Loading Animation**: Added smooth loading spinner animation in the Browsing History tab to prevent blank screen display while DNS analytics are compiling.
+- **Notification Spam**: Fixed notification buffer duplicates and dismiss state persistence in frontend toast system.
+- **DNS UI Layout**: Fixed broken layout where radio buttons expanded to 100% width causing large empty gaps.
+- **VPN Web UI Race Condition**: Fixed a frontend race condition where refreshing the page briefly caused VPN nodes to display as "Idle" before the status payload arrived.
+- **sing-box Outbound DNS Deprecation**: Fixed validation error in sing-box 1.12+ regarding deprecated outbound DNS rule item syntax.
+- **Revert to LAN & WAN Applier Fix**: Fixed `$'\r': command not found` and `set: pipefail: invalid option name` errors when switching between WAN and LAN topologies. Converted all shell scripts and Debian packaging files to LF, enforced `eol=lf` in `.gitattributes`, and added automatic runtime CRLF normalization in `TopologyManager` before invoking `topology.sh` or `test_pppoe.sh`.
+
 ## [0.3.3] - 2026-09-04
 
 ### Fixed

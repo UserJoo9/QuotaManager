@@ -1589,3 +1589,195 @@ def test_milestone_mark_invalid_value_raises(database):
             pass
         await d.close()
     run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Recharge Pack Queue (Add-on Packs)
+# ---------------------------------------------------------------------------
+
+def test_recharge_pack_default_30_day_expiry(database):
+    async def scenario():
+        d = await database()
+        now = _dt.datetime(2026, 8, 1, 12, 0, 0, tzinfo=TZ)
+        svc = QuotaService(d, timezone="Africa/Cairo", clock=make_clock(now))
+        await d.set_bundle(_db.Bundle(total_gb=100.0, reset_day=1))
+        await svc.open_period()
+
+        # Omit expires_at -> mandatory default is 30 days
+        pack = await svc.add_recharge_pack(gb=20.0, recurring=False, target_type="all")
+        assert pack.gb == 20.0
+        expected_exp = now.timestamp() + 30 * 86400
+        assert abs(pack.expires_at - expected_exp) < 2.0
+        assert pack.recurring is False
+        assert pack.target_type == "all"
+        assert pack.active is True
+        await d.close()
+    run(scenario())
+
+
+def test_recharge_pack_base_bundle_drawn_first(database):
+    async def scenario():
+        d = await database()
+        now = _dt.datetime(2026, 8, 1, 12, 0, 0, tzinfo=TZ)
+        svc = QuotaService(d, timezone="Africa/Cairo", clock=make_clock(now))
+        await d.set_bundle(_db.Bundle(total_gb=100.0, reset_day=1))
+        await svc.open_period()
+
+        u = await d.create_user("User1", _db.QUOTA_AUTO)
+        dev = await d.upsert_device("aa:bb:cc:dd:ee:11", user_id=u.id)
+
+        # Add 25 GB booster pack
+        pack = await svc.add_recharge_pack(gb=25.0, recurring=False, target_type="all")
+        assert pack.used_gb == 0.0
+        assert pack.remaining_gb == 25.0
+
+        # Usage under base bundle (80 GB < 100 GB)
+        await d.add_usage(dev.id, "2026-08-01", 0, int(80 * GB))
+        await svc.sync_recharges()
+        p = await d.get_recharge(pack.id)
+        assert p.used_gb == 0.0  # Base bundle consumed, pack untouched!
+        assert p.remaining_gb == 25.0
+
+        # Usage exceeds base bundle (115 GB total -> 15 GB excess)
+        await d.add_usage(dev.id, "2026-08-01", 0, int(35 * GB))
+        await svc.sync_recharges()
+        p = await d.get_recharge(pack.id)
+        assert p.used_gb == 15.0  # Exactly 15 GB drawn from pack
+        assert p.remaining_gb == 10.0
+        assert p.active is True
+        await d.close()
+    run(scenario())
+
+
+def test_recharge_pack_recurring_auto_renews(database):
+    async def scenario():
+        d = await database()
+        now = _dt.datetime(2026, 8, 1, 12, 0, 0, tzinfo=TZ)
+        svc = QuotaService(d, timezone="Africa/Cairo", clock=make_clock(now))
+        await d.set_bundle(_db.Bundle(total_gb=50.0, reset_day=1))
+        await svc.open_period()
+
+        u = await d.create_user("User1", _db.QUOTA_AUTO)
+        dev = await d.upsert_device("aa:bb:cc:dd:ee:22", user_id=u.id)
+
+        # 10 GB recurring pack
+        pack = await svc.add_recharge_pack(gb=10.0, recurring=True, target_type="all")
+
+        # Exceed base bundle by 12 GB (50 GB base + 12 GB = 62 GB total)
+        await d.add_usage(dev.id, "2026-08-01", 0, int(62 * GB))
+        await svc.sync_recharges()
+
+        # Recurring pack should have depleted and renewed with fresh 30-day expiry
+        p = await d.get_recharge(pack.id)
+        assert p.active is True
+        assert p.used_gb == 0.0
+        assert abs(p.expires_at - (now.timestamp() + 30 * 86400)) < 2.0
+        await d.close()
+    run(scenario())
+
+
+def test_recharge_pack_user_targeted(database):
+    async def scenario():
+        d = await database()
+        now = _dt.datetime(2026, 8, 1, 12, 0, 0, tzinfo=TZ)
+        svc = QuotaService(d, timezone="Africa/Cairo", clock=make_clock(now))
+        # Total bundle = 100 GB, Gateway takes 1 GB -> 99 GB shared among 2 users (49.5 GB each)
+        await d.set_bundle(_db.Bundle(total_gb=100.0, reset_day=1))
+        u1 = await d.create_user("Ahmed", _db.QUOTA_AUTO)
+        u2 = await d.create_user("Ali", _db.QUOTA_AUTO)
+        await svc.open_period()
+
+        b = await d.get_bundle()
+        assert b.allowances[u1.id] == 49.5
+        assert b.allowances[u2.id] == 49.5
+
+        # Add 10 GB dedicated pack to Ahmed
+        pack = await svc.add_recharge_pack(gb=10.0, target_type="user", target_id=u1.id)
+        b = await d.get_bundle()
+        # Ahmed's allowance increases by 10 GB; Ali's is unchanged
+        assert b.allowances[u1.id] == 59.5
+        assert b.allowances[u2.id] == 49.5
+        await d.close()
+    run(scenario())
+
+
+def test_recharge_pack_device_targeted_bypass(database):
+    async def scenario():
+        d = await database()
+        now = _dt.datetime(2026, 8, 1, 12, 0, 0, tzinfo=TZ)
+        svc = QuotaService(d, timezone="Africa/Cairo", clock=make_clock(now))
+        await d.set_bundle(_db.Bundle(total_gb=100.0, reset_day=1))
+        await svc.open_period()
+
+        u = await d.create_user("Family", _db.QUOTA_FIXED, 20.0)
+        laptop = await d.upsert_device("aa:bb:cc:dd:ee:33", name="Study Laptop", user_id=u.id)
+        phone = await d.upsert_device("aa:bb:cc:dd:ee:44", name="Brother Phone", user_id=u.id)
+
+        # Family uses 25 GB (> 20 GB allowance -> Family is quota blocked!)
+        await d.add_usage(phone.id, "2026-08-01", 0, int(25 * GB))
+        await svc.evaluate_blocks()
+
+        st_phone = await d.get_device(phone.id)
+        st_laptop = await d.get_device(laptop.id)
+        assert st_phone.block_state == _db.BLOCK_QUOTA
+        assert st_laptop.block_state == _db.BLOCK_QUOTA
+
+        # Add a 10 GB dedicated booster pack to the study laptop
+        pack = await svc.add_recharge_pack(gb=10.0, target_type="device", target_id=laptop.id)
+
+        # Laptop now bypasses user quota block because it has an active device booster!
+        await svc.evaluate_blocks()
+        st_laptop = await d.get_device(laptop.id)
+        st_phone = await d.get_device(phone.id)
+        assert st_laptop.block_state == _db.BLOCK_OK
+        assert st_phone.block_state == _db.BLOCK_QUOTA
+
+        snap = await svc.snapshot_state()
+        assert snap[laptop.mac]["blocked"] is False
+        assert snap[phone.mac]["blocked"] is True
+        await d.close()
+    run(scenario())
+
+
+def test_recharge_pack_rollover_and_reset_month(database):
+    async def scenario():
+        d = await database()
+        now = _dt.datetime(2026, 8, 1, 12, 0, 0, tzinfo=TZ)
+        svc = QuotaService(d, timezone="Africa/Cairo", clock=make_clock(now))
+        await d.set_bundle(_db.Bundle(total_gb=100.0, reset_day=1))
+        await svc.open_period()
+
+        u = await d.create_user("User1", _db.QUOTA_AUTO)
+        dev = await d.upsert_device("aa:bb:cc:dd:ee:55", user_id=u.id)
+
+        # Pack 1: 20 GB, future expiry (e.g. 20 days left), partially used 5 GB -> 15 GB remaining
+        future_exp = now.timestamp() + 20 * 86400
+        p1 = await svc.add_recharge_pack(gb=20.0, expires_at=future_exp, recurring=False, target_type="all")
+        # Pack 2: 10 GB, already expired
+        past_exp = now.timestamp() - 100
+        p2 = await d.create_recharge(gb=10.0, expires_at=past_exp, recurring=False, target_type="all")
+
+        # Use 105 GB (100 base + 5 GB of Pack 1)
+        await d.add_usage(dev.id, "2026-08-01", 0, int(105 * GB))
+        await svc.sync_recharges()
+
+        p1_state = await d.get_recharge(p1.id)
+        assert p1_state.used_gb == 5.0
+        assert p1_state.remaining_gb == 15.0
+
+        # Now admin performs "Reset month"!
+        await svc.reset_month()
+
+        # Pack 1 has remaining 15 GB and unexpired date -> SURVIVES reset month!
+        p1_after = await d.get_recharge(p1.id)
+        assert p1_after.active is True
+        assert p1_after.gb == 15.0  # Remaining balance carried over
+        assert p1_after.used_gb == 0.0
+        assert p1_after.expires_at == future_exp  # Original expiry kept
+
+        # Pack 2 expired -> deactivated
+        p2_after = await d.get_recharge(p2.id)
+        assert p2_after.active is False
+        await d.close()
+    run(scenario())
+

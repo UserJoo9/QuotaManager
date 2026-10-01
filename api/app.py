@@ -20,28 +20,33 @@ import os
 import secrets
 import subprocess
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 import yaml
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
-from api.schemas import (BundleUpdate, DeviceCreate,
+from api.schemas import (BundleUpdate, ConsumptionSpoofRequest, DeviceCreate,
                          DeviceUpdate, DnsImportRequest, DnsPresetEnable,
                          DnsQuickRule,
                          DnsServerUpdate, DomainRuleCreate, DomainRuleUpdate,
                          FirewallBanRequest, FirewallConfigUpdate,
                          FirewallGeoUpdate, FirewallUnbanRequest,
-                         GuestUpdate, LoginRequest, MacListsUpdate,
+                         GuestUpdate,
+                         LoginRequest, MacListsUpdate,
                          MilestoneNotify,
-                         NetworkUpdate, PasswordUpdate, SetupComplete,
+                         NetworkUpdate, PasswordUpdate, RechargeCreate, SetupComplete,
+                         StaticLeaseCreate,
                          TopUpRequest, TotpEnableRequest,
                          UpdateSettings, UserCreate, UserUpdate,
-                         WanRenewConfig, WanTest, WanUpdate)
+                         VpnConnectRequest, VpnNodeCreate, VpnNodeUpdate,
+                         VpnRoutingUpdateRequest, VpnSettingsUpdate,
+                         WanRenewConfig, WanTelegramTest, WanTelegramUpdate, WanTest, WanUpdate)
 from api import waf as _waf
 from core import passwords as _passwords
 from core import timeutil
@@ -49,10 +54,14 @@ from core.config import WafConfig, WebConfig
 from quota import db as _db
 from quota import dns_rules as _dns_rules
 from quota import totp as _totp
+from quota import wan_telegram as _wan_tg
 from quota.engine import GATEWAY_MAC, EngineSnapshot, SnapshotHolder
+from quota.history_analytics import get_history_analytics
 from quota.service import GB, QuotaService
 from quota.vendor import vendor_for
 from quota.version import __version__
+from quota.vpn_manager import VpnManager, VpnManagerStatus
+from quota.vpn_parser import generate_sing_box_config, parse_vpn_link, validate_sing_box_config
 
 log = logging.getLogger("quota.api")
 
@@ -271,6 +280,7 @@ def create_app(
     firewall: object | None = None,
     firewall_wan_preapply: Optional[Callable[[str], object]] = None,
     updater: object | None = None,
+    vpn_manager: Optional[object] = None,
     web_config: WebConfig | None = None,
     waf_config: WafConfig | None = None,
 ) -> FastAPI:
@@ -285,6 +295,16 @@ def create_app(
                   redoc_url=None,
                   openapi_url="/api/openapi.json" if web_cfg.docs_enabled
                   else None)
+
+    _vpn_manager: VpnManager = (
+        vpn_manager if isinstance(vpn_manager, VpnManager)
+        else VpnManager(
+            db=database,
+            vpn_share_manager=vpn_manager if (vpn_manager is not None and hasattr(vpn_manager, "reconcile")) else None,
+        )
+    )
+    app.state.vpn_manager = _vpn_manager
+
 
     def _now() -> _dt.datetime:
         return now_provider() if now_provider else _dt.datetime.now().astimezone()
@@ -462,6 +482,21 @@ def create_app(
             "device_down_gb": round(dusage.get("down", 0) / GB, 3),
         }
 
+    def _recharge_view(p: _db.RechargePack) -> dict[str, Any]:
+        return {
+            "id": p.id,
+            "gb": p.gb,
+            "used_gb": round(p.used_gb, 3),
+            "remaining_gb": p.remaining_gb,
+            "created_at": p.created_at,
+            "expires_at": p.expires_at,
+            "recurring": p.recurring,
+            "target_type": p.target_type,
+            "target_id": p.target_id,
+            "comment": p.comment,
+            "active": p.active,
+        }
+
     # -- dashboard --------------------------------------------------------------
 
     async def _vpn_share_payload() -> dict[str, Any]:
@@ -475,6 +510,7 @@ def create_app(
         return cfg
 
     async def _dashboard_payload() -> dict[str, Any]:
+        await service.sync_recharges()
         bundle = await database.get_bundle()
         users = await database.list_users()
         devices = await database.list_devices()
@@ -484,6 +520,15 @@ def create_app(
         active_ips = active_ips_getter() if active_ips_getter else None
         allowances = bundle.allowances
         live = holder.get()
+        now_ts = service._now().timestamp()
+        packs = await database.list_recharges(active_only=False)
+        gen_extra = sum(p.remaining_gb for p in packs if p.active and p.target_type == "all" and p.expires_at > now_ts)
+        effective_total = round(bundle.total_gb + gen_extra, 3)
+        device_booster_ids = {
+            p.target_id for p in packs
+            if p.active and p.target_type == "device" and p.target_id is not None
+            and p.remaining_gb > 0 and p.expires_at > now_ts
+        }
 
         # Per-user aggregate views (allowance + usage + resolved block state).
         user_views: dict[int, dict[str, Any]] = {}
@@ -539,7 +584,8 @@ def create_app(
             state = service.resolve_device_state(
                 user, d, uv["quota_blocked"] if uv else False,
                 allow_listed=d.mac in allow_set,
-                deny_listed=d.mac in deny_set)
+                deny_listed=d.mac in deny_set,
+                has_device_booster=d.id in device_booster_ids)
             dev_view = _device_view(
                 d, user, uv, leases, live, state,
                 usage_by_device.get(d.id, {"up": 0, "down": 0}),
@@ -560,14 +606,16 @@ def create_app(
         return {
             "bundle_source": await database.get_setting("bundle_source", "config"),
             "bundle": {
-                "total_gb": bundle.total_gb,
+                "base_total_gb": bundle.total_gb,
+                "total_gb": effective_total,
                 "used_gb": round(total_used, 3),
-                "remaining_gb": round(max(0.0, bundle.total_gb - total_used), 3),
+                "remaining_gb": round(max(0.0, effective_total - total_used), 3),
                 "reset_day": bundle.reset_day,
                 "period_type": bundle.period_type,
                 "period_start": bundle.period_start,
                 "period_end": bundle.period_end,
                 "days_left": days_left,
+                "recharges": [_recharge_view(p) for p in packs],
             },
             "users": [user_views[u.id] for u in users],
             "devices": devices_view,
@@ -595,6 +643,7 @@ def create_app(
             # applied state on its own — it can't wait for a manual refresh).
             # status is None in tests / degraded boot, matching /api/network.
             "vpn_share": await _vpn_share_payload(),
+            "vpn": asdict(await _vpn_manager.get_status()),
             # Live shaping engine state for the Network preview: whether tc is
             # available and whether the kernel tree matches the last save
             # ("applying…" while a rebuild is queued). None in tests / when
@@ -915,6 +964,13 @@ def create_app(
                          for a in hist["activity"]],
             "recent": recent,
         }
+
+    @app.get("/api/history/{device_id}/analytics", dependencies=[Depends(_require_auth)])
+    async def get_history_analytics_route(device_id: int | str, window: int = 24) -> dict[str, Any]:
+        """Categorized analytics (Top Apps, Top Websites, Timeline) for device or all."""
+        did = None if str(device_id).lower() in ("all", "0") else int(device_id)
+        return await get_history_analytics(database, device_id=did, hours=window)
+
 
     @app.get("/api/wan", dependencies=[Depends(_require_auth)])
     async def get_wan() -> dict[str, Any]:
@@ -1346,6 +1402,90 @@ def create_app(
         config (``{enabled, minutes, last}``)."""
         return await service.set_wan_renew_config(body.enabled, body.minutes)
 
+    async def _is_wan_firewall_exposed() -> bool:
+        if firewall is None:
+            return False
+        try:
+            cfg_ = await firewall.load_config()
+            return bool(cfg_.get("wan_confirmed"))
+        except Exception:
+            return False
+
+    @app.get("/api/wan/telegram", dependencies=[Depends(_require_auth)])
+    async def get_wan_telegram() -> dict[str, Any]:
+        """Fetch Telegram notification trigger configuration for WAN IP changes."""
+        enabled = (await database.get_setting("wan_telegram_enabled", "0")) == "1"
+        stored_token = await database.get_setting("wan_telegram_bot_token", "")
+        chat_id = await database.get_setting("wan_telegram_chat_id", "")
+        last_ip = await database.get_setting("wan_telegram_last_ip", "")
+        last_sent = await database.get_setting("wan_telegram_last_sent", "")
+
+        wan_exposed = await _is_wan_firewall_exposed()
+        web_port = int(getattr(web_cfg, "port", 8080) or 8080)
+        web_proto = "https" if getattr(web_cfg, "tls_certfile", None) else "http"
+
+        return {
+            "enabled": enabled,
+            "has_token": bool(stored_token),
+            "bot_token": _wan_tg.mask_bot_token(stored_token),
+            "chat_id": chat_id,
+            "last_ip": last_ip,
+            "last_sent": last_sent,
+            "wan_exposed": wan_exposed,
+            "web_port": web_port,
+            "web_proto": web_proto,
+        }
+
+    @app.post("/api/wan/telegram", dependencies=[Depends(_require_auth)])
+    async def set_wan_telegram(body: WanTelegramUpdate) -> dict[str, Any]:
+        """Save Telegram WAN IP change trigger settings."""
+        await database.set_setting("wan_telegram_enabled", "1" if body.enabled else "0")
+        if body.bot_token is not None and body.bot_token.strip():
+            await database.set_setting("wan_telegram_bot_token", body.bot_token.strip())
+        await database.set_setting("wan_telegram_chat_id", (body.chat_id or "").strip())
+
+        await database.add_event(
+            f"Telegram WAN IP trigger {'enabled' if body.enabled else 'disabled'}",
+            "info",
+        )
+        return await get_wan_telegram()
+
+    @app.post("/api/wan/telegram/test", dependencies=[Depends(_require_auth)])
+    async def test_wan_telegram(body: WanTelegramTest) -> dict[str, Any]:
+        """Send an immediate test notification to the configured Telegram bot."""
+        token = (body.bot_token or "").strip()
+        if not token:
+            token = await database.get_setting("wan_telegram_bot_token", "")
+        chat = (body.chat_id or "").strip()
+        if not chat:
+            chat = await database.get_setting("wan_telegram_chat_id", "")
+
+        if not token or not chat:
+            raise HTTPException(400, "Both Telegram Bot Token and Chat ID are required for testing.")
+
+        effective_top = getattr(getattr(service, "cfg", None), "engine", None)
+        top = getattr(effective_top, "topology", "wan") if effective_top else "wan"
+        current_ip = await _wan_tg.get_current_public_ip(top) or "156.204.12.34"
+
+        wan_exposed = await _is_wan_firewall_exposed()
+        web_port = int(getattr(web_cfg, "port", 8080) or 8080)
+        web_proto = "https" if getattr(web_cfg, "tls_certfile", None) else "http"
+
+        msg = _wan_tg.format_wan_ip_message(
+            ip=current_ip,
+            web_port=web_port,
+            web_proto=web_proto,
+            wan_exposed=wan_exposed,
+            interface="ppp0" if top == "wan" else "eth0",
+            is_test=True,
+        )
+
+        ok, err_desc = await _wan_tg.send_telegram_message(token, chat, msg)
+        if not ok:
+            raise HTTPException(400, f"Failed to send Telegram message: {err_desc}")
+
+        return {"ok": True, "message": "Test notification sent successfully to Telegram!"}
+
     @app.get("/api/devices", dependencies=[Depends(_require_auth)])
     async def list_devices() -> list[dict[str, Any]]:
         return (await _dashboard_payload())["devices"]
@@ -1519,6 +1659,22 @@ def create_app(
         if result is None:
             raise HTTPException(404, "user not found")
         return result
+
+    @app.post("/api/admin/spoof-consumption", dependencies=[Depends(_require_auth)])
+    async def spoof_consumption(body: ConsumptionSpoofRequest) -> dict[str, Any]:
+        """Admin private endpoint to calibrate / spoof consumption for a user or device."""
+        try:
+            return await service.spoof_consumption(
+                user_id=body.user_id,
+                mode=body.mode,
+                gb=body.gb,
+                device_id=body.device_id,
+                delta_sign=body.delta_sign,
+                log_event=body.log_event,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
 
     @app.patch("/api/users/{user_id}/dns", dependencies=[Depends(_require_auth)])
     async def set_user_dns(user_id: int, body: DnsServerUpdate) -> dict[str, Any]:
@@ -1759,11 +1915,22 @@ def create_app(
 
     @app.get("/api/bundle", dependencies=[Depends(_require_auth)])
     async def get_bundle() -> dict[str, Any]:
+        await service.sync_recharges()
         b = await database.get_bundle()
-        return {"total_gb": b.total_gb, "reset_day": b.reset_day,
-                "period_type": b.period_type,
-                "period_start": b.period_start, "period_end": b.period_end,
-                "allowances": b.allowances}
+        packs = await database.list_recharges(active_only=True)
+        now_ts = service._now().timestamp()
+        gen_extra = sum(p.remaining_gb for p in packs if p.target_type == "all" and p.expires_at > now_ts)
+        effective_total = round(b.total_gb + gen_extra, 3)
+        return {
+            "total_gb": effective_total,
+            "base_total_gb": b.total_gb,
+            "reset_day": b.reset_day,
+            "period_type": b.period_type,
+            "period_start": b.period_start,
+            "period_end": b.period_end,
+            "allowances": b.allowances,
+            "recharges": [_recharge_view(p) for p in packs],
+        }
 
     async def _apply_bundle_values(total_gb: float | None,
                                    reset_day: int | None,
@@ -1805,7 +1972,13 @@ def create_app(
             await database.set_setting("bundle_source", "dashboard")
             result = await service.recharge(body.add_gb)
             b = await database.get_bundle()
-            return {"total_gb": b.total_gb, "reset_day": b.reset_day,
+            packs = await database.list_recharges(active_only=True)
+            now_ts = service._now().timestamp()
+            gen_extra = sum(p.remaining_gb for p in packs if p.target_type == "all" and p.expires_at > now_ts)
+            effective_total = round(b.total_gb + gen_extra, 3)
+            return {"total_gb": effective_total,
+                    "base_total_gb": b.total_gb,
+                    "reset_day": b.reset_day,
                     "period_type": b.period_type,
                     "added_gb": result["added_gb"]}
         await _apply_bundle_values(body.total_gb, body.reset_day,
@@ -1813,6 +1986,40 @@ def create_app(
         b = await database.get_bundle()
         return {"total_gb": b.total_gb, "reset_day": b.reset_day,
                 "period_type": b.period_type}
+
+    @app.get("/api/bundle/recharges", dependencies=[Depends(_require_auth)])
+    async def list_bundle_recharges() -> list[dict[str, Any]]:
+        await service.sync_recharges()
+        packs = await database.list_recharges(active_only=False)
+        return [_recharge_view(p) for p in packs]
+
+    @app.post("/api/bundle/recharges", status_code=201, dependencies=[Depends(_require_auth)])
+    async def create_bundle_recharge(body: RechargeCreate) -> dict[str, Any]:
+        if body.target_type == "user":
+            if body.target_id is None or await database.get_user(body.target_id) is None:
+                raise HTTPException(400, "Valid target_id is required when target_type is 'user'")
+        elif body.target_type == "device":
+            if body.target_id is None or await database.get_device(body.target_id) is None:
+                raise HTTPException(400, "Valid target_id is required when target_type is 'device'")
+        elif body.target_type != "all":
+            raise HTTPException(400, "target_type must be 'all', 'user', or 'device'")
+
+        pack = await service.add_recharge_pack(
+            gb=body.gb,
+            expires_at=body.expires_at,
+            recurring=body.recurring,
+            target_type=body.target_type,
+            target_id=body.target_id,
+            comment=body.comment or "",
+        )
+        return _recharge_view(pack)
+
+    @app.delete("/api/bundle/recharges/{recharge_id}", dependencies=[Depends(_require_auth)])
+    async def delete_bundle_recharge(recharge_id: int) -> dict[str, Any]:
+        ok = await service.delete_recharge_pack(recharge_id)
+        if not ok:
+            raise HTTPException(404, "recharge pack not found")
+        return {"id": recharge_id, "deleted": True}
 
     @app.post("/api/reset-month", dependencies=[Depends(_require_auth)])
     async def reset_month() -> dict[str, Any]:
@@ -1890,6 +2097,86 @@ def create_app(
                 "speed_limit_mbps": await service.guest_speed_limit_mbps(),
                 "stop_new": await service.stop_new_connections()}
 
+    # -- Guest Mode (Admin Accept / Reject) -----------------------------------
+
+    @app.post("/api/guest/{device_id}/approve", dependencies=[Depends(_require_auth)])
+    async def approve_guest(device_id: int) -> dict[str, Any]:
+        """Admin accepts a guest device, unblocking them and granting the guest quota."""
+        dev = await database.get_device(device_id)
+        if not dev:
+            u = await database.get_user(device_id)
+            if u:
+                return await approve_guest_user(device_id)
+            raise HTTPException(404, "Device not found")
+        gq = await service.guest_quota_gb()
+        quota_gb = dev.fixed_gb if (dev.fixed_gb and dev.fixed_gb > 0) else gq
+        await database.update_device(dev.id, quota_mode=_db.QUOTA_FIXED,
+                                     fixed_gb=quota_gb, block_state=_db.BLOCK_OK)
+        if dev.user_id:
+            await database.update_user(dev.user_id, quota_mode=_db.QUOTA_FIXED,
+                                       fixed_gb=quota_gb, block_state=_db.BLOCK_OK, guest=True)
+        await database.add_event(f"Guest device approved by admin: {dev.mac} ({quota_gb:g} GB)", "info", dev.id)
+        await service.recompute_allowances()
+        _schedule_shaping_sync()
+        return {"ok": True, "block_state": _db.BLOCK_OK, "quota_gb": quota_gb}
+
+    @app.post("/api/guest/{device_id}/reject", dependencies=[Depends(_require_auth)])
+    async def reject_guest(device_id: int) -> dict[str, Any]:
+        """Admin rejects/blocks a guest device. Card stays visible so admin can accept later."""
+        dev = await database.get_device(device_id)
+        if not dev:
+            u = await database.get_user(device_id)
+            if u:
+                return await reject_guest_user(device_id)
+            raise HTTPException(404, "Device not found")
+        await database.set_device_state(dev.id, _db.BLOCK_ADMIN)
+        if dev.user_id:
+            await database.update_user(dev.user_id, block_state=_db.BLOCK_ADMIN)
+        await database.add_event(f"Guest device rejected/blocked by admin: {dev.mac}", "warn", dev.id)
+        await service.recompute_allowances()
+        _schedule_shaping_sync()
+        return {"ok": True, "block_state": _db.BLOCK_ADMIN}
+
+    @app.post("/api/guest/user/{user_id}/approve", dependencies=[Depends(_require_auth)])
+    async def approve_guest_user(user_id: int) -> dict[str, Any]:
+        """Admin accepts a guest user, unblocking them and their devices and granting the guest quota."""
+        u = await database.get_user(user_id)
+        if not u:
+            dev = await database.get_device(user_id)
+            if dev and dev.user_id:
+                return await approve_guest_user(dev.user_id)
+            raise HTTPException(404, "User not found")
+        gq = await service.guest_quota_gb()
+        quota_gb = u.fixed_gb if (u.fixed_gb and u.fixed_gb > 0) else gq
+        await database.update_user(user_id, quota_mode=_db.QUOTA_FIXED,
+                                   fixed_gb=quota_gb, block_state=_db.BLOCK_OK, guest=True)
+        devs = await database.list_devices(user_id=user_id)
+        for d in devs:
+            await database.update_device(d.id, quota_mode=_db.QUOTA_FIXED,
+                                         fixed_gb=quota_gb, block_state=_db.BLOCK_OK)
+        await database.add_event(f"Guest user approved by admin: {u.name or 'Guest'} ({quota_gb:g} GB)", "info")
+        await service.recompute_allowances()
+        _schedule_shaping_sync()
+        return {"ok": True, "block_state": _db.BLOCK_OK, "quota_gb": quota_gb}
+
+    @app.post("/api/guest/user/{user_id}/reject", dependencies=[Depends(_require_auth)])
+    async def reject_guest_user(user_id: int) -> dict[str, Any]:
+        """Admin rejects/blocks a guest user. Card stays visible so admin can accept later."""
+        u = await database.get_user(user_id)
+        if not u:
+            dev = await database.get_device(user_id)
+            if dev and dev.user_id:
+                return await reject_guest_user(dev.user_id)
+            raise HTTPException(404, "User not found")
+        await database.update_user(user_id, block_state=_db.BLOCK_ADMIN)
+        devs = await database.list_devices(user_id=user_id)
+        for d in devs:
+            await database.set_device_state(d.id, _db.BLOCK_ADMIN)
+        await database.add_event(f"Guest user rejected/blocked by admin: {u.name or 'Guest'}", "warn")
+        await service.recompute_allowances()
+        _schedule_shaping_sync()
+        return {"ok": True, "block_state": _db.BLOCK_ADMIN}
+
     # -- speed shaping (Network tab) ------------------------------------------
 
     @app.get("/api/network", dependencies=[Depends(_require_auth)])
@@ -1957,7 +2244,314 @@ def create_app(
             await service.set_mac_list("deny", body.deny)
         return await service.mac_lists()
 
+    # -- static DHCP reservations (MAC <-> IP) ---------------------------------
+
+    @app.get("/api/network/static-leases", dependencies=[Depends(_require_auth)])
+    async def get_static_leases() -> list[dict[str, Any]]:
+        leases = await database.list_static_leases()
+        devices = await database.list_devices()
+        dev_by_mac = {d.mac.lower(): d for d in devices}
+        result = []
+        for item in leases:
+            mac_key = item["mac"].lower()
+            dev = dev_by_mac.get(mac_key)
+            result.append({
+                "mac": item["mac"],
+                "ip": item["ip"],
+                "hostname": item.get("hostname") or "",
+                "created_at": item.get("created_at"),
+                "device_id": dev.id if dev else None,
+                "device_name": dev.name if dev else "",
+            })
+        return result
+
+    @app.post("/api/network/static-leases", dependencies=[Depends(_require_auth)])
+    async def create_static_lease(body: StaticLeaseCreate) -> dict[str, Any]:
+        mac = body.mac.lower()
+        ip = body.ip.strip()
+
+        # Check if IP is already assigned to a DIFFERENT MAC
+        existing = await database.get_static_lease_by_ip(ip)
+        if existing and existing["mac"].lower() != mac:
+            raise HTTPException(400, f"IP {ip} is already assigned to MAC {existing['mac']}")
+
+        saved = await database.set_static_lease(mac, ip, body.hostname or "")
+        dev = await database.get_device(mac=mac)
+        label = dev.name if (dev and dev.name) else (body.hostname or mac)
+        await database.add_event(f"Static IP reservation set: {label} ({mac}) -> {ip}", "info")
+        _schedule_dns_apply()
+        return {
+            "mac": saved.get("mac", mac),
+            "ip": saved.get("ip", ip),
+            "hostname": saved.get("hostname", body.hostname or ""),
+            "device_id": dev.id if dev else None,
+            "device_name": dev.name if dev else "",
+        }
+
+    @app.delete("/api/network/static-leases/{mac}", dependencies=[Depends(_require_auth)])
+    async def delete_static_lease(mac: str) -> dict[str, Any]:
+        clean_mac = mac.strip().lower().replace("-", ":")
+        deleted = await database.delete_static_lease(clean_mac)
+        if not deleted:
+            raise HTTPException(404, "Static lease not found")
+        await database.add_event(f"Static IP reservation removed: {clean_mac}", "info")
+        _schedule_dns_apply()
+        return {"mac": clean_mac, "deleted": True}
+
+    # -- VPN subsystem (Built-in sing-box + Clash API) -----------------------
+
+    @app.get("/api/vpn/status", dependencies=[Depends(_require_auth)])
+    async def get_vpn_status() -> dict[str, Any]:
+        status = await _vpn_manager.get_status()
+        return asdict(status)
+
+    @app.post("/api/vpn/connect", dependencies=[Depends(_require_auth)])
+    async def connect_vpn(body: VpnConnectRequest) -> dict[str, Any]:
+        ok, msg = await _vpn_manager.connect(body.node_id)
+        if not ok:
+            raise HTTPException(400, msg)
+        await database.add_event(f"VPN connected to node #{body.node_id}", "info")
+        _schedule_vpn_apply()
+        return {"ok": True, "message": msg}
+
+    @app.post("/api/vpn/disconnect", dependencies=[Depends(_require_auth)])
+    async def disconnect_vpn() -> dict[str, Any]:
+        await _vpn_manager.disconnect()
+        await database.add_event("VPN disconnected", "info")
+        _schedule_vpn_apply()
+        return {"ok": True}
+
+    @app.get("/api/vpn/nodes", dependencies=[Depends(_require_auth)])
+    async def list_vpn_nodes() -> list[dict[str, Any]]:
+        nodes = await database.list_vpn_nodes()
+        return [asdict(n) for n in nodes]
+
+    @app.post("/api/vpn/nodes", status_code=201, dependencies=[Depends(_require_auth)])
+    async def create_vpn_node(body: VpnNodeCreate) -> dict[str, Any]:
+        try:
+            name, proto, parsed_config = parse_vpn_link(body.raw)
+        except Exception as e:
+            raise HTTPException(400, f"Failed to parse VPN link: {e}") from None
+
+        node_name = body.name.strip() if body.name and body.name.strip() else name
+        config_json = json.dumps(parsed_config)
+
+        # Validate with sing-box check
+        allow_insecure = (await database.get_setting("vpn_allow_insecure", "0")) == "1"
+        full_cfg = generate_sing_box_config(parsed_config, allow_insecure=allow_insecure)
+        valid, val_err = validate_sing_box_config(full_cfg)
+        if not valid:
+            raise HTTPException(400, f"sing-box configuration validation failed: {val_err}")
+
+        node = await database.create_vpn_node(
+            name=node_name,
+            protocol=proto,
+            raw_uri=body.raw,
+            config_json=config_json,
+        )
+        await database.add_event(f"VPN node added: {node.name} ({proto})", "info")
+        return asdict(node)
+
+    @app.patch("/api/vpn/nodes/{node_id}", dependencies=[Depends(_require_auth)])
+    async def update_vpn_node(node_id: int, body: VpnNodeUpdate) -> dict[str, Any]:
+        node = await database.get_vpn_node(node_id)
+        if not node:
+            raise HTTPException(404, "VPN node not found")
+
+        fields_to_update: dict[str, Any] = {}
+        if body.name is not None and body.name.strip():
+            fields_to_update["name"] = body.name.strip()
+
+        if body.raw is not None and body.raw.strip():
+            try:
+                parsed_name, proto, parsed_config = parse_vpn_link(body.raw.strip())
+            except Exception as e:
+                raise HTTPException(400, f"Failed to parse VPN link: {e}") from None
+
+            allow_insecure = (await database.get_setting("vpn_allow_insecure", "0")) == "1"
+            full_cfg = generate_sing_box_config(parsed_config, allow_insecure=allow_insecure)
+            valid, val_err = validate_sing_box_config(full_cfg)
+            if not valid:
+                raise HTTPException(400, f"sing-box configuration validation failed: {val_err}")
+
+            fields_to_update["protocol"] = proto
+            fields_to_update["raw_uri"] = body.raw.strip()
+            fields_to_update["config_json"] = json.dumps(parsed_config)
+            if "name" not in fields_to_update and parsed_name:
+                fields_to_update["name"] = parsed_name
+        else:
+            has_structured = any(
+                v is not None for v in (
+                    body.server, body.server_port, body.uuid, body.sni,
+                    body.flow, body.pbk, body.sid, body.transport, body.path
+                )
+            )
+            if has_structured:
+                try:
+                    outbound = json.loads(node.config_json)
+                except Exception:
+                    outbound = {}
+
+                if body.server is not None and body.server.strip():
+                    outbound["server"] = body.server.strip()
+                if body.server_port is not None:
+                    outbound["server_port"] = int(body.server_port)
+                if body.uuid is not None and body.uuid.strip():
+                    if "password" in outbound and "uuid" not in outbound:
+                        outbound["password"] = body.uuid.strip()
+                    else:
+                        outbound["uuid"] = body.uuid.strip()
+
+                if body.flow is not None:
+                    if body.flow.strip():
+                        outbound["flow"] = body.flow.strip()
+                    elif "flow" in outbound:
+                        del outbound["flow"]
+
+                if body.sni is not None or body.pbk is not None or body.sid is not None:
+                    tls = outbound.setdefault("tls", {"enabled": True})
+                    if body.sni is not None:
+                        tls["server_name"] = body.sni.strip()
+                    if body.pbk is not None or body.sid is not None:
+                        if body.pbk and body.pbk.strip():
+                            reality = tls.setdefault("reality", {"enabled": True})
+                            reality["public_key"] = body.pbk.strip()
+                            if body.sid is not None:
+                                reality["short_id"] = body.sid.strip()
+                        elif "reality" in tls:
+                            del tls["reality"]
+
+                if body.transport is not None:
+                    t = body.transport.strip().lower()
+                    if t == "ws":
+                        outbound["transport"] = {
+                            "type": "ws",
+                            "path": (body.path or "/").strip(),
+                        }
+                    elif t == "grpc":
+                        outbound["transport"] = {
+                            "type": "grpc",
+                            "service_name": (body.path or "").strip(),
+                        }
+                    elif t == "tcp" and "transport" in outbound:
+                        del outbound["transport"]
+
+                allow_insecure = (await database.get_setting("vpn_allow_insecure", "0")) == "1"
+                full_cfg = generate_sing_box_config(outbound, allow_insecure=allow_insecure)
+                valid, val_err = validate_sing_box_config(full_cfg)
+                if not valid:
+                    raise HTTPException(400, f"sing-box configuration validation failed: {val_err}")
+
+                fields_to_update["config_json"] = json.dumps(outbound)
+
+        if fields_to_update:
+            node = await database.update_vpn_node(node_id, **fields_to_update)
+
+        # If the updated node is the active connected one, reconnect with new config
+        if _vpn_manager.active_node and _vpn_manager.active_node.id == node_id:
+            await _vpn_manager.connect(node_id)
+
+        await database.add_event(f"VPN node #{node_id} updated", "info")
+        return asdict(node)
+
+    @app.delete("/api/vpn/nodes/{node_id}", dependencies=[Depends(_require_auth)])
+    async def delete_vpn_node(node_id: int) -> dict[str, Any]:
+        if _vpn_manager.active_node and _vpn_manager.active_node.id == node_id:
+            await _vpn_manager.disconnect()
+        deleted = await database.delete_vpn_node(node_id)
+        if not deleted:
+            raise HTTPException(404, "VPN node not found")
+        await database.add_event(f"VPN node #{node_id} deleted", "info")
+        return {"deleted": True}
+
+    @app.post("/api/vpn/nodes/{node_id}/ping", dependencies=[Depends(_require_auth)])
+    async def ping_vpn_node(node_id: int) -> dict[str, Any]:
+        node = await database.get_vpn_node(node_id)
+        if not node:
+            raise HTTPException(404, "VPN node not found")
+        server = ""
+        port = 443
+        try:
+            cfg = json.loads(node.config_json)
+            server = cfg.get("server", "")
+            port = int(cfg.get("server_port", 443))
+            if not server and "outbounds" in cfg and isinstance(cfg["outbounds"], list):
+                for ob in cfg["outbounds"]:
+                    if isinstance(ob, dict) and ob.get("server"):
+                        server = ob.get("server", "")
+                        port = int(ob.get("server_port", 443))
+                        break
+        except Exception:
+            raise HTTPException(400, "Cannot extract server and port from node config")
+
+        if not server:
+            raise HTTPException(400, "Node config does not specify a target server")
+
+        ping_ms = await _vpn_manager.ping_node(server, port)
+        await database.update_vpn_node(node_id, ping_ms=ping_ms)
+        return {"node_id": node_id, "ping_ms": ping_ms}
+
+    @app.get("/api/vpn/routing", dependencies=[Depends(_require_auth)])
+    async def get_vpn_routing() -> dict[str, Any]:
+        users = await database.list_users()
+        devices = await database.list_devices()
+        rules = await database.get_vpn_routing_rules()
+        rule_map = {f"{r.target_type}:{r.target_id}": r.route_vpn for r in rules}
+
+        users_list = []
+        for u in users:
+            route_vpn = rule_map.get(f"user:{u.id}", not u.vpn_bypass)
+            users_list.append({
+                "id": u.id,
+                "name": u.name or f"User #{u.id}",
+                "route_vpn": route_vpn,
+            })
+
+        devices_list = []
+        for d in devices:
+            route_vpn = rule_map.get(f"device:{d.id}", not d.vpn_bypass)
+            devices_list.append({
+                "id": d.id,
+                "name": d.name or d.mac,
+                "mac": d.mac,
+                "user_id": d.user_id,
+                "route_vpn": route_vpn,
+            })
+
+        return {
+            "users": users_list,
+            "devices": devices_list,
+        }
+
+    @app.post("/api/vpn/routing", dependencies=[Depends(_require_auth)])
+    async def set_vpn_routing(body: VpnRoutingUpdateRequest) -> dict[str, Any]:
+        rule = await database.set_vpn_routing_rule(body.target_type, body.target_id, body.route_vpn)
+        if body.target_type == "device":
+            await database.update_device(body.target_id, vpn_bypass=not body.route_vpn)
+        elif body.target_type == "user":
+            await database.update_user(body.target_id, vpn_bypass=not body.route_vpn)
+
+        _schedule_vpn_apply()
+        return asdict(rule)
+
+    @app.get("/api/vpn/logs", dependencies=[Depends(_require_auth)])
+    async def get_vpn_logs(limit: int = 150) -> dict[str, Any]:
+        return {"logs": _vpn_manager.get_logs(limit=limit)}
+
+    @app.get("/api/vpn/settings", dependencies=[Depends(_require_auth)])
+    async def get_vpn_settings() -> dict[str, Any]:
+        allow_insecure = (await database.get_setting("vpn_allow_insecure", "0")) == "1"
+        return {"allow_insecure": allow_insecure}
+
+    @app.post("/api/vpn/settings", dependencies=[Depends(_require_auth)])
+    async def update_vpn_settings(body: VpnSettingsUpdate) -> dict[str, Any]:
+        await database.set_setting("vpn_allow_insecure", "1" if body.allow_insecure else "0")
+        if _vpn_manager.state == "connected" and _vpn_manager.active_node:
+            await _vpn_manager.connect(_vpn_manager.active_node.id)
+        return {"allow_insecure": body.allow_insecure}
+
     # -- software updates (Admin tab) ------------------------------------------
+
 
     def _updater_or_404():
         if updater is None:
@@ -2230,10 +2824,16 @@ def create_app(
         await _ensure_admin_password(database)
         await service.ensure_period()
         push_task = asyncio.get_running_loop().create_task(_push_loop())
+        # Auto-restore persistent VPN tunnel if previously connected
+        asyncio.get_running_loop().create_task(_vpn_manager.auto_restore())
         try:
             yield
         finally:
             push_task.cancel()
+            try:
+                await asyncio.wait_for(_vpn_manager.disconnect(user_initiated=False), timeout=3.0)
+            except Exception as e:
+                log.debug("VPN shutdown disconnect notice: %s", e)
 
     app.router.lifespan_context = _lifespan
 
