@@ -1,10 +1,6 @@
-# Quota Manager
-
+# <img src="docs/logo/favicon.png" width="48" height="48" valign="middle" alt="شعار Quota Manager"> Quota Manager
+ 
 <a href="README.md"><img src="https://img.shields.io/badge/English-English-blue" alt="English"></a> ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
-
-<table>
-  <tr>
-    <td dir="rtl">
 
 وزّع حزمة الإنترنت المحدودة بشكل عادل بين كل شخص في المنزل. يحصل كل **مستخدم**
 على حصة (بجيجابايت ثابت، أو حصة متساوية من المتبقي)، وتتقاسمها أجهزته كلها
@@ -36,11 +32,6 @@
 - يوفّر **لوحة تحكم داكنة بلمسة زجاجية (obsidian-glass)** يمكنك فتحها من أي
   هاتف على الشبكة المحلية — وواجهة المستخدم كلها (لوحة التحكم، صفحة مراحل
   المنزل، وتقرير الاستهلاك) مريحة للهاتف وتعتمد على اللمس أولًا
-
-    </td>
-    <td width="300" align="center"><img src="docs/logo/favicon.png" width="280" alt="شعار Quota Manager"></td>
-  </tr>
-</table>
 
 <p align="center">
   <img src="docs/diagrams/AR_sketch_diagram.png" width="640"

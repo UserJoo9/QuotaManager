@@ -1,11 +1,6 @@
-# Quota Manager
+# <img src="docs/logo/favicon.png" width="48" height="48" valign="middle" alt="Quota Manager logo"> Quota Manager
 
 <a href="README_AR.md"><img src="https://img.shields.io/badge/%D8%A7%D9%84%D8%B9%D8%B1%D8%A8%D9%8A%D8%A9-Arabic-green" alt="العربية"></a> ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
-
-<table>
-  <tr>
-    <td width="300" align="center"><img src="docs/logo/favicon.png" width="280" alt="Quota Manager logo"></td>
-    <td>
 
 Split your metered internet bundle fairly across every person in the house. Each
 **user** gets an allowance (fixed GB, or an equal share of what's left), their
@@ -38,10 +33,6 @@ gateway:
 - Serves a **dark obsidian-glass dashboard** you can open from any phone on
   the LAN — the whole UI (dashboard, the household milestone page, and the
   consumption report) is phone-friendly and touch-first
-
-    </td>
-  </tr>
-</table>
 
 <p align="center">
   <img src="docs/diagrams/EN_sketch_diagram.png" width="640"
