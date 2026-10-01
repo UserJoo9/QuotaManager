@@ -189,11 +189,11 @@ Maintainer: Youssef Alkhodary <youssef.alkhodary@users.noreply.github.com>
 Depends: python3 (>= 3.10), python3-venv, python3-pip, dnsmasq, nftables,
          iproute2, kmod, ppp, ca-certificates
 Filename: pool/main/q/quota-manager/quota-manager_0.4.0_all.deb
-Size: 50366934
-MD5sum: 15ced81af663c898cc5036a002824df3
-SHA1: 315548c392cb9bb6f956e55e056bb1548173b096
-SHA256: 7e53902f3427084cf022f9914367239ce0e04bb45019ed12023dca5e0a8c33d4
-SHA512: 079fddab65c4c058f22b29e4263dbf63d5f38e04982bf5c098ad15445e2f4f727128b77d6991445f378e5ac9adff8434f840245b3a8812976718cddae0c35f73
+Size: 50367066
+MD5sum: 6ef8a46fc417188c110d3f1bc2168375
+SHA1: 549e8d179a2fdd728ec3104787aef522f06ab7aa
+SHA256: e42540a145d7a1f293fcf94c4d61048a836d0b360f128f718299fc6afeab0f8b
+SHA512: db5c72eadd2376dff5eded9c9bacd44cd334e06718d1697a661172c7aeb27508ca29b775f92f7b20b775b9b0686beb5ec44ec9939191de2ab42afe325e2c66f7
 Homepage: https://github.com/UserJoo9/QuotaManager
 Description: Fair-split metered-internet quota gateway
  Split a metered internet bundle fairly across users and devices. A person's
