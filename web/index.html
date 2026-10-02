@@ -14,16 +14,31 @@
   <!-- LOGIN SCREEN -->
   <div id="login-screen" class="screen hidden">
     <div class="glass card login-card">
-      <h1 class="logo">Quota<span>Manager</span></h1>
-      <p class="subtitle">Internet Quota Management</p>
+      <div class="login-brand">
+        <div class="login-icon-ring">
+          <svg class="login-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="13" width="20" height="8" rx="2" ry="2"></rect>
+            <path d="M6 13V8a6 6 0 0 1 12 0v5"></path>
+            <line x1="12" y1="16" x2="12" y2="18"></line>
+          </svg>
+        </div>
+        <h1 class="login-portal-title">Admin <span>Portal</span></h1>
+      </div>
       <form id="login-form" autocomplete="off">
-        <label for="login-password">Admin password</label>
-        <input type="password" id="login-password" placeholder="••••••••" required>
+        <div class="login-input-wrap">
+          <input type="password" id="login-password" placeholder="Enter password" autocomplete="current-password" required autofocus>
+        </div>
         <label for="login-totp" id="login-totp-label" class="hidden">Authenticator code</label>
-        <input type="text" id="login-totp" inputmode="numeric" autocomplete="one-time-code" placeholder="000 000" class="hidden">
-        <button type="submit" class="btn primary" id="login-submit">Login</button>
+        <div class="login-input-wrap">
+          <input type="text" id="login-totp" inputmode="numeric" autocomplete="one-time-code" placeholder="000 000" class="hidden">
+        </div>
+        <button type="submit" class="btn primary login-btn" id="login-submit">Login</button>
         <p id="login-error" class="error hidden">Wrong password. Try again.</p>
       </form>
+      <div class="login-footer-status">
+        <span class="status-pulse-dot"></span>
+        <span>Gateway System Ready</span>
+      </div>
     </div>
   </div>
 
