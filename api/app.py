@@ -374,6 +374,38 @@ def create_app(
         except RuntimeError:  # no running event loop (should not happen in a route)
             pass
 
+    _engine = engine
+
+    def _schedule_engine_sync() -> None:
+        """Push fresh enforcement maps into the packet engine right away."""
+        if _engine is None or not hasattr(_engine, "update_state"):
+            return
+        async def _do_sync():
+            try:
+                state = await service.snapshot_state()
+                ip_to_mac = {v["ip"]: mac for mac, v in state.items() if v.get("ip")}
+                blocked = {mac: v["blocked"] for mac, v in state.items()}
+                await asyncio.to_thread(_engine.update_state, ip_to_mac, blocked)
+            except Exception:
+                pass
+        try:
+            asyncio.create_task(_do_sync())
+        except RuntimeError:
+            pass
+
+    def _schedule_kick_unblock(mac: str, delay: float = 5.0) -> None:
+        """After kick delay expires, lift kernel-side drop and trigger engine sync."""
+        async def _do_unblock():
+            try:
+                await asyncio.sleep(delay)
+                _schedule_engine_sync()
+            except Exception:
+                pass
+        try:
+            asyncio.create_task(_do_unblock())
+        except RuntimeError:
+            pass
+
     async def _require_auth(request: Request) -> None:
         """FastAPI dependency: every admin route (and the WS handshake) needs a
         valid session cookie. Without it a quota-blocked device could POST
@@ -1578,21 +1610,42 @@ def create_app(
         return {"id": device_id, "updated": True}
 
     @app.delete("/api/devices/{device_id}", dependencies=[Depends(_require_auth)])
-    async def delete_device(device_id: int) -> dict[str, Any]:
+    async def delete_device(device_id: int, blacklist: bool = False) -> dict[str, Any]:
         dev = await database.get_device(device_id)
         if dev is None:
             raise HTTPException(404, "device not found")
         if dev.mac == GATEWAY_MAC:
             raise HTTPException(400, "the gateway box device cannot be deleted")
-        # Deleting a device blacklists its MAC (permanent deny list): it does
-        # not re-register while still connected, the kernel keeps blocking it
-        # even without a device row, and the Network-tab blacklist is the only
-        # way back in (remove the MAC there to unblock + re-register).
-        await database.delete_device(device_id, deny_list_mac=True)
-        await database.add_event(
-            f"Device removed: {dev.name or dev.mac} — MAC blacklisted "
-            f"({dev.mac})", "warn")
-        return {"id": device_id, "deleted": True}
+
+        ip = await database.get_ip_for_mac(dev.mac) or getattr(dev, "ip", "") or ""
+        if blacklist:
+            # Permanent block & blacklist MAC
+            await database.delete_device(device_id, deny_list_mac=True)
+            await service.kick_network(dev.mac, ip=ip, duration=0)
+            await database.add_event(
+                f"Device blocked & blacklisted: {dev.name or dev.mac} ({dev.mac})", "warn")
+            _schedule_engine_sync()
+            return {"id": device_id, "deleted": True, "blacklisted": True}
+        else:
+            # Kick / disconnect with 5s timeout, NO MAC ban
+            service.register_kick_timeout(dev.mac, duration=5.0)
+            await database.delete_lease(dev.mac)
+            await service.kick_network(dev.mac, ip=ip, duration=5.0)
+            await database.delete_device(device_id, deny_list_mac=False)
+            await database.add_event(
+                f"Device kicked & disconnected: {dev.name or dev.mac} "
+                f"(5s timeout, no MAC ban)", "info")
+            _schedule_engine_sync()
+            _schedule_kick_unblock(dev.mac, delay=5.0)
+            return {"id": device_id, "deleted": True, "blacklisted": False, "kicked": True}
+
+    @app.post("/api/devices/{device_id}/kick", dependencies=[Depends(_require_auth)])
+    async def kick_device(device_id: int) -> dict[str, Any]:
+        return await delete_device(device_id, blacklist=False)
+
+    @app.post("/api/devices/{device_id}/block-blacklist", dependencies=[Depends(_require_auth)])
+    async def block_blacklist_device(device_id: int) -> dict[str, Any]:
+        return await delete_device(device_id, blacklist=True)
 
     @app.post("/api/devices/{device_id}/topup", dependencies=[Depends(_require_auth)])
     async def topup(device_id: int, body: TopUpRequest) -> dict[str, Any]:
@@ -1647,25 +1700,52 @@ def create_app(
         return {"id": user_id, "updated": True}
 
     @app.delete("/api/users/{user_id}", dependencies=[Depends(_require_auth)])
-    async def delete_user(user_id: int) -> dict[str, Any]:
+    async def delete_user(user_id: int, blacklist: bool = False) -> dict[str, Any]:
         user = await database.get_user(user_id)
         if user is None:
             raise HTTPException(404, "user not found")
         if getattr(user, "protected", False):
             raise HTTPException(400, "the protected Gateway user cannot be "
                                 "deleted — edit it instead")
-        # Deleting a user blacklists every device MAC it owned (permanent deny
-        # list): none re-register while still connected, the kernel keeps
-        # blocking them even without device rows, and the Network-tab
-        # blacklist is the only way back in. Month-reset cleanup never sets
-        # this flag.
-        removed = await database.delete_user(user_id, cascade=True,
-                                             deny_list_macs=True)
-        await database.add_event(
-            f"User removed: {user.name or user_id} ({removed} device(s) — "
-            f"MACs blacklisted)", "warn")
-        await service.recompute_allowances()
-        return {"id": user_id, "deleted": True, "devices_removed": removed}
+        user_devs = await database.list_devices(user_id=user_id)
+
+        if blacklist:
+            # Permanent block & blacklist all user MACs
+            for d in user_devs:
+                ip = await database.get_ip_for_mac(d.mac) or getattr(d, "ip", "") or ""
+                await service.kick_network(d.mac, ip=ip, duration=0)
+            removed = await database.delete_user(user_id, cascade=True,
+                                                 deny_list_macs=True)
+            await database.add_event(
+                f"User blocked & blacklisted: {user.name or user_id} ({removed} device(s) — "
+                f"MACs blacklisted)", "warn")
+            await service.recompute_allowances()
+            _schedule_engine_sync()
+            return {"id": user_id, "deleted": True, "devices_removed": removed, "blacklisted": True}
+        else:
+            # Kick all devices with 5s timeout, NO MAC ban
+            for d in user_devs:
+                ip = await database.get_ip_for_mac(d.mac) or getattr(d, "ip", "") or ""
+                service.register_kick_timeout(d.mac, duration=5.0)
+                await database.delete_lease(d.mac)
+                await service.kick_network(d.mac, ip=ip, duration=5.0)
+                _schedule_kick_unblock(d.mac, delay=5.0)
+            removed = await database.delete_user(user_id, cascade=True,
+                                                 deny_list_macs=False)
+            await database.add_event(
+                f"User kicked & disconnected: {user.name or user_id} ({removed} device(s), "
+                f"5s timeout, no MAC ban)", "info")
+            await service.recompute_allowances()
+            _schedule_engine_sync()
+            return {"id": user_id, "deleted": True, "devices_removed": removed, "blacklisted": False, "kicked": True}
+
+    @app.post("/api/users/{user_id}/kick", dependencies=[Depends(_require_auth)])
+    async def kick_user(user_id: int) -> dict[str, Any]:
+        return await delete_user(user_id, blacklist=False)
+
+    @app.post("/api/users/{user_id}/block-blacklist", dependencies=[Depends(_require_auth)])
+    async def block_blacklist_user(user_id: int) -> dict[str, Any]:
+        return await delete_user(user_id, blacklist=True)
 
     @app.post("/api/users/{user_id}/topup", dependencies=[Depends(_require_auth)])
     async def topup_user(user_id: int, body: TopUpRequest) -> dict[str, Any]:

@@ -26,8 +26,13 @@ exempts a single device from the user's QUOTA block only — an explicit
 
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 import logging
+import os
+import shutil
+import subprocess
+import time
 from typing import Any, Optional
 
 from core import timeutil
@@ -51,6 +56,131 @@ class QuotaService:
         self.tz = timeutil.tz_for(timezone) if timezone else None
         #: injectable clock (callable returning datetime) for tests
         self._clock = clock
+        self._temporary_kicks: dict[str, float] = {}
+
+    def register_kick_timeout(self, mac: str, duration: float = 5.0) -> None:
+        """Hold a kicked MAC in temporary cooldown for ``duration`` seconds."""
+        mac_clean = mac.strip().lower()
+        self._temporary_kicks[mac_clean] = time.monotonic() + max(1.0, float(duration))
+
+    def is_temporarily_kicked(self, mac: str) -> bool:
+        """Is this MAC in active kick cooldown?"""
+        mac_clean = mac.strip().lower()
+        exp = self._temporary_kicks.get(mac_clean)
+        if exp is None:
+            return False
+        if time.monotonic() < exp:
+            return True
+        self._temporary_kicks.pop(mac_clean, None)
+        return False
+
+    def active_kicked_macs(self) -> set[str]:
+        """All MACs currently in the kick cooldown."""
+        now = time.monotonic()
+        active: set[str] = set()
+        expired: list[str] = []
+        for mac, exp in self._temporary_kicks.items():
+            if now < exp:
+                active.add(mac)
+            else:
+                expired.append(mac)
+        for mac in expired:
+            self._temporary_kicks.pop(mac, None)
+        return active
+
+    async def kick_network(self, mac: str, ip: str = "", duration: float = 5.0,
+                           lease_file: str = "/var/lib/misc/dnsmasq.leases") -> None:
+        """Disconnect a device from the network across WiFi and Cable.
+
+        1. Deauth / disassociate Wi-Fi clients (hostapd_cli, iw).
+        2. Flush active connection tracking sessions (conntrack).
+        3. Delete ARP / neighbor entries (ip neigh).
+        4. Clear DHCP lease from dnsmasq and DB.
+        5. Set temporary kick cooldown for duration (default 5s) if duration > 0.
+        """
+        mac_clean = mac.strip().lower()
+        if duration > 0:
+            self.register_kick_timeout(mac_clean, duration)
+
+        await asyncio.to_thread(
+            self._disconnect_client_hardware_sync,
+            mac_clean, ip, lease_file,
+        )
+
+    @staticmethod
+    def _disconnect_client_hardware_sync(mac: str, ip: str, lease_file: str) -> None:
+        mac = mac.lower()
+
+        # 1. WiFi disconnection
+        if shutil.which("hostapd_cli"):
+            try:
+                subprocess.run(["hostapd_cli", "deauthenticate", mac],
+                               capture_output=True, timeout=2)
+                subprocess.run(["hostapd_cli", "disassociate", mac],
+                               capture_output=True, timeout=2)
+            except Exception:
+                pass
+
+        if shutil.which("iw"):
+            try:
+                wlan_ifaces: list[str] = []
+                if os.path.exists("/sys/class/net"):
+                    for iface in os.listdir("/sys/class/net"):
+                        if iface.startswith(("wl", "wlan", "ap")):
+                            wlan_ifaces.append(iface)
+                if not wlan_ifaces:
+                    res = subprocess.run(["iw", "dev"], capture_output=True, text=True, timeout=2)
+                    for line in res.stdout.splitlines():
+                        line = line.strip()
+                        if line.startswith("Interface "):
+                            wlan_ifaces.append(line.split()[1])
+                for wif in wlan_ifaces:
+                    subprocess.run(["iw", "dev", wif, "station", "del", mac],
+                                   capture_output=True, timeout=2)
+            except Exception:
+                pass
+
+        # 2. Conntrack flush (drops active TCP/UDP connections immediately)
+        if ip and shutil.which("conntrack"):
+            try:
+                subprocess.run(["conntrack", "-D", "-s", ip],
+                               capture_output=True, timeout=2)
+                subprocess.run(["conntrack", "-D", "-d", ip],
+                               capture_output=True, timeout=2)
+            except Exception:
+                pass
+
+        # 3. ARP / neighbor table delete
+        if ip and shutil.which("ip"):
+            try:
+                subprocess.run(["ip", "neigh", "del", ip],
+                               capture_output=True, timeout=2)
+            except Exception:
+                pass
+
+        # 4. dnsmasq dhcp_release
+        if ip and shutil.which("dhcp_release"):
+            try:
+                for iface in ["eth0", "eth1", "br0", "lan", "wlan0"]:
+                    subprocess.run(["dhcp_release", iface, ip, mac],
+                                   capture_output=True, timeout=2)
+            except Exception:
+                pass
+
+        # 5. Clean lease file if present
+        if lease_file and os.path.exists(lease_file):
+            try:
+                with open(lease_file, "r", encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
+                new_lines = [l for l in lines if mac not in l.lower()]
+                if len(new_lines) != len(lines):
+                    with open(lease_file, "w", encoding="utf-8") as f:
+                        f.writelines(new_lines)
+                    if shutil.which("killall"):
+                        subprocess.run(["killall", "-HUP", "dnsmasq"],
+                                       capture_output=True, timeout=2)
+            except Exception:
+                pass
 
     # -- helpers --------------------------------------------------------------
 
@@ -509,7 +639,7 @@ class QuotaService:
         usage_by_user = await self.db.get_period_usage_by_user()
         allowances = (await self.db.get_bundle()).allowances
         allow_set = set(await self.db.get_mac_list("allow"))
-        deny_set = set(await self.db.get_mac_list("deny"))
+        deny_set = set(await self.db.get_mac_list("deny")) | self.active_kicked_macs()
         now_ts = self._now().timestamp()
         packs = await self.db.list_recharges(active_only=True)
         device_booster_ids = {
@@ -556,7 +686,8 @@ class QuotaService:
         # until it expires.
         deny_set = (set(await self.db.get_mac_list("deny"))
                     | await self.refused_macs()
-                    | await self.refused_random_macs())
+                    | await self.refused_random_macs()
+                    | self.active_kicked_macs())
         for mac, ip in leases.items():
             if mac in out or mac not in deny_set:
                 continue
@@ -569,6 +700,17 @@ class QuotaService:
                 "blocked": True,
                 "block_state": _db.BLOCK_ADMIN,
             }
+        for mac in self.active_kicked_macs():
+            if mac not in out:
+                out[mac] = {
+                    "ip": leases.get(mac, ""),
+                    "name": "",
+                    "mode": "",
+                    "allowance_gb": 0.0,
+                    "used_gb": 0.0,
+                    "blocked": True,
+                    "block_state": _db.BLOCK_ADMIN,
+                }
         return out
 
     # -- milestone notifications (page-only, per-user) ------------------------

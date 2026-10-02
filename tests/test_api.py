@@ -1669,10 +1669,7 @@ def test_gateway_device_cannot_be_recreated_or_reassigned(client):
 
 
 def test_delete_device_blacklists_mac(client):
-    """A manual DELETE of a device blacklists its MAC (permanent deny list):
-    run.py never auto-registers it again while it stays connected, and the
-    Network-tab blacklist is the only way back in."""
-#     import asyncio
+    """A DELETE with blacklist=True blacklists the device MAC (permanent deny list)."""
     c, db, _ = client
     _login(c)
     g = _get_loop().run_until_complete(db.create_user(
@@ -1682,39 +1679,72 @@ def test_delete_device_blacklists_mac(client):
     assert _get_loop().run_until_complete(
         db.get_mac_list("deny")) == []
 
-    r = c.delete(f"/api/devices/{dev.id}")
+    r = c.delete(f"/api/devices/{dev.id}?blacklist=true")
     assert r.status_code == 200, r.text
+    assert r.json()["blacklisted"] is True
     assert _get_loop().run_until_complete(
         db.get_mac_list("deny")) == ["aa:bb:cc:dd:ee:99"]
 
 
+def test_delete_device_kick_without_blacklist(client):
+    """The default DELETE (or trash button) kicks the device with 5s timeout, NO MAC ban."""
+    c, db, svc = client
+    _login(c)
+    u = _get_loop().run_until_complete(db.create_user(
+        name="User", quota_mode=_db.QUOTA_AUTO))
+    dev = _get_loop().run_until_complete(db.upsert_device(
+        "aa:bb:cc:dd:ee:11", name="KickedPhone", user_id=u.id))
+
+    r = c.delete(f"/api/devices/{dev.id}")
+    assert r.status_code == 200, r.text
+    assert r.json()["deleted"] is True
+    assert r.json()["blacklisted"] is False
+    assert r.json()["kicked"] is True
+    # MAC is NOT in deny list
+    assert _get_loop().run_until_complete(db.get_mac_list("deny")) == []
+    # Device is in temporary kick cooldown
+    assert svc.is_temporarily_kicked("aa:bb:cc:dd:ee:11") is True
+
+
 def test_delete_user_blacklists_its_macs(client):
-    """Deleting a USER blacklists every device MAC it owned."""
-#     import asyncio
+    """Deleting a USER with blacklist=True blacklists every device MAC it owned."""
     c, db, _ = client
     _login(c)
     g = _get_loop().run_until_complete(db.create_user(
         name="", quota_mode=_db.QUOTA_FIXED, fixed_gb=1.0, guest=True))
     _get_loop().run_until_complete(db.upsert_device(
         "aa:bb:cc:dd:ee:98", user_id=g.id))
-    r = c.delete(f"/api/users/{g.id}")
+    r = c.delete(f"/api/users/{g.id}?blacklist=true")
     assert r.status_code == 200, r.text
     assert _get_loop().run_until_complete(
         db.get_mac_list("deny")) == ["aa:bb:cc:dd:ee:98"]
 
 
+def test_delete_user_kick_without_blacklist(client):
+    """Deleting a user with blacklist=False kicks its devices with 5s timeout, NO MAC ban."""
+    c, db, svc = client
+    _login(c)
+    u = _get_loop().run_until_complete(db.create_user(
+        name="Alice", quota_mode=_db.QUOTA_AUTO))
+    _get_loop().run_until_complete(db.upsert_device(
+        "aa:bb:cc:dd:ee:22", user_id=u.id))
+    r = c.delete(f"/api/users/{u.id}?blacklist=false")
+    assert r.status_code == 200, r.text
+    assert r.json()["blacklisted"] is False
+    assert r.json()["kicked"] is True
+    assert _get_loop().run_until_complete(db.get_mac_list("deny")) == []
+    assert svc.is_temporarily_kicked("aa:bb:cc:dd:ee:22") is True
+
+
 def test_delete_normal_user_blacklists_its_macs(client):
-    """A NORMAL user's devices are blacklisted too (no guest-only carve-out):
-    deleting the user removes the cards AND the kernel keeps blocking the
-    still-connected devices."""
-#     import asyncio
+    """A NORMAL user's devices are blacklisted too when blacklist=True."""
     c, db, _ = client
     _login(c)
     u = _get_loop().run_until_complete(db.create_user(
         name="Dad", quota_mode=_db.QUOTA_FIXED, fixed_gb=20.0))
     _get_loop().run_until_complete(db.upsert_device(
         "aa:bb:cc:dd:ee:97", name="Phone", user_id=u.id))
-    r = c.delete(f"/api/users/{u.id}")
+    r = c.delete(f"/api/users/{u.id}?blacklist=true")
     assert r.status_code == 200, r.text
     assert _get_loop().run_until_complete(
         db.get_mac_list("deny")) == ["aa:bb:cc:dd:ee:97"]
@@ -1731,14 +1761,13 @@ def test_delete_normal_user_blacklists_its_macs(client):
 def test_unblacklist_restores_device(client):
     """Removing a MAC from the deny list (Network tab) unblocks it: the device
     card reappears in the dashboard."""
-#     import asyncio
     c, db, _ = client
     _login(c)
     u = _get_loop().run_until_complete(db.create_user(
         name="Dad", quota_mode=_db.QUOTA_FIXED, fixed_gb=20.0))
     _get_loop().run_until_complete(db.upsert_device(
         "aa:bb:cc:dd:ee:96", name="Phone", user_id=u.id))
-    assert c.delete(f"/api/users/{u.id}").status_code == 200
+    assert c.delete(f"/api/users/{u.id}?blacklist=true").status_code == 200
     assert _get_loop().run_until_complete(
         db.get_mac_list("deny")) == ["aa:bb:cc:dd:ee:96"]
 
@@ -1752,14 +1781,13 @@ def test_unblacklist_restores_device(client):
 def test_blacklisted_device_visible_in_mac_lists_api(client):
     """A deleted device's MAC surfaces in GET /api/mac-lists (the Network-tab
     blacklist), which is the ONLY place it appears."""
-#     import asyncio
     c, db, _ = client
     _login(c)
     u = _get_loop().run_until_complete(db.create_user(
         name="Dad", quota_mode=_db.QUOTA_FIXED, fixed_gb=20.0))
     _get_loop().run_until_complete(db.upsert_device(
         "aa:bb:cc:dd:ee:95", name="Phone", user_id=u.id))
-    assert c.delete(f"/api/users/{u.id}").status_code == 200
+    assert c.delete(f"/api/users/{u.id}?blacklist=true").status_code == 200
     lists = c.get("/api/mac-lists").json()
     assert lists["deny"] == ["aa:bb:cc:dd:ee:95"]
 

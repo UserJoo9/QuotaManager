@@ -716,6 +716,10 @@ class Gateway:
                     log.info("blacklisted MAC %s stays deleted — not "
                              "re-registered (%s)", mac, ip)
                     return
+                if self.service.is_temporarily_kicked(mac):
+                    log.info("kicked MAC %s is in 5s cooldown — not "
+                             "re-registered (%s)", mac, ip)
+                    return
                 if await self.service.stop_new_connections():
                     # "STOP NEW CONNECTIONS": a brand-new MAC is refused at
                     # the DHCP level — dnsmasq ignores it, so it never gets

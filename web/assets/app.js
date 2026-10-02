@@ -565,7 +565,8 @@ function userCard(u, udevs, gw, ghost) {
   // The protected Gateway user is permanent: the admin cuts the box's own
   // internet with the block toggle + edit, but it can never be deleted.
   const delBtn = u.protected ? "" : `
-      <button class="icon-btn danger" data-ua="delete" data-uid="${u.id}" title="Remove user + devices">🗑</button>`;
+      <button class="icon-btn danger" data-ua="delete" data-uid="${u.id}" title="Kick / disconnect user (5s timeout, no ban)">🗑</button>
+      <button class="icon-btn danger" data-ua="block-blacklist" data-uid="${u.id}" title="Block & blacklist user">🚫</button>`;
   const guestActions = u.guest ? (
     u.blocked ? `
       <button class="btn ok small" data-ua="guest-accept" data-uid="${u.id}" title="Accept guest — unblock and grant quota">Accept</button>
@@ -676,7 +677,8 @@ function deviceRow(d) {
       <button class="btn danger small" data-act="guest-reject" data-id="${d.id}" title="Cut / block guest access">Reject</button>`
   ) : "";
   const deleteBtn = d.gateway ? "" : `
-      <button class="icon-btn danger" data-act="delete" data-id="${d.id}" title="Remove">🗑</button>`;
+      <button class="icon-btn danger" data-act="delete" data-id="${d.id}" title="Kick / disconnect device (5s timeout, no ban)">🗑</button>
+      <button class="icon-btn danger" data-act="block-blacklist" data-id="${d.id}" title="Block & blacklist device">🚫</button>`;
   return `
   <div class="device-row ${d.blocked ? "blocked" : ""}" data-id="${d.id}">
     <div class="device-head">
@@ -1889,8 +1891,16 @@ async function doAction(act, id) {
     } else if (act === "delete") {
       const dev = (dashboard.devices || []).find((d) => d.id === id);
       if (dev && dev.gateway) return;  // the box cannot be deleted (API 400s too)
-      if (!confirm(`Remove ${dev && dev.name ? `“${dev.name}”` : "this device"}?`)) return;
-      await API.del(`/api/devices/${id}`);
+      const name = dev && dev.name ? `“${dev.name}”` : "this device";
+      if (!confirm(`Kick & disconnect ${name} from the network?\n\nClient will be disconnected for a 5-second timeout and can reconnect freely without a MAC ban.`)) return;
+      await API.del(`/api/devices/${id}?blacklist=false`);
+    } else if (act === "block-blacklist") {
+      const dev = (dashboard.devices || []).find((d) => d.id === id);
+      if (dev && dev.gateway) return;
+      const name = dev && dev.name ? `“${dev.name}”` : "this device";
+      const mac = dev && dev.mac ? ` (${dev.mac})` : "";
+      if (!confirm(`Permanently block & blacklist ${name}${mac}?\n\nTheir MAC address will be added to the blacklist and network access will be completely cut.`)) return;
+      await API.del(`/api/devices/${id}?blacklist=true`);
     } else if (act === "edit") {
       openDeviceModal(id);
       return;
@@ -1916,10 +1926,19 @@ async function doUserAction(act, uid) {
       if (user && user.protected) return;  // the Gateway user is permanent (API 400s too)
       const names = ((user && user.devices) || [])
         .map((d) => `“${d.name || d.mac}”`).join(", ");
-      const msg = `Remove ${user && user.name ? `“${user.name}”` : `user #${uid}`}` +
-        `${names ? ` and their device(s): ${names}` : ""}? This also deletes their usage history.`;
+      const msg = `Kick & disconnect ${user && user.name ? `“${user.name}”` : `user #${uid}`}` +
+        `${names ? ` and device(s): ${names}` : ""} from the network?\n\nDevices will be disconnected for a 5-second timeout and can reconnect freely without a MAC ban.`;
       if (!confirm(msg)) return;
-      await API.del(`/api/users/${uid}`);
+      await API.del(`/api/users/${uid}?blacklist=false`);
+    } else if (act === "block-blacklist") {
+      const user = (dashboard.users || []).find((x) => x.id === uid);
+      if (user && user.protected) return;
+      const names = ((user && user.devices) || [])
+        .map((d) => `“${d.name || d.mac}”`).join(", ");
+      const msg = `Permanently block & blacklist ${user && user.name ? `“${user.name}”` : `user #${uid}`}` +
+        `${names ? ` and all device(s): ${names}` : ""}?\n\nTheir MAC addresses will be added to the blacklist and network access will be completely blocked.`;
+      if (!confirm(msg)) return;
+      await API.del(`/api/users/${uid}?blacklist=true`);
     } else if (act === "edit") {
       openUserModal(uid);
       return;
