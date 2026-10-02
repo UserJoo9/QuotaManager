@@ -701,23 +701,93 @@ function deviceRow(d) {
 
 /* ---------------- sidebar panels (management / network / wan / admin / logs) ---------------- */
 
-function switchPanel(name) {
+const PANEL_LOADING_INFO = {
+  management: { title: "Loading Management...", sub: "Synchronizing devices and quota status..." },
+  network: { title: "Loading Network...", sub: "Inspecting interfaces, leases, and client rules..." },
+  wan: { title: "Loading WAN...", sub: "Checking uplink, PPPoE status, and traffic..." },
+  admin: { title: "Loading Admin...", sub: "Fetching system logs and router settings..." },
+  history: { title: "Loading History...", sub: "Loading consumption timelines and records..." },
+  dns: { title: "Loading DNS...", sub: "Fetching blocklists, custom records, and query rules..." },
+  firewall: { title: "Loading Firewall...", sub: "Inspecting firewall rules and port forwardings..." },
+  vpn: { title: "Loading VPN...", sub: "Verifying tunnel state and proxy endpoints..." },
+};
+
+let activePanelLoadSeq = 0;
+let panelLoadHideTimeout = null;
+
+function showPanelPopup(name) {
+  const popup = $("panel-loading-popup");
+  if (!popup) return;
+  const titleEl = $("panel-loading-title");
+  const subEl = $("panel-loading-sub");
+  const info = PANEL_LOADING_INFO[name] || {
+    title: `Loading ${name ? name.charAt(0).toUpperCase() + name.slice(1) : "Section"}...`,
+    sub: "Fetching latest system state...",
+  };
+  if (titleEl) titleEl.textContent = info.title;
+  if (subEl) subEl.textContent = info.sub;
+  if (panelLoadHideTimeout) {
+    clearTimeout(panelLoadHideTimeout);
+    panelLoadHideTimeout = null;
+  }
+  popup.classList.remove("hidden");
+  void popup.offsetWidth;
+  popup.classList.add("active");
+}
+
+function hidePanelPopup() {
+  const popup = $("panel-loading-popup");
+  if (!popup) return;
+  popup.classList.remove("active");
+  if (panelLoadHideTimeout) clearTimeout(panelLoadHideTimeout);
+  panelLoadHideTimeout = setTimeout(() => {
+    popup.classList.add("hidden");
+  }, 220);
+}
+
+async function switchPanel(name) {
   try { localStorage.setItem("quota_active_panel", name); } catch (_) { /* ignore */ }
   document.querySelectorAll(".nav-tab").forEach((b) =>
     b.classList.toggle("active", b.dataset.panel === name));
   document.querySelectorAll(".nav-panel").forEach((p) =>
     p.classList.toggle("hidden", p.id !== `panel-${name}`));
-  if (name === "admin") refreshLogs(); // the System Logs console lives on the Admin page
-  if (name === "network") { refreshNetwork(); refreshGuest(); }
-  if (name === "wan") refreshWan();
-  if (name === "firewall") refreshFirewall();
-  if (name === "history") refreshHistory();
-  if (name === "dns") refreshDns();
-  if (name === "vpn") {
-    refreshVpn();
-    startVpnLogPolling();
-  } else {
-    stopVpnLogPolling();
+
+  const seq = ++activePanelLoadSeq;
+  showPanelPopup(name);
+  const startTime = Date.now();
+
+  try {
+    if (name === "admin") {
+      await refreshLogs();
+    } else if (name === "network") {
+      await Promise.allSettled([refreshNetwork(), refreshGuest()]);
+    } else if (name === "wan") {
+      await refreshWan();
+    } else if (name === "firewall") {
+      await refreshFirewall();
+    } else if (name === "history") {
+      await refreshHistory();
+    } else if (name === "dns") {
+      await refreshDns();
+    } else if (name === "vpn") {
+      await refreshVpn();
+      startVpnLogPolling();
+    } else if (name === "management") {
+      await refreshAll();
+    }
+  } catch (err) {
+    console.warn("Panel refresh notice:", err);
+  } finally {
+    if (name !== "vpn") {
+      stopVpnLogPolling();
+    }
+    const elapsed = Date.now() - startTime;
+    const remaining = Math.max(0, 240 - elapsed);
+    setTimeout(() => {
+      if (seq === activePanelLoadSeq) {
+        hidePanelPopup();
+      }
+    }, remaining);
   }
 }
 
