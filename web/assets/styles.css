@@ -834,7 +834,8 @@ select option { background: var(--bg-2); }
   border-radius: var(--radius-lg);
   margin-bottom: 16px;
 }
-.hist-loading-state {
+.hist-loading-state,
+.vpn-loading-state {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -843,6 +844,11 @@ select option { background: var(--bg-2); }
   padding: 60px 20px;
   color: var(--muted);
   font-size: 0.95rem;
+}
+.loading-dim {
+  opacity: 0.35;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
 }
 .hist-spinner {
   width: 38px;

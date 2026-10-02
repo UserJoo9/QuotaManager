@@ -936,11 +936,20 @@ def create_app(
         # rules to go on, since no single device context applies to it.
         rules = await database.list_domain_rules(enabled_only=True)
         status_user_id = dev.user_id if did is not None else None
+
+        domain_status_cache: dict[tuple[str, int | None, int | None], str] = {}
+        def _get_status(dom: str, target_did: int | None, target_uid: int | None) -> str:
+            key = (dom, target_did, target_uid)
+            if key not in domain_status_cache:
+                s, _ = _dns_rules.resolve_domain_status(dom, rules, target_did, target_uid)
+                domain_status_cache[key] = s
+            return domain_status_cache[key]
+
         top_domains = []
         for t in hist["top_domains"]:
-            status, _rule = _dns_rules.resolve_domain_status(
-                t["domain"], rules, did, status_user_id)
+            status = _get_status(t["domain"], did, status_user_id)
             top_domains.append({**t, "status": status})
+
         owner_cache: dict[int, int | None] = {}  # device_id -> user_id, memoized
         for item in recent:
             # An aggregate row may belong to a DIFFERENT device than `did`
@@ -952,9 +961,11 @@ def create_app(
                     owner = await database.get_device(row_did)
                     owner_cache[row_did] = owner.user_id if owner else None
                 row_uid = owner_cache[row_did]
-            status, _rule = _dns_rules.resolve_domain_status(
-                item["domain"], rules, row_did, row_uid)
-            item["status"] = status
+            item["status"] = _get_status(item["domain"], row_did, row_uid)
+
+        analytics_data = await get_history_analytics(
+            database, device_id=did, hours=window, precomputed_raw=hist)
+
         return {
             "device_id": "all" if did is None else did,
             "window_hours": window,
@@ -963,6 +974,7 @@ def create_app(
             "activity": [{"bucket_minute": a["minute"], "count": a["hits"]}
                          for a in hist["activity"]],
             "recent": recent,
+            "analytics": analytics_data,
         }
 
     @app.get("/api/history/{device_id}/analytics", dependencies=[Depends(_require_auth)])

@@ -1494,10 +1494,7 @@ class Database:
             f"WHERE {scope}bucket_minute>=? "
             "ORDER BY bucket_minute DESC, count DESC, domain LIMIT ?",
             params + (limit,))
-        total = await self._fetch_one(
-            "SELECT COALESCE(SUM(count), 0) hits FROM dns_history "
-            f"WHERE {scope}bucket_minute>=?",
-            params)
+        total_hits = sum(int(r["hits"]) for r in activity)
         return {
             "top_domains": [{"domain": r["domain"], "hits": r["hits"]}
                             for r in top],
@@ -1506,7 +1503,7 @@ class Database:
             "recent": [{"minute": r["minute"], "domain": r["domain"],
                         "count": r["count"], "device_id": r["device_id"]}
                        for r in recent],
-            "total": int(total[0]) if total else 0,
+            "total": total_hits,
         }
 
     async def prune_dns_history(self, user_id: int, before_minute: str) -> int:

@@ -1235,24 +1235,27 @@ async function refreshHistory() {
   const windowHours = Number($("hist-window").value) || 24;
   const loading = $("hist-loading");
   const empty = $("hist-empty");
+  const statCards = $("hist-stat-cards");
+
   if (loading) loading.classList.remove("hidden");
   if (empty) empty.classList.add("hidden");
-  if (!historyCache) {
-    document.querySelectorAll(".hist-view").forEach((v) => v.classList.add("hidden"));
-  }
+  document.querySelectorAll(".hist-view").forEach((v) => v.classList.add("hidden"));
+  if (statCards) statCards.classList.add("loading-dim");
 
   try {
-    const [raw, analytics] = await Promise.all([
-      API.get(`/api/history/${id}?window=${windowHours}&limit=200`),
-      API.get(`/api/history/${id}/analytics?window=${windowHours}`),
-    ]);
+    const raw = await API.get(`/api/history/${id}?window=${windowHours}&limit=200`);
     historyCache = raw;
-    historyAnalyticsCache = analytics;
+    if (raw && raw.analytics) {
+      historyAnalyticsCache = raw.analytics;
+    } else {
+      historyAnalyticsCache = await API.get(`/api/history/${id}/analytics?window=${windowHours}`);
+    }
   } catch (_) {
     historyCache = null;
     historyAnalyticsCache = null;
   } finally {
     if (loading) loading.classList.add("hidden");
+    if (statCards) statCards.classList.remove("loading-dim");
   }
   renderHistory(historyCache, historyAnalyticsCache);
 }
@@ -3341,14 +3344,37 @@ let vpnNodesCache = [];
 let vpnRoutingCache = { users: [], devices: [] };
 let editingVpnNodeId = null;
 
-async function refreshVpn() {
-  await loadVpnStatus();
-  await Promise.allSettled([
-    loadVpnNodes(),
-    loadVpnRouting(),
-    loadVpnSettings(),
-    loadVpnLogs(),
-  ]);
+async function refreshVpn(showLoading = true) {
+  const loading = $("vpn-loading");
+  const content = $("vpn-content");
+  const isFirstLoad = !vpnStatusCache;
+
+  if (showLoading && loading) {
+    loading.classList.remove("hidden");
+    if (content) {
+      if (isFirstLoad) {
+        content.classList.add("hidden");
+      } else {
+        content.classList.add("loading-dim");
+      }
+    }
+  }
+
+  try {
+    await Promise.allSettled([
+      loadVpnStatus(),
+      loadVpnNodes(),
+      loadVpnRouting(),
+      loadVpnSettings(),
+      loadVpnLogs(),
+    ]);
+  } finally {
+    if (loading) loading.classList.add("hidden");
+    if (content) {
+      content.classList.remove("hidden");
+      content.classList.remove("loading-dim");
+    }
+  }
 }
 
 async function loadVpnSettings() {

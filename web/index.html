@@ -1180,7 +1180,11 @@
 
       <!-- VPN: Built-in sing-box Manager & Real-time Network Tunnel -->
       <section id="panel-vpn" class="nav-panel hidden">
-        <div class="vpn-layout">
+        <div id="vpn-loading" class="vpn-loading-state hidden">
+          <div class="hist-spinner"></div>
+          <span>Loading VPN status, routing &amp; nodes...</span>
+        </div>
+        <div class="vpn-layout" id="vpn-content">
 
           <!-- HERO STATUS & SPEED GAUGES -->
           <div class="glass card vpn-hero-card">

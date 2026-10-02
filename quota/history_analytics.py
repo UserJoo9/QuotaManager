@@ -139,13 +139,17 @@ def get_base_domain(domain: str) -> str:
 
 async def get_history_analytics(db: Database,
                                 device_id: int | None = None,
-                                hours: int = 24) -> dict[str, Any]:
+                                hours: int = 24,
+                                precomputed_raw: dict[str, Any] | None = None) -> dict[str, Any]:
     """Compile rich visual analytics from DNS history."""
     now = _dt.datetime.now().astimezone()
-    since = now - _dt.timedelta(hours=hours)
-    since_minute = since.strftime("%Y-%m-%d %H:%M")
+    if precomputed_raw is not None:
+        raw_history = precomputed_raw
+    else:
+        since = now - _dt.timedelta(hours=hours)
+        since_minute = since.strftime("%Y-%m-%d %H:%M")
+        raw_history = await db.get_dns_history(device_id=device_id, since_minute=since_minute, limit=500)
 
-    raw_history = await db.get_dns_history(device_id=device_id, since_minute=since_minute, limit=500)
     top_domains = raw_history.get("top_domains", [])
     total_queries = raw_history.get("total", 0)
     raw_activity = raw_history.get("activity", [])
