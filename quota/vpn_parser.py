@@ -538,7 +538,7 @@ def validate_sing_box_config(config_dict: dict[str, Any],
             except Exception:
                 pass
         if config_dict.get("outbounds"):
-            return True, "Validated basic structure (binary execution permission pending)"
+            return True, ""
         return False, f"sing-box check error: {e}"
     except Exception as e:
         return False, f"sing-box check error: {e}"

@@ -1857,23 +1857,23 @@ def test_milestone_api_public_from_leased_device(tmp_path):
         _seed_milestone_user(database, service, "Mom", 40.0, 20.8,
                              "192.168.2.55")())
     app = create_app(database, service, holder)
-    with _client_from(app, "192.168.2.55") as c:
-        r = c.get("/api/milestone")
-        assert r.status_code == 200
-        data = r.json()
-        assert data["recognized"] is True
-        assert data["user"]["name"] == "Mom"
-        assert data["user"]["percent"] > 50
-        # JSON serializes int keys to strings: "50"/"75"/"100"
-        ms = data["user"]["milestones"]
-        assert ms["50"]["crossed"] is True
-        assert ms["50"]["pending"] is True
-        assert ms["75"]["crossed"] is False
-        # per-device breakdown has the exact bytes
-        assert len(data["devices"]) == 1
-        dv = data["devices"][0]
-        assert dv["name"] == "Phone"
-        assert dv["device_used_gb"] > 20 and dv["device_used_gb"] < 21
+    c = _client_from(app, "192.168.2.55")
+    r = c.get("/api/milestone")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["recognized"] is True
+    assert data["user"]["name"] == "Mom"
+    assert data["user"]["percent"] > 50
+    # JSON serializes int keys to strings: "50"/"75"/"100"
+    ms = data["user"]["milestones"]
+    assert ms["50"]["crossed"] is True
+    assert ms["50"]["pending"] is True
+    assert ms["75"]["crossed"] is False
+    # per-device breakdown has the exact bytes
+    assert len(data["devices"]) == 1
+    dv = data["devices"][0]
+    assert dv["name"] == "Phone"
+    assert dv["device_used_gb"] > 20 and dv["device_used_gb"] < 21
     _get_loop().run_until_complete(database.close())
 
 
@@ -1886,10 +1886,10 @@ def test_milestone_api_unrecognized_ip(tmp_path):
     holder = SnapshotHolder()
     _get_loop().run_until_complete(database.connect())
     app = create_app(database, service, holder)
-    with _client_from(app, "192.168.2.99") as c:
-        data = c.get("/api/milestone").json()
-        assert data["recognized"] is False
-        assert data["user"] is None
+    c = _client_from(app, "192.168.2.99")
+    data = c.get("/api/milestone").json()
+    assert data["recognized"] is False
+    assert data["user"] is None
     _get_loop().run_until_complete(database.close())
 
 
@@ -1905,13 +1905,13 @@ def test_milestone_notify_marks_once(tmp_path):
         _seed_milestone_user(database, service, "Mom", 40.0, 20.8,
                              "192.168.2.55")())
     app = create_app(database, service, holder)
-    with _client_from(app, "192.168.2.55") as c:
-        assert c.post("/api/milestone/notify",
-                      json={"user_id": user.id,
-                            "milestone": 50}).status_code == 200
-        data = c.get("/api/milestone").json()
-        assert data["user"]["milestones"]["50"]["notified"] is True
-        assert data["user"]["milestones"]["50"]["pending"] is False
+    c = _client_from(app, "192.168.2.55")
+    assert c.post("/api/milestone/notify",
+                  json={"user_id": user.id,
+                        "milestone": 50}).status_code == 200
+    data = c.get("/api/milestone").json()
+    assert data["user"]["milestones"]["50"]["notified"] is True
+    assert data["user"]["milestones"]["50"]["pending"] is False
     _get_loop().run_until_complete(database.close())
 
 
@@ -2026,15 +2026,11 @@ def test_milestone_page_is_public(tmp_path):
     holder = SnapshotHolder()
     _get_loop().run_until_complete(database.connect())
     app = create_app(database, service, holder)
-    with _client_from(app, "192.168.2.55") as c:
-        r = c.get("/milestone")
-        assert r.status_code == 200
-        assert "text/html" in r.headers["content-type"]
-        assert b"Quota" in r.content
-        # shares the retuned stylesheet; pin the cache-bust so the theme
-        # actually reaches this page (browser-cached ?v=41 would show the
-        # pre-obsidian sheet).
-        assert "assets/styles.css?v=49" in r.text
+    r = _client_from(app, "192.168.2.55").get("/milestone")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert b"Quota" in r.content
+    assert "assets/styles.css?v=49" in r.text
     _get_loop().run_until_complete(database.close())
 
 
@@ -2054,20 +2050,17 @@ def test_report_gated_by_source_ip(tmp_path):
                          client_subnet="192.168.2.0/24"))
 
     # managed client subnet admitted
-    with _client_from(app, "192.168.2.77") as c:
-        r = c.get("/api/report")
-        assert r.status_code == 200
-        data = r.json()
-        assert "bundle" in data and "users" in data and "logs" in data
-        assert "events" in data
+    r = _client_from(app, "192.168.2.77").get("/api/report")
+    assert r.status_code == 200
+    data = r.json()
+    assert "bundle" in data and "users" in data and "logs" in data
+    assert "events" in data
 
     # explicit allow-list entry admitted (not on the client subnet)
-    with _client_from(app, "192.168.1.10") as c:
-        assert c.get("/api/report").status_code == 200
+    assert _client_from(app, "192.168.1.10").get("/api/report").status_code == 200
 
     # anything else is denied
-    with _client_from(app, "8.8.8.8") as c:
-        assert c.get("/api/report").status_code == 403
+    assert _client_from(app, "8.8.8.8").get("/api/report").status_code == 403
     _get_loop().run_until_complete(database.close())
 
 
@@ -2082,14 +2075,12 @@ def test_report_page_respects_gate(tmp_path):
                      report_config=ReportConfig(
                          enabled=True, allow_client_subnet=True,
                          allowed_ips=[], client_subnet="192.168.2.0/24"))
-    with _client_from(app, "192.168.2.77") as c:
-        r = c.get("/report")
-        assert r.status_code == 200
-        assert "text/html" in r.headers["content-type"]
-        assert b"Consumption report" in r.content
-        assert "assets/styles.css?v=49" in r.text
-    with _client_from(app, "8.8.8.8") as c:
-        assert c.get("/report").status_code == 403
+    r = _client_from(app, "192.168.2.77").get("/report")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert b"Consumption report" in r.content
+    assert "assets/styles.css?v=49" in r.text
+    assert _client_from(app, "8.8.8.8").get("/report").status_code == 403
     _get_loop().run_until_complete(database.close())
 
 
@@ -2106,8 +2097,7 @@ def test_report_disabled_denies_everyone(tmp_path):
                          allowed_ips=["192.168.1.10"],
                          client_subnet="192.168.2.0/24"))
     for ip in ("192.168.2.77", "192.168.1.10"):
-        with _client_from(app, ip) as c:
-            assert c.get("/api/report").status_code == 403
+        assert _client_from(app, ip).get("/api/report").status_code == 403
     _get_loop().run_until_complete(database.close())
 
 

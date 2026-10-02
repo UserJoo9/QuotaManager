@@ -2831,6 +2831,14 @@ def create_app(
         finally:
             push_task.cancel()
             restore_task.cancel()
+            try:
+                await push_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            try:
+                await restore_task
+            except (asyncio.CancelledError, Exception):
+                pass
             if _vpn_manager.state != "disconnected" or _vpn_manager._proc is not None:
                 try:
                     await asyncio.wait_for(_vpn_manager.disconnect(user_initiated=False), timeout=2.0)
