@@ -596,8 +596,7 @@ def _as_dataclass(dc: Any, data: dict[str, Any] | None) -> Any:
 def resolve_config_path(path: str | os.PathLike[str] | None = None) -> Path:
     """Resolve a config path string or directory to an existing or target config file.
 
-    If given a directory (common with Docker volume mounts when the host path did
-    not exist prior to container boot), search inside for ``config.yaml`` or ``config.yml``.
+    If given a directory, search inside for ``config.yaml`` or ``config.yml``.
     """
     raw_path = path or os.environ.get("QUOTA_CONFIG") or DEFAULT_CONFIG_PATH
     cfg_path = Path(raw_path)

@@ -260,7 +260,7 @@ class TestEnsureNetworkInfrastructure:
 
 class TestEnsureNftablesConf:
     def test_skips_when_target_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """If the target .nft file doesn't exist (Docker), skip silently."""
+        """If the target .nft file doesn't exist, skip silently."""
         import quota.startup_health as mod
         monkeypatch.setattr(mod, "_CONF_SYMLINK", tmp_path / "nftables.conf")
         monkeypatch.setattr(mod, "_CONF_TARGET", tmp_path / "nonexistent.nft")

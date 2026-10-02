@@ -14,8 +14,7 @@ they own is cut at once; a per-device override can exempt a single device.
 Admin dashboard: obsidian-glass web UI (fixed left sidebar, midnight obsidian
 base + electric-cobalt accents, dark glassmorphism cards, 2-column masonry
 user cards, subtle particle canvas). Deployment target: **Linux on an old
-laptop** (Kali/Debian) — the kernel owns the network path. Docker is a
-**fully wired, supported secondary install path** (see [EXISTING_ARCHITECTURE]).
+laptop** (Kali/Debian) — the kernel owns the network path.
 
 ---
 
@@ -47,8 +46,7 @@ starlette dropping the httpx fallback breaks the suite. Fix is additive: pin
 `starlette` and add `httpx2` to test deps. httpx is **test-only** — runtime
 uses stdlib `urllib` (updater.py:93, dns_rules.py:241, tun2socks.py).
 
-- Runtime: **Python 3.11** (venv; 3.10+ supported). Docker image builds on
-  **python:3.12-slim-bookworm** — both ≥3.10, fine.
+- Runtime: **Python 3.11** (venv; 3.10+ supported).
 - Auth = stdlib `hashlib.pbkdf2_hmac` — **600k iterations** new hashes
   (`salt$iters$dk`), legacy 200k verified + auto-rehashed on login. Hardened
   **2026-08-19**: policy-enforced passwords (`core/passwords.py`: ≥12 chars,
@@ -352,18 +350,8 @@ preserving `/etc/quota-gateway/config.yaml` + `/var/lib/quota-gateway/quota.db`.
 on `release` + dispatch backfill): imports the private key from the
 `APT_REPO_GPG_KEY` secret, signs `Packages`/`Release`, pushes to `gh-pages`
 hosted at https://UserJoo9.github.io/QuotaManager/. Public key at
-`quota-manager.gpg`; `tests/test_packaging.py` pins the whole contract.
-**`[AUDIT 2026-08-19]` ALSO present**: `ci.yml` (pytest + node + docker-build-test)
-and `docker-publish.yml` — two workflows the old map didn't list.
-
-**`[AUDIT 2026-08-19]` Docker install path IS wired, not orphan**: `Dockerfile`
-(python:3.12-slim), `docker-compose.yml`, `DOCKER_DEPLOYMENT.md`,
-`.dockerignore`, `.env.example`, `scripts/docker-entrypoint.sh` (full parallel
-gateway bootstrapper: NAT + dnsmasq + dnslog config), `scripts/docker-systemctl-shim.sh`,
-`.github/workflows/docker-publish.yml`. No Python code imports Docker (only a
-`core/config.py:455` docstring). Docker lacks WAN/PPPoE mode support. `data/`
-mount (`./data:/var/lib/quota-gateway:rw`) in compose; `data/` is gitignored +
-empty on dev.
+**`[AUDIT 2026-08-19]` ALSO present**: `ci.yml` (pytest + pyflakes)
+and `release.yml`, `apt-repo.yml`.
 
 ---
 
@@ -410,8 +398,7 @@ QuotaManager/
 ├── config.yaml               # Linux gateway settings (dnsmasq + nftables + gates)
 ├── run.py                    # Composition root + orchestrator (Gateway, _maintenance_tick)
 ├── requirements-linux.txt    # pinned runtime + test deps (starlette NOT pinned — see TECH_STACK)
-├── Dockerfile / docker-compose.yml / DOCKER_DEPLOYMENT.md / .env.example / .dockerignore
-├── .github/workflows/        # release.yml, apt-repo.yml, ci.yml, docker-publish.yml
+├── .github/workflows/        # release.yml, apt-repo.yml, ci.yml
 ├── packaging/DEBIAN/         # control.template, postinst, prerm
 ├── core/                     # clean foundation, zero upward deps
 │   ├── config.py (575)       # config.yaml -> typed Config dataclasses (incl. FirewallConfig + WebConfig + WafConfig)
@@ -453,9 +440,7 @@ QuotaManager/
 │   ├── topology.sh           # runtime LAN/WAN applier (env-fed)
 │   ├── test_pppoe.sh         # throwaway dial (ppp200)
 │   ├── update_oui.py         # regenerate oui.txt from IEEE
-│   ├── replay_nft_startup.sh # debug reproduction of startup nft sequence
-│   ├── docker-entrypoint.sh  # Docker bootstrapper (NAT + dnsmasq + dnslog config)
-│   └── docker-systemctl-shim.sh
+│   └── replay_nft_startup.sh # debug reproduction of startup nft sequence
 ├── docs/                     # [AUDIT] screenshots only (favicon, dashboard.png) — NOT docs
 ├── data/                     # [AUDIT] gitignored, empty on dev; db_path default "data/quota.db" (config.py:420)
 └── logs/                     # [AUDIT] gitignored runtime artifact (quota.log, rotating)
@@ -510,7 +495,6 @@ Items from the 2026-08-08/10 audits marked ✔ are fixed. Items marked
 - **TestClient httpx→httpx2 deprecation** — starlette 1.4.1 warns today; the
   whole API test layer (~30+ sites) breaks when the httpx fallback is dropped.
   Add `httpx2` to test deps.
-- Docker inherits the same starlette drift (no extra pinning).
 
 **Dead code (verified `[AUDIT 2026-08-19]`):**
 - Test-only, zero production callers: `quota/db.py` `set_lease` (:972),
@@ -698,8 +682,6 @@ the regression net that blocks the breaking change.
 - **LAN mode needs a fixed uplink address on the box**: router DHCP reservation
   or a static address (setup sets `192.168.1.110` and verifies it). Not an
   issue in WAN mode.
-- **Docker is not WAN-capable** and carries no extra version pinning (shares
-  the starlette drift).
 - **`[AUDIT 2026-08-19]` default admin password is `admin`** when
   `QUOTA_ADMIN_PASSWORD` is unset — change it on any non-ephemeral deployment.
   Mitigated 2026-08-19: the `admin_password_default` marker blocks Strong WAN

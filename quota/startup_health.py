@@ -125,7 +125,7 @@ def ensure_nftables_conf() -> bool:
     """
     if not _CONF_TARGET.exists():
         log.debug("ensure_nftables_conf: target %s not found — skipping "
-                  "(Docker / non-setup deployment)", _CONF_TARGET)
+                  "(non-setup deployment)", _CONF_TARGET)
         return True
 
     try:
