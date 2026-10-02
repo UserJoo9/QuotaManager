@@ -34,8 +34,10 @@ import logging
 import os
 import re
 import signal
+import socket
 import subprocess
 import time
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -1204,9 +1206,11 @@ class Gateway:
                 # bundle consumption sits inside the quota math. The box's MAC has
                 # no lease, so it never appears in snap.by_ip — only in snap.gateway.
                 if snap.gateway.up or snap.gateway.down:
-                    box = devices_by_mac.get(GATEWAY_MAC.lower())
-                    if box is not None:
-                        usage_records.append((box.id, today, snap.gateway.up, snap.gateway.down))
+                    is_gw_blocked = bool(getattr(self.engine, "gateway_blocked", False))
+                    if not is_gw_blocked:
+                        box = devices_by_mac.get(GATEWAY_MAC.lower())
+                        if box is not None:
+                            usage_records.append((box.id, today, snap.gateway.up, snap.gateway.down))
 
                 if usage_records:
                     await self.database.add_usage_batch(usage_records)
@@ -1685,6 +1689,44 @@ class Gateway:
                         learned = await asyncio.to_thread(
                             self._vpn_learn, None)
                         self._vpn_allowed |= learned
+                        try:
+                            node_id_str = await self.database.get_setting("vpn_active_node_id", "")
+                            if node_id_str and node_id_str.isdigit():
+                                node = await self.database.get_vpn_node(int(node_id_str))
+                                srv = None
+                                if node:
+                                    if getattr(node, "config_json", None):
+                                        try:
+                                            c = json.loads(node.config_json)
+                                            srv = c.get("server")
+                                            if not srv and "outbounds" in c and isinstance(c["outbounds"], list):
+                                                for ob in c["outbounds"]:
+                                                    if isinstance(ob, dict) and ob.get("server"):
+                                                        srv = ob["server"]
+                                                        break
+                                        except Exception:
+                                            pass
+                                    if not srv and getattr(node, "raw_uri", None):
+                                        from urllib.parse import urlparse
+                                        try:
+                                            srv = urlparse(node.raw_uri).hostname
+                                        except Exception:
+                                            pass
+                                if srv:
+                                    srv_str = str(srv).strip()
+                                    try:
+                                        ip_address(srv_str)
+                                        self._vpn_allowed.add(srv_str)
+                                    except ValueError:
+                                        try:
+                                            resolved = await asyncio.to_thread(
+                                                socket.gethostbyname, srv_str)
+                                            if resolved:
+                                                self._vpn_allowed.add(resolved)
+                                        except Exception as ex:
+                                            log.warning("Could not resolve active VPN node server %r: %s", srv_str, ex)
+                        except Exception as ex:
+                            log.warning("Could not add active VPN node to gw_allowed: %s", ex)
                         override = list(
                             getattr(self.cfg.engine, "gateway_allow_ips", [])
                             or [])

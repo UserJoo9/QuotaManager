@@ -701,10 +701,12 @@ def test_gateway_chains_and_counters_programmed():
     assert "type filter hook output priority 0; policy accept;" in joined
     assert "q_gw_up" in fake.counters
     assert "q_gw_down" in fake.counters
-    # counters exclude the two local subnets (local traffic is never charged)
+    # counters exclude the two local subnets + loopback + vpn tun (local/internal traffic is never charged)
     assert ("ip daddr != 192.168.1.0/24 ip daddr != 192.168.2.0/24 "
+            "ip daddr != 127.0.0.0/8 ip daddr != 172.19.0.0/30 "
             "counter name q_gw_up") in joined
     assert ("ip saddr != 192.168.1.0/24 ip saddr != 192.168.2.0/24 "
+            "ip saddr != 127.0.0.0/8 ip saddr != 172.19.0.0/30 "
             "counter name q_gw_down") in joined
     # DNS exemptions come before the gw_blocked drops (clients keep DNS while
     # the box itself is cut), and the drops carry the LAN exclusions + loopback
@@ -715,9 +717,11 @@ def test_gateway_chains_and_counters_programmed():
     # the gw_allowed accepts come after the exemptions but BEFORE the drops
     assert joined.index("ip daddr @gw_allowed accept") < drop_idx
     assert ("ip daddr @gw_blocked ip daddr != 192.168.1.0/24 "
-            "ip daddr != 192.168.2.0/24 ip daddr != 127.0.0.0/8 drop") in joined
+            "ip daddr != 192.168.2.0/24 ip daddr != 127.0.0.0/8 "
+            "ip daddr != 172.19.0.0/30 drop") in joined
     assert ("ip saddr @gw_blocked ip saddr != 192.168.1.0/24 "
-            "ip saddr != 192.168.2.0/24 ip saddr != 127.0.0.0/8 drop") in joined
+            "ip saddr != 192.168.2.0/24 ip saddr != 127.0.0.0/8 "
+            "ip saddr != 172.19.0.0/30 drop") in joined
     # DHCP exemptions also come BEFORE the drops: a NEW client's DISCOVER/REQUEST
     # has saddr 0.0.0.0 (not a local subnet) and the OFFER/ACK replies go to the
     # broadcast 255.255.255.255 — both would match the drops and leave the device
@@ -901,11 +905,13 @@ def test_gateway_cut_exempts_loopback():
     eng = _engine(fake)
     eng.start()
     joined = " | ".join(fake.rules)
-    # the gw_blocked drops carry the LAN exclusions PLUS loopback
+    # the gw_blocked drops carry the LAN exclusions PLUS loopback + tun
     assert ("ip daddr @gw_blocked ip daddr != 192.168.1.0/24 "
-            "ip daddr != 192.168.2.0/24 ip daddr != 127.0.0.0/8 drop") in joined
+            "ip daddr != 192.168.2.0/24 ip daddr != 127.0.0.0/8 "
+            "ip daddr != 172.19.0.0/30 drop") in joined
     assert ("ip saddr @gw_blocked ip saddr != 192.168.1.0/24 "
-            "ip saddr != 192.168.2.0/24 ip saddr != 127.0.0.0/8 drop") in joined
+            "ip saddr != 192.168.2.0/24 ip saddr != 127.0.0.0/8 "
+            "ip saddr != 172.19.0.0/30 drop") in joined
     eng.set_gateway_blocked(True)
     assert _gateway_set(fake) == {"0.0.0.0/0"}
 

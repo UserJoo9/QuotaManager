@@ -583,9 +583,9 @@ class NftablesEngine:
         # gw_blocked drops BEFORE the counters: a dropped packet terminates the
         # chain, so a blocked box's attempted bytes are never counted (they
         # never leave the box — nothing is consumed from the bundle). Loopback
-        # is exempt so the box's own local services (dashboard, tun2socks ->
-        # VPN client) keep working while its internet is cut.
-        gw_exclusions = self._local_networks + ["127.0.0.0/8"]
+        # and VPN tun interface are exempt so the box's own local services (dashboard,
+        # tun2socks -> VPN client, sing-box tun) keep working while its internet is cut.
+        gw_exclusions = [n for n in self._local_networks if n not in ("127.0.0.0/8", "172.19.0.0/30")] + ["127.0.0.0/8", "172.19.0.0/30"]
         out_drop = _match("ip daddr @gw_blocked", "ip daddr",
                           gw_exclusions) + " drop"
         in_drop = _match("ip saddr @gw_blocked", "ip saddr",
@@ -595,8 +595,8 @@ class NftablesEngine:
         # Counters LAST: only non-local, non-exempted traffic that survives the
         # block reaches them.
         if self._count_gateway:
-            out_count = _gateway_exclusions("ip daddr", self._local_networks)
-            in_count = _gateway_exclusions("ip saddr", self._local_networks)
+            out_count = _gateway_exclusions("ip daddr", gw_exclusions)
+            in_count = _gateway_exclusions("ip saddr", gw_exclusions)
             carried_up = self._add_counter("q_gw_up")
             carried_down = self._add_counter("q_gw_down")
             if carried_up or carried_down:
