@@ -123,14 +123,7 @@ upgrade`.
 
 ---
 
-#### Method B — Docker (any Linux machine / server)
-
-Docker lets you run Quota Manager containerized on any Linux box. See
-[DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md) for the full guide.
-
----
-
-#### Method C — downloaded `.deb`
+#### Method B — downloaded `.deb`
 
 Download the latest `quota-manager_<version>_all.deb` from the
 [Releases](https://github.com/UserJoo9/QuotaManager/releases) page, then:
@@ -402,9 +395,6 @@ sudo apt remove quota-manager
 # Remove entirely (also deletes /opt/quota-manager)
 sudo purge quota-manager
 ```
-
-For Docker: `docker compose pull && docker compose up -d` to upgrade,
-`docker compose down` to stop. See [DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md).
 
 **Back up** your database occasionally (while the service is stopped) — it
 holds every device, allowance, and history: `/var/lib/quota-gateway/quota.db`
