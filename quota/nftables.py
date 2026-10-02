@@ -562,6 +562,10 @@ class NftablesEngine:
                    "udp dport 53 accept"])
         self._run(["add", "rule", f"{FAMILY} {self.table} input",
                    "udp sport 53 accept"])
+        self._run(["add", "rule", f"{FAMILY} {self.table} output",
+                   "tcp dport 53 accept"])
+        self._run(["add", "rule", f"{FAMILY} {self.table} input",
+                   "tcp sport 53 accept"])
         # DHCP exemptions: a NEW client's DISCOVER/REQUEST has no IP yet
         # (saddr 0.0.0.0, not a local subnet) and the OFFER/ACK reply goes to
         # the broadcast 255.255.255.255 — both would match the gw_blocked drop

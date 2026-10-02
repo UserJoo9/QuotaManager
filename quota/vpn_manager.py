@@ -17,9 +17,11 @@ import json
 import logging
 import os
 import subprocess
+import socket
 import tempfile
 import time
 from dataclasses import dataclass, field
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
 try:
@@ -132,16 +134,26 @@ class VpnManager:
 
     async def ping_node(self, host: str, port: int, timeout: float = 3.0) -> float:
         """Measure TCP connect latency to host:port in milliseconds."""
+        clean_host = (host or "").strip()
+        if not clean_host or not port:
+            return -1.0
         start = time.perf_counter()
+        target_ip = clean_host
         try:
+            # Force IPv4 to prevent IPv6 network unreachable errors on systems with unrouted IPv6
+            try:
+                ip_address(clean_host)
+            except ValueError:
+                target_ip = await asyncio.to_thread(socket.gethostbyname, clean_host)
+
             _, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port), timeout=timeout
+                asyncio.open_connection(target_ip, int(port)), timeout=timeout
             )
             writer.close()
             await writer.wait_closed()
             return round((time.perf_counter() - start) * 1000.0, 1)
         except Exception as e:
-            log.debug("Ping failed for %s:%d: %s", host, port, e)
+            log.warning("Ping failed for %s (%s):%d [%s]: %s", clean_host, target_ip, port, type(e).__name__, e)
             return -1.0
 
     async def auto_restore(self) -> None:

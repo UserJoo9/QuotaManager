@@ -39,7 +39,7 @@ import subprocess
 import time
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import uvicorn
 
@@ -1575,6 +1575,38 @@ class Gateway:
             "" if chosen == pin else " — the pinned tunnel was superseded")
         return chosen
 
+    async def _extract_node_server_ip(self, node: Any) -> str | None:
+        srv = None
+        if getattr(node, "config_json", None):
+            try:
+                c = json.loads(node.config_json)
+                srv = c.get("server")
+                if not srv and "outbounds" in c and isinstance(c["outbounds"], list):
+                    for ob in c["outbounds"]:
+                        if isinstance(ob, dict) and ob.get("server"):
+                            srv = ob["server"]
+                            break
+            except Exception:
+                pass
+        if not srv and getattr(node, "raw_uri", None):
+            from urllib.parse import urlparse
+            try:
+                srv = urlparse(node.raw_uri).hostname
+            except Exception:
+                pass
+        if not srv:
+            return None
+        srv_str = str(srv).strip()
+        try:
+            ip_address(srv_str)
+            return srv_str
+        except ValueError:
+            try:
+                resolved = await asyncio.to_thread(socket.gethostbyname, srv_str)
+                return resolved if resolved else None
+            except Exception:
+                return None
+
     async def _sync_vpn_share(self) -> None:
         """Reconcile the VPN-share policy routing with the dashboard switch.
 
@@ -1690,43 +1722,13 @@ class Gateway:
                             self._vpn_learn, None)
                         self._vpn_allowed |= learned
                         try:
-                            node_id_str = await self.database.get_setting("vpn_active_node_id", "")
-                            if node_id_str and node_id_str.isdigit():
-                                node = await self.database.get_vpn_node(int(node_id_str))
-                                srv = None
-                                if node:
-                                    if getattr(node, "config_json", None):
-                                        try:
-                                            c = json.loads(node.config_json)
-                                            srv = c.get("server")
-                                            if not srv and "outbounds" in c and isinstance(c["outbounds"], list):
-                                                for ob in c["outbounds"]:
-                                                    if isinstance(ob, dict) and ob.get("server"):
-                                                        srv = ob["server"]
-                                                        break
-                                        except Exception:
-                                            pass
-                                    if not srv and getattr(node, "raw_uri", None):
-                                        from urllib.parse import urlparse
-                                        try:
-                                            srv = urlparse(node.raw_uri).hostname
-                                        except Exception:
-                                            pass
-                                if srv:
-                                    srv_str = str(srv).strip()
-                                    try:
-                                        ip_address(srv_str)
-                                        self._vpn_allowed.add(srv_str)
-                                    except ValueError:
-                                        try:
-                                            resolved = await asyncio.to_thread(
-                                                socket.gethostbyname, srv_str)
-                                            if resolved:
-                                                self._vpn_allowed.add(resolved)
-                                        except Exception as ex:
-                                            log.warning("Could not resolve active VPN node server %r: %s", srv_str, ex)
+                            nodes = await self.database.list_vpn_nodes()
+                            for n in nodes:
+                                nip = await self._extract_node_server_ip(n)
+                                if nip:
+                                    self._vpn_allowed.add(nip)
                         except Exception as ex:
-                            log.warning("Could not add active VPN node to gw_allowed: %s", ex)
+                            log.warning("Could not add saved VPN nodes to gw_allowed: %s", ex)
                         override = list(
                             getattr(self.cfg.engine, "gateway_allow_ips", [])
                             or [])
@@ -2088,6 +2090,7 @@ def main() -> None:
                          firewall_wan_preapply=gateway._firewall_wan_preapply,
                          updater=gateway.updater,
                          vpn_manager=gateway.vpn_manager,
+                         engine=gateway.engine,
                          web_config=cfg.web,
                          waf_config=cfg.waf)
         # TLS (web.tls_certfile / web.tls_keyfile): uvicorn terminates HTTPS

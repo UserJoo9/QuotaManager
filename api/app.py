@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import secrets
+import socket
 import subprocess
 import time
 from dataclasses import asdict
@@ -281,6 +282,7 @@ def create_app(
     firewall_wan_preapply: Optional[Callable[[str], object]] = None,
     updater: object | None = None,
     vpn_manager: Optional[object] = None,
+    engine: Optional[object] = None,
     web_config: WebConfig | None = None,
     waf_config: WafConfig | None = None,
 ) -> FastAPI:
@@ -2496,8 +2498,35 @@ def create_app(
         except Exception:
             raise HTTPException(400, "Cannot extract server and port from node config")
 
+        if not server and getattr(node, "raw_uri", None):
+            from urllib.parse import urlparse
+            try:
+                p = urlparse(node.raw_uri)
+                if p.hostname:
+                    server = p.hostname
+                if p.port:
+                    port = p.port
+            except Exception:
+                pass
+
         if not server:
             raise HTTPException(400, "Node config does not specify a target server")
+
+        # Whitelist server IPv4 in engine's @gw_allowed so the ping is not dropped if gateway internet is cut
+        if engine is not None and hasattr(engine, "set_gateway_allowed"):
+            try:
+                server_ip = None
+                try:
+                    ipaddress.ip_address(server)
+                    server_ip = server
+                except ValueError:
+                    server_ip = await asyncio.to_thread(socket.gethostbyname, server)
+                if server_ip:
+                    current_allowed = list(getattr(engine, "_gateway_allowed", None) or [])
+                    if server_ip not in current_allowed:
+                        engine.set_gateway_allowed(sorted(set(current_allowed) | {server_ip}))
+            except Exception as ex:
+                logging.getLogger("api").debug("Notice whitelisting server_ip for ping: %s", ex)
 
         ping_ms = await _vpn_manager.ping_node(server, port)
         await database.update_vpn_node(node_id, ping_ms=ping_ms)
