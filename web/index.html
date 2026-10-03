@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quota Manager</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=63">
+    <link rel="stylesheet" href="/assets/styles.css?v=64">
   <script disable-devtool-auto src='/assets/detector.js'></script>
 </head>
 <body>
@@ -695,78 +695,6 @@
             </div>
           </div>
 
-          <!-- ALLOW / DENY CIDRs -->
-          <div class="glass card settings-card">
-            <h3>IP / CIDR lists</h3>
-            <div class="field">
-              <label for="fw-allow-cidrs">Allowlist (bypasses the WAN default-deny)</label>
-              <textarea id="fw-allow-cidrs" rows="2" placeholder="203.0.113.0/24, one per line"></textarea>
-            </div>
-            <div class="field">
-              <label for="fw-deny-cidrs">Blocklist (deny &gt; allow)</label>
-              <textarea id="fw-deny-cidrs" rows="2" placeholder="198.51.100.0/24, one per line"></textarea>
-            </div>
-          </div>
-
-          <!-- PROTECTION TOGGLES -->
-          <div class="glass card settings-card">
-            <h3>Protection</h3>
-            <div class="settings-grid">
-              <div class="field">
-                <label for="fw-syn-rate">SYN-flood rate (per second)</label>
-                <input type="number" id="fw-syn-rate" min="1" value="10">
-              </div>
-              <div class="field">
-                <label for="fw-syn-burst">SYN-flood burst</label>
-                <input type="number" id="fw-syn-burst" min="1" value="20">
-              </div>
-              <div class="field">
-                <label for="fw-bf-threshold">Brute-force threshold (logins)</label>
-                <input type="number" id="fw-bf-threshold" min="1" value="10">
-              </div>
-              <div class="field">
-                <label for="fw-bf-seconds">Brute-force ban (seconds)</label>
-                <input type="number" id="fw-bf-seconds" min="60" value="1800">
-              </div>
-              <div class="field">
-                <label for="fw-scan-threshold">Port-scan SYN threshold</label>
-                <input type="number" id="fw-scan-threshold" min="1" value="200">
-              </div>
-              <div class="field">
-                <label for="fw-scan-seconds">Port-scan ban (seconds)</label>
-                <input type="number" id="fw-scan-seconds" min="60" value="3600">
-              </div>
-            </div>
-            <div class="fw-toggle-row">
-              <label class="switch-row" for="fw-scan-enabled">
-                <span>Port-scan detection</span>
-                <span class="switch"><input type="checkbox" id="fw-scan-enabled" checked><span class="slider"></span></span>
-              </label>
-              <label class="switch-row" for="fw-geo">
-                <span>Geo-block (uses the stored country→CIDR map)</span>
-                <span class="switch"><input type="checkbox" id="fw-geo"><span class="slider"></span></span>
-              </label>
-              <label class="switch-row" for="fw-wan-confirmed">
-                <span>Expose dashboard on ppp0 in WAN mode <em>(explicit, risky)</em></span>
-                <span class="switch"><input type="checkbox" id="fw-wan-confirmed"><span class="slider"></span></span>
-              </label>
-            </div>
-          </div>
-
-          <div class="glass card settings-card fw-https-card" id="fw-https-card">
-            <div class="fw-https-row">
-              <div class="fw-https-info">
-                <h3>Enforce HTTPS</h3>
-                <p class="muted small">Generate a self-signed TLS certificate and enable encrypted dashboard access in one click. The browser will show a one-time warning you accept — after that the connection is encrypted and the WAN-over-HTTP warning disappears.</p>
-              </div>
-              <div class="fw-https-btns">
-                <button id="fw-enforce-https" class="btn primary" type="button">Enable HTTPS</button>
-                <button id="fw-remove-https" class="btn ghost danger hidden" type="button">Remove HTTPS</button>
-              </div>
-            </div>
-            <div id="fw-https-status" class="muted small fw-https-status hidden"></div>
-          </div>
-
           <!-- Remove HTTPS confirmation modal -->
           <div id="fw-https-modal" class="modal hidden">
             <div class="glass card modal-card">
@@ -787,8 +715,82 @@
           <div id="fw-warnings" class="fw-warnings"></div>
         </div>
 
-        <!-- RIGHT COLUMN: bans + log -->
+        <!-- RIGHT COLUMN: Protection, IP Lists, HTTPS, Active Bans & Firewall Log -->
         <div class="netquota-side">
+          <!-- PROTECTION TOGGLES -->
+          <div class="glass card settings-card">
+            <h3>Protection &amp; Flood Limits</h3>
+            <div class="settings-grid">
+              <div class="field">
+                <label for="fw-syn-rate">SYN-flood rate (/s)</label>
+                <input type="number" id="fw-syn-rate" min="1" value="10">
+              </div>
+              <div class="field">
+                <label for="fw-syn-burst">SYN-flood burst</label>
+                <input type="number" id="fw-syn-burst" min="1" value="20">
+              </div>
+              <div class="field">
+                <label for="fw-bf-threshold">Brute-force (logins)</label>
+                <input type="number" id="fw-bf-threshold" min="1" value="10">
+              </div>
+              <div class="field">
+                <label for="fw-bf-seconds">Brute-force ban (s)</label>
+                <input type="number" id="fw-bf-seconds" min="60" value="1800">
+              </div>
+              <div class="field">
+                <label for="fw-scan-threshold">Port-scan SYN threshold</label>
+                <input type="number" id="fw-scan-threshold" min="1" value="200">
+              </div>
+              <div class="field">
+                <label for="fw-scan-seconds">Port-scan ban (s)</label>
+                <input type="number" id="fw-scan-seconds" min="60" value="3600">
+              </div>
+            </div>
+            <div class="fw-toggle-row">
+              <label class="switch-row" for="fw-scan-enabled">
+                <span>Port-scan detection</span>
+                <span class="switch"><input type="checkbox" id="fw-scan-enabled" checked><span class="slider"></span></span>
+              </label>
+              <label class="switch-row" for="fw-geo">
+                <span>Geo-block (stored country→CIDR)</span>
+                <span class="switch"><input type="checkbox" id="fw-geo"><span class="slider"></span></span>
+              </label>
+              <label class="switch-row" for="fw-wan-confirmed">
+                <span>Expose dashboard on ppp0 in WAN mode <em>(risky)</em></span>
+                <span class="switch"><input type="checkbox" id="fw-wan-confirmed"><span class="slider"></span></span>
+              </label>
+            </div>
+          </div>
+
+          <!-- ALLOW / DENY CIDRs -->
+          <div class="glass card settings-card">
+            <h3>IP / CIDR lists</h3>
+            <div class="field">
+              <label for="fw-allow-cidrs">Allowlist (bypasses the WAN default-deny)</label>
+              <textarea id="fw-allow-cidrs" rows="2" placeholder="203.0.113.0/24, one per line"></textarea>
+            </div>
+            <div class="field">
+              <label for="fw-deny-cidrs">Blocklist (deny &gt; allow)</label>
+              <textarea id="fw-deny-cidrs" rows="2" placeholder="198.51.100.0/24, one per line"></textarea>
+            </div>
+          </div>
+
+          <!-- ENFORCE HTTPS -->
+          <div class="glass card settings-card fw-https-card" id="fw-https-card">
+            <div class="fw-https-row">
+              <div class="fw-https-info">
+                <h3>Enforce HTTPS</h3>
+                <p class="muted small">Generate self-signed TLS cert for encrypted dashboard access.</p>
+              </div>
+              <div class="fw-https-btns">
+                <button id="fw-enforce-https" class="btn primary small" type="button">Enable HTTPS</button>
+                <button id="fw-remove-https" class="btn ghost danger small hidden" type="button">Remove</button>
+              </div>
+            </div>
+            <div id="fw-https-status" class="muted small fw-https-status hidden"></div>
+          </div>
+
+          <!-- ACTIVE BANS -->
           <div class="glass card settings-card">
             <h3>Active bans</h3>
             <div id="fw-bans" class="fw-ban-list">
@@ -799,6 +801,8 @@
               <button id="fw-ban-btn" class="btn small" type="button">Ban</button>
             </div>
           </div>
+
+          <!-- FIREWALL LOG -->
           <div class="glass card settings-card">
             <h3>Firewall log</h3>
             <p class="muted small">Recent firewall events.</p>
@@ -1005,65 +1009,42 @@
       <!-- import, and per-user/per-device upstream DNS-server overrides. -->
       <section id="panel-dns" class="nav-panel hidden">
 
-        <!-- ULTRA AD-BLOCKER HERO SHIELD -->
-        <div class="glass card adblock-hero-card">
-          <div class="adblock-hero-header">
-            <div class="adblock-hero-title">
-              <div class="adblock-shield-icon" id="adblock-shield-icon">🛡️</div>
-              <div>
-                <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-                  <h3 style="margin: 0; font-size: 1.15rem;">Ultra Network Ad-Blocker</h3>
-                  <span id="adblock-status-badge" class="badge off">Protection Off</span>
-                </div>
-                <p class="muted small" style="margin-top: 4px;">Hardware-level ad &amp; tracker blocking for all connected devices on the network without installing any software or apps.</p>
+        <!-- DNS CONTENT & AD-BLOCKER FILTERS -->
+        <div class="glass card">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; flex-wrap: wrap; gap: 12px;">
+            <div>
+              <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                <h3 style="margin: 0; font-size: 1.15rem;">Content &amp; Ad-Block Filters</h3>
+                <span id="adblock-status-badge" class="badge off">Protection Off</span>
               </div>
+              <p class="muted small" style="margin-top: 4px;">Hardware-level network filtering: block ads, telemetry, trackers, and parental control categories across all devices.</p>
             </div>
-            <div class="adblock-hero-toggle">
-              <label class="switch-label" style="display: inline-flex; align-items: center; gap: 10px; cursor: pointer; user-select: none;">
-                <span id="adblock-toggle-label" class="muted small" style="font-weight: 600;">Disabled</span>
-                <label class="switch" style="margin: 0;">
-                  <input type="checkbox" id="adblock-master-switch">
-                  <span class="slider"></span>
-                </label>
-              </label>
+            <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+              <button type="button" id="adblock-update-btn" class="btn ghost small" title="Re-download latest ad feeds">⟳ Update Feeds</button>
+              <button type="button" id="adblock-whitelist-btn" class="btn ghost small" title="Whitelist a specific domain">＋ Whitelist</button>
             </div>
           </div>
 
-          <!-- STATS & INFO BAR -->
-          <div class="adblock-stats-row">
-            <div class="adblock-stat-item">
-              <span class="adblock-stat-label">Protection Mode</span>
-              <span class="adblock-stat-value text-accent" id="adblock-mode-val">🔥 Ultra PRO</span>
+          <!-- AD-BLOCKER INTENSITY PRESETS (Directly toggled) -->
+          <div style="margin-top: 14px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+              <span class="muted small" style="font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Network Ad-Blocker:</span>
+              <span class="font-mono text-accent small" id="adblock-domains-count">—</span>
             </div>
-            <div class="adblock-stat-item">
-              <span class="adblock-stat-label">Blocked Domains</span>
-              <span class="adblock-stat-value font-mono" id="adblock-domains-count">—</span>
-            </div>
-            <div class="adblock-stat-item">
-              <span class="adblock-stat-label">Network Coverage</span>
-              <span class="adblock-stat-value">All Devices (Global)</span>
-            </div>
-            <div class="adblock-stat-item">
-              <span class="adblock-stat-label">Quick Actions</span>
-              <div style="display: flex; gap: 6px; align-items: center; margin-top: 2px;">
-                <button type="button" id="adblock-update-btn" class="btn ghost tiny" title="Re-download latest ad feeds">⟳ Update Feeds</button>
-                <button type="button" id="adblock-whitelist-btn" class="btn ghost tiny" title="Whitelist a specific domain">＋ Whitelist</button>
-              </div>
-            </div>
-          </div>
+            <!-- Hidden master switch preserved for backward-compatible state management -->
+            <input type="checkbox" id="adblock-master-switch" class="hidden">
+            <span id="adblock-toggle-label" class="hidden"></span>
+            <span id="adblock-mode-val" class="hidden"></span>
 
-          <!-- PROTECTION INTENSITY / PRESET TIERS -->
-          <div class="adblock-tiers-wrap">
-            <span class="muted small" style="display: block; margin-bottom: 8px; font-weight: 600;">Protection Intensity Level:</span>
             <div class="adblock-tiers-grid">
               <label class="adblock-tier-card active" data-tier="adblock-ultra">
                 <input type="radio" name="adblock-tier" value="adblock-ultra" checked>
                 <div class="adblock-tier-content">
                   <div class="adblock-tier-head">
-                    <strong>🔥 Ultra PRO (Recommended)</strong>
+                    <strong>Ultra PRO (Recommended)</strong>
                     <span class="adblock-tier-tag pro">Most Powerful</span>
                   </div>
-                  <p class="muted small">HaGeZi Multi PRO + AdGuard + Anudeep. Comprehensive shield against web ads, video pre-rolls, mobile in-app ads, popups, and smart TV telemetry.</p>
+                  <p class="muted small">Comprehensive shield against web ads, video pre-rolls, mobile in-app ads, popups, and smart TV telemetry (HaGeZi Multi PRO + AdGuard).</p>
                 </div>
               </label>
 
@@ -1071,23 +1052,25 @@
                 <input type="radio" name="adblock-tier" value="ads-tracking">
                 <div class="adblock-tier-content">
                   <div class="adblock-tier-head">
-                    <strong>⚡ Standard Protection</strong>
+                    <strong>Standard Protection</strong>
                     <span class="adblock-tier-tag">Lightweight</span>
                   </div>
-                  <p class="muted small">StevenBlack unified hosts. Standard web ads and basic analytics tracking with zero false positives.</p>
+                  <p class="muted small">Standard web ads and basic analytics tracking with zero false positives (StevenBlack unified hosts).</p>
                 </div>
               </label>
             </div>
           </div>
-        </div>
 
-        <div class="glass card" style="margin-top: 14px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-            <h3 style="margin: 0;">🛡️ Category &amp; Content Filters</h3>
+          <hr class="sep" style="margin: 20px 0 16px 0;">
+
+          <!-- CATEGORY PRESET SWITCHES -->
+          <div>
+            <div style="margin-bottom: 10px;">
+              <span class="muted small" style="font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Parental Controls &amp; Category Filters:</span>
+            </div>
+            <div id="dns-presets-list" class="dns-presets-list"></div>
+            <p id="dns-presets-error" class="error hidden"></p>
           </div>
-          <p class="muted small">One-click blocking for sensitive or distracting content categories (Parental Controls) across all connected devices.</p>
-          <div id="dns-presets-list" class="dns-presets-list"></div>
-          <p id="dns-presets-error" class="error hidden"></p>
         </div>
 
         <div class="glass card">
@@ -1756,6 +1739,6 @@
     </div>
   </div>
 
-    <script src="/assets/app.js?v=80"></script>
+    <script src="/assets/app.js?v=81"></script>
 </body>
 </html>

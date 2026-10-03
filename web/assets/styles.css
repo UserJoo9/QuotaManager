@@ -4,45 +4,45 @@
    ============================================================ */
 
 :root {
-  --bg: #07080A;              /* midnight obsidian — page base */
-  --bg-2: #0D0E12;            /* elevated obsidian — sidebar / login */
-  --surface: #161B26;         /* main cards & summary cards — solid */
-  --surface-panel: #0D1017;   /* sidebar & container panels — solid */
-  --surface-2: #1E2533;       /* hover / elevated */
-  --surface-3: #2A3347;       /* subtle highlight */
-  --border: #2A3347;
-  --border-soft: #1E2533;
-  --text: #F8FAFC;            /* brighter text for contrast */
-  --text-dim: #CBD5E1;        /* brighter dim text */
-  --text-faint: #94A3B8;
-  --accent: #3B82F6;          
-  --accent-hover: #2563EB;
-  --accent-2: #2563EB;        
-  --accent-3: #60A5FA;        
-  --danger: #EF4444;          /* brighter red */
-  --warn: #F59E0B;            /* brighter amber */
-  --ok: #3B82F6;
-  --up: #60A5FA;              
-  --down: #22D3EE;            
-  --off: #64748B;             
-  --glass-filter: none;       /* removed blur */
-  --glass-card-bg: #161B26;   
-  --glass-panel-bg: #0D1017;  
-  --glass-border: #2A3347;
-  --glass-inner: none;        /* removed heavy inset shadows */
-  --glow: none;               /* removed unnecessary glows */
-  --glow-bar: none;           
-  --glow-switch: none;        
+  --bg: #06080e;              /* deep obsidian canvas */
+  --bg-2: #0b0f19;            /* elevated obsidian */
+  --surface: #121826;         /* rich dark navy card background */
+  --surface-panel: #090d16;   /* sidebar & docked panels */
+  --surface-2: #1b2438;       /* interactive surfaces & card highlights */
+  --surface-3: #26334d;       /* subtle hover/divider state */
+  --border: rgba(255, 255, 255, 0.08); /* clean translucent border */
+  --border-soft: rgba(255, 255, 255, 0.04);
+  --text: #f8fafc;            /* crisp bright text */
+  --text-dim: #94a3b8;        /* balanced muted text */
+  --text-faint: #64748b;
+  --accent: #38bdf8;          /* vibrant sky-blue/cyan primary */
+  --accent-hover: #0ea5e9;
+  --accent-2: #2563eb;        /* royal blue secondary */
+  --accent-3: #60a5fa;        
+  --danger: #f43f5e;          /* vibrant rose/red */
+  --warn: #f59e0b;            /* warm amber */
+  --ok: #10b981;              /* emerald green */
+  --up: #60a5fa;              
+  --down: #22d3ee;            
+  --off: #64748b;             
+  --glass-filter: blur(16px);
+  --glass-card-bg: rgba(18, 24, 38, 0.78);
+  --glass-panel-bg: rgba(9, 13, 22, 0.88);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --glass-inner: inset 0 1px 0 0 rgba(255, 255, 255, 0.07);
+  --glow: 0 0 20px rgba(56, 189, 248, 0.15);
+  --glow-bar: 0 0 10px rgba(56, 189, 248, 0.4);
+  --glow-switch: 0 0 12px rgba(56, 189, 248, 0.45);
   --mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, "Liberation Mono", monospace;
   /* legacy glass aliases */
-  --glass-bg: #161B26;
-  --glass-bg-2: #1E2533;
+  --glass-bg: rgba(18, 24, 38, 0.78);
+  --glass-bg-2: rgba(27, 36, 56, 0.82);
   --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 12px;
   --radius-xl: 14px;
-  --shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 4px 12px rgba(0, 0, 0, 0.2);
-  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow: 0 4px 16px -2px rgba(0, 0, 0, 0.5), 0 2px 6px -1px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 12px 32px -4px rgba(0, 0, 0, 0.6), 0 4px 12px -2px rgba(0, 0, 0, 0.4);
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
@@ -1621,9 +1621,10 @@ select option { background: var(--bg-2); }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
 
 /* ---------- responsive: sidebar collapses to an icon rail ---------- */
+/* ---------- responsive: mobile & tablet optimization ---------- */
 @media (max-width: 900px) {
   .sidebar { width: 64px; }
-  .content { margin-left: 64px; padding: 24px 20px 50px; }
+  .content { margin-left: 64px; padding: 22px 18px 50px; }
   .nav-label, .sidebar-brand .logo, .net-status, .quick-label { display: none; }
   .side-nav { padding: 14px 10px; }
   .nav-tab { justify-content: center; padding: 12px 0; }
@@ -1633,38 +1634,64 @@ select option { background: var(--bg-2); }
   .sidebar-quick { display: none; }
   .two-col { grid-template-columns: 1fr; }
   .device-grid { columns: 1; }
+  .netquota-layout { grid-template-columns: 1fr; }
+  .management-layout { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 768px) {
+  .admin-unified-grid { grid-template-columns: 1fr !important; }
+  .wan-grid { grid-template-columns: 1fr !important; }
+  .adblock-tiers-grid { grid-template-columns: 1fr !important; }
+  .settings-grid { grid-template-columns: 1fr 1fr; }
+  .card { padding: 18px 16px; }
+  .nav-panel { gap: 18px; }
 }
 
 @media (max-width: 480px) {
-  .logo { font-size: 1.3rem; }
-  .ring { width: 146px; height: 146px; }
-  .ring-big { font-size: 1.3rem; }
+  .logo { font-size: 1.25rem; }
+  .ring { width: 140px; height: 140px; }
+  .ring-big { font-size: 1.25rem; }
   .ring-small { font-size: 0.7rem; }
   .icon-btn, .accordion-toggle { width: 34px; height: 34px; }
-  .btn.small { padding: 8px 11px; font-size: 0.8rem; }
-  .modal, .welcome-overlay { padding: 12px; }
-  .modal-card { padding: 20px 16px; max-height: calc(100vh - 24px); }
-  .welcome-overlay .welcome-card { padding: 22px 18px; max-height: calc(100vh - 24px); }
-  .login-card { padding: 26px 18px; }
-  .content { margin-left: 0; padding: 16px 12px 40px; }
-  .sidebar { position: fixed; top: auto; right: 0; left: 0; bottom: 0; width: 100%; height: 56px;
-             flex-direction: row; align-items: center; border-right: none; border-top: 1px solid var(--border-soft); }
+  .btn { padding: 9px 12px; font-size: 0.85rem; }
+  .btn.small { padding: 7px 10px; font-size: 0.78rem; }
+  .modal, .welcome-overlay { padding: 10px; }
+  .modal-card { padding: 18px 14px; max-height: calc(100vh - 20px); border-radius: var(--radius-lg); }
+  .welcome-overlay .welcome-card { padding: 20px 16px; max-height: calc(100vh - 20px); }
+  .login-card { padding: 24px 16px; }
+  .content { margin-left: 0; padding: 14px 10px 72px; }
+  .sidebar {
+    position: fixed; top: auto; right: 0; left: 0; bottom: 0;
+    width: 100%; height: 58px; z-index: 40;
+    flex-direction: row; align-items: center; justify-content: space-around;
+    border-right: none; border-top: 1px solid var(--border);
+    background: rgba(9, 13, 22, 0.96) !important;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+  }
   .sidebar-brand, .sidebar-footer { display: none; }
-  .side-nav { flex-direction: row; align-items: center; gap: 2px; padding: 4px 8px; overflow-x: auto; }
-  .nav-tab { padding: 8px 12px; }
+  .side-nav {
+    flex-direction: row; align-items: center; justify-content: space-around;
+    width: 100%; gap: 4px; padding: 4px 6px; overflow-x: auto;
+  }
+  .nav-tab { padding: 8px 10px; border-radius: var(--radius-md); }
   .device-grid { columns: 1; }
-  .bundle-card { justify-content: center; gap: 18px; padding: 18px 14px; }
-  .bundle-stats { grid-template-columns: repeat(2, 1fr); gap: 10px; }
-  .device-live { flex-wrap: wrap; gap: 10px 16px; }
-  .device-numbers { flex-wrap: wrap; gap: 6px 12px; }
-  .device-actions { flex-wrap: wrap; }
-  .logs-toolbar { width: 100%; }
+  .bundle-card { justify-content: center; gap: 14px; padding: 16px 12px; }
+  .bundle-stats { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .bundle-stats-vertical { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .settings-grid { grid-template-columns: 1fr; }
+  .device-live { flex-wrap: wrap; gap: 8px 14px; }
+  .device-numbers { flex-wrap: wrap; gap: 6px 10px; font-size: 0.75rem; }
+  .device-actions { flex-wrap: wrap; gap: 6px; }
+  .logs-toolbar { width: 100%; flex-wrap: wrap; }
   #log-search { width: 100%; }
-  .filter-group { flex-wrap: wrap; width: 100%; justify-content: center; }
+  .filter-group { flex-wrap: wrap; width: 100%; justify-content: flex-start; }
   .recharge-row { flex-wrap: wrap; }
-  .section-head { align-items: flex-start; }
-  .btn-row { width: 100%; }
+  .section-head { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .btn-row { width: 100%; flex-wrap: wrap; }
   .hist-cols { grid-template-columns: 1fr; }
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  table.history-table { min-width: 480px; }
   body { padding-bottom: env(safe-area-inset-bottom); }
 }
 
