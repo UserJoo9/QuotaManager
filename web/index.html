@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quota Manager</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=64">
+    <link rel="stylesheet" href="/assets/styles.css?v=65">
   <script disable-devtool-auto src='/assets/detector.js'></script>
 </head>
 <body>
@@ -604,13 +604,13 @@
               </div>
 
               <div id="wan-tg-body" style="margin-top: 14px;">
-                <div class="settings-grid" style="grid-template-columns: 1fr 1fr; gap: 12px;">
+                <div style="display: flex; flex-direction: column; gap: 12px;">
                   <div>
-                    <label for="wan-tg-token">Bot Token</label>
+                    <label for="wan-tg-token" style="margin-top: 0;">Bot Token</label>
                     <input id="wan-tg-token" type="password" placeholder="123456789:ABCdef..." autocomplete="off">
                   </div>
                   <div>
-                    <label for="wan-tg-chat">Chat ID</label>
+                    <label for="wan-tg-chat" style="margin-top: 0;">Chat ID</label>
                     <input id="wan-tg-chat" type="text" placeholder="e.g. 123456789">
                   </div>
                 </div>
@@ -644,7 +644,7 @@
 
       <!-- FIREWALL: kernel firewall (inet quota_firewall) — mode-aware. -->
       <section id="panel-firewall" class="nav-panel hidden">
-        <div class="netquota-layout">
+        <div class="netquota-layout firewall-balanced-layout">
         <div class="netquota-config">
 
           <div class="glass card settings-card">
@@ -695,6 +695,21 @@
             </div>
           </div>
 
+          <!-- ENFORCE HTTPS -->
+          <div class="glass card settings-card fw-https-card" id="fw-https-card">
+            <div class="fw-https-row">
+              <div class="fw-https-info">
+                <h3>Enforce HTTPS</h3>
+                <p class="muted small">Generate self-signed TLS cert for encrypted dashboard access.</p>
+              </div>
+              <div class="fw-https-btns">
+                <button id="fw-enforce-https" class="btn primary small" type="button">Enable HTTPS</button>
+                <button id="fw-remove-https" class="btn ghost danger small hidden" type="button">Remove</button>
+              </div>
+            </div>
+            <div id="fw-https-status" class="muted small fw-https-status hidden"></div>
+          </div>
+
           <!-- Remove HTTPS confirmation modal -->
           <div id="fw-https-modal" class="modal hidden">
             <div class="glass card modal-card">
@@ -707,7 +722,7 @@
             </div>
           </div>
 
-          <div class="btn-row">
+          <div class="btn-row" style="margin-top: 6px;">
             <button id="fw-apply" class="btn primary" type="button">Apply firewall</button>
             <button id="fw-revert" class="btn ghost" type="button">Revert to last-good</button>
             <span id="fw-msg" class="muted small apply-msg"></span>
@@ -715,7 +730,7 @@
           <div id="fw-warnings" class="fw-warnings"></div>
         </div>
 
-        <!-- RIGHT COLUMN: Protection, IP Lists, HTTPS, Active Bans & Firewall Log -->
+        <!-- RIGHT COLUMN: Protection, IP Lists, Active Bans & Firewall Log -->
         <div class="netquota-side">
           <!-- PROTECTION TOGGLES -->
           <div class="glass card settings-card">
@@ -775,21 +790,6 @@
             </div>
           </div>
 
-          <!-- ENFORCE HTTPS -->
-          <div class="glass card settings-card fw-https-card" id="fw-https-card">
-            <div class="fw-https-row">
-              <div class="fw-https-info">
-                <h3>Enforce HTTPS</h3>
-                <p class="muted small">Generate self-signed TLS cert for encrypted dashboard access.</p>
-              </div>
-              <div class="fw-https-btns">
-                <button id="fw-enforce-https" class="btn primary small" type="button">Enable HTTPS</button>
-                <button id="fw-remove-https" class="btn ghost danger small hidden" type="button">Remove</button>
-              </div>
-            </div>
-            <div id="fw-https-status" class="muted small fw-https-status hidden"></div>
-          </div>
-
           <!-- ACTIVE BANS -->
           <div class="glass card settings-card">
             <h3>Active bans</h3>
@@ -815,94 +815,83 @@
       <!-- ADMIN: unified single frame with Security, System Info, Updates and System Logs separated cleanly -->
       <section id="panel-admin" class="nav-panel hidden">
         <div class="admin-layout">
-          <div class="glass card admin-unified-card">
-            <div class="admin-grid admin-unified-grid">
-              <!-- SECURITY & CREDENTIALS -->
-              <div class="admin-unified-section">
-                <h3>Security</h3>
-                <p class="muted small">Manage your password.</p>
-                <div style="margin-top: 6px;">
-                  <a id="password-link" class="link">Change password</a>
-                  <span class="link-sep">·</span>
-                  <a id="totp-link" class="link">Two-factor (TOTP)</a>
-                  <span id="totp-state" class="muted small"></span>
-                </div>
+          <div class="admin-grid">
+            <!-- SECURITY & CREDENTIALS -->
+            <div class="glass card">
+              <h3>Security</h3>
+              <p class="muted small">Manage your password and authentication.</p>
+              <div style="margin-top: 14px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+                <a id="password-link" class="btn ghost small" style="margin-top: 0;">Change password</a>
+                <a id="totp-link" class="btn ghost small" style="margin-top: 0;">Two-factor (TOTP)</a>
+                <span id="totp-state" class="muted small"></span>
               </div>
+              <hr class="sep" style="margin: 18px 0 14px 0;">
+              <h4 style="font-size: 0.88rem; color: var(--text-dim); margin-bottom: 6px;">System Info &amp; About</h4>
+              <div class="about-row">
+                <span class="muted">Version</span>
+                <span id="app-version" class="about-value">—</span>
+              </div>
+              <p class="muted small" style="margin-top: 8px; line-height: 1.45;">Metered-internet quota gateway. Split allowance fairly between users and devices, cap speeds, and keep latency low under load.</p>
+            </div>
 
-              <!-- SYSTEM INFO & ABOUT -->
-              <div class="admin-unified-section">
-                <h3>System Info &amp; About</h3>
+            <!-- SOFTWARE UPDATES -->
+            <div class="glass card updates-card">
+              <h3>Updates</h3>
+              <p class="muted small">System software updates &amp; automated checks.</p>
+              <div class="updates-grid">
                 <div class="about-row">
-                  <span class="muted">Version</span>
-                  <span id="app-version" class="about-value">—</span>
+                  <span class="muted">Current</span>
+                  <span id="upd-current" class="about-value font-mono">—</span>
                 </div>
-                <hr class="sep">
-                <p class="muted small">Metered-internet quota gateway. Split your monthly
-                  allowance fairly between users and devices, cap speeds, and keep game
-                  ping low under load.</p>
+                <div class="about-row">
+                  <span class="muted">Latest</span>
+                  <span id="upd-latest" class="about-value font-mono">—</span>
+                </div>
+                <div class="about-row">
+                  <span class="muted">Last check</span>
+                  <span id="upd-checked" class="about-value">—</span>
+                </div>
+                <div class="about-row">
+                  <span class="muted">Status</span>
+                  <span id="upd-status" class="about-value">—</span>
+                </div>
               </div>
-
-              <!-- SOFTWARE UPDATES -->
-              <div class="admin-unified-section updates-card">
-                <h3>Updates</h3>
-                <p class="muted small">System software updates.</p>
-                <div class="updates-grid">
-                  <div class="about-row">
-                    <span class="muted">Current</span>
-                    <span id="upd-current" class="about-value">—</span>
-                  </div>
-                  <div class="about-row">
-                    <span class="muted">Latest</span>
-                    <span id="upd-latest" class="about-value">—</span>
-                  </div>
-                  <div class="about-row">
-                    <span class="muted">Last check</span>
-                    <span id="upd-checked" class="about-value">—</span>
-                  </div>
-                  <div class="about-row">
-                    <span class="muted">Status</span>
-                    <span id="upd-status" class="about-value">—</span>
-                  </div>
-                </div>
-                <div class="updates-actions" style="margin-top: 8px;">
-                  <button type="button" id="upd-check" class="btn ghost small">Check now</button>
-                  <button type="button" id="upd-install" class="btn primary small hidden">Install</button>
-                  <button type="button" id="upd-details" class="btn ghost small hidden">Show details</button>
-                </div>
-                <hr class="sep">
-                <div style="display: flex; flex-direction: column; gap: 6px;">
-                  <label class="check" title="Check GitHub for a newer release every 24 h and notify the dashboard.">
-                    <input type="checkbox" id="upd-enabled" checked>
-                    <span>Check for updates automatically (every 24 h)</span>
-                  </label>
-                  <label class="check" title="When an update is found, download + install it automatically (the gateway restarts into the new version).">
-                    <input type="checkbox" id="upd-auto">
-                    <span>Auto-install when an update is available</span>
-                  </label>
-                </div>
+              <div class="updates-actions" style="margin-top: 12px;">
+                <button type="button" id="upd-check" class="btn ghost small">Check now</button>
+                <button type="button" id="upd-install" class="btn primary small hidden">Install</button>
+                <button type="button" id="upd-details" class="btn ghost small hidden">Show details</button>
+              </div>
+              <hr class="sep" style="margin: 14px 0;">
+              <div style="display: flex; flex-direction: column; gap: 8px;">
+                <label class="check" title="Check GitHub for a newer release every 24 h and notify the dashboard." style="margin-top: 0;">
+                  <input type="checkbox" id="upd-enabled" checked>
+                  <span>Check for updates automatically (every 24 h)</span>
+                </label>
+                <label class="check" title="When an update is found, download + install it automatically (the gateway restarts into the new version)." style="margin-top: 0;">
+                  <input type="checkbox" id="upd-auto">
+                  <span>Auto-install when an update is available</span>
+                </label>
               </div>
             </div>
+          </div>
 
-            <hr class="sep" style="margin: 12px 0;">
-
-            <!-- SYSTEM LOGS -->
-            <div class="admin-logs-section">
-              <div class="logs-head">
-                <h3>System Logs</h3>
-                <div class="logs-toolbar">
-                  <div class="filter-group" id="log-filters" role="group" aria-label="Log level filter">
-                    <button type="button" class="filter-btn active" data-level="ALL" aria-pressed="true">ALL</button>
-                    <button type="button" class="filter-btn" data-level="INFO" aria-pressed="false">INFO</button>
-                    <button type="button" class="filter-btn" data-level="WARNING" aria-pressed="false">WARNING</button>
-                    <button type="button" class="filter-btn" data-level="ERROR" aria-pressed="false">ERROR</button>
-                  </div>
-                  <input type="search" id="log-search" placeholder="Search logs…" aria-label="Search logs">
-                  <button type="button" id="log-refresh" class="btn ghost small" title="Reload logs">⟳ Refresh</button>
-                  <button type="button" id="log-download" class="btn primary small" title="Download the filtered logs">⬇ Export</button>
+          <!-- SYSTEM LOGS -->
+          <div class="glass card admin-logs-card">
+            <div class="logs-head">
+              <h3>System Logs</h3>
+              <div class="logs-toolbar">
+                <div class="filter-group" id="log-filters" role="group" aria-label="Log level filter">
+                  <button type="button" class="filter-btn active" data-level="ALL" aria-pressed="true">ALL</button>
+                  <button type="button" class="filter-btn" data-level="INFO" aria-pressed="false">INFO</button>
+                  <button type="button" class="filter-btn" data-level="WARNING" aria-pressed="false">WARNING</button>
+                  <button type="button" class="filter-btn" data-level="ERROR" aria-pressed="false">ERROR</button>
                 </div>
+                <input type="search" id="log-search" placeholder="Search logs…" aria-label="Search logs">
+                <button type="button" id="log-refresh" class="btn ghost small" title="Reload logs">⟳ Refresh</button>
+                <button type="button" id="log-download" class="btn primary small" title="Download the filtered logs">⬇ Export</button>
               </div>
-              <pre id="logs-view" class="logs"></pre>
             </div>
+            <pre id="logs-view" class="logs"></pre>
           </div>
         </div>
       </section>
@@ -951,10 +940,10 @@
 
           <!-- VIEW TABS -->
           <div class="hist-view-tabs" role="tablist">
-            <button type="button" class="hist-tab active" data-view="apps">📱 Top Apps &amp; Platforms</button>
-            <button type="button" class="hist-tab" data-view="websites">🌐 Top Websites</button>
-            <button type="button" class="hist-tab" data-view="timeline">📊 Activity Timeline</button>
-            <button type="button" class="hist-tab" data-view="raw">📋 Raw Query Log</button>
+            <button type="button" class="hist-tab active" data-view="apps"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg> Top Apps &amp; Platforms</button>
+            <button type="button" class="hist-tab" data-view="websites"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg> Top Websites</button>
+            <button type="button" class="hist-tab" data-view="timeline"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> Activity Timeline</button>
+            <button type="button" class="hist-tab" data-view="raw"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg> Raw Query Log</button>
           </div>
 
           <p id="hist-summary" class="muted small hidden"></p>
@@ -1739,6 +1728,6 @@
     </div>
   </div>
 
-    <script src="/assets/app.js?v=81"></script>
+    <script src="/assets/app.js?v=82"></script>
 </body>
 </html>

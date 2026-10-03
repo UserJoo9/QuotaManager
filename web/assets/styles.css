@@ -1177,7 +1177,14 @@ select option { background: var(--bg-2); }
   gap: 22px;
   align-items: start;
 }
-@media (max-width: 900px) { .netquota-layout { grid-template-columns: 1fr; } }
+.firewall-balanced-layout {
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr) !important;
+  gap: 20px;
+}
+@media (max-width: 900px) { 
+  .netquota-layout { grid-template-columns: 1fr; } 
+  .firewall-balanced-layout { grid-template-columns: 1fr !important; }
+}
 
 .netquota-config {
   display: flex;
