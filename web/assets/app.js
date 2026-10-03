@@ -20,6 +20,14 @@ const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
+/* ---------------- clean SVG icons (replacing emojis) ---------------- */
+const ICON_EDIT = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`;
+const ICON_KICK = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>`;
+const ICON_BAN = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>`;
+const ICON_TRASH = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>`;
+const ICON_ZAP = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`;
+
+
 /* ---------------- privacy eye ---------------- */
 /* Hides on-screen sensitive details — MAC addresses (device rows, rogue rows,
    device modal) and the saved PPPoE credentials prefill (username + password) —
@@ -565,8 +573,8 @@ function userCard(u, udevs, gw, ghost) {
   // The protected Gateway user is permanent: the admin cuts the box's own
   // internet with the block toggle + edit, but it can never be deleted.
   const delBtn = u.protected ? "" : `
-      <button class="icon-btn danger" data-ua="delete" data-uid="${u.id}" title="Kick / disconnect user (5s timeout, no ban)">🗑</button>
-      <button class="icon-btn danger" data-ua="block-blacklist" data-uid="${u.id}" title="Block & blacklist user">🚫</button>`;
+      <button class="icon-btn danger" data-ua="delete" data-uid="${u.id}" title="Kick / disconnect user (5s timeout, no ban)">${ICON_KICK}</button>
+      <button class="icon-btn danger" data-ua="block-blacklist" data-uid="${u.id}" title="Block & blacklist user">${ICON_BAN}</button>`;
   const guestActions = u.guest ? (
     u.blocked ? `
       <button class="btn ok small" data-ua="guest-accept" data-uid="${u.id}" title="Accept guest — unblock and grant quota">Accept</button>
@@ -579,7 +587,7 @@ function userCard(u, udevs, gw, ghost) {
         <input type="checkbox" class="toggle-user" data-uid="${u.id}" ${u.blocked ? "" : "checked"}>
         <span class="slider"></span>
       </label>
-      <button class="icon-btn" data-ua="edit" data-uid="${u.id}" title="Edit user">✎</button>
+      <button class="icon-btn" data-ua="edit" data-uid="${u.id}" title="Edit user">${ICON_EDIT}</button>
       ${delBtn}`;
   const devHtml = udevs.map(deviceRow).join("");
   const guestTag = u.guest
@@ -677,8 +685,8 @@ function deviceRow(d) {
       <button class="btn danger small" data-act="guest-reject" data-id="${d.id}" title="Cut / block guest access">Reject</button>`
   ) : "";
   const deleteBtn = d.gateway ? "" : `
-      <button class="icon-btn danger" data-act="delete" data-id="${d.id}" title="Kick / disconnect device (5s timeout, no ban)">🗑</button>
-      <button class="icon-btn danger" data-act="block-blacklist" data-id="${d.id}" title="Block & blacklist device">🚫</button>`;
+      <button class="icon-btn danger" data-act="delete" data-id="${d.id}" title="Kick / disconnect device (5s timeout, no ban)">${ICON_KICK}</button>
+      <button class="icon-btn danger" data-act="block-blacklist" data-id="${d.id}" title="Block & blacklist device">${ICON_BAN}</button>`;
   return `
   <div class="device-row ${d.blocked ? "blocked" : ""}" data-id="${d.id}">
     <div class="device-head">
@@ -695,7 +703,7 @@ function deviceRow(d) {
     <div class="device-actions actions">
       ${guestDevActions}
       ${blockSwitch}
-      <button class="icon-btn" data-act="edit" data-id="${d.id}" title="Edit / top up">✎</button>
+      <button class="icon-btn" data-act="edit" data-id="${d.id}" title="Edit / top up">${ICON_EDIT}</button>
       ${deleteBtn}
     </div>
   </div>`;
@@ -2318,8 +2326,8 @@ function renderRecharges(packs, users, devices) {
   const now = Date.now() / 1000;
   tbody.innerHTML = activePacks.map(p => {
     let targetLabel = "All (General)";
-    if (p.target_type === "user") targetLabel = `👤 ${esc(userMap[p.target_id] || "User #" + p.target_id)}`;
-    else if (p.target_type === "device") targetLabel = `📱 ${esc(devMap[p.target_id] || "Device #" + p.target_id)}`;
+    if (p.target_type === "user") targetLabel = `User: ${esc(userMap[p.target_id] || "#" + p.target_id)}`;
+    else if (p.target_type === "device") targetLabel = `Device: ${esc(devMap[p.target_id] || "#" + p.target_id)}`;
 
     const expDate = new Date(p.expires_at * 1000);
     const daysLeft = Math.ceil((p.expires_at - now) / 86400);
@@ -2382,6 +2390,7 @@ async function submitRecharge(ev) {
   $("set-recharge").value = "";
   if ($("recharge-expiry")) $("recharge-expiry").value = "";
   if ($("recharge-comment")) $("recharge-comment").value = "";
+  if ($("recharge-modal")) $("recharge-modal").classList.add("hidden");
   await refreshAll();
 }
 
@@ -2488,33 +2497,183 @@ async function cutExistingRandomMacs(ev) {
   await refreshNetwork();
 }
 
-/* MAC whitelist / blacklist: textareas hold one MAC per line (or
-   comma-separated); Save replaces both lists wholesale. Entries resolve at
-   enforcement time — existing devices pick the change up on the next tick. */
+/* MAC whitelist / blacklist: clean rules table + add rule modal with conflict validation */
+let cachedMacLists = { allow: [], deny: [] };
+
+function renderMacRulesTable() {
+  const tbody = $("mac-rules-tbody");
+  if (!tbody) return;
+  const allow = cachedMacLists.allow || [];
+  const deny = cachedMacLists.deny || [];
+  if (!allow.length && !deny.length) {
+    tbody.innerHTML = `<tr><td colspan="4" class="muted small" style="text-align: center; padding: 12px;">No MAC rules configured yet.</td></tr>`;
+    return;
+  }
+
+  const devMap = {};
+  const devs = (dashboard && dashboard.devices) || [];
+  for (const d of devs) {
+    if (d.mac) devMap[d.mac.toLowerCase()] = d.name || d.vendor || "";
+  }
+
+  const rows = [];
+  allow.forEach(mac => {
+    const name = devMap[mac.toLowerCase()] || "—";
+    rows.push(`<tr>
+      <td><code class="font-mono">${esc(macText(mac))}</code></td>
+      <td><strong>${esc(name)}</strong></td>
+      <td><span class="mac-rule-badge allow">Whitelist (Allow)</span></td>
+      <td class="num">
+        <button type="button" class="btn ghost danger tiny" onclick="removeMacRule('${esc(mac)}', 'allow')" title="Remove rule">${ICON_TRASH}</button>
+      </td>
+    </tr>`);
+  });
+
+  deny.forEach(mac => {
+    const name = devMap[mac.toLowerCase()] || "—";
+    rows.push(`<tr>
+      <td><code class="font-mono">${esc(macText(mac))}</code></td>
+      <td><strong>${esc(name)}</strong></td>
+      <td><span class="mac-rule-badge deny">Blacklist (Deny)</span></td>
+      <td class="num">
+        <button type="button" class="btn ghost danger tiny" onclick="removeMacRule('${esc(mac)}', 'deny')" title="Remove rule">${ICON_TRASH}</button>
+      </td>
+    </tr>`);
+  });
+
+  tbody.innerHTML = rows.join("");
+}
+
 async function refreshMacLists() {
-  if (macListsDirty) return; // never clobber an admin's in-progress edit
   try {
     const lists = await API.get("/api/mac-lists");
-    $("mac-allow-list").value = (lists.allow || []).join("\n");
-    $("mac-deny-list").value = (lists.deny || []).join("\n");
+    cachedMacLists = {
+      allow: (lists.allow || []).map(m => m.trim().toLowerCase()).filter(Boolean),
+      deny: (lists.deny || []).map(m => m.trim().toLowerCase()).filter(Boolean),
+    };
+    if ($("mac-allow-list")) $("mac-allow-list").value = cachedMacLists.allow.join("\n");
+    if ($("mac-deny-list")) $("mac-deny-list").value = cachedMacLists.deny.join("\n");
+    renderMacRulesTable();
   } catch (_) { /* MAC-lists panel is not critical */ }
+}
+
+async function removeMacRule(mac, type) {
+  const norm = mac.trim().toLowerCase();
+  cachedMacLists[type] = (cachedMacLists[type] || []).filter(m => m !== norm);
+  try {
+    await API.post("/api/mac-lists", {
+      allow: cachedMacLists.allow,
+      deny: cachedMacLists.deny,
+    });
+    if ($("mac-allow-list")) $("mac-allow-list").value = cachedMacLists.allow.join("\n");
+    if ($("mac-deny-list")) $("mac-deny-list").value = cachedMacLists.deny.join("\n");
+    renderMacRulesTable();
+  } catch (e) {
+    alert("Could not remove MAC rule: " + e.message);
+  }
+}
+
+function openMacRuleModal() {
+  const modal = $("mac-rule-modal");
+  if (!modal) return;
+  $("mac-rule-macs").value = "";
+  $("mac-rule-type").value = "allow";
+  const warn = $("mac-rule-conflict-warn");
+  if (warn) {
+    warn.textContent = "";
+    warn.classList.add("hidden");
+  }
+
+  const devSelect = $("mac-rule-dev-select");
+  if (devSelect) {
+    let html = `<option value="">Choose a known device…</option>`;
+    const devs = (dashboard && dashboard.devices) || [];
+    for (const d of devs) {
+      if (d.mac) {
+        const label = d.name ? `${d.name} (${d.mac})` : d.mac;
+        html += `<option value="${esc(d.mac)}">${esc(label)}</option>`;
+      }
+    }
+    devSelect.innerHTML = html;
+  }
+
+  modal.classList.remove("hidden");
+}
+
+function closeMacRuleModal() {
+  const modal = $("mac-rule-modal");
+  if (modal) modal.classList.add("hidden");
+}
+
+async function submitNewMacRule(ev) {
+  if (ev) ev.preventDefault();
+  const type = $("mac-rule-type").value;
+  const raw = $("mac-rule-macs").value || "";
+  const macs = raw.split(/[\n,]+/).map(s => s.trim().toLowerCase()).filter(Boolean);
+  const warn = $("mac-rule-conflict-warn");
+
+  if (!macs.length) {
+    if (warn) {
+      warn.textContent = "Please enter at least one valid MAC address.";
+      warn.classList.remove("hidden");
+    }
+    return;
+  }
+
+  // Check conflicts with the opposite list
+  const oppositeType = type === "allow" ? "deny" : "allow";
+  const oppositeLabel = type === "allow" ? "Blacklist (Deny)" : "Whitelist (Allow)";
+  const currentLabel = type === "allow" ? "Whitelist (Allow)" : "Blacklist (Deny)";
+  const oppositeList = cachedMacLists[oppositeType] || [];
+
+  for (const m of macs) {
+    if (oppositeList.includes(m)) {
+      if (warn) {
+        warn.textContent = `Conflict detected: MAC ${m} is currently assigned to the ${oppositeLabel} list. You must remove it from the ${oppositeLabel} list before adding it to ${currentLabel}.`;
+        warn.classList.remove("hidden");
+      }
+      return;
+    }
+  }
+
+  const targetList = [...(cachedMacLists[type] || [])];
+  for (const m of macs) {
+    if (!targetList.includes(m)) targetList.push(m);
+  }
+  cachedMacLists[type] = targetList;
+
+  try {
+    await API.post("/api/mac-lists", {
+      allow: cachedMacLists.allow,
+      deny: cachedMacLists.deny,
+    });
+    if ($("mac-allow-list")) $("mac-allow-list").value = cachedMacLists.allow.join("\n");
+    if ($("mac-deny-list")) $("mac-deny-list").value = cachedMacLists.deny.join("\n");
+    closeMacRuleModal();
+    renderMacRulesTable();
+  } catch (e) {
+    if (warn) {
+      warn.textContent = `Could not save MAC rule: ${e.message}`;
+      warn.classList.remove("hidden");
+    }
+  }
 }
 
 async function submitMacLists() {
   const msg = $("mac-lists-msg");
-  const split = (el) => (el.value || "")
-    .split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+  const split = (el) => (el ? el.value || "" : "")
+    .split(/[\n,]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
   try {
-    await API.post("/api/mac-lists", {
-      allow: split($("mac-allow-list")),
-      deny: split($("mac-deny-list")),
-    });
+    const allow = split($("mac-allow-list"));
+    const deny = split($("mac-deny-list"));
+    await API.post("/api/mac-lists", { allow, deny });
+    cachedMacLists = { allow, deny };
     macListsDirty = false;
     if (msg) {
       msg.textContent = "MAC lists saved — applied on the next tick.";
       msg.classList.remove("hidden");
     }
-    await refreshMacLists();
+    renderMacRulesTable();
   } catch (e) {
     if (msg) {
       msg.textContent = `Could not save: ${e.message}`;
@@ -2601,6 +2760,7 @@ async function submitStaticLease(ev) {
     $("sl-ip").value = "";
     $("sl-hostname").value = "";
     $("sl-device-select").value = "";
+    if ($("static-lease-modal")) $("static-lease-modal").classList.add("hidden");
     await refreshStaticLeases();
   } catch (e) {
     if (msg) {
@@ -3580,14 +3740,14 @@ function renderVpnNodes(nodes) {
         <td><span class="vpn-node-proto-tag">${esc((n.protocol || "vless").toUpperCase())}</span></td>
         <td>
           <span class="${pingCls}" id="vpn-ping-val-${n.id}">${pingText}</span>
-          <button type="button" id="vpn-ping-btn-${n.id}" class="btn ghost tiny" onclick="pingVpnNode(${n.id})" title="Test latency">⚡</button>
+          <button type="button" id="vpn-ping-btn-${n.id}" class="btn ghost tiny" onclick="pingVpnNode(${n.id})" title="Test latency">${ICON_ZAP}</button>
         </td>
         <td class="num">
           ${isActive && isConnected
             ? `<button type="button" class="btn ghost danger tiny" onclick="disconnectVpn()">Disconnect</button>`
             : `<button type="button" class="btn primary tiny" onclick="connectVpn(${n.id})">Connect</button>`}
-          <button type="button" class="btn ghost tiny" onclick="editVpnNode(${n.id})" title="Edit node">✎</button>
-          <button type="button" class="btn ghost danger tiny" onclick="deleteVpnNode(${n.id})" title="Delete node">✕</button>
+          <button type="button" class="btn ghost tiny" onclick="editVpnNode(${n.id})" title="Edit node">${ICON_EDIT}</button>
+          <button type="button" class="btn ghost danger tiny" onclick="deleteVpnNode(${n.id})" title="Delete node">${ICON_TRASH}</button>
         </td>
       </tr>
     `;
@@ -4082,6 +4242,39 @@ async function init() {
     }
   });
   $("static-lease-form").addEventListener("submit", submitStaticLease);
+  // Recharge modal open/close
+  const openRechargeBtn = $("open-recharge-modal-btn");
+  if (openRechargeBtn) openRechargeBtn.addEventListener("click", () => $("recharge-modal").classList.remove("hidden"));
+  const rechargeModalCancel = $("recharge-modal-cancel");
+  if (rechargeModalCancel) rechargeModalCancel.addEventListener("click", () => $("recharge-modal").classList.add("hidden"));
+  if ($("recharge-modal")) $("recharge-modal").addEventListener("click", (ev) => { if (ev.target === $("recharge-modal")) $("recharge-modal").classList.add("hidden"); });
+  // MAC rule modal open/close
+  const openMacRuleBtn = $("open-mac-rule-btn");
+  if (openMacRuleBtn) openMacRuleBtn.addEventListener("click", openMacRuleModal);
+  const macRuleCancel = $("mac-rule-modal-cancel");
+  if (macRuleCancel) macRuleCancel.addEventListener("click", closeMacRuleModal);
+  if ($("mac-rule-modal")) $("mac-rule-modal").addEventListener("click", (ev) => { if (ev.target === $("mac-rule-modal")) closeMacRuleModal(); });
+  const macRuleForm = $("mac-rule-form");
+  if (macRuleForm) macRuleForm.addEventListener("submit", submitNewMacRule);
+  const macRuleDevSelect = $("mac-rule-dev-select");
+  if (macRuleDevSelect) macRuleDevSelect.addEventListener("change", (ev) => {
+    const val = ev.target.value;
+    if (val && $("mac-rule-macs")) {
+      const cur = $("mac-rule-macs").value.trim();
+      $("mac-rule-macs").value = cur ? cur + "\n" + val : val;
+    }
+  });
+  // Static lease modal open/close
+  const openStaticLeaseBtn = $("open-static-lease-btn");
+  if (openStaticLeaseBtn) openStaticLeaseBtn.addEventListener("click", () => {
+    populateStaticLeaseDeviceSelect();
+    $("static-lease-modal").classList.remove("hidden");
+  });
+  const slModalCancel = $("sl-modal-cancel");
+  if (slModalCancel) slModalCancel.addEventListener("click", () => $("static-lease-modal").classList.add("hidden"));
+  if ($("static-lease-modal")) $("static-lease-modal").addEventListener("click", (ev) => { if (ev.target === $("static-lease-modal")) $("static-lease-modal").classList.add("hidden"); });
+  // expose removeMacRule for inline onclick handlers
+  window.removeMacRule = removeMacRule;
   // speed shaping: saving sends all four fields; the master toggle just
   // marks the current draft — it takes effect together on Save.
   $("shaping-save-btn").addEventListener("click", submitNetwork);

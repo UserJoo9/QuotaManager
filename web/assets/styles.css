@@ -418,6 +418,49 @@ select option { background: var(--bg-2); }
 .stat-value.purple { color: var(--accent-3); }
 .stat-value.warning { color: var(--danger); }
 
+/* ---------- management page layout (users/devices on left, vertical bundle on right) ---------- */
+.management-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 24px;
+  align-items: start;
+}
+@media (max-width: 1100px) {
+  .management-layout {
+    grid-template-columns: 1fr;
+  }
+}
+.management-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.management-sidebar {
+  position: sticky;
+  top: 24px;
+}
+.bundle-card-vertical {
+  padding: 22px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.bundle-card-vertical .ring {
+  width: 154px;
+  height: 154px;
+}
+.bundle-card-vertical .ring-big {
+  font-size: 1.35rem;
+}
+.bundle-stats-vertical {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 14px;
+  margin-top: 8px;
+}
+
 /* ---------- user / device grid (masonry: 2 columns, no gaps) ---------- */
 .section-head {
   display: flex;
@@ -810,6 +853,42 @@ select option { background: var(--bg-2); }
   align-items: stretch;
 }
 .admin-grid .glass.card { height: 100%; }
+.admin-unified-card {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  flex: 1;
+  min-height: 0;
+}
+.admin-unified-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.25fr;
+  gap: 24px;
+  align-items: start;
+}
+@media (max-width: 1050px) {
+  .admin-unified-grid {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+}
+.admin-unified-section {
+  display: flex;
+  flex-direction: column;
+}
+.admin-logs-section {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.admin-logs-section .logs {
+  flex: 1 1 0;
+  width: 100%;
+  min-height: 280px;
+  max-height: none;
+  overflow-y: auto;
+}
 .admin-logs-card {
   flex: 1;
   display: flex;
@@ -824,6 +903,29 @@ select option { background: var(--bg-2); }
   overflow-y: auto;
 }
 @media (max-width: 900px) { .admin-grid { grid-template-columns: 1fr; } }
+
+/* MAC rules badges */
+.mac-rule-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+.mac-rule-badge.allow {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+.mac-rule-badge.deny {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
 
 /* ---------- browsing history ---------- */
 .table-wrap {
