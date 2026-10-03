@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quota Manager</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=66">
+    <link rel="stylesheet" href="/assets/styles.css?v=67">
   <script disable-devtool-auto src='/assets/detector.js'></script>
 </head>
 <body>
@@ -539,7 +539,7 @@
 
           <!-- RIGHT COLUMN: WAN status preview + Telegram trigger -->
           <div style="display: flex; flex-direction: column; gap: 20px;">
-            <div class="glass card preview-card">
+            <div class="glass card">
               <h3>WAN status</h3>
               <div class="stat">
                 <span class="stat-label">Topology</span>
@@ -621,12 +621,7 @@
                   <button type="button" id="wan-tg-fw-link" class="btn ghost tiny" style="color: #38bdf8;">Configure in Firewall Tab →</button>
                 </div>
 
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 14px; flex-wrap: wrap; gap: 10px;">
-                  <div class="muted small">
-                    <span>Last notified IP: </span><strong id="wan-tg-last-ip" class="font-mono text-accent">—</strong>
-                    <span style="margin: 0 6px;">·</span>
-                    <span id="wan-tg-last-sent">—</span>
-                  </div>
+                <div style="display: flex; justify-content: flex-end; align-items: center; margin-top: 14px;">
                   <div class="btn-row" style="margin: 0;">
                     <button type="button" id="wan-tg-test-btn" class="btn ghost small"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> Send Test</button>
                     <button type="button" id="wan-tg-save-btn" class="btn primary small">Save Trigger</button>

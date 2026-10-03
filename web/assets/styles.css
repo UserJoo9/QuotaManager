@@ -1469,8 +1469,8 @@ select option { background: var(--bg-2); }
 .update-banner-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 
 /* ---------- software-updates card (Admin tab) ---------- */
-.updates-card { grid-column: 1 / -1; }
-.updates-grid { display: grid; grid-template-columns: repeat(2, 1fr); column-gap: 24px; }
+.updates-card { /* sits in its grid cell next to Security card */ }
+.updates-grid { display: grid; grid-template-columns: repeat(2, 1fr); column-gap: 16px; }
 .updates-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 .updates-card .check { margin-top: 10px; }
 @media (max-width: 560px) { .updates-grid { grid-template-columns: 1fr; } }
