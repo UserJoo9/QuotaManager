@@ -94,13 +94,14 @@ def test_index_served(client):
     assert 'id="d-bypass-exempt-note"' in r.text
     # v27: privacy eye (sidebar quick action) — mask MACs + PPPoE password
     assert 'id="privacy-eye"' in r.text
-    # Bundle summary lives INSIDE the Management panel (first tab only), and
-    # the Consumption donut section was removed (no usage-chart canvas).
+    # Bundle summary now lives in the fixed sidebar (always visible from any tab)
     assert 'id="panel-management"' in r.text
-    assert r.text.index('id="panel-management"') < r.text.index("bundle-used")
+    assert 'id="sidebar-bundle"' in r.text
+    assert 'id="bundle-used"' in r.text
+    assert r.text.index('id="sidebar-bundle"') < r.text.index('id="panel-management"')
     assert 'id="usage-chart"' not in r.text
-    assert "assets/app.js?v=82" in r.text
-    assert "assets/styles.css?v=65" in r.text
+    assert "assets/app.js?v=83" in r.text
+    assert "assets/styles.css?v=66" in r.text
     # v24: the sidebar collapse toggle is gone — the sidebar is a fixed rail.
     assert "sidebar-toggle" not in r.text
     assert "sidebar-collapsed" not in r.text
@@ -355,6 +356,6 @@ def test_history_assets_bumped(client):
     48/47; the v27.1 PPPoE-username privacy fix took app.js to 48 — this
     always checks the CURRENT baseline, not the original bump."""
     r = client.get("/")
-    assert "assets/styles.css?v=65" in r.text
-    assert "assets/app.js?v=82" in r.text
+    assert "assets/styles.css?v=66" in r.text
+    assert "assets/app.js?v=83" in r.text
 

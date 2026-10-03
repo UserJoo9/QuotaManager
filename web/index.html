@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quota Manager</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=65">
+    <link rel="stylesheet" href="/assets/styles.css?v=66">
   <script disable-devtool-auto src='/assets/detector.js'></script>
 </head>
 <body>
@@ -95,6 +95,49 @@
           <span class="nav-label">VPN</span>
         </button>
       </nav>
+
+      <!-- COMPACT BUNDLE WIDGET — always visible from any tab -->
+      <div class="sidebar-bundle" id="sidebar-bundle">
+        <div class="sidebar-bundle-header">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-4 0v2"/><line x1="12" y1="12" x2="12" y2="16"/><line x1="10" y1="14" x2="14" y2="14"/></svg>
+          <span>Monthly Bundle</span>
+        </div>
+        <div class="sidebar-bundle-ring-wrap">
+          <div class="ring ring-mini" id="bundle-ring">
+            <div class="ring-center">
+              <span id="bundle-used" class="ring-big">0 GB</span>
+              <span class="ring-small">of <span id="bundle-total">0</span> GB</span>
+            </div>
+          </div>
+        </div>
+        <div class="sidebar-bundle-stats">
+          <div class="sidebar-stat">
+            <span class="sidebar-stat-label">Remaining</span>
+            <span id="bundle-remaining" class="sidebar-stat-value accent">—</span>
+          </div>
+          <div class="sidebar-stat">
+            <span class="sidebar-stat-label">Period</span>
+            <span id="bundle-period" class="sidebar-stat-value">–</span>
+          </div>
+          <div class="sidebar-stat">
+            <span class="sidebar-stat-label">Days left</span>
+            <span id="bundle-days" class="sidebar-stat-value">–</span>
+          </div>
+          <div class="sidebar-stat">
+            <span class="sidebar-stat-label">Users</span>
+            <span id="bundle-users" class="sidebar-stat-value">0</span>
+          </div>
+          <div class="sidebar-stat">
+            <span class="sidebar-stat-label">Devices</span>
+            <span id="bundle-devices" class="sidebar-stat-value">0</span>
+          </div>
+          <div class="sidebar-stat">
+            <span class="sidebar-stat-label">Blocked</span>
+            <span id="bundle-blocked" class="sidebar-stat-value danger">0</span>
+          </div>
+        </div>
+      </div>
+
       <div class="sidebar-footer">
         <span id="net-status" class="net-status" title="Checking internet connection…">
           <span class="dot off"></span>
@@ -153,83 +196,37 @@
           </div>
         </div>
       </div>
-      <!-- MANAGEMENT: users & devices + bundle stats (first tab only) -->
+      <!-- MANAGEMENT: users & devices (bundle summary lives in sidebar) -->
       <section id="panel-management" class="nav-panel">
-        <div class="management-layout">
-          <!-- MAIN CONTENT (LEFT ~75-80%): Users, devices, and rogue devices -->
-          <div class="management-main">
-            <section class="section">
-              <div class="section-head" style="flex-wrap: wrap; gap: 10px;">
-                <h2>Users &amp; devices</h2>
-                <div class="head-actions" style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
-                  <select id="layout-toggle" class="btn ghost small" style="padding: 4px 10px; height: 32px; font-size: 0.8rem; background: transparent; border: 1px solid var(--border); color: var(--text);" title="Change Layout">
-                    <option value="masonry">Masonry (Columns)</option>
-                    <option value="grid">Grid (Fixed Rows)</option>
-                    <option value="list">List (Single Column)</option>
-                  </select>
-                  <button id="add-user-btn" class="btn ghost small">＋ Add user</button>
-                  <button id="add-device-btn" class="btn primary small">＋ Add device</button>
-                </div>
-              </div>
-              <div id="devices-list" class="device-grid"></div>
-            </section>
-
-            <!-- ROGUE / UNMANAGED DEVICES -->
-            <section id="rogue-section" class="section hidden">
-              <div class="section-head">
-                <h2>Unmanaged / rogue devices</h2>
-                <span id="rogue-count" class="muted small"></span>
-              </div>
-              <p class="muted small" style="margin-bottom:10px">
-                Active on your network but <strong>not</strong> leased by the quota DHCP —
-                a static-IP device bypasses the box (its traffic is never counted or
-                blocked). The ARP gateway-lock cuts its internet when enabled.
-              </p>
-              <div id="rogue-list" class="rogue-list"></div>
-            </section>
-          </div>
-
-          <!-- SIDEBAR (RIGHT ~20-25%): Vertical monthly bundle summary card -->
-          <aside class="management-sidebar">
-            <div class="bundle-card-vertical glass card">
-              <h3 style="margin-bottom: 14px; font-size: 0.95rem; text-align: center;">Monthly Bundle</h3>
-              <div class="bundle-ring-wrap" style="display: flex; justify-content: center; margin-bottom: 16px;">
-                <div class="ring" id="bundle-ring">
-                  <div class="ring-center">
-                    <span id="bundle-used" class="ring-big">0 GB</span>
-                    <span class="ring-small">used of <span id="bundle-total">0</span> GB</span>
-                  </div>
-                </div>
-              </div>
-              <div class="bundle-stats-vertical">
-                <div class="stat">
-                  <span class="stat-label">Remaining</span>
-                  <span id="bundle-remaining" class="stat-value purple">0 GB</span>
-                </div>
-                <div class="stat">
-                  <span class="stat-label">Period</span>
-                  <span id="bundle-period" class="stat-value">–</span>
-                </div>
-                <div class="stat">
-                  <span class="stat-label">Days left</span>
-                  <span id="bundle-days" class="stat-value">–</span>
-                </div>
-                <div class="stat">
-                  <span class="stat-label">Users</span>
-                  <span id="bundle-users" class="stat-value">0</span>
-                </div>
-                <div class="stat">
-                  <span class="stat-label">Devices</span>
-                  <span id="bundle-devices" class="stat-value">0</span>
-                </div>
-                <div class="stat">
-                  <span class="stat-label">Blocked</span>
-                  <span id="bundle-blocked" class="stat-value warning">0</span>
-                </div>
-              </div>
+        <section class="section">
+          <div class="section-head" style="flex-wrap: wrap; gap: 10px;">
+            <h2>Users &amp; devices</h2>
+            <div class="head-actions" style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+              <select id="layout-toggle" class="btn ghost small" style="padding: 4px 10px; height: 32px; font-size: 0.8rem; background: transparent; border: 1px solid var(--border); color: var(--text);" title="Change Layout">
+                <option value="masonry">Masonry (Columns)</option>
+                <option value="grid">Grid (Fixed Rows)</option>
+                <option value="list">List (Single Column)</option>
+              </select>
+              <button id="add-user-btn" class="btn ghost small">＋ Add user</button>
+              <button id="add-device-btn" class="btn primary small">＋ Add device</button>
             </div>
-          </aside>
-        </div>
+          </div>
+          <div id="devices-list" class="device-grid"></div>
+        </section>
+
+        <!-- ROGUE / UNMANAGED DEVICES -->
+        <section id="rogue-section" class="section hidden">
+          <div class="section-head">
+            <h2>Unmanaged / rogue devices</h2>
+            <span id="rogue-count" class="muted small"></span>
+          </div>
+          <p class="muted small" style="margin-bottom:10px">
+            Active on your network but <strong>not</strong> leased by the quota DHCP —
+            a static-IP device bypasses the box (its traffic is never counted or
+            blocked). The ARP gateway-lock cuts its internet when enabled.
+          </p>
+          <div id="rogue-list" class="rogue-list"></div>
+        </section>
       </section>
 
       <!-- NETWORK & QUOTA: bundle + guest + connection toggles -->
@@ -1728,6 +1725,6 @@
     </div>
   </div>
 
-    <script src="/assets/app.js?v=82"></script>
+    <script src="/assets/app.js?v=83"></script>
 </body>
 </html>
