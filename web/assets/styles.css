@@ -400,11 +400,11 @@ body {
 
 .gauge-svg {
   width: 180px;
-  height: 94px;
+  height: 90px;
   overflow: visible;
 }
 
-/* ── base arc tracks (all on identical circle R=68 centered at 95,90) ── */
+/* ── base arc tracks (all on identical circle R=64 centered at 95,82) ── */
 .gauge-track-bg {
   fill: none;
   stroke: rgba(255, 255, 255, 0.07);
@@ -434,9 +434,9 @@ body {
   stroke: url(#gauge-fill-grad);
   stroke-width: 8;
   stroke-linecap: round;
-  /* half-circle arc length: π × 68 ≈ 213.6 */
-  stroke-dasharray: 213.6;
-  stroke-dashoffset: 213.6;
+  /* half-circle arc length: π × 64 ≈ 201.1 */
+  stroke-dasharray: 201.1;
+  stroke-dashoffset: 201.1;
   transition: stroke-dashoffset 650ms cubic-bezier(0.34, 1.2, 0.64, 1),
               stroke 300ms ease, filter 300ms ease;
   filter: drop-shadow(0 0 6px rgba(56, 189, 248, 0.75));
@@ -444,7 +444,7 @@ body {
 
 /* ── needle group ── */
 .gauge-svg-needle-group {
-  transform-origin: 95px 90px;
+  transform-origin: 95px 82px;
   transform: rotate(-90deg);              /* 0% = pointing left */
   transition: transform 650ms cubic-bezier(0.34, 1.35, 0.64, 1);
 }
@@ -466,10 +466,10 @@ body {
   fill: #ffffff;
 }
 
-/* ── digital readout (placed directly below the arc base) ── */
+/* ── digital readout (placed directly below the arc base with breathing space) ── */
 .gauge-digital-readout {
   text-align: center;
-  margin-top: -6px;
+  margin-top: 4px;
   z-index: 2;
   position: relative;
   pointer-events: none;
@@ -583,6 +583,8 @@ body {
   text-align: left;
   font: inherit;
   transition: all 220ms var(--ease);
+  min-width: 0;
+  overflow: hidden;
 }
 
 .gauge-option:hover {
@@ -650,6 +652,8 @@ body {
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
 }
 
 .gauge-name {
@@ -657,6 +661,8 @@ body {
   font-weight: 700;
   color: var(--text);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .gauge-desc {

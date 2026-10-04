@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quota Manager</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=77">
+    <link rel="stylesheet" href="/assets/styles.css?v=78">
   <script disable-devtool-auto src='/assets/detector.js'></script>
 </head>
 <body>
@@ -105,7 +105,7 @@
         </div>
         <div class="sidebar-bundle-ring-wrap">
           <div class="svg-gauge-box" id="bundle-ring">
-            <svg class="gauge-svg" viewBox="0 0 190 98" preserveAspectRatio="xMidYMid meet">
+            <svg class="gauge-svg" viewBox="0 0 190 90" preserveAspectRatio="xMidYMid meet">
               <defs>
                 <linearGradient id="gauge-fill-grad" x1="0%" y1="0%" x2="100%" y2="0%">
                   <stop offset="0%" stop-color="#0284c7" />
@@ -118,29 +118,29 @@
                 </linearGradient>
                 <!-- Segmented mask for Cyber Digital style -->
                 <mask id="gauge-seg-mask">
-                  <path d="M 27 90 A 68 68 0 0 1 163 90" fill="none" stroke="#ffffff" stroke-width="14" stroke-dasharray="7 3" stroke-linecap="butt" />
+                  <path d="M 31 82 A 64 64 0 0 1 159 82" fill="none" stroke="#ffffff" stroke-width="14" stroke-dasharray="7 3" stroke-linecap="butt" />
                 </mask>
               </defs>
 
               <!-- Track Background (clean, high-contrast) -->
-              <path class="gauge-track-bg" d="M 27 90 A 68 68 0 0 1 163 90" />
+              <path class="gauge-track-bg" d="M 31 82 A 64 64 0 0 1 159 82" />
               <!-- Safe Track Track (0-80%) -->
-              <path class="gauge-track-safe" d="M 27 90 A 68 68 0 0 1 150 50" />
+              <path class="gauge-track-safe" d="M 31 82 A 64 64 0 0 1 146.8 44.4" />
               <!-- Danger Track Track (80-100%) -->
-              <path class="gauge-track-danger" d="M 150 50 A 68 68 0 0 1 163 90" />
+              <path class="gauge-track-danger" d="M 146.8 44.4 A 64 64 0 0 1 159 82" />
 
               <!-- Active Animated Progress Path -->
-              <path id="gauge-svg-fill" class="gauge-fill-path" d="M 27 90 A 68 68 0 0 1 163 90" />
+              <path id="gauge-svg-fill" class="gauge-fill-path" d="M 31 82 A 64 64 0 0 1 159 82" />
 
-              <!-- Needle (Pivot at 95, 90) -->
+              <!-- Needle (Pivot at 95, 82 - comfortably raised from text, length 40 staying within dial) -->
               <g id="gauge-svg-needle-group" class="gauge-svg-needle-group">
-                <line x1="95" y1="90" x2="95" y2="38" class="gauge-svg-needle-beam" />
-                <circle cx="95" cy="90" r="6" class="gauge-svg-needle-pivot" />
-                <circle cx="95" cy="90" r="2.5" class="gauge-svg-needle-center" />
+                <line x1="95" y1="82" x2="95" y2="42" class="gauge-svg-needle-beam" />
+                <circle cx="95" cy="82" r="5.5" class="gauge-svg-needle-pivot" />
+                <circle cx="95" cy="82" r="2.2" class="gauge-svg-needle-center" />
               </g>
             </svg>
 
-            <!-- Digital Readout Center (Cleanly below needle pivot) -->
+            <!-- Digital Readout Center (Cleanly separated below needle pivot) -->
             <div class="gauge-digital-readout">
               <span id="bundle-used" class="ring-big">0 GB</span>
               <span class="ring-small">of <span id="bundle-total">0</span> GB</span>
@@ -1046,7 +1046,7 @@
                       <span class="preview-needle"></span>
                     </div>
                     <div class="gauge-info">
-                      <span class="gauge-name">1. Sports Needle Speedometer</span>
+                      <span class="gauge-name">1. Sports Needle</span>
                       <span class="gauge-desc">Real rotating precision needle, tick notches &amp; redline</span>
                     </div>
                   </button>
@@ -1935,6 +1935,6 @@
     </div>
   </div>
 
-    <script src="/assets/app.js?v=92"></script>
+    <script src="/assets/app.js?v=93"></script>
 </body>
 </html>

@@ -417,9 +417,9 @@ function renderBundle(b, devices, users) {
   if (ringEl) {
     ringEl.style.setProperty("--p", usedPct.toFixed(1));
 
-    // Half-circle arc: radius=68, arc length = π×68 ≈ 213.6
-    // dashoffset=213.6 → empty; dashoffset=0 → full
-    const totalArcLen = 213.6;
+    // Half-circle arc: radius=64, arc length = π×64 ≈ 201.1
+    // dashoffset=201.1 → empty; dashoffset=0 → full
+    const totalArcLen = 201.1;
     const offset = Math.max(0, totalArcLen - (usedPct / 100) * totalArcLen);
     const fillPath = $("gauge-svg-fill");
     if (fillPath) {
