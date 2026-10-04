@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quota Manager</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=68">
+    <link rel="stylesheet" href="/assets/styles.css?v=69">
   <script disable-devtool-auto src='/assets/detector.js'></script>
 </head>
 <body>
@@ -62,6 +62,7 @@
         <h1 class="logo">Quota<span>Manager</span></h1>
       </div>
       <nav class="side-nav" aria-label="Sections">
+        <div class="nav-indicator" id="nav-indicator"></div>
         <button class="nav-tab active" data-panel="management">
           <span class="nav-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span>
           <span class="nav-label">Management</span>
@@ -947,6 +948,52 @@
                   </div>
                 </div>
               </div>
+
+              <div class="particle-theme-section">
+                <div class="section-head" style="margin-bottom: 6px; margin-top: 18px;">
+                  <div>
+                    <h4 style="margin: 0; font-size: 0.95rem;">Background Particle FX</h4>
+                    <p class="muted small" style="margin-top: 2px;">Dynamic animated canvas effects drifting across the interface.</p>
+                  </div>
+                </div>
+                <div class="particle-grid" id="particle-grid">
+                  <button type="button" class="particle-option active" data-particle-style="mesh">
+                    <span class="particle-badge-icon">🕸️</span>
+                    <div class="particle-info">
+                      <span class="particle-name">Network Mesh</span>
+                      <span class="particle-desc">Connected constellation node web</span>
+                    </div>
+                  </button>
+                  <button type="button" class="particle-option" data-particle-style="dust">
+                    <span class="particle-badge-icon">✨</span>
+                    <div class="particle-info">
+                      <span class="particle-name">Cosmic Dust</span>
+                      <span class="particle-desc">Glowing embers floating upward</span>
+                    </div>
+                  </button>
+                  <button type="button" class="particle-option" data-particle-style="rain">
+                    <span class="particle-badge-icon">⚡</span>
+                    <div class="particle-info">
+                      <span class="particle-name">Digital Rain</span>
+                      <span class="particle-desc">High-speed cyber data streams</span>
+                    </div>
+                  </button>
+                  <button type="button" class="particle-option" data-particle-style="orbs">
+                    <span class="particle-badge-icon">🔮</span>
+                    <div class="particle-info">
+                      <span class="particle-name">Floating Orbs</span>
+                      <span class="particle-desc">Soft pulsing ethereal bokeh</span>
+                    </div>
+                  </button>
+                  <button type="button" class="particle-option" data-particle-style="off">
+                    <span class="particle-badge-icon">🚫</span>
+                    <div class="particle-info">
+                      <span class="particle-name">Disabled</span>
+                      <span class="particle-desc">Clean static background</span>
+                    </div>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -1251,70 +1298,73 @@
             </div>
           </div>
 
-          <!-- ROUTING CONTROLS -->
-          <div class="glass card" style="margin-top: 14px;">
-            <div class="section-head">
-              <div>
-                <h3>Device &amp; User Routing</h3>
-                <p class="muted small">Specify which household members and devices route via VPN vs. Direct.</p>
+          <!-- SIDE-BY-SIDE BALANCED GRID: ROUTING & NODES -->
+          <div class="vpn-split-grid">
+            <!-- ROUTING CONTROLS -->
+            <div class="glass card vpn-split-col">
+              <div class="section-head">
+                <div>
+                  <h3>Device &amp; User Routing</h3>
+                  <p class="muted small">Specify which household members and devices route via VPN vs. Direct.</p>
+                </div>
+                <div class="btn-row" style="margin: 0;">
+                  <button type="button" id="vpn-route-all-btn" class="btn ghost tiny">Route all</button>
+                  <button type="button" id="vpn-route-none-btn" class="btn ghost tiny">Direct all</button>
+                </div>
               </div>
-              <div class="btn-row" style="margin: 0;">
-                <button type="button" id="vpn-route-all-btn" class="btn ghost tiny">Route all</button>
-                <button type="button" id="vpn-route-none-btn" class="btn ghost tiny">Direct all</button>
+              <div class="vpn-routing-toolbar">
+                <div class="vpn-routing-tabs" id="vpn-routing-tab-group">
+                  <button type="button" class="vpn-tab-btn active" data-vtab="users">👤 Users</button>
+                  <button type="button" class="vpn-tab-btn" data-vtab="devices">📱 Devices</button>
+                </div>
+                <div class="vpn-routing-search-box">
+                  <input type="text" id="vpn-routing-search" placeholder="Search devices, users, or MAC…" class="small">
+                </div>
+              </div>
+              <div class="vpn-routing-list" id="vpn-routing-list">
+                <!-- dynamic user / device toggle rows -->
               </div>
             </div>
-            <div class="vpn-routing-toolbar">
-              <div class="vpn-routing-tabs" id="vpn-routing-tab-group">
-                <button type="button" class="vpn-tab-btn active" data-vtab="users">👤 Users</button>
-                <button type="button" class="vpn-tab-btn" data-vtab="devices">📱 Devices</button>
-              </div>
-              <div class="vpn-routing-search-box">
-                <input type="text" id="vpn-routing-search" placeholder="Search devices, users, or MAC…" class="small">
-              </div>
-            </div>
-            <div class="vpn-routing-list" id="vpn-routing-list">
-              <!-- dynamic user / device toggle rows -->
-            </div>
-          </div>
 
-          <!-- VPN NODES MANAGEMENT -->
-          <div class="glass card" style="margin-top: 14px;">
-            <div class="section-head">
-              <div>
-                <h3>VPN Nodes &amp; Configurations</h3>
-                <p class="muted small">Manage V2Ray links (VLESS, VMess, Trojan, Shadowsocks) and custom configs.</p>
-              </div>
-              <div class="btn-row" style="margin: 0; align-items: center; gap: 14px;">
-                <label class="switch-label" style="display: inline-flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; user-select: none;" title="Skip TLS certificate validation across all VPN configurations">
-                  <span class="muted">Allow Insecure</span>
-                  <label class="switch tiny" style="margin: 0;">
-                    <input type="checkbox" id="vpn-allow-insecure-switch">
-                    <span class="slider"></span>
+            <!-- VPN NODES MANAGEMENT -->
+            <div class="glass card vpn-split-col">
+              <div class="section-head">
+                <div>
+                  <h3>VPN Nodes &amp; Configurations</h3>
+                  <p class="muted small">Manage V2Ray links (VLESS, VMess, Trojan, Shadowsocks) and custom configs.</p>
+                </div>
+                <div class="btn-row" style="margin: 0; align-items: center; gap: 14px;">
+                  <label class="switch-label" style="display: inline-flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; user-select: none;" title="Skip TLS certificate validation across all VPN configurations">
+                    <span class="muted">Allow Insecure</span>
+                    <label class="switch tiny" style="margin: 0;">
+                      <input type="checkbox" id="vpn-allow-insecure-switch">
+                      <span class="slider"></span>
+                    </label>
                   </label>
-                </label>
-                <button type="button" id="vpn-add-node-btn" class="btn primary small">＋ Add Node</button>
+                  <button type="button" id="vpn-add-node-btn" class="btn primary small">＋ Add Node</button>
+                </div>
               </div>
-            </div>
-            <div class="table-wrap" style="margin-top: 10px;">
-              <table class="history-table" id="vpn-nodes-table">
-                <thead>
-                  <tr>
-                    <th>Status</th>
-                    <th>Node Name</th>
-                    <th>Protocol</th>
-                    <th>Latency</th>
-                    <th class="num">Actions</th>
-                  </tr>
-                </thead>
-                <tbody id="vpn-nodes-tbody">
-                  <tr><td colspan="5" class="muted small" style="text-align: center; padding: 16px;">No VPN nodes added yet. Click "Add Node" to import a link.</td></tr>
-                </tbody>
-              </table>
+              <div class="table-wrap" style="margin-top: 10px;">
+                <table class="history-table" id="vpn-nodes-table">
+                  <thead>
+                    <tr>
+                      <th>Status</th>
+                      <th>Node Name</th>
+                      <th>Protocol</th>
+                      <th>Latency</th>
+                      <th class="num">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="vpn-nodes-tbody">
+                    <tr><td colspan="5" class="muted small" style="text-align: center; padding: 16px;">No VPN nodes added yet. Click "Add Node" to import a link.</td></tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
 
           <!-- DIAGNOSTICS & CORE LOGS CONSOLE -->
-          <div class="glass card vpn-logs-card" style="margin-top: 18px;">
+          <div class="glass card vpn-logs-card">
             <div class="logs-head" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 10px;">
               <div>
                 <h3 style="display: flex; align-items: center; gap: 8px;">
@@ -1803,6 +1853,6 @@
     </div>
   </div>
 
-    <script src="/assets/app.js?v=84"></script>
+    <script src="/assets/app.js?v=85"></script>
 </body>
 </html>

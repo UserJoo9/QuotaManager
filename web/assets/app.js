@@ -759,10 +759,26 @@ function hidePanelPopup() {
   }, 220);
 }
 
+function updateNavIndicator(panelName) {
+  const indicator = $("nav-indicator");
+  if (!indicator) return;
+  const activeTab = document.querySelector(`.nav-tab[data-panel="${panelName}"]`) || document.querySelector(".nav-tab.active");
+  if (!activeTab) {
+    indicator.style.opacity = "0";
+    return;
+  }
+  const top = activeTab.offsetTop;
+  const height = activeTab.offsetHeight;
+  indicator.style.transform = `translateY(${top}px)`;
+  indicator.style.height = `${height}px`;
+  indicator.style.opacity = "1";
+}
+
 async function switchPanel(name) {
   try { localStorage.setItem("quota_active_panel", name); } catch (_) { /* ignore */ }
   document.querySelectorAll(".nav-tab").forEach((b) =>
     b.classList.toggle("active", b.dataset.panel === name));
+  updateNavIndicator(name);
   document.querySelectorAll(".nav-panel").forEach((p) =>
     p.classList.toggle("hidden", p.id !== `panel-${name}`));
 
@@ -4101,20 +4117,39 @@ window.setVpnRouting = setVpnRouting;
 
 /* ---------------- ambient particle layer ---------------- */
 
-// Ultra-subtle drifting dust over the obsidian base. Self-contained (no deps),
-// DPR-aware, pauses when the tab is hidden, and fully disabled for users who
-// prefer reduced motion. Guards on element presence so it degrades to a no-op
-// anywhere the canvas is absent.
+let currentParticleStyle = "mesh";
+let particleRaf = null;
+
+function applyParticleStyle(styleName) {
+  currentParticleStyle = styleName || "mesh";
+  try { localStorage.setItem("quota_particles", currentParticleStyle); } catch (_) {}
+  document.querySelectorAll(".particle-option").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.particleStyle === currentParticleStyle);
+  });
+  if (window.__reinitParticles) {
+    window.__reinitParticles();
+  }
+}
+
+// Multi-mode dynamic ambient particles (Mesh, Dust, Digital Rain, Floating Orbs, Disabled).
+// DPR-aware, pauses when hidden, respects reduced motion or user toggle.
 function initParticles() {
   const canvas = document.getElementById("bg-particles");
   if (!canvas) return;
-  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    currentParticleStyle = "off";
+  } else {
+    try {
+      const saved = localStorage.getItem("quota_particles");
+      if (saved) currentParticleStyle = saved;
+    } catch (_) {}
+  }
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
 
   let w = 0, h = 0, dpr = 1;
   const particles = [];
-  const COUNT = 50;
+  const COUNT = 45;
 
   function resize() {
     dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -4127,45 +4162,180 @@ function initParticles() {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
+  function getThemeColor() {
+    const curTheme = document.documentElement.getAttribute("data-theme") || "default";
+    switch (curTheme) {
+      case "emerald": return { r: 16, g: 185, b: 129 };
+      case "violet": return { r: 168, g: 85, b: 247 };
+      case "crimson": return { r: 244, g: 63, b: 94 };
+      case "amber": return { r: 245, g: 158, b: 11 };
+      case "nord": return { r: 45, g: 212, b: 191 };
+      default: return { r: 56, g: 189, b: 248 };
+    }
+  }
+
   function seed() {
     particles.length = 0;
-    for (let i = 0; i < COUNT; i++) {
-      particles.push({
-        x: Math.random() * w,
-        y: Math.random() * h,
-        r: Math.random() * 1.5 + 1.5,
-        vx: (Math.random() - 0.5) * 0.6,
-        vy: -(Math.random() * 0.4 + 0.4),
-        a: Math.random() * 0.1 + 0.35,
-        tw: Math.random() * Math.PI * 2,
-      });
+    if (currentParticleStyle === "off") return;
+
+    if (currentParticleStyle === "rain") {
+      // Digital cyber rain streams
+      const rainCount = Math.floor(w / 35);
+      for (let i = 0; i < rainCount; i++) {
+        particles.push({
+          x: Math.random() * w,
+          y: Math.random() * h,
+          len: Math.random() * 24 + 14,
+          speed: Math.random() * 3.5 + 2.5,
+          a: Math.random() * 0.35 + 0.25,
+        });
+      }
+    } else if (currentParticleStyle === "orbs") {
+      // Soft large floating bokeh orbs
+      for (let i = 0; i < 18; i++) {
+        particles.push({
+          x: Math.random() * w,
+          y: Math.random() * h,
+          r: Math.random() * 28 + 14,
+          vx: (Math.random() - 0.5) * 0.35,
+          vy: (Math.random() - 0.5) * 0.35,
+          a: Math.random() * 0.08 + 0.05,
+          tw: Math.random() * Math.PI * 2,
+        });
+      }
+    } else {
+      // Mesh or Cosmic Dust
+      const count = currentParticleStyle === "mesh" ? 42 : COUNT;
+      for (let i = 0; i < count; i++) {
+        particles.push({
+          x: Math.random() * w,
+          y: Math.random() * h,
+          r: currentParticleStyle === "mesh" ? (Math.random() * 1.4 + 1.2) : (Math.random() * 2 + 1.2),
+          vx: (Math.random() - 0.5) * 0.5,
+          vy: currentParticleStyle === "dust" ? -(Math.random() * 0.5 + 0.3) : (Math.random() - 0.5) * 0.45,
+          a: Math.random() * 0.2 + 0.35,
+          tw: Math.random() * Math.PI * 2,
+        });
+      }
     }
   }
 
   function tick() {
     ctx.clearRect(0, 0, w, h);
-    ctx.shadowColor = "rgba(59, 130, 246, 0.8)";
-    ctx.shadowBlur = 8;
-    for (const p of particles) {
-      p.x += p.vx;
-      p.y += p.vy;
-      p.tw += 0.008;
-      if (p.y < -6) { p.y = h + 6; p.x = Math.random() * w; }
-      if (p.x < -6) p.x = w + 6;
-      if (p.x > w + 6) p.x = -6;
-      const alpha = p.a * (0.7 + 0.3 * Math.sin(p.tw));
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-      ctx.fillStyle = "rgba(59, 130, 246, " + alpha.toFixed(3) + ")";
-      ctx.fill();
+    if (currentParticleStyle === "off") return;
+
+    const rgb = getThemeColor();
+    const colorStr = `${rgb.r}, ${rgb.g}, ${rgb.b}`;
+
+    if (currentParticleStyle === "rain") {
+      for (const p of particles) {
+        p.y += p.speed;
+        if (p.y > h + 30) {
+          p.y = -30;
+          p.x = Math.random() * w;
+        }
+        ctx.beginPath();
+        const grad = ctx.createLinearGradient(p.x, p.y - p.len, p.x, p.y);
+        grad.addColorStop(0, `rgba(${colorStr}, 0)`);
+        grad.addColorStop(1, `rgba(${colorStr}, ${p.a.toFixed(3)})`);
+        ctx.strokeStyle = grad;
+        ctx.lineWidth = 1.6;
+        ctx.moveTo(p.x, p.y - p.len);
+        ctx.lineTo(p.x, p.y);
+        ctx.stroke();
+
+        ctx.fillStyle = `rgba(${colorStr}, ${(p.a * 1.3).toFixed(3)})`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 1.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else if (currentParticleStyle === "orbs") {
+      for (const p of particles) {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.tw += 0.01;
+        if (p.x < -p.r) p.x = w + p.r;
+        if (p.x > w + p.r) p.x = -p.r;
+        if (p.y < -p.r) p.y = h + p.r;
+        if (p.y > h + p.r) p.y = -p.r;
+
+        const pulseAlpha = p.a * (0.8 + 0.2 * Math.sin(p.tw));
+        const radGrad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r);
+        radGrad.addColorStop(0, `rgba(${colorStr}, ${pulseAlpha.toFixed(3)})`);
+        radGrad.addColorStop(1, `rgba(${colorStr}, 0)`);
+        ctx.fillStyle = radGrad;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else {
+      // Mesh or Dust
+      ctx.shadowColor = `rgba(${colorStr}, 0.7)`;
+      ctx.shadowBlur = 8;
+      for (let i = 0; i < particles.length; i++) {
+        const p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.tw += 0.01;
+        if (p.y < -8) { p.y = h + 8; p.x = Math.random() * w; }
+        if (p.y > h + 8) { p.y = -8; p.x = Math.random() * w; }
+        if (p.x < -8) p.x = w + 8;
+        if (p.x > w + 8) p.x = -8;
+
+        const alpha = p.a * (0.7 + 0.3 * Math.sin(p.tw));
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${colorStr}, ${alpha.toFixed(3)})`;
+        ctx.fill();
+
+        // Connected constellation network mesh lines
+        if (currentParticleStyle === "mesh") {
+          for (let j = i + 1; j < particles.length; j++) {
+            const p2 = particles[j];
+            const dx = p.x - p2.x;
+            const dy = p.y - p2.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist < 130) {
+              const lineAlpha = (1 - dist / 130) * 0.18;
+              ctx.beginPath();
+              ctx.moveTo(p.x, p.y);
+              ctx.lineTo(p2.x, p2.y);
+              ctx.strokeStyle = `rgba(${colorStr}, ${lineAlpha.toFixed(3)})`;
+              ctx.lineWidth = 0.9;
+              ctx.stroke();
+            }
+          }
+        }
+      }
+      ctx.shadowBlur = 0;
     }
-    ctx.shadowBlur = 0;
-    raf = requestAnimationFrame(tick);
+
+    particleRaf = requestAnimationFrame(tick);
   }
 
-  let raf = null;
-  function start() { if (!raf) raf = requestAnimationFrame(tick); }
-  function stop() { if (raf) { cancelAnimationFrame(raf); raf = null; } }
+  function start() {
+    if (currentParticleStyle === "off") {
+      ctx.clearRect(0, 0, w, h);
+      return;
+    }
+    if (!particleRaf) particleRaf = requestAnimationFrame(tick);
+  }
+
+  function stop() {
+    if (particleRaf) {
+      cancelAnimationFrame(particleRaf);
+      particleRaf = null;
+    }
+  }
+
+  window.__reinitParticles = () => {
+    stop();
+    ctx.clearRect(0, 0, w, h);
+    if (currentParticleStyle !== "off") {
+      seed();
+      start();
+    }
+  };
 
   resize();
   seed();
@@ -4667,6 +4837,27 @@ async function init() {
       applyTheme(theme);
     });
   }
+
+  // Particle Effects switcher
+  const savedParticles = localStorage.getItem("quota_particles") || "mesh";
+  applyParticleStyle(savedParticles);
+  const particleGrid = $("particle-grid");
+  if (particleGrid) {
+    particleGrid.addEventListener("click", (ev) => {
+      const opt = ev.target.closest("[data-particle-style]");
+      if (!opt) return;
+      const style = opt.dataset.particleStyle;
+      applyParticleStyle(style);
+    });
+  }
+
+  // Initial sliding nav indicator position
+  const initialPanel = localStorage.getItem("quota_active_panel") || "management";
+  setTimeout(() => updateNavIndicator(initialPanel), 50);
+  window.addEventListener("resize", () => {
+    const curActive = document.querySelector(".nav-tab.active");
+    if (curActive) updateNavIndicator(curActive.dataset.panel);
+  });
 
   $("d-mode").addEventListener("change", () => {
     $("d-fixed-wrap").classList.toggle("hidden", $("d-mode").value !== "fixed");
