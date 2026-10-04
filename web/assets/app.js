@@ -410,7 +410,11 @@ function updateResetDayAvailability() {
 
 function renderBundle(b, devices, users) {
   const usedPct = b.total_gb > 0 ? Math.min(100, (b.used_gb / b.total_gb) * 100) : 0;
-  $("bundle-ring").style.setProperty("--p", usedPct.toFixed(1));
+  const ringEl = $("bundle-ring");
+  if (ringEl) {
+    ringEl.style.setProperty("--p", usedPct.toFixed(1));
+    ringEl.classList.toggle("redline", usedPct >= 80);
+  }
   $("bundle-used").textContent = fmt(b.used_gb);
   $("bundle-total").textContent = b.total_gb;
   $("bundle-remaining").textContent = fmt(b.remaining_gb);
@@ -4174,6 +4178,29 @@ function initParticles() {
   });
 }
 
+/* ---------------- Theme Engine ---------------- */
+function applyTheme(name) {
+  if (!name || name === "default") {
+    document.documentElement.removeAttribute("data-theme");
+    try { localStorage.setItem("quota_theme", "default"); } catch (_) {}
+  } else {
+    document.documentElement.setAttribute("data-theme", name);
+    try { localStorage.setItem("quota_theme", name); } catch (_) {}
+  }
+  document.querySelectorAll(".theme-option").forEach((opt) => {
+    const isCur = (opt.dataset.setTheme || "default") === (name || "default");
+    opt.classList.toggle("active", isCur);
+  });
+}
+
+// Early theme restore on script load to prevent flash of unstyled theme
+try {
+  const _savedTheme = localStorage.getItem("quota_theme");
+  if (_savedTheme && _savedTheme !== "default") {
+    document.documentElement.setAttribute("data-theme", _savedTheme);
+  }
+} catch (_) {}
+
 /* ---------------- init ---------------- */
 
 async function init() {
@@ -4627,6 +4654,19 @@ async function init() {
     });
     renderLogs();
   });
+
+  // Themes & Appearance switcher
+  const savedTheme = localStorage.getItem("quota_theme") || "default";
+  applyTheme(savedTheme);
+  const themeGrid = $("theme-grid");
+  if (themeGrid) {
+    themeGrid.addEventListener("click", (ev) => {
+      const opt = ev.target.closest("[data-set-theme]");
+      if (!opt) return;
+      const theme = opt.dataset.setTheme;
+      applyTheme(theme);
+    });
+  }
 
   $("d-mode").addEventListener("change", () => {
     $("d-fixed-wrap").classList.toggle("hidden", $("d-mode").value !== "fixed");
