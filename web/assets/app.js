@@ -413,6 +413,9 @@ function renderBundle(b, devices, users) {
   const ringEl = $("bundle-ring");
   if (ringEl) {
     ringEl.style.setProperty("--p", usedPct.toFixed(1));
+    // 270 deg sweep: starts at -135deg (0%) and sweeps to +135deg (100%)
+    const needleDeg = -135 + (usedPct * 2.7);
+    ringEl.style.setProperty("--needle-deg", `${needleDeg.toFixed(1)}deg`);
     ringEl.classList.toggle("redline", usedPct >= 80);
   }
   $("bundle-used").textContent = fmt(b.used_gb);
@@ -4426,14 +4429,14 @@ function applyTheme(name) {
 }
 
 /* ---------------- Gauge Style Engine ---------------- */
-let currentGaugeStyle = "cyber";
+let currentGaugeStyle = "needle";
 
 function applyGaugeStyle(style) {
-  currentGaugeStyle = style || "cyber";
+  currentGaugeStyle = style || "needle";
   try { localStorage.setItem("quota_gauge_style", currentGaugeStyle); } catch (_) {}
   const bundle = $("sidebar-bundle");
   if (bundle) {
-    bundle.classList.remove("gauge-cyber", "gauge-minimal", "gauge-racing", "gauge-plasma");
+    bundle.classList.remove("gauge-needle", "gauge-segmented", "gauge-minimal", "gauge-cyber", "gauge-racing", "gauge-plasma");
     bundle.classList.add(`gauge-${currentGaugeStyle}`);
   }
   document.querySelectorAll(".gauge-option").forEach((opt) => {
@@ -4450,7 +4453,7 @@ try {
 } catch (_) {}
 
 try {
-  const _savedGauge = localStorage.getItem("quota_gauge_style") || "cyber";
+  const _savedGauge = localStorage.getItem("quota_gauge_style") || "needle";
   document.addEventListener("DOMContentLoaded", () => {
     const bundle = $("sidebar-bundle");
     if (bundle) {
@@ -4940,7 +4943,7 @@ async function init() {
   }
 
   // Speedometer Gauge Style switcher (4 designs)
-  const savedGauge = localStorage.getItem("quota_gauge_style") || "cyber";
+  const savedGauge = localStorage.getItem("quota_gauge_style") || "needle";
   applyGaugeStyle(savedGauge);
   const gaugeGrid = $("gauge-grid");
   if (gaugeGrid) {

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quota Manager</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=73">
+    <link rel="stylesheet" href="/assets/styles.css?v=74">
   <script disable-devtool-auto src='/assets/detector.js'></script>
 </head>
 <body>
@@ -105,6 +105,11 @@
         </div>
         <div class="sidebar-bundle-ring-wrap">
           <div class="ring ring-mini" id="bundle-ring">
+            <div class="gauge-ticks" aria-hidden="true"></div>
+            <div class="gauge-needle-wrap" id="gauge-needle-wrap">
+              <div class="gauge-needle"></div>
+              <div class="gauge-needle-cap"></div>
+            </div>
             <div class="ring-center">
               <span id="bundle-used" class="ring-big">0 GB</span>
               <span class="ring-small">of <span id="bundle-total">0</span> GB</span>
@@ -1004,43 +1009,47 @@
                   </div>
                 </div>
                 <div class="gauge-grid" id="gauge-grid">
-                  <button type="button" class="gauge-option active" data-gauge-style="cyber">
-                    <div class="gauge-badge-preview cyber">
-                      <span class="gauge-mini-arc"></span>
+                  <!-- Style 1: Turbo Needle Tachometer -->
+                  <button type="button" class="gauge-option active" data-gauge-style="needle">
+                    <div class="gauge-badge-preview needle">
+                      <span class="preview-needle"></span>
                     </div>
                     <div class="gauge-info">
-                      <span class="gauge-name">1. Cyber Neon Pro</span>
-                      <span class="gauge-desc">Crisp dual neon glow, vibrant redline</span>
+                      <span class="gauge-name">1. Sports Needle Tachometer</span>
+                      <span class="gauge-desc">Real rotating speedometer needle with 80/20 redline</span>
                     </div>
                   </button>
 
+                  <!-- Style 2: Segmented LED Arc -->
+                  <button type="button" class="gauge-option" data-gauge-style="segmented">
+                    <div class="gauge-badge-preview segmented">
+                      <span class="preview-seg"></span>
+                    </div>
+                    <div class="gauge-info">
+                      <span class="gauge-name">2. Segmented LED Cluster</span>
+                      <span class="gauge-desc">Digital dashed LED segments &amp; warning red blocks</span>
+                    </div>
+                  </button>
+
+                  <!-- Style 3: Minimal Tesla Dash -->
                   <button type="button" class="gauge-option" data-gauge-style="minimal">
                     <div class="gauge-badge-preview minimal">
-                      <span class="gauge-mini-arc"></span>
+                      <span class="preview-clean"></span>
                     </div>
                     <div class="gauge-info">
-                      <span class="gauge-name">2. Minimal Solid Ring</span>
-                      <span class="gauge-desc">Clean high-contrast Apple/Tesla ring</span>
+                      <span class="gauge-name">3. Modern Electric Horizon</span>
+                      <span class="gauge-desc">Sleek, ultra-clean solid arc with floating gauge stats</span>
                     </div>
                   </button>
 
-                  <button type="button" class="gauge-option" data-gauge-style="racing">
-                    <div class="gauge-badge-preview racing">
-                      <span class="gauge-mini-arc"></span>
+                  <!-- Style 4: Dual Sci-Fi Reactor Arc -->
+                  <button type="button" class="gauge-option" data-gauge-style="cyber">
+                    <div class="gauge-badge-preview cyber">
+                      <span class="preview-arc"></span>
                     </div>
                     <div class="gauge-info">
-                      <span class="gauge-name">3. Racing Tachometer</span>
-                      <span class="gauge-desc">Sports dash with tick notches</span>
-                    </div>
-                  </button>
-
-                  <button type="button" class="gauge-option" data-gauge-style="plasma">
-                    <div class="gauge-badge-preview plasma">
-                      <span class="gauge-mini-arc"></span>
-                    </div>
-                    <div class="gauge-info">
-                      <span class="gauge-name">4. Deep Plasma Pulse</span>
-                      <span class="gauge-desc">Volumetric radial depth with outer aura</span>
+                      <span class="gauge-name">4. Cyber Supercharger</span>
+                      <span class="gauge-desc">Futuristic dual concentric rings with neon aura</span>
                     </div>
                   </button>
                 </div>
