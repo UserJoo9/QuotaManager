@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quota Manager</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=76">
+    <link rel="stylesheet" href="/assets/styles.css?v=77">
   <script disable-devtool-auto src='/assets/detector.js'></script>
 </head>
 <body>
@@ -105,98 +105,43 @@
         </div>
         <div class="sidebar-bundle-ring-wrap">
           <div class="svg-gauge-box" id="bundle-ring">
-            <svg class="gauge-svg" viewBox="0 0 180 120" preserveAspectRatio="xMidYMid meet">
+            <svg class="gauge-svg" viewBox="0 0 190 98" preserveAspectRatio="xMidYMid meet">
               <defs>
-                <!-- SVG Gradients -->
-                <linearGradient id="gauge-fill-grad" x1="0%" y1="100%" x2="100%" y2="0%">
+                <linearGradient id="gauge-fill-grad" x1="0%" y1="0%" x2="100%" y2="0%">
                   <stop offset="0%" stop-color="#0284c7" />
-                  <stop offset="70%" stop-color="#38bdf8" />
+                  <stop offset="60%" stop-color="#38bdf8" />
                   <stop offset="100%" stop-color="#00f2fe" />
                 </linearGradient>
-                <linearGradient id="gauge-redline-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <linearGradient id="gauge-redline-grad" x1="0%" y1="0%" x2="100%" y2="0%">
                   <stop offset="0%" stop-color="#fb7185" />
                   <stop offset="100%" stop-color="#f43f5e" />
                 </linearGradient>
-                <!-- Outer Glow Filters -->
-                <filter id="cyan-glow" x="-30%" y="-30%" width="160%" height="160%">
-                  <feGaussianBlur stdDeviation="3" result="blur" />
-                  <feMerge>
-                    <feMergeNode in="blur" />
-                    <feMergeNode in="SourceGraphic" />
-                  </feMerge>
-                </filter>
-                <filter id="needle-glow" x="-40%" y="-40%" width="180%" height="180%">
-                  <feGaussianBlur stdDeviation="2.5" result="blur" />
-                  <feMerge>
-                    <feMergeNode in="blur" />
-                    <feMergeNode in="SourceGraphic" />
-                  </feMerge>
-                </filter>
+                <!-- Segmented mask for Cyber Digital style -->
+                <mask id="gauge-seg-mask">
+                  <path d="M 27 90 A 68 68 0 0 1 163 90" fill="none" stroke="#ffffff" stroke-width="14" stroke-dasharray="7 3" stroke-linecap="butt" />
+                </mask>
               </defs>
 
               <!-- Track Background (clean, high-contrast) -->
-              <path class="gauge-track-bg" d="M 32.2 79.1 A 58 58 0 1 1 147.8 79.1" />
+              <path class="gauge-track-bg" d="M 27 90 A 68 68 0 0 1 163 90" />
               <!-- Safe Track Track (0-80%) -->
-              <path class="gauge-track-safe" d="M 32.2 79.1 A 58 58 0 1 1 138.6 42.4" />
+              <path class="gauge-track-safe" d="M 27 90 A 68 68 0 0 1 150 50" />
               <!-- Danger Track Track (80-100%) -->
-              <path class="gauge-track-danger" d="M 138.6 42.4 A 58 58 0 0 1 147.8 79.1" />
+              <path class="gauge-track-danger" d="M 150 50 A 68 68 0 0 1 163 90" />
 
               <!-- Active Animated Progress Path -->
-              <path id="gauge-svg-fill" class="gauge-fill-path" d="M 32.2 79.1 A 58 58 0 1 1 147.8 79.1" />
+              <path id="gauge-svg-fill" class="gauge-fill-path" d="M 27 90 A 68 68 0 0 1 163 90" />
 
-              <!-- Head Pip Orb for Horizon Style -->
-              <circle id="gauge-head-pip" class="gauge-head-pip" cx="32.2" cy="79.1" r="4.5" />
-
-              <!-- 20 Discrete Segment Bars for Cyber Segmented Style -->
-              <g class="gauge-svg-segments" id="gauge-svg-segments">
-                <line x1="38.0" y1="74.2" x2="26.0" y2="74.3" class="gauge-seg-bar" data-seg="0" />
-                <line x1="38.7" y1="65.6" x2="26.8" y2="63.7" class="gauge-seg-bar" data-seg="1" />
-                <line x1="40.8" y1="57.3" x2="29.4" y2="53.4" class="gauge-seg-bar" data-seg="2" />
-                <line x1="44.2" y1="49.4" x2="33.6" y2="43.7" class="gauge-seg-bar" data-seg="3" />
-                <line x1="48.9" y1="42.2" x2="39.4" y2="34.8" class="gauge-seg-bar" data-seg="4" />
-                <line x1="54.7" y1="35.8" x2="46.6" y2="27.0" class="gauge-seg-bar" data-seg="5" />
-                <line x1="61.5" y1="30.5" x2="54.9" y2="20.5" class="gauge-seg-bar" data-seg="6" />
-                <line x1="69.1" y1="26.4" x2="64.2" y2="15.4" class="gauge-seg-bar" data-seg="7" />
-                <line x1="77.2" y1="23.6" x2="74.2" y2="12.0" class="gauge-seg-bar" data-seg="8" />
-                <line x1="85.7" y1="22.2" x2="84.7" y2="10.2" class="gauge-seg-bar" data-seg="9" />
-                <line x1="94.3" y1="22.2" x2="95.3" y2="10.2" class="gauge-seg-bar" data-seg="10" />
-                <line x1="102.8" y1="23.6" x2="105.8" y2="12.0" class="gauge-seg-bar" data-seg="11" />
-                <line x1="110.9" y1="26.4" x2="115.8" y2="15.4" class="gauge-seg-bar" data-seg="12" />
-                <line x1="118.5" y1="30.5" x2="125.1" y2="20.5" class="gauge-seg-bar" data-seg="13" />
-                <line x1="125.3" y1="35.8" x2="133.4" y2="27.0" class="gauge-seg-bar" data-seg="14" />
-                <line x1="131.1" y1="42.2" x2="140.6" y2="34.8" class="gauge-seg-bar" data-seg="15" />
-                <line x1="135.8" y1="49.4" x2="146.4" y2="43.7" class="gauge-seg-bar red" data-seg="16" />
-                <line x1="139.2" y1="57.3" x2="150.6" y2="53.4" class="gauge-seg-bar red" data-seg="17" />
-                <line x1="141.3" y1="65.6" x2="153.2" y2="63.7" class="gauge-seg-bar red" data-seg="18" />
-                <line x1="142.0" y1="74.2" x2="154.0" y2="74.3" class="gauge-seg-bar red" data-seg="19" />
-              </g>
-
-              <!-- Tick Marks for Sports Tachometer Style -->
-              <g class="gauge-svg-ticks" id="gauge-svg-ticks">
-                <!-- 0% -->
-                <line x1="28.2" y1="79.4" x2="22.3" y2="79.9" class="g-tick" />
-                <!-- 20% -->
-                <line x1="38.0" y1="40.2" x2="33.0" y2="37.0" class="g-tick" />
-                <!-- 40% -->
-                <line x1="69.8" y1="15.4" x2="67.9" y2="9.7" class="g-tick" />
-                <!-- 60% -->
-                <line x1="110.2" y1="15.4" x2="112.1" y2="9.7" class="g-tick" />
-                <!-- 80% (Redline Entry) -->
-                <line x1="142.0" y1="40.2" x2="147.0" y2="37.0" class="g-tick red" />
-                <!-- 100% -->
-                <line x1="151.8" y1="79.4" x2="157.7" y2="79.9" class="g-tick red" />
-              </g>
-
-              <!-- Needle (Centered at 90, 74) -->
-              <g class="gauge-svg-needle-group" id="gauge-svg-needle-group">
-                <line x1="90" y1="74" x2="90" y2="24" class="gauge-svg-needle-beam" />
-                <circle cx="90" cy="74" r="6" class="gauge-svg-needle-pivot" />
-                <circle cx="90" cy="74" r="2.5" class="gauge-svg-needle-center" />
+              <!-- Needle (Pivot at 95, 90) -->
+              <g id="gauge-svg-needle-group" class="gauge-svg-needle-group">
+                <line x1="95" y1="90" x2="95" y2="38" class="gauge-svg-needle-beam" />
+                <circle cx="95" cy="90" r="6" class="gauge-svg-needle-pivot" />
+                <circle cx="95" cy="90" r="2.5" class="gauge-svg-needle-center" />
               </g>
             </svg>
 
-            <!-- Digital Readout Center (Below Needle Pivot) -->
-            <div class="ring-center gauge-digital-readout">
+            <!-- Digital Readout Center (Cleanly below needle pivot) -->
+            <div class="gauge-digital-readout">
               <span id="bundle-used" class="ring-big">0 GB</span>
               <span class="ring-small">of <span id="bundle-total">0</span> GB</span>
             </div>
@@ -1990,6 +1935,6 @@
     </div>
   </div>
 
-    <script src="/assets/app.js?v=91"></script>
+    <script src="/assets/app.js?v=92"></script>
 </body>
 </html>
