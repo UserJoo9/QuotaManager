@@ -413,30 +413,31 @@ body {
   transition: opacity 400ms var(--ease);
 }
 
-/* Speedometer Conic Ring with 20% Redline Zone & Intense Dual Glow */
+/* Speedometer Conic Ring: 80% Blue Zone + 20% Red Zone */
 .ring.ring-mini {
   width: 124px;
   height: 124px;
   border-radius: 50%;
   position: relative;
-  /* Speedometer style: starts at 225deg, sweeps 270deg total.
-     Safe zone = first 80% (0% to 216deg), Redline zone = last 20% (216deg to 270deg) */
+  /* 270deg sweep starting from 225deg (bottom-left to bottom-right):
+     - First 80% (0deg to 216deg) = Blue Zone (filled with bright electric cyan/blue glow, remaining is dark blue)
+     - Last 20% (216deg to 270deg) = Red Zone (active redline or dark ruby track)
+     - Bottom cutout (270deg to 360deg) = transparent opening */
   background: conic-gradient(
     from 225deg,
-    /* Active fill zone */
+    /* 1. Active Used Fill (Electric Blue Glow) */
     var(--accent) 0deg,
     var(--accent-3) calc(min(var(--p, 0), 80) * 2.7deg),
-    /* Active redline fill if p > 80 */
-    var(--danger) calc(min(var(--p, 0), 80) * 2.7deg),
-    var(--danger) calc(min(var(--p, 0), 100) * 2.7deg),
-    /* Inactive track zone */
-    rgba(255, 255, 255, 0.08) calc(var(--p, 0) * 2.7deg),
-    rgba(255, 255, 255, 0.08) 216deg,
-    /* Permanent Redline Zone marker (last 20%) */
-    rgba(244, 63, 94, 0.85) 216deg,
-    rgba(251, 113, 133, 0.95) 245deg,
-    rgba(244, 63, 94, 0.85) 270deg,
-    /* Bottom cutout (speedometer arch gap: 270deg to 360deg) */
+    /* 2. Remaining Safe Track (Unused part of the 80% Blue Zone) */
+    rgba(56, 189, 248, 0.22) calc(min(var(--p, 0), 80) * 2.7deg),
+    rgba(56, 189, 248, 0.22) 216deg,
+    /* 3. Redline 20% Zone (last 20%: 216deg to 270deg) */
+    /* If p > 80, filled with hot glowing danger red, otherwise vibrant ruby danger track */
+    rgba(244, 63, 94, 0.95) 216deg,
+    rgba(244, 63, 94, 0.95) calc(max(216, min(var(--p, 0), 100) * 2.7) * 1deg),
+    rgba(244, 63, 94, 0.35) calc(max(216, min(var(--p, 0), 100) * 2.7) * 1deg),
+    rgba(244, 63, 94, 0.35) 270deg,
+    /* 4. Bottom Speedometer Arch Cutout */
     transparent 270deg,
     transparent 360deg
   );
@@ -445,16 +446,16 @@ body {
   box-shadow: 
     0 0 24px rgba(0, 0, 0, 0.7),
     inset 0 0 12px rgba(0, 0, 0, 0.8),
-    -10px 0 22px -4px rgba(56, 189, 248, 0.5),   /* Vibrant Blue glow on active left arc */
-    10px 4px 22px -4px rgba(244, 63, 94, 0.55);   /* Vibrant Red glow on redline right arc */
+    -12px -2px 24px -4px rgba(56, 189, 248, 0.45),   /* Vibrant Blue glow on the 80% blue zone */
+    12px 2px 24px -4px rgba(244, 63, 94, 0.5);      /* Vibrant Red glow on the 20% red zone */
   transition: box-shadow 400ms var(--ease);
 }
 
 .ring.ring-mini.redline {
   box-shadow: 
-    0 0 32px rgba(244, 63, 94, 0.65),
+    0 0 32px rgba(244, 63, 94, 0.7),
     inset 0 0 14px rgba(244, 63, 94, 0.5),
-    0 0 26px var(--glow-danger);
+    0 0 30px var(--glow-danger);
 }
 
 .ring.ring-mini::before {
