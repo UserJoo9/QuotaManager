@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quota Manager</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=74">
+    <link rel="stylesheet" href="/assets/styles.css?v=75">
   <script disable-devtool-auto src='/assets/detector.js'></script>
 </head>
 <body>
@@ -104,13 +104,72 @@
           <span>Monthly Bundle</span>
         </div>
         <div class="sidebar-bundle-ring-wrap">
-          <div class="ring ring-mini" id="bundle-ring">
-            <div class="gauge-ticks" aria-hidden="true"></div>
-            <div class="gauge-needle-wrap" id="gauge-needle-wrap">
-              <div class="gauge-needle"></div>
-              <div class="gauge-needle-cap"></div>
-            </div>
-            <div class="ring-center">
+          <div class="svg-gauge-box" id="bundle-ring">
+            <svg class="gauge-svg" viewBox="0 0 160 120" preserveAspectRatio="xMidYMid meet">
+              <defs>
+                <!-- SVG Gradient for Fill -->
+                <linearGradient id="gauge-fill-grad" x1="0%" y1="100%" x2="100%" y2="0%">
+                  <stop offset="0%" stop-color="#0284c7" />
+                  <stop offset="70%" stop-color="#38bdf8" />
+                  <stop offset="100%" stop-color="#00f2fe" />
+                </linearGradient>
+                <linearGradient id="gauge-redline-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stop-color="#fb7185" />
+                  <stop offset="100%" stop-color="#f43f5e" />
+                </linearGradient>
+                <!-- Outer Glow Filters -->
+                <filter id="cyan-glow" x="-30%" y="-30%" width="160%" height="160%">
+                  <feGaussianBlur stdDeviation="3.5" result="blur" />
+                  <feMerge>
+                    <feMergeNode in="blur" />
+                    <feMergeNode in="SourceGraphic" />
+                  </feMerge>
+                </filter>
+                <filter id="needle-glow" x="-40%" y="-40%" width="180%" height="180%">
+                  <feGaussianBlur stdDeviation="3" result="blur" />
+                  <feMerge>
+                    <feMergeNode in="blur" />
+                    <feMergeNode in="SourceGraphic" />
+                  </feMerge>
+                </filter>
+              </defs>
+
+              <!-- Track Background (Clean, vibrant, high-contrast) -->
+              <path class="gauge-track-bg" d="M 25 125 A 65 65 0 1 1 135 125" />
+              <!-- Safe Track Track (0-80%) -->
+              <path class="gauge-track-safe" d="M 25 125 A 65 65 0 1 1 127 50" />
+              <!-- Danger Track Track (80-100%) -->
+              <path class="gauge-track-danger" d="M 127 50 A 65 65 0 0 1 135 125" />
+
+              <!-- Active Animated Progress Path -->
+              <path id="gauge-svg-fill" class="gauge-fill-path" d="M 25 125 A 65 65 0 1 1 135 125" />
+
+              <!-- Tick Marks for Track -->
+              <g class="gauge-svg-ticks" id="gauge-svg-ticks">
+                <!-- 0% -->
+                <line x1="20" y1="125" x2="10" y2="125" class="g-tick" />
+                <!-- 20% -->
+                <line x1="27" y1="84" x2="18" y2="79" class="g-tick" />
+                <!-- 40% -->
+                <line x1="49" y1="52" x2="43" y2="43" class="g-tick" />
+                <!-- 60% -->
+                <line x1="80" y1="40" x2="80" y2="30" class="g-tick" />
+                <!-- 80% (Redline Entry) -->
+                <line x1="111" y1="52" x2="117" y2="43" class="g-tick red" />
+                <!-- 100% -->
+                <line x1="140" y1="125" x2="150" y2="125" class="g-tick red" />
+              </g>
+
+              <!-- Needle (Centered at 80, 105) -->
+              <g class="gauge-svg-needle-group" id="gauge-svg-needle-group">
+                <line x1="80" y1="105" x2="80" y2="46" class="gauge-svg-needle-beam" />
+                <circle cx="80" cy="105" r="7.5" class="gauge-svg-needle-pivot" />
+                <circle cx="80" cy="105" r="3" class="gauge-svg-needle-center" />
+              </g>
+            </svg>
+
+            <!-- Digital Readout Center -->
+            <div class="ring-center gauge-digital-readout">
               <span id="bundle-used" class="ring-big">0 GB</span>
               <span class="ring-small">of <span id="bundle-total">0</span> GB</span>
             </div>
@@ -1009,47 +1068,36 @@
                   </div>
                 </div>
                 <div class="gauge-grid" id="gauge-grid">
-                  <!-- Style 1: Turbo Needle Tachometer -->
+                  <!-- Style 1: Sports Needle Tachometer -->
                   <button type="button" class="gauge-option active" data-gauge-style="needle">
                     <div class="gauge-badge-preview needle">
                       <span class="preview-needle"></span>
                     </div>
                     <div class="gauge-info">
-                      <span class="gauge-name">1. Sports Needle Tachometer</span>
-                      <span class="gauge-desc">Real rotating speedometer needle with 80/20 redline</span>
+                      <span class="gauge-name">1. Sports Needle Speedometer</span>
+                      <span class="gauge-desc">Real rotating precision needle, tick notches &amp; redline</span>
                     </div>
                   </button>
 
-                  <!-- Style 2: Segmented LED Arc -->
+                  <!-- Style 2: Digital LED Segment Blocks -->
                   <button type="button" class="gauge-option" data-gauge-style="segmented">
                     <div class="gauge-badge-preview segmented">
                       <span class="preview-seg"></span>
                     </div>
                     <div class="gauge-info">
-                      <span class="gauge-name">2. Segmented LED Cluster</span>
-                      <span class="gauge-desc">Digital dashed LED segments &amp; warning red blocks</span>
+                      <span class="gauge-name">2. Digital Segmented LED</span>
+                      <span class="gauge-desc">Illuminated digital dash blocks &amp; warning redline</span>
                     </div>
                   </button>
 
-                  <!-- Style 3: Minimal Tesla Dash -->
+                  <!-- Style 3: Electric Horizon Curve -->
                   <button type="button" class="gauge-option" data-gauge-style="minimal">
                     <div class="gauge-badge-preview minimal">
                       <span class="preview-clean"></span>
                     </div>
                     <div class="gauge-info">
-                      <span class="gauge-name">3. Modern Electric Horizon</span>
-                      <span class="gauge-desc">Sleek, ultra-clean solid arc with floating gauge stats</span>
-                    </div>
-                  </button>
-
-                  <!-- Style 4: Dual Sci-Fi Reactor Arc -->
-                  <button type="button" class="gauge-option" data-gauge-style="cyber">
-                    <div class="gauge-badge-preview cyber">
-                      <span class="preview-arc"></span>
-                    </div>
-                    <div class="gauge-info">
-                      <span class="gauge-name">4. Cyber Supercharger</span>
-                      <span class="gauge-desc">Futuristic dual concentric rings with neon aura</span>
+                      <span class="gauge-name">3. Electric Horizon Arc</span>
+                      <span class="gauge-desc">Tesla-style pure glowing cyan curve with scarlet zone</span>
                     </div>
                   </button>
                 </div>
@@ -1913,6 +1961,6 @@
     </div>
   </div>
 
-    <script src="/assets/app.js?v=89"></script>
+    <script src="/assets/app.js?v=90"></script>
 </body>
 </html>

@@ -413,9 +413,28 @@ function renderBundle(b, devices, users) {
   const ringEl = $("bundle-ring");
   if (ringEl) {
     ringEl.style.setProperty("--p", usedPct.toFixed(1));
-    // 270 deg sweep: starts at -135deg (0%) and sweeps to +135deg (100%)
-    const needleDeg = -135 + (usedPct * 2.7);
-    ringEl.style.setProperty("--needle-deg", `${needleDeg.toFixed(1)}deg`);
+    // Arc path length is approx 252px across the 222 deg sweep
+    // stroke-dasharray is set to 252 in CSS; dashoffset decreases from 252 to 0 as usedPct increases
+    const totalArcLen = 252;
+    const offset = Math.max(0, totalArcLen - (usedPct / 100) * totalArcLen);
+    const fillPath = $("gauge-svg-fill");
+    if (fillPath) {
+      fillPath.style.strokeDashoffset = offset.toFixed(1);
+      // Switch fill to redline gradient if >= 80%
+      if (usedPct >= 80) {
+        fillPath.setAttribute("stroke", "url(#gauge-redline-grad)");
+        fillPath.style.filter = "drop-shadow(0 0 8px rgba(244, 63, 94, 0.8))";
+      } else {
+        fillPath.setAttribute("stroke", "url(#gauge-fill-grad)");
+        fillPath.style.filter = "drop-shadow(0 0 6px rgba(56, 189, 248, 0.7))";
+      }
+    }
+    // Needle rotation: from -111deg (at 0%) to +111deg (at 100%) centered at (80, 105)
+    const needleDeg = -111 + (usedPct * 2.22);
+    const needleGroup = $("gauge-svg-needle-group");
+    if (needleGroup) {
+      needleGroup.style.transform = `rotate(${needleDeg.toFixed(1)}deg)`;
+    }
     ringEl.classList.toggle("redline", usedPct >= 80);
   }
   $("bundle-used").textContent = fmt(b.used_gb);
