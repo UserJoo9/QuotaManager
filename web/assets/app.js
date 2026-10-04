@@ -502,8 +502,25 @@ function renderUsers(users, devices, gw) {
     if (!byUser.has(k)) byUser.set(k, []);
     byUser.get(k).push(d);
   }
+
+  // Ordering: 1. Gateway (protected) always first -> 2. Registered users -> 3. Guests always last
+  const sortedUsers = [...(users || [])].sort((a, b) => {
+    const isGwA = !!(a.protected || a.name === "Gateway");
+    const isGwB = !!(b.protected || b.name === "Gateway");
+    if (isGwA && !isGwB) return -1;
+    if (!isGwA && isGwB) return 1;
+
+    const isGuestA = !!a.guest;
+    const isGuestB = !!b.guest;
+    if (!isGuestA && isGuestB) return -1;
+    if (isGuestA && !isGuestB) return 1;
+
+    // Stable sort within group: preserve existing order or by id / name
+    return (a.id || 0) - (b.id || 0);
+  });
+
   const parts = [];
-  for (const u of users || []) {
+  for (const u of sortedUsers) {
     parts.push(userCard(u, byUser.get(u.id) || [], gw));
   }
   // orphan devices (no user) — should not happen post-migration, but render
