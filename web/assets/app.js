@@ -4423,14 +4423,38 @@ function applyTheme(name) {
     const isCur = (opt.dataset.setTheme || "default") === (name || "default");
     opt.classList.toggle("active", isCur);
   });
+/* ---------------- Gauge Style Engine ---------------- */
+let currentGaugeStyle = "cyber";
+
+function applyGaugeStyle(style) {
+  currentGaugeStyle = style || "cyber";
+  try { localStorage.setItem("quota_gauge_style", currentGaugeStyle); } catch (_) {}
+  const bundle = $("sidebar-bundle");
+  if (bundle) {
+    bundle.classList.remove("gauge-cyber", "gauge-minimal", "gauge-racing", "gauge-plasma");
+    bundle.classList.add(`gauge-${currentGaugeStyle}`);
+  }
+  document.querySelectorAll(".gauge-option").forEach((opt) => {
+    opt.classList.toggle("active", opt.dataset.gaugeStyle === currentGaugeStyle);
+  });
 }
 
-// Early theme restore on script load to prevent flash of unstyled theme
+// Early gauge and theme restore on script load to prevent flash of unstyled elements
 try {
   const _savedTheme = localStorage.getItem("quota_theme");
   if (_savedTheme && _savedTheme !== "default") {
     document.documentElement.setAttribute("data-theme", _savedTheme);
   }
+} catch (_) {}
+
+try {
+  const _savedGauge = localStorage.getItem("quota_gauge_style") || "cyber";
+  document.addEventListener("DOMContentLoaded", () => {
+    const bundle = $("sidebar-bundle");
+    if (bundle) {
+      bundle.classList.add(`gauge-${_savedGauge}`);
+    }
+  });
 } catch (_) {}
 
 /* ---------------- init ---------------- */
@@ -4910,6 +4934,19 @@ async function init() {
       if (!opt) return;
       const style = opt.dataset.particleStyle;
       applyParticleStyle(style);
+    });
+  }
+
+  // Speedometer Gauge Style switcher (4 designs)
+  const savedGauge = localStorage.getItem("quota_gauge_style") || "cyber";
+  applyGaugeStyle(savedGauge);
+  const gaugeGrid = $("gauge-grid");
+  if (gaugeGrid) {
+    gaugeGrid.addEventListener("click", (ev) => {
+      const opt = ev.target.closest("[data-gauge-style]");
+      if (!opt) return;
+      const style = opt.dataset.gaugeStyle;
+      applyGaugeStyle(style);
     });
   }
 

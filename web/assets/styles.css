@@ -382,7 +382,7 @@ body {
   position: relative;
 }
 
-/* Dual-glow ambient halos behind the gauge: Blue aura on the left, Red aura on the redline right */
+/* Dual-glow ambient halos behind the gauge (responsive to active style) */
 .sidebar-bundle-ring-wrap::before {
   content: "";
   position: absolute;
@@ -413,49 +413,19 @@ body {
   transition: opacity 400ms var(--ease);
 }
 
-/* Speedometer Conic Ring: 80% Blue Zone + 20% Red Zone */
+/* ==========================================================================
+   SPEEDOMETER 4 SELECTABLE DESIGN STYLES
+   ========================================================================== */
+
+/* Base common geometry */
 .ring.ring-mini {
   width: 124px;
   height: 124px;
   border-radius: 50%;
   position: relative;
-  /* 270deg sweep starting from 225deg (bottom-left to bottom-right):
-     - First 80% (0deg to 216deg) = Blue Zone (filled with bright electric cyan/blue glow, remaining is dark blue)
-     - Last 20% (216deg to 270deg) = Red Zone (active redline or dark ruby track)
-     - Bottom cutout (270deg to 360deg) = transparent opening */
-  background: conic-gradient(
-    from 225deg,
-    /* 1. Active Used Fill (Electric Blue Glow) */
-    var(--accent) 0deg,
-    var(--accent-3) calc(min(var(--p, 0), 80) * 2.7deg),
-    /* 2. Remaining Safe Track (Unused part of the 80% Blue Zone) */
-    rgba(56, 189, 248, 0.22) calc(min(var(--p, 0), 80) * 2.7deg),
-    rgba(56, 189, 248, 0.22) 216deg,
-    /* 3. Redline 20% Zone (last 20%: 216deg to 270deg) */
-    /* If p > 80, filled with hot glowing danger red, otherwise vibrant ruby danger track */
-    rgba(244, 63, 94, 0.95) 216deg,
-    rgba(244, 63, 94, 0.95) calc(max(216, min(var(--p, 0), 100) * 2.7) * 1deg),
-    rgba(244, 63, 94, 0.35) calc(max(216, min(var(--p, 0), 100) * 2.7) * 1deg),
-    rgba(244, 63, 94, 0.35) 270deg,
-    /* 4. Bottom Speedometer Arch Cutout */
-    transparent 270deg,
-    transparent 360deg
-  );
   display: grid;
   place-items: center;
-  box-shadow: 
-    0 0 24px rgba(0, 0, 0, 0.7),
-    inset 0 0 12px rgba(0, 0, 0, 0.8),
-    -12px -2px 24px -4px rgba(56, 189, 248, 0.45),   /* Vibrant Blue glow on the 80% blue zone */
-    12px 2px 24px -4px rgba(244, 63, 94, 0.5);      /* Vibrant Red glow on the 20% red zone */
-  transition: box-shadow 400ms var(--ease);
-}
-
-.ring.ring-mini.redline {
-  box-shadow: 
-    0 0 32px rgba(244, 63, 94, 0.7),
-    inset 0 0 14px rgba(244, 63, 94, 0.5),
-    0 0 30px var(--glow-danger);
+  transition: all 350ms var(--ease);
 }
 
 .ring.ring-mini::before {
@@ -472,12 +442,292 @@ body {
   font-weight: 800;
   letter-spacing: -0.03em;
   color: #fff;
-  text-shadow: 0 0 8px rgba(255, 255, 255, 0.6), 0 0 18px var(--accent), 0 0 28px var(--accent);
+  transition: text-shadow 300ms ease;
 }
 
+.ring.ring-mini .ring-small {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  text-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+}
+
+/* -------------------------------------------------------------
+   STYLE 1: Cyber Neon Pro (Default Dual Neon Glow)
+   - 80% Blue safe zone + 20% Red danger zone with solid vibrant fills
+   ------------------------------------------------------------- */
+.sidebar-bundle.gauge-cyber .ring.ring-mini,
+.ring.ring-mini {
+  background: conic-gradient(
+    from 225deg,
+    /* Active Used Fill */
+    #38bdf8 0deg,
+    #0284c7 calc(min(var(--p, 0), 80) * 2.7deg),
+    /* Remaining Safe Track */
+    rgba(56, 189, 248, 0.28) calc(min(var(--p, 0), 80) * 2.7deg),
+    rgba(56, 189, 248, 0.28) 216deg,
+    /* Redline 20% Zone */
+    #f43f5e 216deg,
+    #f43f5e calc(max(216, min(var(--p, 0), 100) * 2.7) * 1deg),
+    rgba(244, 63, 94, 0.35) calc(max(216, min(var(--p, 0), 100) * 2.7) * 1deg),
+    rgba(244, 63, 94, 0.35) 270deg,
+    /* Cutout */
+    transparent 270deg,
+    transparent 360deg
+  );
+  box-shadow: 
+    0 0 24px rgba(0, 0, 0, 0.7),
+    inset 0 0 12px rgba(0, 0, 0, 0.8),
+    -12px -2px 24px -4px rgba(56, 189, 248, 0.55),
+    12px 2px 24px -4px rgba(244, 63, 94, 0.55);
+}
+.sidebar-bundle.gauge-cyber .ring.ring-mini.redline,
+.ring.ring-mini.redline {
+  box-shadow: 0 0 32px rgba(244, 63, 94, 0.75), inset 0 0 14px rgba(244, 63, 94, 0.5), 0 0 30px var(--glow-danger);
+}
+.sidebar-bundle.gauge-cyber .ring.ring-mini .ring-big,
+.ring.ring-mini .ring-big {
+  text-shadow: 0 0 8px rgba(255, 255, 255, 0.6), 0 0 18px var(--accent), 0 0 28px var(--accent);
+}
+.sidebar-bundle.gauge-cyber .ring.ring-mini.redline .ring-big,
 .ring.ring-mini.redline .ring-big {
   color: #fff;
   text-shadow: 0 0 8px rgba(255, 255, 255, 0.6), 0 0 18px var(--danger), 0 0 32px var(--danger);
+}
+
+/* -------------------------------------------------------------
+   STYLE 2: Minimal Solid Ring (Tesla / Apple Clean High-Contrast)
+   - Ultra crisp, thick, solid saturated color with no blurry glow
+   ------------------------------------------------------------- */
+.sidebar-bundle.gauge-minimal .sidebar-bundle-ring-wrap::before,
+.sidebar-bundle.gauge-minimal .sidebar-bundle-ring-wrap::after {
+  display: none !important;
+}
+.sidebar-bundle.gauge-minimal .ring.ring-mini {
+  background: conic-gradient(
+    from 225deg,
+    /* Active Used Solid Blue */
+    #0284c7 0deg,
+    #38bdf8 calc(min(var(--p, 0), 80) * 2.7deg),
+    /* Remaining Safe Track: Deep solid slate navy */
+    #1e293b calc(min(var(--p, 0), 80) * 2.7deg),
+    #1e293b 216deg,
+    /* Redline 20% Zone */
+    #e11d48 216deg,
+    #f43f5e calc(max(216, min(var(--p, 0), 100) * 2.7) * 1deg),
+    #4c1d24 calc(max(216, min(var(--p, 0), 100) * 2.7) * 1deg),
+    #4c1d24 270deg,
+    /* Cutout */
+    transparent 270deg,
+    transparent 360deg
+  );
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6), inset 0 2px 8px rgba(0, 0, 0, 0.9);
+}
+.sidebar-bundle.gauge-minimal .ring.ring-mini::before {
+  inset: 14px;
+  background: #0b0f19;
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+.sidebar-bundle.gauge-minimal .ring.ring-mini .ring-big {
+  color: #fff;
+  text-shadow: none;
+}
+.sidebar-bundle.gauge-minimal .ring.ring-mini.redline .ring-big {
+  color: #fb7185;
+  text-shadow: none;
+}
+
+/* -------------------------------------------------------------
+   STYLE 3: Racing Tachometer (Sports Notch Dash)
+   - Repeating ticks simulation + vivid sports cluster gradient
+   ------------------------------------------------------------- */
+.sidebar-bundle.gauge-racing .ring.ring-mini {
+  background: 
+    repeating-conic-gradient(
+      from 225deg,
+      rgba(0, 0, 0, 0.6) 0deg,
+      rgba(0, 0, 0, 0.6) 1.2deg,
+      transparent 1.2deg,
+      transparent 5.4deg
+    ),
+    conic-gradient(
+      from 225deg,
+      #06b6d4 0deg,
+      #3b82f6 calc(min(var(--p, 0), 80) * 2.7deg),
+      rgba(15, 23, 42, 0.85) calc(min(var(--p, 0), 80) * 2.7deg),
+      rgba(15, 23, 42, 0.85) 216deg,
+      #fb7185 216deg,
+      #f43f5e calc(max(216, min(var(--p, 0), 100) * 2.7) * 1deg),
+      rgba(88, 28, 36, 0.8) calc(max(216, min(var(--p, 0), 100) * 2.7) * 1deg),
+      rgba(88, 28, 36, 0.8) 270deg,
+      transparent 270deg,
+      transparent 360deg
+    );
+  box-shadow: 
+    0 0 20px rgba(0, 0, 0, 0.8),
+    inset 0 0 16px rgba(0, 0, 0, 0.9),
+    0 0 20px rgba(56, 189, 248, 0.35);
+}
+.sidebar-bundle.gauge-racing .ring.ring-mini::before {
+  inset: 13px;
+  background: radial-gradient(circle at 50% 50%, #0d121f 0%, #05070c 100%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.sidebar-bundle.gauge-racing .ring.ring-mini .ring-big {
+  color: #38bdf8;
+  font-family: var(--mono);
+  text-shadow: 0 0 12px rgba(56, 189, 248, 0.7);
+}
+.sidebar-bundle.gauge-racing .ring.ring-mini.redline .ring-big {
+  color: #f43f5e;
+  text-shadow: 0 0 14px rgba(244, 63, 94, 0.8);
+}
+
+/* -------------------------------------------------------------
+   STYLE 4: Deep Plasma Pulse (Sci-Fi Volumetric Outer Aura)
+   - Radiant luminous beam and glowing energy core
+   ------------------------------------------------------------- */
+.sidebar-bundle.gauge-plasma .sidebar-bundle-ring-wrap::before {
+  width: 140px;
+  height: 140px;
+  background: radial-gradient(circle, rgba(56, 189, 248, 0.45) 0%, rgba(37, 99, 235, 0.25) 50%, transparent 75%);
+  opacity: 0.5;
+  filter: blur(16px);
+  left: -8px;
+  top: -8px;
+}
+.sidebar-bundle.gauge-plasma .sidebar-bundle-ring-wrap::after {
+  right: -5px;
+  top: 10px;
+  background: radial-gradient(circle, rgba(244, 63, 94, 0.8) 0%, transparent 70%);
+  opacity: 0.6;
+  filter: blur(14px);
+}
+.sidebar-bundle.gauge-plasma .ring.ring-mini {
+  background: conic-gradient(
+    from 225deg,
+    #60a5fa 0deg,
+    #38bdf8 calc(min(var(--p, 0), 80) * 2.7deg * 0.5),
+    #a855f7 calc(min(var(--p, 0), 80) * 2.7deg),
+    rgba(79, 70, 229, 0.25) calc(min(var(--p, 0), 80) * 2.7deg),
+    rgba(79, 70, 229, 0.25) 216deg,
+    #ec4899 216deg,
+    #f43f5e calc(max(216, min(var(--p, 0), 100) * 2.7) * 1deg),
+    rgba(236, 72, 153, 0.3) calc(max(216, min(var(--p, 0), 100) * 2.7) * 1deg),
+    rgba(236, 72, 153, 0.3) 270deg,
+    transparent 270deg,
+    transparent 360deg
+  );
+  box-shadow: 
+    0 0 30px rgba(0, 0, 0, 0.8),
+    inset 0 0 16px rgba(0, 0, 0, 0.8),
+    0 0 25px rgba(56, 189, 248, 0.5),
+    0 0 45px rgba(168, 85, 247, 0.3);
+}
+.sidebar-bundle.gauge-plasma .ring.ring-mini::before {
+  inset: 11px;
+  background: radial-gradient(circle at 50% 30%, #17112c 0%, #080612 100%);
+  box-shadow: inset 0 2px 12px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(168, 85, 247, 0.2);
+}
+.sidebar-bundle.gauge-plasma .ring.ring-mini .ring-big {
+  color: #fff;
+  text-shadow: 0 0 10px #38bdf8, 0 0 20px #a855f7, 0 0 35px #a855f7;
+}
+.sidebar-bundle.gauge-plasma .ring.ring-mini.redline .ring-big {
+  color: #fff;
+  text-shadow: 0 0 10px #f43f5e, 0 0 22px #ec4899, 0 0 35px #f43f5e;
+}
+
+/* -------------------------------------------------------------
+   Gauge Selector Grid & Preview Badges in Admin Panel
+   ------------------------------------------------------------- */
+.gauge-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.gauge-option {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  transition: all 220ms var(--ease);
+}
+
+.gauge-option:hover {
+  transform: translateY(-2px);
+  border-color: rgba(255, 255, 255, 0.18);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.gauge-option.active {
+  border-color: var(--accent);
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  box-shadow: 0 0 16px var(--glow-accent), inset 0 0 0 1px var(--accent);
+}
+
+.gauge-badge-preview {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  position: relative;
+  flex: 0 0 28px;
+  display: grid;
+  place-items: center;
+  background: conic-gradient(from 225deg, #38bdf8 0deg, #38bdf8 170deg, #1e293b 170deg, #1e293b 216deg, #f43f5e 216deg, #f43f5e 270deg, transparent 270deg);
+}
+
+.gauge-badge-preview.minimal {
+  background: conic-gradient(from 225deg, #0284c7 0deg, #38bdf8 170deg, #0f172a 170deg, #0f172a 216deg, #f43f5e 216deg, #f43f5e 270deg, transparent 270deg);
+}
+
+.gauge-badge-preview.racing {
+  background: 
+    repeating-conic-gradient(from 225deg, rgba(0,0,0,0.7) 0deg, rgba(0,0,0,0.7) 3deg, transparent 3deg, transparent 15deg),
+    conic-gradient(from 225deg, #06b6d4 0deg, #3b82f6 170deg, #0f172a 170deg, #0f172a 216deg, #f43f5e 216deg, #f43f5e 270deg, transparent 270deg);
+}
+
+.gauge-badge-preview.plasma {
+  background: conic-gradient(from 225deg, #60a5fa 0deg, #a855f7 170deg, #1e1b4b 170deg, #1e1b4b 216deg, #ec4899 216deg, #f43f5e 270deg, transparent 270deg);
+  box-shadow: 0 0 8px rgba(168, 85, 247, 0.6);
+}
+
+.gauge-badge-preview::after {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  border-radius: 50%;
+  background: var(--bg);
+}
+
+.gauge-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.gauge-name {
+  font-size: 0.84rem;
+  font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.gauge-desc {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .ring.ring-mini .ring-small {
