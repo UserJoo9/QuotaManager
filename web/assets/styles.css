@@ -382,21 +382,38 @@ body {
   position: relative;
 }
 
-/* Subtle ambient radial neon flare behind the gauge */
+/* Dual-glow ambient halos behind the gauge: Blue aura on the left, Red aura on the redline right */
 .sidebar-bundle-ring-wrap::before {
   content: "";
   position: absolute;
-  width: 130px;
-  height: 130px;
+  left: 2px;
+  top: 10px;
+  width: 75px;
+  height: 90px;
   border-radius: 50%;
-  background: radial-gradient(circle, var(--accent) 0%, transparent 70%);
-  opacity: 0.18;
-  filter: blur(14px);
+  background: radial-gradient(circle, var(--accent) 0%, rgba(56, 189, 248, 0.4) 40%, transparent 75%);
+  opacity: 0.35;
+  filter: blur(12px);
   pointer-events: none;
   transition: opacity 400ms var(--ease), background 400ms var(--ease);
 }
 
-/* Speedometer Conic Ring with 20% Redline Zone & Intense Glow */
+.sidebar-bundle-ring-wrap::after {
+  content: "";
+  position: absolute;
+  right: 2px;
+  top: 15px;
+  width: 60px;
+  height: 75px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(244, 63, 94, 0.7) 0%, rgba(244, 63, 94, 0.35) 45%, transparent 75%);
+  opacity: 0.45;
+  filter: blur(10px);
+  pointer-events: none;
+  transition: opacity 400ms var(--ease);
+}
+
+/* Speedometer Conic Ring with 20% Redline Zone & Intense Dual Glow */
 .ring.ring-mini {
   width: 124px;
   height: 124px;
@@ -413,25 +430,31 @@ body {
     var(--danger) calc(min(var(--p, 0), 80) * 2.7deg),
     var(--danger) calc(min(var(--p, 0), 100) * 2.7deg),
     /* Inactive track zone */
-    rgba(255, 255, 255, 0.06) calc(var(--p, 0) * 2.7deg),
-    rgba(255, 255, 255, 0.06) 216deg,
+    rgba(255, 255, 255, 0.08) calc(var(--p, 0) * 2.7deg),
+    rgba(255, 255, 255, 0.08) 216deg,
     /* Permanent Redline Zone marker (last 20%) */
-    rgba(244, 63, 94, 0.35) 216deg,
-    rgba(244, 63, 94, 0.35) 270deg,
+    rgba(244, 63, 94, 0.85) 216deg,
+    rgba(251, 113, 133, 0.95) 245deg,
+    rgba(244, 63, 94, 0.85) 270deg,
     /* Bottom cutout (speedometer arch gap: 270deg to 360deg) */
     transparent 270deg,
     transparent 360deg
   );
   display: grid;
   place-items: center;
-  box-shadow: 0 0 24px rgba(0, 0, 0, 0.7), inset 0 0 12px rgba(0, 0, 0, 0.8), 0 0 20px var(--glow-accent);
-  filter: drop-shadow(0 0 10px var(--accent)) drop-shadow(0 0 22px rgba(56, 189, 248, 0.35));
-  transition: box-shadow 400ms var(--ease), filter 400ms var(--ease);
+  box-shadow: 
+    0 0 24px rgba(0, 0, 0, 0.7),
+    inset 0 0 12px rgba(0, 0, 0, 0.8),
+    -10px 0 22px -4px rgba(56, 189, 248, 0.5),   /* Vibrant Blue glow on active left arc */
+    10px 4px 22px -4px rgba(244, 63, 94, 0.55);   /* Vibrant Red glow on redline right arc */
+  transition: box-shadow 400ms var(--ease);
 }
 
 .ring.ring-mini.redline {
-  box-shadow: 0 0 30px rgba(244, 63, 94, 0.6), inset 0 0 14px rgba(244, 63, 94, 0.5), 0 0 25px var(--glow-danger);
-  filter: drop-shadow(0 0 12px var(--danger)) drop-shadow(0 0 26px rgba(244, 63, 94, 0.5));
+  box-shadow: 
+    0 0 32px rgba(244, 63, 94, 0.65),
+    inset 0 0 14px rgba(244, 63, 94, 0.5),
+    0 0 26px var(--glow-danger);
 }
 
 .ring.ring-mini::before {
@@ -448,7 +471,7 @@ body {
   font-weight: 800;
   letter-spacing: -0.03em;
   color: #fff;
-  text-shadow: 0 0 8px rgba(255, 255, 255, 0.6), 0 0 18px var(--accent), 0 0 30px var(--accent);
+  text-shadow: 0 0 8px rgba(255, 255, 255, 0.6), 0 0 18px var(--accent), 0 0 28px var(--accent);
 }
 
 .ring.ring-mini.redline .ring-big {
