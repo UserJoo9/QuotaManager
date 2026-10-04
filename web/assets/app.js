@@ -791,6 +791,37 @@ function updateNavIndicator(panelName) {
   indicator.style.opacity = "1";
 }
 
+const loadedPanels = new Set();
+
+function isPanelContentLoaded(name) {
+  if (loadedPanels.has(name)) return true;
+  if (name === "management") {
+    return !!(dashboard && dashboard.bundle);
+  }
+  if (name === "network") {
+    return !!(dashboard && dashboard.network);
+  }
+  if (name === "wan") {
+    return !!wanStatus;
+  }
+  if (name === "firewall") {
+    return !!fwStatus;
+  }
+  if (name === "history") {
+    return !!historyCache;
+  }
+  if (name === "dns") {
+    return !!dnsStatusCache;
+  }
+  if (name === "vpn") {
+    return !!vpnStatusCache;
+  }
+  if (name === "admin") {
+    return Array.isArray(logLines) && logLines.length > 0;
+  }
+  return false;
+}
+
 async function switchPanel(name) {
   try { localStorage.setItem("quota_active_panel", name); } catch (_) { /* ignore */ }
   document.querySelectorAll(".nav-tab").forEach((b) =>
@@ -799,9 +830,15 @@ async function switchPanel(name) {
   document.querySelectorAll(".nav-panel").forEach((p) =>
     p.classList.toggle("hidden", p.id !== `panel-${name}`));
 
+  const isLoaded = isPanelContentLoaded(name);
   const seq = ++activePanelLoadSeq;
-  showPanelPopup(name);
-  const startTime = Date.now();
+  let startTime = 0;
+
+  // Only display the loading popup if the panel has not loaded its content yet
+  if (!isLoaded) {
+    showPanelPopup(name);
+    startTime = Date.now();
+  }
 
   try {
     if (name === "admin") {
@@ -817,24 +854,29 @@ async function switchPanel(name) {
     } else if (name === "dns") {
       await refreshDns();
     } else if (name === "vpn") {
-      await refreshVpn();
+      await refreshVpn(!isLoaded);
       startVpnLogPolling();
     } else if (name === "management") {
       await refreshAll();
     }
+    loadedPanels.add(name);
   } catch (err) {
     console.warn("Panel refresh notice:", err);
   } finally {
     if (name !== "vpn") {
       stopVpnLogPolling();
     }
-    const elapsed = Date.now() - startTime;
-    const remaining = Math.max(0, 240 - elapsed);
-    setTimeout(() => {
-      if (seq === activePanelLoadSeq) {
-        hidePanelPopup();
-      }
-    }, remaining);
+    if (!isLoaded) {
+      const elapsed = Date.now() - startTime;
+      const remaining = Math.max(0, 240 - elapsed);
+      setTimeout(() => {
+        if (seq === activePanelLoadSeq) {
+          hidePanelPopup();
+        }
+      }, remaining);
+    } else {
+      hidePanelPopup();
+    }
   }
 }
 
@@ -1339,7 +1381,7 @@ function dnsQuickActions(domain, deviceId) {
 let historyAnalyticsCache = null;
 let currentHistoryView = "apps";
 
-async function refreshHistory() {
+async function refreshHistory(showLoading = false) {
   const sel = $("hist-device");
   syncHistoryDeviceSelect();
   const id = sel.value;   // "all" (household) or a device id string
@@ -1353,11 +1395,14 @@ async function refreshHistory() {
   const loading = $("hist-loading");
   const empty = $("hist-empty");
   const statCards = $("hist-stat-cards");
+  const isFirstLoad = !historyCache;
 
-  if (loading) loading.classList.remove("hidden");
-  if (empty) empty.classList.add("hidden");
-  document.querySelectorAll(".hist-view").forEach((v) => v.classList.add("hidden"));
-  if (statCards) statCards.classList.add("loading-dim");
+  if ((showLoading || isFirstLoad) && loading) {
+    loading.classList.remove("hidden");
+    if (empty) empty.classList.add("hidden");
+    document.querySelectorAll(".hist-view").forEach((v) => v.classList.add("hidden"));
+    if (statCards) statCards.classList.add("loading-dim");
+  }
 
   try {
     const raw = await API.get(`/api/history/${id}?window=${windowHours}&limit=200`);
