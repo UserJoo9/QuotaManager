@@ -378,11 +378,25 @@ body {
 .sidebar-bundle-ring-wrap {
   display: flex;
   justify-content: center;
-  padding: 6px 0;
+  padding: 8px 0;
   position: relative;
 }
 
-/* Speedometer Conic Ring with 20% Redline Zone */
+/* Subtle ambient radial neon flare behind the gauge */
+.sidebar-bundle-ring-wrap::before {
+  content: "";
+  position: absolute;
+  width: 130px;
+  height: 130px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--accent) 0%, transparent 70%);
+  opacity: 0.18;
+  filter: blur(14px);
+  pointer-events: none;
+  transition: opacity 400ms var(--ease), background 400ms var(--ease);
+}
+
+/* Speedometer Conic Ring with 20% Redline Zone & Intense Glow */
 .ring.ring-mini {
   width: 124px;
   height: 124px;
@@ -410,12 +424,14 @@ body {
   );
   display: grid;
   place-items: center;
-  box-shadow: 0 0 20px rgba(0, 0, 0, 0.6), inset 0 0 10px rgba(0, 0, 0, 0.8), 0 0 12px var(--glow-accent);
-  transition: box-shadow 400ms var(--ease);
+  box-shadow: 0 0 24px rgba(0, 0, 0, 0.7), inset 0 0 12px rgba(0, 0, 0, 0.8), 0 0 20px var(--glow-accent);
+  filter: drop-shadow(0 0 10px var(--accent)) drop-shadow(0 0 22px rgba(56, 189, 248, 0.35));
+  transition: box-shadow 400ms var(--ease), filter 400ms var(--ease);
 }
 
 .ring.ring-mini.redline {
-  box-shadow: 0 0 24px rgba(244, 63, 94, 0.5), inset 0 0 12px rgba(244, 63, 94, 0.4), 0 0 16px var(--glow-danger);
+  box-shadow: 0 0 30px rgba(244, 63, 94, 0.6), inset 0 0 14px rgba(244, 63, 94, 0.5), 0 0 25px var(--glow-danger);
+  filter: drop-shadow(0 0 12px var(--danger)) drop-shadow(0 0 26px rgba(244, 63, 94, 0.5));
 }
 
 .ring.ring-mini::before {
@@ -432,17 +448,18 @@ body {
   font-weight: 800;
   letter-spacing: -0.03em;
   color: #fff;
-  text-shadow: 0 0 12px rgba(255, 255, 255, 0.4), 0 0 20px var(--accent);
+  text-shadow: 0 0 8px rgba(255, 255, 255, 0.6), 0 0 18px var(--accent), 0 0 30px var(--accent);
 }
 
 .ring.ring-mini.redline .ring-big {
-  color: var(--danger);
-  text-shadow: 0 0 12px rgba(244, 63, 94, 0.6), 0 0 24px var(--danger);
+  color: #fff;
+  text-shadow: 0 0 8px rgba(255, 255, 255, 0.6), 0 0 18px var(--danger), 0 0 32px var(--danger);
 }
 
 .ring.ring-mini .ring-small {
   font-size: 0.68rem;
   color: var(--text-dim);
+  text-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
 }
 
 .sidebar-bundle-stats {
