@@ -676,22 +676,38 @@ body {
 .sidebar-bundle-stats {
   width: 100%;
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px 10px;
-  padding-top: 8px;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 8px 6px;
+  padding-top: 10px;
   border-top: 1px solid rgba(255, 255, 255, 0.05);
 }
+
 .sidebar-stat {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
 }
+
+.sidebar-stat.col-half {
+  grid-column: span 3;
+}
+
+.sidebar-stat.col-full {
+  grid-column: span 6;
+}
+
+.sidebar-stat.col-third {
+  grid-column: span 2;
+}
+
 .sidebar-stat-label {
   font-size: 0.62rem;
   color: var(--text-faint);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
+
 .sidebar-stat-value {
   font-size: 0.88rem;
   font-weight: 700;
@@ -701,13 +717,34 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
 .sidebar-stat-value.accent {
   color: var(--accent);
   text-shadow: 0 0 10px var(--accent);
 }
+
 .sidebar-stat-value.danger {
   color: var(--danger);
   text-shadow: 0 0 10px var(--danger);
+}
+
+.sidebar-stat.period-stat {
+  gap: 4px;
+}
+
+.sidebar-stat.period-stat .period-val {
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.88);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 3px 8px;
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .sidebar-footer {

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quota Manager</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=78">
+    <link rel="stylesheet" href="/assets/styles.css?v=79">
   <script disable-devtool-auto src='/assets/detector.js'></script>
 </head>
 <body>
@@ -148,27 +148,27 @@
           </div>
         </div>
         <div class="sidebar-bundle-stats">
-          <div class="sidebar-stat">
+          <div class="sidebar-stat col-half">
             <span class="sidebar-stat-label">Remaining</span>
             <span id="bundle-remaining" class="sidebar-stat-value accent">—</span>
           </div>
-          <div class="sidebar-stat">
-            <span class="sidebar-stat-label">Period</span>
-            <span id="bundle-period" class="sidebar-stat-value">–</span>
-          </div>
-          <div class="sidebar-stat">
+          <div class="sidebar-stat col-half">
             <span class="sidebar-stat-label">Days left</span>
             <span id="bundle-days" class="sidebar-stat-value">–</span>
           </div>
-          <div class="sidebar-stat">
+          <div class="sidebar-stat col-full period-stat">
+            <span class="sidebar-stat-label">Period</span>
+            <span id="bundle-period" class="sidebar-stat-value period-val">–</span>
+          </div>
+          <div class="sidebar-stat col-third">
             <span class="sidebar-stat-label">Users</span>
             <span id="bundle-users" class="sidebar-stat-value">0</span>
           </div>
-          <div class="sidebar-stat">
+          <div class="sidebar-stat col-third">
             <span class="sidebar-stat-label">Devices</span>
             <span id="bundle-devices" class="sidebar-stat-value">0</span>
           </div>
-          <div class="sidebar-stat">
+          <div class="sidebar-stat col-third">
             <span class="sidebar-stat-label">Blocked</span>
             <span id="bundle-blocked" class="sidebar-stat-value danger">0</span>
           </div>
@@ -1935,6 +1935,6 @@
     </div>
   </div>
 
-    <script src="/assets/app.js?v=93"></script>
+    <script src="/assets/app.js?v=94"></script>
 </body>
 </html>
