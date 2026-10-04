@@ -378,39 +378,8 @@ body {
 .sidebar-bundle-ring-wrap {
   display: flex;
   justify-content: center;
-  padding: 8px 0;
+  padding: 6px 0 2px 0;
   position: relative;
-}
-
-/* Dual-glow ambient halos behind the gauge (responsive to active style) */
-.sidebar-bundle-ring-wrap::before {
-  content: "";
-  position: absolute;
-  left: 2px;
-  top: 10px;
-  width: 75px;
-  height: 90px;
-  border-radius: 50%;
-  background: radial-gradient(circle, var(--accent) 0%, rgba(56, 189, 248, 0.4) 40%, transparent 75%);
-  opacity: 0.35;
-  filter: blur(12px);
-  pointer-events: none;
-  transition: opacity 400ms var(--ease), background 400ms var(--ease);
-}
-
-.sidebar-bundle-ring-wrap::after {
-  content: "";
-  position: absolute;
-  right: 2px;
-  top: 15px;
-  width: 60px;
-  height: 75px;
-  border-radius: 50%;
-  background: radial-gradient(circle, rgba(244, 63, 94, 0.7) 0%, rgba(244, 63, 94, 0.35) 45%, transparent 75%);
-  opacity: 0.45;
-  filter: blur(10px);
-  pointer-events: none;
-  transition: opacity 400ms var(--ease);
 }
 
 /* ==========================================================================
@@ -422,7 +391,7 @@ body {
    ========================================================================== */
 
 .svg-gauge-box {
-  width: 170px;
+  width: 180px;
   height: 120px;
   position: relative;
   display: flex;
@@ -436,29 +405,28 @@ body {
   width: 100%;
   height: 100%;
   overflow: visible;
-  filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.6));
 }
 
 /* Base Track Styling */
 .gauge-track-bg {
   fill: none;
-  stroke: rgba(255, 255, 255, 0.04);
-  stroke-width: 14;
+  stroke: rgba(255, 255, 255, 0.05);
+  stroke-width: 9;
   stroke-linecap: round;
 }
 
 .gauge-track-safe {
   fill: none;
   stroke: rgba(56, 189, 248, 0.16);
-  stroke-width: 12;
+  stroke-width: 7;
   stroke-linecap: round;
   transition: all 300ms ease;
 }
 
 .gauge-track-danger {
   fill: none;
-  stroke: rgba(244, 63, 94, 0.28);
-  stroke-width: 12;
+  stroke: rgba(244, 63, 94, 0.25);
+  stroke-width: 7;
   stroke-linecap: round;
   transition: all 300ms ease;
 }
@@ -467,38 +435,69 @@ body {
 .gauge-fill-path {
   fill: none;
   stroke: url(#gauge-fill-grad);
-  stroke-width: 12;
+  stroke-width: 7;
   stroke-linecap: round;
-  stroke-dasharray: 252;
-  stroke-dashoffset: 252;
+  stroke-dasharray: 192.3;
+  stroke-dashoffset: 192.3;
   transition: stroke-dashoffset 650ms cubic-bezier(0.34, 1.2, 0.64, 1), stroke 300ms ease, filter 300ms ease;
-  filter: drop-shadow(0 0 6px rgba(56, 189, 248, 0.7));
+  filter: drop-shadow(0 0 6px rgba(56, 189, 248, 0.75));
 }
 
-/* Tick Marks */
-.gauge-svg-ticks line.g-tick {
-  stroke: rgba(255, 255, 255, 0.25);
+/* Head Pip Orb for Horizon Style */
+.gauge-head-pip {
+  fill: #ffffff;
+  stroke: #38bdf8;
   stroke-width: 2;
+  filter: drop-shadow(0 0 6px #38bdf8);
+  transition: cx 650ms cubic-bezier(0.34, 1.2, 0.64, 1), cy 650ms cubic-bezier(0.34, 1.2, 0.64, 1), opacity 300ms ease, stroke 300ms ease, filter 300ms ease;
+}
+
+/* Tick Marks for Sports Tachometer */
+.gauge-svg-ticks line.g-tick {
+  stroke: rgba(255, 255, 255, 0.35);
+  stroke-width: 1.8;
   stroke-linecap: round;
 }
 
 .gauge-svg-ticks line.g-tick.red {
-  stroke: rgba(244, 63, 94, 0.7);
-  stroke-width: 2.5;
+  stroke: #f43f5e;
+  stroke-width: 2.2;
   filter: drop-shadow(0 0 4px rgba(244, 63, 94, 0.8));
+}
+
+/* Segmented LED Bars for Cyber Dash */
+.gauge-svg-segments {
+  display: none;
+}
+
+.gauge-seg-bar {
+  stroke: rgba(255, 255, 255, 0.12);
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  transition: stroke 250ms ease, filter 250ms ease;
+}
+
+.gauge-seg-bar.active {
+  stroke: #38bdf8;
+  filter: drop-shadow(0 0 5px rgba(56, 189, 248, 0.95));
+}
+
+.gauge-seg-bar.red.active {
+  stroke: #f43f5e;
+  filter: drop-shadow(0 0 6px rgba(244, 63, 94, 0.95));
 }
 
 /* Rotating Needle Group */
 .gauge-svg-needle-group {
-  transform-origin: 80px 105px;
-  transform: rotate(-111deg);
+  transform-origin: 90px 74px;
+  transform: rotate(-95deg);
   transition: transform 650ms cubic-bezier(0.34, 1.35, 0.64, 1);
   filter: drop-shadow(0 0 5px rgba(244, 63, 94, 0.85));
 }
 
 .gauge-svg-needle-beam {
   stroke: #f43f5e;
-  stroke-width: 3.2;
+  stroke-width: 2.8;
   stroke-linecap: round;
 }
 
@@ -512,10 +511,10 @@ body {
   fill: #fff;
 }
 
-/* Digital Readout Center */
+/* Digital Readout Center (Cleanly separated below pivot) */
 .gauge-digital-readout {
   position: absolute;
-  bottom: 0px;
+  bottom: 2px;
   left: 50%;
   transform: translateX(-50%);
   text-align: center;
@@ -525,21 +524,22 @@ body {
 }
 
 .gauge-digital-readout .ring-big {
-  font-size: 1.25rem;
+  font-size: 1.22rem;
   font-weight: 800;
   letter-spacing: -0.02em;
   color: #fff;
   display: block;
   font-family: var(--mono);
-  text-shadow: 0 0 10px rgba(56, 189, 248, 0.5);
+  text-shadow: 0 0 10px rgba(56, 189, 248, 0.45);
   line-height: 1.1;
 }
 
 .gauge-digital-readout .ring-small {
-  font-size: 0.68rem;
+  font-size: 0.72rem;
   color: var(--text-dim);
   display: block;
   margin-top: 2px;
+  font-family: var(--sans);
 }
 
 /* ==========================================================================
@@ -551,67 +551,81 @@ body {
 .sidebar-bundle.gauge-needle .gauge-svg-ticks {
   display: block;
 }
-.sidebar-bundle.gauge-needle .gauge-track-safe {
-  stroke: rgba(56, 189, 248, 0.22);
+.sidebar-bundle.gauge-needle .gauge-track-bg,
+.sidebar-bundle.gauge-needle .gauge-track-safe,
+.sidebar-bundle.gauge-needle .gauge-track-danger,
+.sidebar-bundle.gauge-needle .gauge-fill-path {
+  display: block;
 }
-.sidebar-bundle.gauge-needle .gauge-track-danger {
-  stroke: rgba(244, 63, 94, 0.35);
-  stroke-width: 14;
+.sidebar-bundle.gauge-needle .gauge-head-pip {
+  display: none;
+}
+.sidebar-bundle.gauge-needle .gauge-svg-segments {
+  display: none;
 }
 
 /* ==========================================================================
    MODEL 2: Digital Segmented LED (.gauge-segmented)
    ========================================================================== */
 .sidebar-bundle.gauge-segmented .gauge-svg-needle-group {
-  display: none; /* Needle hidden for pure digital look */
+  display: none;
 }
-.sidebar-bundle.gauge-segmented .gauge-fill-path,
+.sidebar-bundle.gauge-segmented .gauge-svg-ticks {
+  display: none;
+}
+.sidebar-bundle.gauge-segmented .gauge-head-pip {
+  display: none;
+}
+.sidebar-bundle.gauge-segmented .gauge-track-bg,
 .sidebar-bundle.gauge-segmented .gauge-track-safe,
-.sidebar-bundle.gauge-segmented .gauge-track-danger {
-  stroke-linecap: butt;
-  stroke-dasharray: 6 3; /* Distinct LED blocks! */
-}
+.sidebar-bundle.gauge-segmented .gauge-track-danger,
 .sidebar-bundle.gauge-segmented .gauge-fill-path {
-  stroke-width: 14;
+  display: none;
 }
-.sidebar-bundle.gauge-segmented .gauge-track-safe {
-  stroke-width: 14;
-  stroke: rgba(56, 189, 248, 0.15);
-}
-.sidebar-bundle.gauge-segmented .gauge-track-danger {
-  stroke-width: 14;
-  stroke: rgba(244, 63, 94, 0.25);
+.sidebar-bundle.gauge-segmented .gauge-svg-segments {
+  display: block;
 }
 .sidebar-bundle.gauge-segmented .gauge-digital-readout .ring-big {
   color: #38bdf8;
   letter-spacing: 0.04em;
-  text-shadow: 0 0 12px rgba(56, 189, 248, 0.75);
+  text-shadow: 0 0 12px rgba(56, 189, 248, 0.8);
 }
 
 /* ==========================================================================
    MODEL 3: Electric Horizon Curve (.gauge-minimal)
    ========================================================================== */
 .sidebar-bundle.gauge-minimal .gauge-svg-needle-group {
-  display: none; /* Minimalist clean curve */
+  display: none;
 }
 .sidebar-bundle.gauge-minimal .gauge-svg-ticks {
-  display: none; /* Clean no ticks */
+  display: none;
+}
+.sidebar-bundle.gauge-minimal .gauge-svg-segments {
+  display: none;
+}
+.sidebar-bundle.gauge-minimal .gauge-track-bg {
+  stroke-width: 9;
+  stroke: rgba(255, 255, 255, 0.05);
 }
 .sidebar-bundle.gauge-minimal .gauge-track-safe {
-  stroke-width: 6;
-  stroke: rgba(255, 255, 255, 0.08);
+  stroke-width: 8;
+  stroke: rgba(56, 189, 248, 0.14);
 }
 .sidebar-bundle.gauge-minimal .gauge-track-danger {
-  stroke-width: 6;
-  stroke: rgba(244, 63, 94, 0.3);
+  stroke-width: 8;
+  stroke: rgba(244, 63, 94, 0.22);
 }
 .sidebar-bundle.gauge-minimal .gauge-fill-path {
   stroke-width: 8;
+  display: block;
   stroke-linecap: round;
 }
+.sidebar-bundle.gauge-minimal .gauge-head-pip {
+  display: block;
+}
 .sidebar-bundle.gauge-minimal .gauge-digital-readout .ring-big {
-  color: #f8fafc;
-  text-shadow: none;
+  color: #00f2fe;
+  text-shadow: 0 0 14px rgba(0, 242, 254, 0.6);
 }
 
 /* Redline text glow when full */

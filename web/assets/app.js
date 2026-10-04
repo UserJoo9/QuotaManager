@@ -408,14 +408,17 @@ function updateResetDayAvailability() {
     $("setup-period-type").value === "end_of_month" ? "(0 = calendar end)" : "(0 = never)";
 }
 
+let lastBundleState = null;
+
 function renderBundle(b, devices, users) {
+  lastBundleState = { b, devices, users };
   const usedPct = b.total_gb > 0 ? Math.min(100, (b.used_gb / b.total_gb) * 100) : 0;
   const ringEl = $("bundle-ring");
   if (ringEl) {
     ringEl.style.setProperty("--p", usedPct.toFixed(1));
-    // Arc path length is approx 252px across the 222 deg sweep
-    // stroke-dasharray is set to 252 in CSS; dashoffset decreases from 252 to 0 as usedPct increases
-    const totalArcLen = 252;
+    // Arc path length is approx 192.3px across the 190 deg sweep
+    // stroke-dasharray is set to 192.3; dashoffset decreases from 192.3 to 0 as usedPct increases
+    const totalArcLen = 192.3;
     const offset = Math.max(0, totalArcLen - (usedPct / 100) * totalArcLen);
     const fillPath = $("gauge-svg-fill");
     if (fillPath) {
@@ -423,18 +426,46 @@ function renderBundle(b, devices, users) {
       // Switch fill to redline gradient if >= 80%
       if (usedPct >= 80) {
         fillPath.setAttribute("stroke", "url(#gauge-redline-grad)");
-        fillPath.style.filter = "drop-shadow(0 0 8px rgba(244, 63, 94, 0.8))";
+        fillPath.style.filter = "drop-shadow(0 0 8px rgba(244, 63, 94, 0.85))";
       } else {
         fillPath.setAttribute("stroke", "url(#gauge-fill-grad)");
-        fillPath.style.filter = "drop-shadow(0 0 6px rgba(56, 189, 248, 0.7))";
+        fillPath.style.filter = "drop-shadow(0 0 6px rgba(56, 189, 248, 0.75))";
       }
     }
-    // Needle rotation: from -111deg (at 0%) to +111deg (at 100%) centered at (80, 105)
-    const needleDeg = -111 + (usedPct * 2.22);
+    // Needle rotation: from -95deg (at 0%) to +95deg (at 100%) centered at (90, 74)
+    const needleDeg = -95 + (usedPct * 1.90);
     const needleGroup = $("gauge-svg-needle-group");
     if (needleGroup) {
       needleGroup.style.transform = `rotate(${needleDeg.toFixed(1)}deg)`;
     }
+
+    // Head pip position for Model 3 (Electric Horizon)
+    const headPip = $("gauge-head-pip");
+    if (headPip) {
+      const rad = (185 - (usedPct * 1.90)) * (Math.PI / 180);
+      const px = 90 + 58 * Math.cos(rad);
+      const py = 74 - 58 * Math.sin(rad);
+      headPip.setAttribute("cx", px.toFixed(1));
+      headPip.setAttribute("cy", py.toFixed(1));
+      headPip.style.opacity = usedPct > 0 ? "1" : "0";
+      if (usedPct >= 80) {
+        headPip.setAttribute("stroke", "#f43f5e");
+        headPip.style.filter = "drop-shadow(0 0 7px #f43f5e)";
+      } else {
+        headPip.setAttribute("stroke", "#38bdf8");
+        headPip.style.filter = "drop-shadow(0 0 7px #38bdf8)";
+      }
+    }
+
+    // Segmented LED bars for Model 2 (Digital Segmented LED)
+    const segBars = document.querySelectorAll(".gauge-seg-bar");
+    if (segBars.length > 0) {
+      segBars.forEach((seg, idx) => {
+        const active = (idx + 0.5) * 5 <= usedPct;
+        seg.classList.toggle("active", active);
+      });
+    }
+
     ringEl.classList.toggle("redline", usedPct >= 80);
   }
   $("bundle-used").textContent = fmt(b.used_gb);
@@ -4461,6 +4492,9 @@ function applyGaugeStyle(style) {
   document.querySelectorAll(".gauge-option").forEach((opt) => {
     opt.classList.toggle("active", opt.dataset.gaugeStyle === currentGaugeStyle);
   });
+  if (lastBundleState && lastBundleState.b) {
+    renderBundle(lastBundleState.b, lastBundleState.devices, lastBundleState.users);
+  }
 }
 
 // Early gauge and theme restore on script load to prevent flash of unstyled elements
@@ -4874,10 +4908,10 @@ async function init() {
         const r = card.querySelector('input[type="radio"]');
         card.classList.toggle("active", r && r.checked);
       });
+      // Selecting a tier directly activates protection with that tier
       const sw = $("adblock-master-switch");
-      if (sw && sw.checked) {
-        await toggleAdblockMaster(true);
-      }
+      if (sw) sw.checked = true;
+      await toggleAdblockMaster(true);
     });
   });
   const adblockUpdateBtn = $("adblock-update-btn");
