@@ -4423,6 +4423,8 @@ function applyTheme(name) {
     const isCur = (opt.dataset.setTheme || "default") === (name || "default");
     opt.classList.toggle("active", isCur);
   });
+}
+
 /* ---------------- Gauge Style Engine ---------------- */
 let currentGaugeStyle = "cyber";
 
