@@ -22,6 +22,7 @@ the project layout, tests, and the release process.
 - [VPN share](#vpn-share)
 - [Native VPN Subsystem (sing-box Core & Clash API)](#native-vpn-subsystem-sing-box-core--clash-api)
 - [Ultra Ad-Blocker & History Analytics Engine](#ultra-ad-blocker--history-analytics-engine)
+- [Speedometer Gauge & Frontend Subsystems (Themes, Particles, Navigation)](#speedometer-gauge--frontend-subsystems-themes-particles-navigation)
 - [Software updates](#software-updates)
 - [Key design decisions](#key-design-decisions)
 - [Known bottlenecks & technical debt](#known-bottlenecks--technical-debt)
@@ -987,6 +988,58 @@ filtering running directly on top of `dnsmasq`:
 
 ---
 
+## Speedometer Gauge & Frontend Subsystems (Themes, Particles, Navigation)
+
+The frontend features a responsive, GPU-accelerated speedometer gauge, an adaptive visual theme system, an interactive background particle FX engine, and optimized multi-tab panel navigation:
+
+### 1. Speedometer Architecture & SVG Geometry
+The quota gauge is built with scalable inline SVG (`viewBox="0 0 190 90"`), anchored around a center coordinate of `(95, 82)` with an arc radius $R = 64$:
+- **Arc Geometry & Length**:
+  The semicircular path covers $180^\circ$ ($\pi$ radians), giving an exact perimeter:
+  $$L = \pi \times R = \pi \times 64 \approx 201.1\,\text{px}$$
+  Dynamic quota consumption is rendered via SVG dash geometry:
+  `stroke-dasharray: 201.1` and `stroke-dashoffset: 201.1 * (1 - ratio)`.
+- **Track Paths (Safe & Danger Zones)**:
+  - **Safe Track (0% to 80%)**: `d="M 31 82 A 64 64 0 0 1 146.8 44.4"`
+  - **Danger Track (80% to 100%)**: `d="M 146.8 44.4 A 64 64 0 0 1 159 82"`
+- **Three Interchangeable Models**:
+  Users can switch between three visual designs from Settings:
+  1. **Model 1: Needle & Dial (`.gauge-needle`)**: High-contrast needle beam originating from `(95, 82)` to `(95, 42)` (length 40px, maintaining 24px clearance from the outer dial arc). Rotates smoothly from $-90^\circ$ (0%) to $+90^\circ$ (100%) around pivot `(95, 82)`.
+  2. **Model 2: Segmented Arc (`.gauge-segmented`)**: Futuristic HUD style with radial dash segments generated via an SVG `<mask id="gauge-seg-mask">` with `stroke-dasharray: 7 3`.
+  3. **Model 3: Minimal Glowing Arc (`.gauge-minimal`)**: Ultra-clean 6px glowing horizon curve with a subtle backdrop glow.
+- **Sidebar 3-Row Grid Layout**:
+  The sidebar quota stats are organized in a 6-column CSS grid (`.bundle-stats-grid`):
+  - **Row 1**: Remaining GB (columns 1–3) and Days Left (columns 4–6).
+  - **Row 2**: Full-width period badge (columns 1–6) displaying renewal dates or "Manual Cycle" comfortably without text clipping.
+  - **Row 3**: Users (columns 1–2), Devices (columns 3–4), and Blocked devices (columns 5–6).
+
+### 2. Theme Engine & Particle Background FX
+- **Themes**: Supported color schemes (`theme-classic-dark`, `theme-matrix`, `theme-cyberpunk`, `theme-ocean-calm`, `theme-nordic-frost`) persist in `localStorage`.
+- **Particle Canvas (`#bg-canvas`)**: Runs on a native HTML5 Canvas using `requestAnimationFrame`:
+  - `mesh`: Interactive geometric node web with distance-threshold line connections.
+  - `starfield`: 3D warp-speed starfield simulation.
+  - `matrix`: Digital raining green code stream.
+  - `clean`: Minimalist ambient static background without animations.
+  - Canvas throttles during tab inactivity and auto-resizes on viewport changes.
+
+### 3. Panel Navigation & Terminal Log Viewport
+- **Race Condition Prevention**: Tab switching coordinates through `activePanelLoadSeq` and cached panel states (`loadedPanels`, `isPanelContentLoaded`) to prevent asynchronous payload overrides during rapid tab switching.
+- **Admin Tab Scrollable Logs**: The system and audit log viewports feature fixed-height scrollable terminal containers, ensuring system logs remain readable and accessible without pushing admin controls or action buttons off-screen.
+
+### 4. Device & User Kick vs. Blacklist Lifecycle
+The management plane provides two distinct disconnection modes:
+- **Kick / Disconnect (`POST /api/devices/{id}/kick`, `POST /api/users/{id}/kick` or `DELETE ?blacklist=false`)**:
+  - Drops existing connection states instantly via `conntrack -D` and nftables.
+  - Deletes the DHCP lease from dnsmasq (`database.delete_lease(mac)`).
+  - Registers a temporary 5-second cooldown via `service.register_kick_timeout(mac, 5.0)` to force the client device to renegotiate DHCP.
+  - After 5 seconds, `_schedule_kick_unblock(mac, 5.0)` lifts the kernel drop rule.
+  - The MAC is **not** added to the permanent blacklist (`mac_lists`), allowing the device to reconnect freely once renegotiated.
+- **Block & Blacklist (`POST /api/devices/{id}/block-blacklist`, `POST /api/users/{id}/block-blacklist` or `DELETE ?blacklist=true`)**:
+  - Permanently writes the MAC to `mac_lists` (`deny`).
+  - Instantly drops all active and future traffic at line-rate in nftables until an admin explicitly removes the MAC from the blacklist.
+
+---
+
 ## Software updates
 
 `quota/updater.py` (NEW) gives the Admin tab a self-update check against the
@@ -1455,10 +1508,15 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/dashboard` | full bundle + users + devices + usage snapshot |
-| GET/POST/PATCH/DELETE | `/api/users` & `/api/users/{id}` | list / create / update / delete users (allowance, block, speed caps; `exempt_quota: true` lifts the quota gate — the user is never quota-blocked, manual admin cuts still apply). **DELETE blacklists every device MAC it owns** (permanent deny list — see the quota-model section) |
+| GET/POST/PATCH/DELETE | `/api/users` & `/api/users/{id}` | list / create / update / delete users (allowance, block, speed caps; `exempt_quota: true` lifts the quota gate — the user is never quota-blocked, manual admin cuts still apply). **DELETE `?blacklist=true` blacklists every device MAC it owns** (permanent deny list — see the quota-model section), while `?blacklist=false` kicks them for 5s without blacklist |
+| POST | `/api/users/{id}/kick` | kick/disconnect all devices owned by user for 5s (flushes lease & drops state; device can reconnect) |
+| POST | `/api/users/{id}/block-blacklist` | permanently block and blacklist all device MACs owned by user |
 | POST | `/api/users/{id}/topup` | add GB to a user's allowance, clears their quota block |
-| GET/POST/PATCH/DELETE | `/api/devices` & `/api/devices/{id}` | list / create / update / delete devices (user, quota, bypass, speed caps). **DELETE blacklists the device's MAC** (permanent deny list — see the quota-model section) |
+| GET/POST/PATCH/DELETE | `/api/devices` & `/api/devices/{id}` | list / create / update / delete devices (user, quota, bypass, speed caps). **DELETE `?blacklist=true` blacklists the device's MAC** (permanent deny list — see the quota-model section), while `?blacklist=false` kicks device for 5s without blacklist |
+| POST | `/api/devices/{id}/kick` | kick/disconnect device for 5s (flushes lease & drops state; device can reconnect) |
+| POST | `/api/devices/{id}/block-blacklist` | permanently block and blacklist the device's MAC |
 | POST | `/api/devices/{id}/topup` | add GB to a device, clears its quota block |
+| POST | `/api/admin/spoof-consumption` | calibrate or test consumption for a user or device (`{"user_id" \| "device_id", "bytes"}`) |
 | GET | `/api/usage/{id}` · `/api/usage` | daily usage series per device / aggregated |
 | GET | `/api/events?limit=30` | audit events |
 | GET | `/api/logs?limit=300` | tail of the rotating log (newest first) |

@@ -24,6 +24,15 @@ gateway:
   flag keeps one device online)
 - Caps any device's or user's **internet speed** and keeps gaming ping low while
   others download
+- **Automotive Speedometer Gauge**: A live tachometer-style dial showing your monthly
+  bundle with a safe zone (0–80%) and glowing scarlet redline warning zone (80–100%),
+  featuring 3 selectable physical models (**Sports Needle**, **Digital Segmented LED**,
+  and **Electric Horizon Arc**)
+- **Themes & Background FX Engine**: Switch between 4 visual color themes (Obsidian Glass,
+  Cyberpunk Neon, Emerald Mint, Sunset Crimson) and 4 ambient background particle modes
+  (Network Mesh, Cosmic Starfield, Digital Rain Matrix, or Clean Static)
+- **Temporary Device Kick (5-Second Disconnect)**: Instantly disconnect any device for 5
+  seconds to force connection drops or IP lease renewals without permanently blacklisting it
 - **Native VPN Manager (sing-box & Clash API)**: Built-in proxy core (VLESS, VMess,
   Shadowsocks, Trojan, WireGuard) with live speed meters, node configuration editor,
   persistent auto-connect, and per-user/device policy routing
@@ -36,9 +45,9 @@ gateway:
   active websites and apps (YouTube, TikTok, Netflix, Facebook) and per-device daily timelines
 - **Static DHCP IP Reservations**: Assign fixed IP addresses to servers, printers, or
   gaming consoles directly from the dashboard with one click
-- Serves a **dark obsidian-glass dashboard** you can open from any phone on
-  the LAN — the whole UI (dashboard, the household milestone page, and the
-  consumption report) is phone-friendly and touch-first
+- Serves a **dark obsidian-glass dashboard** with instant zero-flicker tab switching
+  that you can open from any phone on the LAN — the whole UI (dashboard, milestone page,
+  and consumption report) is phone-friendly and touch-first
 
 <p align="center">
   <img src="docs/diagrams/EN_sketch_diagram.png" width="640"
@@ -220,14 +229,14 @@ See [Structure_README.md](Structure_README.md) → *Running from source*.
 
 | Tab | What it does |
 |---|---|
-| **Management** | the bundle ring (used / remaining / days left) and a card per **user** (features a Layout Toggle for Grid/Masonry/List views) — allowance, usage bar, block toggle, top-up, edit, delete — with their devices listed underneath (name, MAC, manufacturer, its own quota bar + up/down split). Each device card also features a **presence LED** that goes grey when the device stops answering. A user can be flagged **Exempt from quota** (never quota-blocked, however much they use — manual blocks still work) |
+| **Management** | **Speedometer Bundle Gauge** (live tachometer dial with safe zone & scarlet redline, with 3 selectable physical styles) + reorganized 3-row metrics (Remaining GB, Days left, Period badge, and Users/Devices/Blocked counters), **Pinned Protected Gateway** as the top card, and a card per **user** (with Grid/Masonry/List views, speed caps, quota allowances, block toggle, **5s temporary kick/disconnect**, and usage breakdown). Devices show vendor logos, active IP, MAC, live ping presence LED, and quota bars. Users can be flagged **Exempt from quota**. |
 | **Network** | bundle settings, **Guest mode** (auto-register new devices with a small allowance + speed limit + guest cap + **STOP NEW CONNECTIONS**), **Reset month now**, speed shaping master switch (set your real line rates), **Static DHCP IP reservations**, **Decline random MACs**, **MAC whitelist / blacklist**, and a live network overview |
 | **VPN** | **Built-in sing-box Manager**: Import VLESS, VMess, Shadowsocks, Trojan, and WireGuard links with QR / clipboard support, test latency, edit outbound protocols & transport settings via the Interactive Proxy Editor modal, monitor real-time Clash API speed meters & session traffic, and selectively route or bypass individual users and devices |
 | **WAN** | direct PPPoE dialing ("strong" mode) with automated periodic IP renewal schedule and **Telegram Bot notification trigger** on public IP changes |
-| **DNS** | **Ultra Network Ad-Blocker** (Hardware-level HaGeZi PRO + AdGuard + StevenBlack shield), **Category & Content Filters** (Parental Controls for adult content, gambling, social media, and streaming), custom domain rules (block/allow/redirect), and hosts/adblock list importer |
+| **DNS** | **Ultra Network Ad-Blocker** (Hardware-level HaGeZi PRO + AdGuard + StevenBlack shield with master switch), **Category & Content Filters** (Parental Controls for adult content, gambling, social media, and streaming), custom domain rules (block/allow/redirect), and hosts/adblock list importer |
 | **History** | real-time query timeline and domain consumption analytics: pick a device + look-back window → its **top domains** (with share %), hourly activity, and recent queries |
 | **Firewall** | network-level access rules: default security posture (LAN: open outward; WAN: block all new inbound), custom rules, automatic brute-force / port-scan bans, port forwarding, DMZ target, and live Firewall log |
-| **Admin** | security & credentials (change password, Two-Factor Authentication with QR code), **Software updates** (check & install newer releases directly), and **System Info & About** with **System Logs** (level filter, search, export) |
+| **Admin** | **Appearance & Themes** (4 themes: Obsidian, Cyberpunk, Emerald, Sunset; 4 background particle modes; 3 Speedometer gauge physical styles), security & credentials (change password, 2FA with QR code), **Software updates** (one-click check & self-install), and **System Logs** in a dedicated scrollable console window (level filter, search, export) |
 
 The sidebar footer's **eye** toggle masks on-screen sensitive details — MAC
 addresses (device rows, rogue rows, the device modal) and the saved PPPoE
