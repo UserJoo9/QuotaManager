@@ -1,23 +1,23 @@
 Architectures: all
 Codename: stable
 Components: main
-Date: Thu, 01 Oct 2026 17:25:03 +0000
+Date: Mon, 05 Oct 2026 12:22:03 +0000
 Label: Quota Manager
 Origin: Quota Manager
 Suite: stable
 MD5Sum:
- 20b03a83eded395a8ed1b292db16189a              148 Release
- a02e9d3472a5134c29792d700647503a            10908 main/binary-all/Packages
- 636477ae432b47b7db698ff5907a8400             2268 main/binary-all/Packages.gz
+ 5ef368ef42eba46578872addc17cad1f              148 Release
+ 3bd50d1a6e5f7634e45f23ea080bfb6b            12273 main/binary-all/Packages
+ e36d481c2ee06783b37c80eb90abd45d             2456 main/binary-all/Packages.gz
 SHA1:
- 699b61ad9ca39752774160bddf593aaef804ce4f              148 Release
- 0df2f2eebce5bbb5f674bb0de12747ff1eb9c8cf            10908 main/binary-all/Packages
- d324bbec87e1ab9f700342a365eb634b49afbd87             2268 main/binary-all/Packages.gz
+ 86b8ad28ff39a7c644a17c5dafff958653b5bd68              148 Release
+ bd7a44abe230fa4063d462637a2e037e5093a8f2            12273 main/binary-all/Packages
+ 687bb44c26bb80ed3909ba2136ba8f21e3e6f7a5             2456 main/binary-all/Packages.gz
 SHA256:
- 92cc36dba9941818496f0bfe2aa3886bc2d2f6045bc7df0672d32e122cf46608              148 Release
- 61dbf80928162e7528e08cc96a0c5c8742c81a20810e421836cd7845ddbc19b1            10908 main/binary-all/Packages
- 293971a1b79682f9edbd4f5614fa542d0951800b632e5d39817a642a4e2ada61             2268 main/binary-all/Packages.gz
+ 523bb30a917b8f5cfd777cb982f76e904e7e1abbfb8160313924ec3509ca04f1              148 Release
+ d6c9364ae7e42761e07b522b84df2d6133d8b847ba2358066c52a021ca99e6d8            12273 main/binary-all/Packages
+ 83eeebd0294cbaaf7b34a54e1bb8403a53c842079af644b7cb79cee51ca60931             2456 main/binary-all/Packages.gz
 SHA512:
- fd6944d1f9787848ce6997860efa89f403f5659ac8a4d1f544fdfd3ec25cec78d3370c50291f8deeccc115fb896dfce3f4fa7e821678f8fdbf1f39b8b17ee2d2              148 Release
- 0c4b98b2ab8771d9e8d4a77edbd025caaf4e74e91bb5bc1e52be066dfc9cafd4e106620efa54604de4ed33794104883861073b79b807d3d8fa0986e48e592a5e            10908 main/binary-all/Packages
- e279294c405381f3b9cabd8e17355030f63e721c66bf6923042aa6839cee84d79f3080bffe6494fbbe276dd9316beaa3b77f81a3c616030969087adc74cc3016             2268 main/binary-all/Packages.gz
+ 8ab015dc6d1913e978ddf4fbac4370e30181eca53a508730fc5b5aeed3b63c96b666ffe9887bd258ce45c08cea1ca93181be0f8c86bcba469236cc39b616b203              148 Release
+ 2838458aec3a3d4ed1ed1dc625ed9586b115690c2bf208249df221d3ab0ac1743e2dd208db70d36afbd14b02913ce5cdf3f065f61aa013ce2195f4ae88d0c7dd            12273 main/binary-all/Packages
+ 9334f17009be1f41d881d6df13be7be8bb18da140f656bafc0cb2cc5e2f643e6f9598b05741b0dd0012a3f9825abe7eb41478152fef70c2cfd6ced08bd82d7e4             2456 main/binary-all/Packages.gz

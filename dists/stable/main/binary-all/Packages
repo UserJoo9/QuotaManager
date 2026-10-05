@@ -206,3 +206,29 @@ Description: Fair-split metered-internet quota gateway
  configures the network stack (dnsmasq + nftables + tc), installs the Python
  runtime into /opt/quota-manager, and runs the gateway as a systemd service.
 
+Package: quota-manager
+Architecture: all
+Version: 0.4.1
+Priority: optional
+Section: net
+Maintainer: Youssef Alkhodary <youssef.alkhodary@users.noreply.github.com>
+Depends: python3 (>= 3.10), python3-venv, python3-pip, dnsmasq, nftables,
+         iproute2, kmod, ppp, ca-certificates
+Filename: pool/main/q/quota-manager/quota-manager_0.4.1_all.deb
+Size: 50350014
+MD5sum: 1c41bd7998c4f78d2a256393f3b7b3ad
+SHA1: 96168b2a44144a0fc61f9615db03c28e72cbb093
+SHA256: 09ec6f98c4121f2ce268945cd74a3439ad9348fe964a86164b787fc4dfbb0e7b
+SHA512: e82aa6951a826d1b5c1351dde6b6ba191279a6bc2d5746000c0ec1e17be023303d65bca2d6ed12994e1151b7d37d2a3f5cd0800c90e94c4a6432a0c3894eb755
+Homepage: https://github.com/UserJoo9/QuotaManager
+Description: Fair-split metered-internet quota gateway
+ Split a metered internet bundle fairly across users and devices. A person's
+ allowance covers all their devices; when it runs out every device they own is
+ cut at once (a per-device exemption keeps one device online). Per-device and
+ per-user speed caps with low-latency fq_codel queues, a dark-purple
+ glassmorphism admin dashboard, and a WebSocket live view.
+ .
+ The gateway needs a wired-NIC laptop running Debian/Kali as root. The package
+ configures the network stack (dnsmasq + nftables + tc), installs the Python
+ runtime into /opt/quota-manager, and runs the gateway as a systemd service.
+
