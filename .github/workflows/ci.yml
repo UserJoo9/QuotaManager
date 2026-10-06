@@ -52,6 +52,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-linux.txt
+          pip install pytest-timeout
 
       - name: Run linter (pyflakes)
         run: |
@@ -61,4 +62,4 @@ jobs:
         env:
           PYTHONPATH: .
         run: |
-          pytest -v
+          pytest -v --timeout=60
