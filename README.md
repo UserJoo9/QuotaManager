@@ -225,6 +225,62 @@ See [Structure_README.md](Structure_README.md) → *Running from source*.
 
 ---
 
+## Low-Power 24/7 Deployment (Android Phone & OpenWrt)
+
+Running a full-sized desktop PC 24/7 consumes 50–100 Watts, which can add noticeable cost to your monthly power bill. Because QuotaManager relies strictly on line-rate Linux kernel primitives (`nftables`, `tc`, and `dnsmasq`), it runs smoothly on **ultra-low-power devices consuming only 2–5 Watts** (virtually zero electricity cost):
+
+### Option A: Old Android Phone (Rooted + OTG Ethernet)
+An old spare Android phone (Android 7–14 with root / Magisk / KernelSU) makes an ideal, silent, battery-backed gateway:
+
+1. **Hardware Setup**:
+   - Connect a USB Type-C (or Micro-USB) OTG Hub with an **Ethernet port and pass-through charging (PD/5V)**.
+   - Plug the Ethernet cable directly into your main ISP router's LAN port.
+   - *(Recommended)* To protect the phone's battery when plugged in 24/7, use apps like **ACC (Advanced Charging Controller)** to cap charging at 60–70%, or remove the battery and power the phone via a direct dummy battery connection.
+
+2. **Software Setup (Debian Chroot via Termux)**:
+   - Install **Termux** from F-Droid, open it, and obtain root permissions:
+     ```bash
+     su
+     ```
+   - Deploy a lightweight Debian 12 (ARM64) root filesystem using standard chroot managers (such as `LinuxDeploy` or a Debian chroot script).
+   - Inside the Debian environment, install QuotaManager directly from our official APT repository:
+     ```bash
+     curl -fsSL https://UserJoo9.github.io/QuotaManager/KEY.gpg | gpg --dearmor -o /etc/apt/trusted.gpg.d/quota-manager.gpg
+     echo "deb https://UserJoo9.github.io/QuotaManager/ stable main" > /etc/apt/sources.list.d/quota-manager.list
+     apt-get update
+     apt-get install -y quota-manager
+     ```
+   - Open `http://192.168.2.1:8080` (or the phone's static IP) to access your dashboard!
+
+### Option B: OpenWrt Router
+If you have a dedicated OpenWrt router (or an old supported router flashed with OpenWrt 22.03+):
+
+1. **System Requirements**:
+   - Router with 128MB+ RAM and storage (for 16MB/32MB flash routers, enable **ExtRoot** using an inexpensive USB flash drive).
+   - Install prerequisites via `opkg`:
+     ```bash
+     opkg update
+     opkg install python3 python3-pip nftables kmod-nft-core ip-full dnsmasq-full
+     ```
+
+2. **Clone & Setup**:
+   ```bash
+   git clone https://github.com/UserJoo9/QuotaManager.git /opt/QuotaManager
+   cd /opt/QuotaManager
+   pip install -r requirements-linux.txt
+   ```
+
+3. **Autostart Service (Procd)**:
+   Enable and start the background daemon using the bundled OpenWrt service script:
+   ```bash
+   cp /opt/QuotaManager/scripts/quota-manager.openwrt /etc/init.d/quota-manager
+   chmod +x /etc/init.d/quota-manager
+   /etc/init.d/quota-manager enable
+   /etc/init.d/quota-manager start
+   ```
+
+---
+
 ## Using the dashboard
 
 | Tab | What it does |

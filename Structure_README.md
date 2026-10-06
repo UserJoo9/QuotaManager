@@ -43,7 +43,7 @@ user's allowance covers all their devices (phone + tablet + laptop share one
 slice); when the user exceeds it, every device they own is cut at once, and a
 per-device *exempt* flag can keep one device online.
 
-The deployment target is **Linux on an old laptop** (Kali/Debian) because the
+The deployment target is **Linux on an old laptop, rooted Android phone, or OpenWrt router** (Kali/Debian/OpenWrt) because the
 kernel owns the network path: nftables counts and drops at line rate with **no
 Python in the packet path**. The web dashboard (FastAPI + WebSocket) is only the
 control plane.
@@ -1594,7 +1594,8 @@ QuotaManager/
 │   ├── topology.sh           # runtime LAN/WAN applier (panel-invoked, env-fed)
 │   ├── test_pppoe.sh         # throwaway PPPoE dial — test creds, no config change
 │   ├── update_oui.py         # regenerate quota/oui.txt from the IEEE registry
-│   └── replay_nft_startup.sh # replay the engine's startup nft command sequence (debug)
+│   ├── replay_nft_startup.sh # replay the engine's startup nft command sequence (debug)
+│   └── quota-manager.openwrt # OpenWrt procd service script for low-power router daemon
 ├── core/
 │   ├── config.py             # config.yaml -> typed Config dataclasses
 │   ├── logging_setup.py      # non-blocking QueueHandler -> writer thread -> rotating file

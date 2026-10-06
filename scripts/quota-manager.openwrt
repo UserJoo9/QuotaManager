@@ -1,0 +1,35 @@
+#!/bin/sh /etc/rc.common
+# /etc/init.d/quota-manager — OpenWrt procd service script for QuotaManager
+#
+# Install:
+#   cp scripts/quota-manager.openwrt /etc/init.d/quota-manager
+#   chmod +x /etc/init.d/quota-manager
+#   /etc/init.d/quota-manager enable
+#   /etc/init.d/quota-manager start
+
+USE_PROCD=1
+START=95
+STOP=10
+
+PROG="/usr/bin/python3"
+APP_DIR="/opt/QuotaManager"
+PIDFILE="/var/run/quota-manager.pid"
+
+start_service() {
+    [ -d "$APP_DIR" ] || {
+        echo "QuotaManager directory not found at $APP_DIR" >&2
+        return 1
+    }
+
+    procd_open_instance
+    procd_set_param command "$PROG" "$APP_DIR/run.py"
+    procd_set_param respawn 3600 5 0
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_set_param pidfile "$PIDFILE"
+    procd_close_instance
+}
+
+stop_service() {
+    [ -f "$PIDFILE" ] && kill "$(cat "$PIDFILE")" 2>/dev/null
+}

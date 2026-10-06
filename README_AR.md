@@ -246,6 +246,62 @@ uplink للجهاز أو تعارض، تفقد الأجهزة بوابتها وD
 
 ---
 
+## تشغيل البوابة 24/7 بأقل استهلاك كهرباء (هواتف أندرويد وراوترات OpenWrt)
+
+تشغيل كمبيوتر مكتبي (PC) عادي طوال الـ 24 ساعة يستهلك ما بين 50 إلى 100 وات، مما يرفع فاتورة الكهرباء الشهرية بنقل العداد لشريحة أعلى. ونظراً لأن QuotaManager يعتمد كلياً على كيرنل لينكس الأصلي السريع (`nftables`, `tc`, `dnsmasq`)، يمكن تشغيله بكفاءة كاملة على **أجهزة موفرة جداً تستهلك 2 إلى 5 وات فقط** (تكلفة كهرباء شبه معدومة):
+
+### الخيار الأول: هاتف أندرويد قديم مروّت (Root + OTG Ethernet)
+أي هاتف أندرويد قديم مركون (أندرويد 7 حتى 14 بصلاحيات الروت Magisk أو KernelSU) يمكن تحويله إلى خادم بوابة صامت لا يستهلك أكثر من 3 وات:
+
+1. **التوصيل والعتاد**:
+   - وصّل بالهاتف وصلة **OTG Hub** تحتوي على منفذ **Ethernet (شبكة)** ومنفذ **شحن مستمر (Pass-through Charging)**.
+   - وصّل كابل الإيثرنت بمنفذ LAN في راوتر الإنترنت الرئيسي.
+   - *(نصيحة هامة)* لحماية بطارية الهاتف من الانتفاخ مع استمرار الشحن 24/7، استخدم تطبيق روت مثل **ACC (Advanced Charging Controller)** لتحديد سقف الشحن عند 60%–70%، أو انزع البطارية واستخدم توصيل 5V مباشر.
+
+2. **البيئة البرمجية (Debian Chroot عبر Termux)**:
+   - افتح تطبيق **Termux** واطلب صلاحيات الروت:
+     ```bash
+     su
+     ```
+   - ثبّت بيئة دبيان Debian 12 (ARM64) مدمجة عبر Chroot (باستخدام أدوات مثل `LinuxDeploy` أو سكربت Chroot).
+   - داخل بيئة دبيان، ثبّت حزمة QuotaManager مباشرة من مستودع APT الرسمي:
+     ```bash
+     curl -fsSL https://UserJoo9.github.io/QuotaManager/KEY.gpg | gpg --dearmor -o /etc/apt/trusted.gpg.d/quota-manager.gpg
+     echo "deb https://UserJoo9.github.io/QuotaManager/ stable main" > /etc/apt/sources.list.d/quota-manager.list
+     apt-get update
+     apt-get install -y quota-manager
+     ```
+   - افتح `http://192.168.2.1:8080` (أو عنوان IP الهاتف) وستعمل لوحة التحكم بكامل كفاءتها!
+
+### الخيار الثاني: راوتر OpenWrt
+إذا كان لديك راوتر مثبت عليه نظام **OpenWrt** (إصدار 22.03 أو أحدث):
+
+1. **المتطلبات الأساسية**:
+   - راوتر يحتوي على ذاكرة كافية (128MB+ RAM وفلاش؛ وللراوترات ذات الفلاش الصغير 16MB/32MB، فعّل خاصية **ExtRoot** باستخدام فلاشة USB رخيصة).
+   - تثبيت الحزم المطلوبة عبر `opkg`:
+     ```bash
+     opkg update
+     opkg install python3 python3-pip nftables kmod-nft-core ip-full dnsmasq-full
+     ```
+
+2. **تنزيل البرنامج وإعداده**:
+   ```bash
+   git clone https://github.com/UserJoo9/QuotaManager.git /opt/QuotaManager
+   cd /opt/QuotaManager
+   pip install -r requirements-linux.txt
+   ```
+
+3. **التشغيل التلقائي عبر Procd**:
+   فعّل الخدمة لتبدأ تلقائياً مع تشغيل الراوتر باستخدام السكربت المرفق:
+   ```bash
+   cp /opt/QuotaManager/scripts/quota-manager.openwrt /etc/init.d/quota-manager
+   chmod +x /etc/init.d/quota-manager
+   /etc/init.d/quota-manager enable
+   /etc/init.d/quota-manager start
+   ```
+
+---
+
 ## استخدام لوحة التحكم
 
 | التبويب | ما يفعله |
