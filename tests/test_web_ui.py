@@ -100,7 +100,7 @@ def test_index_served(client):
     assert 'id="bundle-used"' in r.text
     assert r.text.index('id="sidebar-bundle"') < r.text.index('id="panel-management"')
     assert 'id="usage-chart"' not in r.text
-    assert "assets/app.js?v=94" in r.text
+    assert "assets/app.js?v=95" in r.text
     assert "assets/styles.css?v=79" in r.text
     # v24: the sidebar collapse toggle is gone — the sidebar is a fixed rail.
     assert "sidebar-toggle" not in r.text
@@ -357,5 +357,28 @@ def test_history_assets_bumped(client):
     always checks the CURRENT baseline, not the original bump."""
     r = client.get("/")
     assert "assets/styles.css?v=79" in r.text
-    assert "assets/app.js?v=94" in r.text
+    assert "assets/app.js?v=95" in r.text
+
+
+def test_no_inline_event_handlers_for_strict_csp():
+    """Under Content-Security-Policy `script-src 'self'` (no 'unsafe-inline'),
+    browsers refuse inline HTML event attributes (onclick, onchange, etc.).
+    All interactive controls in index.html and app.js must use addEventListener
+    or delegated event handling."""
+    import re
+    from pathlib import Path
+
+    web_dir = Path(__file__).resolve().parent.parent / "web"
+    pattern = re.compile(r"""\bon(click|change|submit|input|keydown|keyup)\s*=""", re.IGNORECASE)
+
+    violations = []
+    # Check index.html and app.js
+    for target in [web_dir / "index.html", web_dir / "assets" / "app.js"]:
+        text = target.read_text(encoding="utf-8", errors="ignore")
+        for idx, line in enumerate(text.splitlines(), 1):
+            if pattern.search(line):
+                violations.append(f"{target.name}:{idx}: {line.strip()[:80]}")
+
+    assert not violations, f"Found inline event handlers violating strict CSP:\n" + "\n".join(violations)
+
 

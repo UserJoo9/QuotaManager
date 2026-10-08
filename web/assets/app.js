@@ -941,8 +941,8 @@ function fwRuleRow(r, i) {
         </span>
       </div>
       <div class="fw-rule-actions">
-        <button type="button" class="btn ghost tiny" onclick="fwEditRule(${i})">Edit</button>
-        <button type="button" class="btn ghost tiny danger" onclick="fwDeleteRule(${i})">×</button>
+        <button type="button" class="btn ghost tiny" data-fw-act="edit-rule" data-idx="${i}">Edit</button>
+        <button type="button" class="btn ghost tiny danger" data-fw-act="del-rule" data-idx="${i}">×</button>
       </div>
     </div>`;
 }
@@ -958,7 +958,7 @@ function fwServiceRow(s, i) {
         </span>
       </div>
       <div class="fw-rule-actions">
-        <button type="button" class="btn ghost tiny danger" onclick="fwDeleteService(${i})">×</button>
+        <button type="button" class="btn ghost tiny danger" data-fw-act="del-service" data-idx="${i}">×</button>
       </div>
     </div>`;
 }
@@ -974,8 +974,8 @@ function fwForwardRow(f, i) {
         </span>
       </div>
       <div class="fw-rule-actions">
-        <button type="button" class="btn ghost tiny" onclick="fwEditForward(${i})">Edit</button>
-        <button type="button" class="btn ghost tiny danger" onclick="fwDeleteForward(${i})">×</button>
+        <button type="button" class="btn ghost tiny" data-fw-act="edit-fwd" data-idx="${i}">Edit</button>
+        <button type="button" class="btn ghost tiny danger" data-fw-act="del-fwd" data-idx="${i}">×</button>
       </div>
     </div>`;
 }
@@ -1032,7 +1032,7 @@ function fwRenderStatus() {
         <div class="fw-ban">
           <span><strong>${esc(b.ip)}</strong> <span class="muted small">${esc(b.reason)}</span></span>
           <span class="muted small">${Math.ceil(b.remaining / 60)} min left</span>
-          <button type="button" class="btn ghost tiny danger" onclick='fwUnban("${b.ip}")'>×</button>
+          <button type="button" class="btn ghost tiny danger" data-fw-unban="${esc(b.ip)}">×</button>
         </div>`).join("")
     : `<p class="muted small">No active bans.</p>`;
   // log
@@ -1393,15 +1393,15 @@ async function quickDnsRule(domain, action, scope, deviceId) {
 }
 
 function dnsQuickActions(domain, deviceId) {
-  const d = JSON.stringify(domain);
+  const domEsc = esc(domain);
   const devBtns = deviceId
-    ? `<button type="button" class="btn ghost tiny" onclick='quickDnsRule(${d},"block","device",${deviceId})'>Block device</button>`
+    ? `<button type="button" class="btn ghost tiny" data-dns-quick="block" data-dns-scope="device" data-dns-domain="${domEsc}" data-dns-devid="${deviceId}">Block device</button>`
     : "";
   return `
     <div class="dns-quick-actions">
       ${devBtns}
-      <button type="button" class="btn ghost tiny" onclick='quickDnsRule(${d},"block","global",null)'>Block everyone</button>
-      <button type="button" class="btn ghost tiny" onclick='quickDnsRule(${d},"allow","global",null)'>Allow</button>
+      <button type="button" class="btn ghost tiny" data-dns-quick="block" data-dns-scope="global" data-dns-domain="${domEsc}">Block everyone</button>
+      <button type="button" class="btn ghost tiny" data-dns-quick="allow" data-dns-scope="global" data-dns-domain="${domEsc}">Allow</button>
     </div>`;
 }
 
@@ -2454,7 +2454,7 @@ function renderRecharges(packs, users, devices) {
       <td>${typeBadge}</td>
       <td class="small">${expText}</td>
       <td class="num">
-        <button type="button" class="btn warning tiny" onclick="deleteRechargePack(${p.id})">Delete</button>
+        <button type="button" class="btn warning tiny" data-pack-del="${p.id}">Delete</button>
       </td>
     </tr>`;
   }).join("");
@@ -2633,7 +2633,7 @@ function renderMacRulesTable() {
       <td><strong>${esc(name)}</strong></td>
       <td><span class="mac-rule-badge allow">Whitelist (Allow)</span></td>
       <td class="num">
-        <button type="button" class="btn ghost danger tiny" onclick="removeMacRule('${esc(mac)}', 'allow')" title="Remove rule">${ICON_TRASH}</button>
+        <button type="button" class="btn ghost danger tiny" data-mac-rule-del="${esc(mac)}" data-mac-rule-type="allow" title="Remove rule">${ICON_TRASH}</button>
       </td>
     </tr>`);
   });
@@ -2645,7 +2645,7 @@ function renderMacRulesTable() {
       <td><strong>${esc(name)}</strong></td>
       <td><span class="mac-rule-badge deny">Blacklist (Deny)</span></td>
       <td class="num">
-        <button type="button" class="btn ghost danger tiny" onclick="removeMacRule('${esc(mac)}', 'deny')" title="Remove rule">${ICON_TRASH}</button>
+        <button type="button" class="btn ghost danger tiny" data-mac-rule-del="${esc(mac)}" data-mac-rule-type="deny" title="Remove rule">${ICON_TRASH}</button>
       </td>
     </tr>`);
   });
@@ -2825,7 +2825,7 @@ function renderStaticLeases() {
       <td><code>${esc(macText(item.mac))}</code></td>
       <td><code>${esc(item.ip)}</code></td>
       <td class="num">
-        <button type="button" class="btn warning tiny" onclick="deleteStaticLease('${esc(item.mac)}')">Delete</button>
+        <button type="button" class="btn warning tiny" data-lease-del="${esc(item.mac)}">Delete</button>
       </td>
     </tr>`;
   }).join("");
@@ -3849,14 +3849,14 @@ function renderVpnNodes(nodes) {
         <td><span class="vpn-node-proto-tag">${esc((n.protocol || "vless").toUpperCase())}</span></td>
         <td>
           <span class="${pingCls}" id="vpn-ping-val-${n.id}">${pingText}</span>
-          <button type="button" id="vpn-ping-btn-${n.id}" class="btn ghost tiny" onclick="pingVpnNode(${n.id})" title="Test latency">${ICON_ZAP}</button>
+          <button type="button" id="vpn-ping-btn-${n.id}" class="btn ghost tiny" data-vpn-act="ping" data-vpn-id="${n.id}" title="Test latency">${ICON_ZAP}</button>
         </td>
         <td class="num">
           ${isActive && isConnected
-            ? `<button type="button" class="btn ghost danger tiny" onclick="disconnectVpn()">Disconnect</button>`
-            : `<button type="button" class="btn primary tiny" onclick="connectVpn(${n.id})">Connect</button>`}
-          <button type="button" class="btn ghost tiny" onclick="editVpnNode(${n.id})" title="Edit node">${ICON_EDIT}</button>
-          <button type="button" class="btn ghost danger tiny" onclick="deleteVpnNode(${n.id})" title="Delete node">${ICON_TRASH}</button>
+            ? `<button type="button" class="btn ghost danger tiny" data-vpn-act="disconnect">Disconnect</button>`
+            : `<button type="button" class="btn primary tiny" data-vpn-act="connect" data-vpn-id="${n.id}">Connect</button>`}
+          <button type="button" class="btn ghost tiny" data-vpn-act="edit" data-vpn-id="${n.id}" title="Edit node">${ICON_EDIT}</button>
+          <button type="button" class="btn ghost danger tiny" data-vpn-act="delete" data-vpn-id="${n.id}" title="Delete node">${ICON_TRASH}</button>
         </td>
       </tr>
     `;
@@ -3929,7 +3929,7 @@ function renderVpnRouting(data) {
               <div class="vpn-user-controls">
                 <span class="vpn-route-badge ${u.route_vpn ? "routed" : "direct"}">${u.route_vpn ? "VPN" : "Direct"}</span>
                 <label class="switch" title="Route all devices of ${esc(u.name)} via VPN">
-                  <input type="checkbox" ${u.route_vpn ? "checked" : ""} onchange="setVpnRouting('user', ${u.id}, this.checked)">
+                  <input type="checkbox" ${u.route_vpn ? "checked" : ""} data-vpn-route-type="user" data-vpn-route-id="${u.id}">
                   <span class="slider"></span>
                 </label>
               </div>
@@ -3965,7 +3965,7 @@ function renderVpnRouting(data) {
             <div class="vpn-dev-action">
               <span class="vpn-dev-status-tag ${d.route_vpn ? "routed" : "direct"}">${d.route_vpn ? "VPN" : "Direct"}</span>
               <label class="switch tiny" title="Route this device via VPN">
-                <input type="checkbox" ${d.route_vpn ? "checked" : ""} onchange="setVpnRouting('device', ${d.id}, this.checked)">
+                <input type="checkbox" ${d.route_vpn ? "checked" : ""} data-vpn-route-type="device" data-vpn-route-id="${d.id}">
                 <span class="slider"></span>
               </label>
             </div>
@@ -4563,6 +4563,13 @@ async function init() {
   const rechargeModalCancel = $("recharge-modal-cancel");
   if (rechargeModalCancel) rechargeModalCancel.addEventListener("click", () => $("recharge-modal").classList.add("hidden"));
   if ($("recharge-modal")) $("recharge-modal").addEventListener("click", (ev) => { if (ev.target === $("recharge-modal")) $("recharge-modal").classList.add("hidden"); });
+  const rechargeTbody = $("recharges-queue-tbody");
+  if (rechargeTbody) {
+    rechargeTbody.addEventListener("click", (ev) => {
+      const btn = ev.target.closest("[data-pack-del]");
+      if (btn && btn.dataset.packDel) deleteRechargePack(+btn.dataset.packDel);
+    });
+  }
   // MAC rule modal open/close
   const openMacRuleBtn = $("open-mac-rule-btn");
   if (openMacRuleBtn) openMacRuleBtn.addEventListener("click", openMacRuleModal);
@@ -4579,6 +4586,13 @@ async function init() {
       $("mac-rule-macs").value = cur ? cur + "\n" + val : val;
     }
   });
+  const macTbody = $("mac-rules-tbody");
+  if (macTbody) {
+    macTbody.addEventListener("click", (ev) => {
+      const btn = ev.target.closest("[data-mac-rule-del]");
+      if (btn && btn.dataset.macRuleDel) removeMacRule(btn.dataset.macRuleDel, btn.dataset.macRuleType);
+    });
+  }
   // Static lease modal open/close
   const openStaticLeaseBtn = $("open-static-lease-btn");
   if (openStaticLeaseBtn) openStaticLeaseBtn.addEventListener("click", () => {
@@ -4588,8 +4602,13 @@ async function init() {
   const slModalCancel = $("sl-modal-cancel");
   if (slModalCancel) slModalCancel.addEventListener("click", () => $("static-lease-modal").classList.add("hidden"));
   if ($("static-lease-modal")) $("static-lease-modal").addEventListener("click", (ev) => { if (ev.target === $("static-lease-modal")) $("static-lease-modal").classList.add("hidden"); });
-  // expose removeMacRule for inline onclick handlers
-  window.removeMacRule = removeMacRule;
+  const slTbody = $("static-leases-tbody");
+  if (slTbody) {
+    slTbody.addEventListener("click", (ev) => {
+      const btn = ev.target.closest("[data-lease-del]");
+      if (btn && btn.dataset.leaseDel) deleteStaticLease(btn.dataset.leaseDel);
+    });
+  }
   // speed shaping: saving sends all four fields; the master toggle just
   // marks the current draft — it takes effect together on Save.
   $("shaping-save-btn").addEventListener("click", submitNetwork);
@@ -4638,6 +4657,40 @@ async function init() {
   });
   $("fw-rule-add").addEventListener("click", fwAddRule);
   $("fw-fwd-add").addEventListener("click", fwAddForward);
+  const fwRulesEl = $("fw-rules");
+  if (fwRulesEl) {
+    fwRulesEl.addEventListener("click", (ev) => {
+      const btn = ev.target.closest("[data-fw-act]");
+      if (!btn) return;
+      const idx = +btn.dataset.idx;
+      if (btn.dataset.fwAct === "edit-rule") fwEditRule(idx);
+      else if (btn.dataset.fwAct === "del-rule") fwDeleteRule(idx);
+    });
+  }
+  const fwServicesEl = $("fw-services");
+  if (fwServicesEl) {
+    fwServicesEl.addEventListener("click", (ev) => {
+      const btn = ev.target.closest("[data-fw-act='del-service']");
+      if (btn) fwDeleteService(+btn.dataset.idx);
+    });
+  }
+  const fwForwardsEl = $("fw-forwards");
+  if (fwForwardsEl) {
+    fwForwardsEl.addEventListener("click", (ev) => {
+      const btn = ev.target.closest("[data-fw-act]");
+      if (!btn) return;
+      const idx = +btn.dataset.idx;
+      if (btn.dataset.fwAct === "edit-fwd") fwEditForward(idx);
+      else if (btn.dataset.fwAct === "del-fwd") fwDeleteForward(idx);
+    });
+  }
+  const fwBansEl = $("fw-bans");
+  if (fwBansEl) {
+    fwBansEl.addEventListener("click", (ev) => {
+      const btn = ev.target.closest("[data-fw-unban]");
+      if (btn && btn.dataset.fwUnban) fwUnban(btn.dataset.fwUnban);
+    });
+  }
   // firewall rule modal
   $("fw-rm-save").addEventListener("click", _saveRuleModal);
   $("fw-rm-cancel").addEventListener("click", () => $("fw-rule-modal").classList.add("hidden"));
@@ -4716,6 +4769,18 @@ async function init() {
   document.querySelectorAll(".hist-tab").forEach((btn) => {
     btn.addEventListener("click", () => switchHistoryView(btn.dataset.view));
   });
+  const histTop = $("hist-top");
+  if (histTop) {
+    histTop.addEventListener("click", (ev) => {
+      const btn = ev.target.closest("[data-dns-quick]");
+      if (!btn) return;
+      const domain = btn.dataset.dnsDomain;
+      const action = btn.dataset.dnsQuick;
+      const scope = btn.dataset.dnsScope;
+      const devId = btn.dataset.dnsDevid ? +btn.dataset.dnsDevid : null;
+      quickDnsRule(domain, action, scope, devId);
+    });
+  }
 
   // VPN subsystem event listeners
   const vpnToggleBtn = $("vpn-toggle-btn");
@@ -4869,6 +4934,30 @@ async function init() {
       btn.classList.add("active");
       currentVpnRoutingTab = btn.dataset.vtab || "users";
       renderVpnRouting(vpnRoutingCache);
+    });
+  }
+  const vpnNodesTbody = $("vpn-nodes-tbody");
+  if (vpnNodesTbody) {
+    vpnNodesTbody.addEventListener("click", (ev) => {
+      const btn = ev.target.closest("[data-vpn-act]");
+      if (!btn) return;
+      const act = btn.dataset.vpnAct;
+      const id = btn.dataset.vpnId ? +btn.dataset.vpnId : null;
+      if (act === "ping") pingVpnNode(id);
+      else if (act === "disconnect") disconnectVpn();
+      else if (act === "connect") connectVpn(id);
+      else if (act === "edit") editVpnNode(id);
+      else if (act === "delete") deleteVpnNode(id);
+    });
+  }
+  const vpnRoutingList = $("vpn-routing-list");
+  if (vpnRoutingList) {
+    vpnRoutingList.addEventListener("change", (ev) => {
+      const input = ev.target.closest("[data-vpn-route-type]");
+      if (!input) return;
+      const type = input.dataset.vpnRouteType;
+      const id = +input.dataset.vpnRouteId;
+      setVpnRouting(type, id, input.checked);
     });
   }
 
