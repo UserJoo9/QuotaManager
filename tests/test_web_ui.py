@@ -379,6 +379,6 @@ def test_no_inline_event_handlers_for_strict_csp():
             if pattern.search(line):
                 violations.append(f"{target.name}:{idx}: {line.strip()[:80]}")
 
-    assert not violations, f"Found inline event handlers violating strict CSP:\n" + "\n".join(violations)
+    assert not violations, "Found inline event handlers violating strict CSP:\n" + "\n".join(violations)
 
 
