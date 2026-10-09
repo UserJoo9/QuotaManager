@@ -2365,6 +2365,7 @@ select option { background: var(--bg-2); }
   .icon-btn, .accordion-toggle { width: 34px; height: 34px; }
   .btn { padding: 9px 12px; font-size: 0.85rem; }
   .btn.small { padding: 7px 10px; font-size: 0.78rem; }
+  .btn.tiny { padding: 6px 12px; font-size: 0.8rem; min-height: 28px; }
   .modal, .welcome-overlay { padding: 10px; }
   .modal-card { padding: 18px 14px; max-height: calc(100vh - 20px); border-radius: var(--radius-lg); }
   .welcome-overlay .welcome-card { padding: 20px 16px; max-height: calc(100vh - 20px); }

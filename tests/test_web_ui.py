@@ -101,7 +101,7 @@ def test_index_served(client):
     assert r.text.index('id="sidebar-bundle"') < r.text.index('id="panel-management"')
     assert 'id="usage-chart"' not in r.text
     assert "assets/app.js?v=95" in r.text
-    assert "assets/styles.css?v=79" in r.text
+    assert "assets/styles.css?v=80" in r.text
     # v24: the sidebar collapse toggle is gone — the sidebar is a fixed rail.
     assert "sidebar-toggle" not in r.text
     assert "sidebar-collapsed" not in r.text
@@ -356,7 +356,7 @@ def test_history_assets_bumped(client):
     48/47; the v27.1 PPPoE-username privacy fix took app.js to 48 — this
     always checks the CURRENT baseline, not the original bump."""
     r = client.get("/")
-    assert "assets/styles.css?v=79" in r.text
+    assert "assets/styles.css?v=80" in r.text
     assert "assets/app.js?v=95" in r.text
 
 

@@ -3988,6 +3988,16 @@ async function setVpnRouting(type, id, routeVpn) {
 }
 
 async function connectVpn(nodeId) {
+  const btn = document.querySelector(`[data-vpn-act="connect"][data-vpn-id="${nodeId}"]`);
+  const heroBtn = $("vpn-toggle-btn");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Connecting…";
+  }
+  if (heroBtn) {
+    heroBtn.disabled = true;
+    heroBtn.textContent = "Connecting…";
+  }
   try {
     await API.post("/api/vpn/connect", { node_id: nodeId });
     await loadVpnStatus();
@@ -3997,10 +4007,23 @@ async function connectVpn(nodeId) {
     alert("Connection failed: " + e.message);
     await loadVpnStatus();
     await loadVpnLogs();
+  } finally {
+    if (btn) btn.disabled = false;
+    if (heroBtn) heroBtn.disabled = false;
   }
 }
 
 async function disconnectVpn() {
+  const btn = document.querySelector(`[data-vpn-act="disconnect"]`);
+  const heroBtn = $("vpn-toggle-btn");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Disconnecting…";
+  }
+  if (heroBtn) {
+    heroBtn.disabled = true;
+    heroBtn.textContent = "Disconnecting…";
+  }
   try {
     await API.post("/api/vpn/disconnect");
     await loadVpnStatus();
@@ -4009,6 +4032,9 @@ async function disconnectVpn() {
   } catch (e) {
     alert("Disconnect failed: " + e.message);
     await loadVpnLogs();
+  } finally {
+    if (btn) btn.disabled = false;
+    if (heroBtn) heroBtn.disabled = false;
   }
 }
 
