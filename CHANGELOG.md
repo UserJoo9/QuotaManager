@@ -6,6 +6,13 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## [0.4.2] — 2026-10-09
+
+### Fixed
+- **Dashboard Action Buttons on Mobile & Modern Browsers**: Fixed an issue where several interactive controls across the dashboard — including VPN node connection, add-on package deletion, static IP reservation removal, MAC filtering rules, and firewall management controls — were unresponsive when clicked or tapped.
+- **VPN Connection Feedback**: Added clear visual status indicators ("Connecting…" and "Disconnecting…") when switching VPN nodes, providing immediate feedback that your request is being handled.
+- **Mobile Touch Responsiveness**: Enlarged the touch target areas of smaller action buttons on phone screens for easier and more reliable tapping.
+
 ## [0.4.1] — 2026-10-05
 
 ### Added
