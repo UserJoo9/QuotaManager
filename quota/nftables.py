@@ -282,6 +282,10 @@ class NftablesEngine:
         #: tunnel, the VPN server endpoints live here — the ONE box-side egress
         #: that survives a Gateway cut (see :meth:`set_gateway_allowed`).
         self._gateway_allowed: tuple[str, ...] | None = None
+        web_cfg = getattr(cfg, "web", None)
+        self._web_port: int = int(getattr(web_cfg, "port", 8080) if web_cfg is not None else 8080)
+        #: IPs of pending guests programmed into the `pending_guests` captive portal set
+        self._last_pending_guests: list[str] = []
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -334,11 +338,21 @@ class NftablesEngine:
                    mac_saddr_drop])
         self._run(["add", "rule", f"{FAMILY} {self.table} forward",
                    mac_daddr_drop])
+        # Clamp TCP MSS to Path MTU on forwarded traffic (prevents VPN/PPPoE packet fragmentation)
+        self._run_best_effort(["add", "rule", f"{FAMILY} {self.table} forward",
+                               "tcp flags syn tcp option maxseg size set rt mtu"])
         # The box's own internet: input/output hooks with q_gw_up/q_gw_down
         # counters (count_gateway) + a gw_blocked set the admin toggles. Runs
         # BEFORE the counter reset below so a carried-over q_gw_* total is
         # captured as the baseline first (see _reseed_gateway_baseline).
         self._program_gateway()
+        # Captive portal redirection for pending guests (HTTP port 80 -> panel web port)
+        self._run_best_effort(["add", "set", f"{FAMILY} {self.table} pending_guests",
+                              "{ type ipv4_addr; }"])
+        self._run_best_effort(["add", "chain", f"{FAMILY} {self.table} prerouting",
+                              "{ type nat hook prerouting priority -50; policy accept; }"])
+        self._run_best_effort(["add", "rule", f"{FAMILY} {self.table} prerouting",
+                              f"ip saddr @pending_guests tcp dport 80 redirect to :{self._web_port}"])
         # `flush table` removes rules but NOT named counter objects. After a
         # restart the per-device counters keep their cumulative totals and the
         # in-memory delta baseline (_last) is gone, so the first drain would
@@ -361,7 +375,8 @@ class NftablesEngine:
         self.available = False
 
     def update_state(self, ip_to_mac: dict[str, str],
-                     blocked: dict[str, bool]) -> None:
+                     blocked: dict[str, bool],
+                     pending_guests: Optional[list[str]] = None) -> None:
         """Reconcile per-device counters + the blocked set with the service."""
         self._ip_to_mac = dict(ip_to_mac)
         self._blocked = dict(blocked)
@@ -401,6 +416,25 @@ class NftablesEngine:
         # cannot see those; the ether set can (its traffic still crosses the
         # forward chain with its real saddr/daddr).
         self._sync_blocked_macs(blocked)
+        if pending_guests is not None:
+            self._sync_pending_guests(pending_guests)
+
+    def _sync_pending_guests(self, pending_guests: list[str]) -> None:
+        """Program the kernel ``pending_guests`` set for captive portal redirect."""
+        pg_sorted = sorted(pending_guests)
+        if pg_sorted == self._last_pending_guests:
+            return
+        self._last_pending_guests = None
+        if self._run(["flush", "set", f"{FAMILY} {self.table} pending_guests"]):
+            ok = True
+            for ip in pg_sorted:
+                if not self._run(["add", "element",
+                                  f"{FAMILY} {self.table} pending_guests",
+                                  f"{{ {ip} }}"]):
+                    ok = False
+                    break
+            if ok:
+                self._last_pending_guests = pg_sorted
 
     def _sync_blocked_ips(self, blocked_ips: list[str]) -> None:
         """Program the kernel ``blocked`` set for leased, quota-blocked IPs."""

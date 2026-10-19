@@ -31,7 +31,18 @@ def test_vless_reality_parser():
 
     cfg = generate_sing_box_config(outbound)
     assert cfg["inbounds"][0]["interface_name"] == "quota-vpn"
+    assert cfg["inbounds"][0]["auto_route"] is True
     assert cfg["experimental"]["clash_api"]["external_controller"] == "127.0.0.1:9090"
+
+    # DNS must route through local dnsmasq (127.0.0.1:53) so ad-blocker & parental rules apply
+    dns_servers = cfg["dns"]["servers"]
+    assert any(s.get("server") == "127.0.0.1" and s.get("server_port") == 53 for s in dns_servers)
+
+    # Route rules must direct private LAN IPs to "direct" outbound while public traffic (including upstream DNS) goes to proxy-out
+    route_rules = cfg["route"]["rules"]
+    assert any("192.168.0.0/16" in r.get("ip_cidr", []) and r.get("outbound") == "direct" for r in route_rules)
+    assert not any(r.get("port") == 53 and r.get("outbound") == "direct" for r in route_rules)
+
     valid, err = validate_sing_box_config(cfg)
     assert valid is True
     assert err == ""

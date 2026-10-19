@@ -130,6 +130,17 @@ shaping:
   client_subnet: ""
   ifb: ifb0
   lan_rate_mbps: 1000
+  # VPN-share queue control (inert while the tunnel is not active). The box
+  # keeps the bottleneck queue inside its own AQM instead of the ISP buffer:
+  # every WAN rate is programmed at line_margin_pct (x vpn_margin_pct unless
+  # measured), the box's encrypted egress is capped at the UPLOAD total, and
+  # the outer download is policed on ifb1 (cake ingress).
+  line_margin_pct: 93
+  vpn_margin_pct: 85
+  # Run a speed test THROUGH the VPN and put the real numbers here (Mbps).
+  # Both > 0 => they replace the Network-tab totals while the VPN is on.
+  vpn_down_mbps: 12
+  vpn_up_mbps: 1.0
 
 # "VPN share" — route the whole client subnet through the box's VPN. The box
 # runs a VPN client in TUN mode (sing-box/xray `tun`, WireGuard, or tun2socks

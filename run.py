@@ -426,8 +426,12 @@ class Gateway:
 
     # ------------------------------------------------------------- startup
 
-    async def startup(self) -> None:
-        """Connect DB, ensure period, start optional subsystems."""
+    async def startup_core(self) -> None:
+        """Connect DB, ensure period, instantiate managers.
+
+        Runs in < 20 ms so the web server can bind port 8080 and serve the UI
+        immediately without waiting for kernel rules or network commands.
+        """
         await self.database.connect()
         # A dashboard WAN-toggle applies on the NEXT restart: the DB override
         # must land on cfg BEFORE the engine/scanner are built below (they read
@@ -445,140 +449,122 @@ class Gateway:
         await self.service.ensure_period()
         log.info("database ready: %s", self.cfg.db_path)
 
-        # -- startup self-heal (infrastructure resilience) -----------------
-        # The setup script creates ``quota_nat`` (masquerade) and the NIC
-        # addresses once; either can be silently lost (nft flush ruleset,
-        # NM reconnection, broken symlink).  Recreate anything missing
-        # before the engine / firewall depend on it.  Best-effort — a
-        # failure is logged and never prevents the app from starting.
-        self._startup_self_heal()
-
-        # -- packet engine (nftables kernel rules) --------------------------
-        if self.cfg.engine.enabled:
+        if self.cfg.engine.enabled and self.engine is None:
             self.engine = _make_engine(self.cfg, self.holder)
-            self.engine.start()
-            log.info("packet engine started (%s)", getattr(self.engine, "name", "?"))
-        else:
-            log.warning("packet engine disabled in config — no per-packet accounting")
-
-        # -- speed shaping (tc) ---------------------------------------------
-        # Kernel-side HTB + fq_codel per-device / per-user speed limits. The
-        # maintenance loop feeds it settings + the live IP map each tick; the
-        # shaper only rebuilds the kernel tree when something changed.
-        self.shaper = _make_shaper(self.cfg)
-        if self.shaper is not None:
-            self.shaper.start()
-
-        # -- DNS filtering (dnsmasq domain rules + per-client DNS servers) --
-        # Pure config-generation, no kernel/socket state to "start" — built
-        # here (not __init__) for symmetry with the shaper/dnslog and so a
-        # future config-driven rebuild has the same lifecycle shape. An
-        # initial apply happens after the maintenance loop's first tick
-        # (device tags need a device list), not here — see _maintenance_tick.
-        self.dns_manager = _make_dns_manager(self.cfg)
-
-        # -- VPN share (policy routing into the box's tunnel) ----------------
-        # Reconcile once at boot (the DB switch may say on — the rules must
-        # land before any client traffic; a crashed previous run's leftovers
-        # are removed when the switch is off — see VpnShareManager.reconcile),
-        # then every maintenance tick + right after a Network-tab toggle.
-        self.vpn_manager = _make_vpn_manager(self.cfg)
-        self.tun2socks_manager = _make_tun2socks_manager(self.cfg)
-        await self._sync_vpn_share()
-
-        # -- kernel firewall (nftables quota_firewall) ------------------------
-        # A SEPARATE table layered BEFORE the quota engine (forward/input hook
-        # priority -100, the engine is 0): firewall-denied traffic never reaches
-        # the quota counters, and quota cuts still apply afterward. It never
-        # touches quota_gateway / quota_nat / quota_arp_lock. Built AFTER the
-        # topology override so its LAN/WAN posture derives from the EFFECTIVE
-        # topology. Reconciles on every maintenance tick; the API drives
-        # safe-apply (watchdog auto-revert), bans, and the WAN-transition
-        # pre-apply (no exposure window).
-        if getattr(self.cfg, "firewall", None) is not None \
+        if self.shaper is None:
+            self.shaper = _make_shaper(self.cfg)
+        if self.dns_manager is None:
+            self.dns_manager = _make_dns_manager(self.cfg)
+        if self.vpn_manager is None:
+            self.vpn_manager = _make_vpn_manager(self.cfg)
+        if self.tun2socks_manager is None:
+            self.tun2socks_manager = _make_tun2socks_manager(self.cfg)
+        if self.firewall is None and getattr(self.cfg, "firewall", None) is not None \
                 and self.cfg.firewall.enabled:
             self.firewall = FirewallManager(self.cfg, self.database,
                                             web_port=self.cfg.web.port)
-            await self.firewall.load_config()
-            await self.firewall.load_geo()
-            await asyncio.to_thread(self.firewall.apply)
-            log.info("firewall started (%s mode)",
-                     "wan" if self.firewall.topology == "wan" else "lan")
-
-        # -- ARP gateway-lock (opt-in) ---------------------------------------
-        # Deny internet to devices that bypass the box by using the ROUTER as
-        # their gateway (static-IP cheat). The engine already programmed the
-        # deny rules (quota/nftables.py, engine.gateway_arp_lock); this starts
-        # the continuous responder that makes the bypasser resolve the router's
-        # IP to the box's MAC so its frames arrive at the box to be dropped.
-        # Skipped in WAN mode — the box terminates the line itself, so there is
-        # no router on the client segment to lock against (no-op anyway, but
-        # don't even start the raw-socket thread).
-        if (getattr(self.cfg.engine, "gateway_arp_lock", False)
-                and getattr(self.cfg.engine, "topology", "lan") != "wan"):
-            from quota.arp_lock import ArpLock  # lazy: raw sockets + a thread
-
-            self.arp_lock = ArpLock(self.cfg)
-            self.arp_lock.start()
-
-        # -- rogue scanner ----------------------------------------------------
-        # Built here (not in __init__) so it resolves its probe networks after
-        # the DB topology override above: in WAN mode it probes ONLY the client
-        # subnet (no uplink LAN). The None-guard lets a test inject a fake.
         if self.arp_scanner is None:
             self.arp_scanner = ArpScanner(self.cfg)
+        self._install_signal_handlers()
+
+    async def startup_subsystems(self) -> None:
+        """Background initialization of kernel rules, shaping, firewall, tailers."""
+        # -- startup self-heal (infrastructure resilience) -----------------
+        try:
+            await asyncio.to_thread(self._startup_self_heal)
+        except Exception as e:
+            log.warning("startup self-heal notice: %s", e)
+
+        # -- packet engine (nftables kernel rules) --------------------------
+        if self.engine is not None and getattr(self.engine, "available", False):
+            try:
+                await asyncio.to_thread(self.engine.start)
+                log.info("packet engine started (%s)", getattr(self.engine, "name", "?"))
+            except Exception as e:
+                log.warning("packet engine start notice: %s", e)
+
+        # -- speed shaping (tc) ---------------------------------------------
+        if self.shaper is not None:
+            try:
+                await asyncio.to_thread(self.shaper.start)
+            except Exception as e:
+                log.warning("shaper start notice: %s", e)
+
+        # -- VPN share (policy routing into the box's tunnel) ----------------
+        try:
+            await self._sync_vpn_share()
+        except Exception as e:
+            log.warning("vpn share sync notice: %s", e)
+
+        # -- kernel firewall (nftables quota_firewall) ------------------------
+        if self.firewall is not None:
+            try:
+                await self.firewall.load_config()
+                await self.firewall.load_geo()
+                await asyncio.to_thread(self.firewall.apply)
+                log.info("firewall started (%s mode)",
+                         "wan" if self.firewall.topology == "wan" else "lan")
+            except Exception as e:
+                log.warning("firewall start notice: %s", e)
+
+        # -- ARP gateway-lock (opt-in) ---------------------------------------
+        if (getattr(self.cfg.engine, "gateway_arp_lock", False)
+                and getattr(self.cfg.engine, "topology", "lan") != "wan"
+                and self.arp_lock is None):
+            try:
+                from quota.arp_lock import ArpLock
+                self.arp_lock = ArpLock(self.cfg)
+                self.arp_lock.start()
+            except Exception as e:
+                log.warning("arp lock start notice: %s", e)
 
         # -- DNS browsing history (quota.dnslog) ------------------------------
-        # Tail dnsmasq's query log on a dedicated thread and bucket queries
-        # into dns_history each tick. Disabled via cfg.history.enabled: false
-        # => the tailer is never started (recording ceases entirely).
-        if getattr(self.cfg, "history", None) is not None and self.cfg.history.enabled:
-            resume: dict[str, object] = {}
+        if getattr(self.cfg, "history", None) is not None and self.cfg.history.enabled and self.dnslog is None:
             try:
-                resume = json.loads(
-                    await self.database.get_setting("dnslog_state", "{}") or "{}")
-            except ValueError:
-                log.warning("dnslog: ignoring unparseable dnslog_state setting")
-                resume = {}
-            self.dnslog = DnslogTailer(self.cfg.history.dnsmasq_log_file,
-                                       resume=resume)
-            self.dnslog.start()
-            log.info("DNS-history tailer started (%s, resume=%s)",
-                     self.cfg.history.dnsmasq_log_file,
-                     "yes" if resume else "no")
+                resume: dict[str, object] = {}
+                try:
+                    resume = json.loads(
+                        await self.database.get_setting("dnslog_state", "{}") or "{}")
+                except ValueError:
+                    resume = {}
+                self.dnslog = DnslogTailer(self.cfg.history.dnsmasq_log_file,
+                                           resume=resume)
+                self.dnslog.start()
+                log.info("DNS-history tailer started (%s, resume=%s)",
+                         self.cfg.history.dnsmasq_log_file,
+                         "yes" if resume else "no")
+            except Exception as e:
+                log.warning("dnslog start notice: %s", e)
 
         # -- passive WiFi probe (quota.wifi_probe) -----------------------
-        # A dedicated thread runs airodump-ng against a monitor-mode WiFi card
-        # and learns which SSID each device is actually associated with (the
-        # router bridges clients L2, so the box's own NICs can't tell). OFF by
-        # default — the probe card must be a spare one. A test may inject a
-        # fake before startup() (None-guard, same as arp_scanner).
         wprobe_cfg = getattr(getattr(self.cfg, "network", None), "wifi_probe", None)
         if self.wifi_probe is None and wprobe_cfg is not None \
                 and getattr(wprobe_cfg, "enabled", False):
-            from quota.wifi_probe import WifiProbe
+            try:
+                from quota.wifi_probe import WifiProbe
+                self.wifi_probe = WifiProbe(
+                    interface=getattr(wprobe_cfg, "interface", "") or "",
+                    poll_interval=float(
+                        getattr(wprobe_cfg, "poll_interval", 5.0) or 5.0),
+                    sighted_ttl=float(
+                        getattr(wprobe_cfg, "sighted_ttl", 600.0) or 600.0))
+                self.wifi_probe.start()
+                log.info("WiFi probe started (interface %r)",
+                         getattr(wprobe_cfg, "interface", "") or "auto")
+            except Exception as e:
+                log.warning("wifi probe start notice: %s", e)
 
-            self.wifi_probe = WifiProbe(
-                interface=getattr(wprobe_cfg, "interface", "") or "",
-                poll_interval=float(
-                    getattr(wprobe_cfg, "poll_interval", 5.0) or 5.0),
-                sighted_ttl=float(
-                    getattr(wprobe_cfg, "sighted_ttl", 600.0) or 600.0))
-        if self.wifi_probe is not None:
-            self.wifi_probe.start()
-            log.info("WiFi probe started (interface %r)",
-                     getattr(wprobe_cfg, "interface", "") or "auto")
-
-        # -- DHCP + DNS -----------------------------------------------------
-        # dnsmasq owns these (served on the client subnet by the setup
-        # script). We only LEARN device bindings from its lease file (see
-        # _sync_dnsmasq_leases).
         log.info("DHCP + DNS via dnsmasq on the client subnet — Python "
                  "DHCP/DNS/ARP stack not used")
 
         # -- maintenance loop -----------------------------------------------
-        self._maintenance_task = asyncio.create_task(self._maintenance_loop())
-        self._install_signal_handlers()
+        if self._maintenance_task is None:
+            self._maintenance_task = asyncio.create_task(self._maintenance_loop())
+
+    async def startup(self) -> None:
+        """Connect DB, ensure period, start optional subsystems."""
+        await self.startup_core()
+        await self.startup_subsystems()
 
     async def _seed_bundle_from_cfg(self) -> None:
         """Sync the DB bundle from config.yaml unless the dashboard owns it.
@@ -1110,26 +1096,51 @@ class Gateway:
             except asyncio.TimeoutError:
                 pass
 
+    async def _timed(self, name: str, coro: Any) -> Any:
+        """Await one tick step and name it in the log when it is slow, so a
+        53 s tick can be attributed to the step that caused it."""
+        t0 = time.perf_counter()
+        try:
+            return await coro
+        finally:
+            dt = time.perf_counter() - t0
+            if dt > 1.0:
+                log.warning("maintenance step %s took %.1fs", name, dt)
+
+    def _spawn_telegram_tick(self) -> None:
+        """Run the Telegram WAN-IP notifier OFF the tick: a blocked/slow
+        Telegram endpoint used to hold the whole 15 s maintenance cycle for its
+        network timeout (shaping, blocks and VPN routing all waited)."""
+        task = getattr(self, "_telegram_task", None)
+        if task is not None and not task.done():
+            return
+        self._telegram_task = asyncio.ensure_future(
+            asyncio.wait_for(self._wan_telegram_ip_tick(), timeout=20))
+        # Swallow the result: a timeout/failure here is already logged inside
+        # the tick and must not surface as "exception never retrieved".
+        self._telegram_task.add_done_callback(
+            lambda t: t.cancelled() or t.exception())
+
     async def _maintenance_tick(self) -> None:
         # 1. Roll the quota period if stale (covers month boundary).
         await self.service.ensure_period()
 
         # 1b. Learn device bindings from dnsmasq's lease file.
-        await self._sync_dnsmasq_leases()
+        await self._timed("_sync_dnsmasq_leases", self._sync_dnsmasq_leases())
 
         # 1b2. Learn each device's source NIC (NIC tag) from the kernel
         #      neighbor table. Only updates when a fresh value is seen, so an
         #      offline device keeps its last-known interface.
-        await self._collect_neigh_active()
+        await self._timed("_collect_neigh_active", self._collect_neigh_active())
 
         # 1b3. Passive WiFi probe: collects monitor-mode snapshots for the
         #      yield check in _maybe_latency_tick (when the monitor probe is
         #      available, the ARP-RTT probe yields).
-        await self._wifi_probe_tick()
+        await self._timed("_wifi_probe_tick", self._wifi_probe_tick())
 
         # 1b4. ARP-RTT probe (any hardware). Slow cadence,
         #      off the event loop (raw sockets + sleeps in a worker thread).
-        await self._maybe_latency_tick()
+        await self._timed("_maybe_latency_tick", self._maybe_latency_tick())
 
         # 1c. Rogue/unmanaged-host scan on a slow cadence (60 s): static-IP
         #     devices are not in the lease file, so they never show in the
@@ -1162,10 +1173,10 @@ class Gateway:
         # 1f. WAN public-IP auto-renew on schedule (the dashboard WAN tab).
         #     Only in WAN mode with ppp0 UP — a down dial means the internet
         #     isn't working, and renewing into a dead line is pointless.
-        await self._wan_ip_renew_tick()
+        await self._timed("_wan_ip_renew_tick", self._wan_ip_renew_tick())
 
         # 1g. Telegram WAN IP change trigger (notifies admin whenever public IP changes).
-        await self._wan_telegram_ip_tick()
+        self._spawn_telegram_tick()
 
         # 1h. GitHub self-update check (24 h gate lives inside the updater —
         #     maybe_check is a no-op until the interval elapses). A failure is
@@ -1173,7 +1184,7 @@ class Gateway:
         #     cfg.updates.enabled=false (master switch / hermetic tests).
         if self.updater is not None:
             try:
-                await self.updater.maybe_check()
+                await self._timed("updater.maybe_check", self.updater.maybe_check())
             except Exception:  # noqa: BLE001 — never let the updater stall a tick
                 log.exception("update check tick failed")
 
@@ -1229,13 +1240,22 @@ class Gateway:
         ip_to_mac = {v["ip"]: mac for mac, v in state.items() if v.get("ip")}
         self._last_ip_to_mac = ip_to_mac  # for an immediate shaping re-sync
         blocked = {mac: v["blocked"] for mac, v in state.items()}
+        pending_guests = {
+            v["ip"] for mac, v in state.items()
+            if v.get("ip") and v.get("guest") and v.get("blocked")
+        }
         engine_available = False
         gateway_blocked = None
         if self.engine is not None:
             # nft update_state + set_gateway_blocked shell out to `nft`
             # (a subprocess per rebuild, ~80 on a first boot). Run them off
             # the event loop so a slow kernel sync never stalls the WS push.
-            await asyncio.to_thread(self.engine.update_state, ip_to_mac, blocked)
+            try:
+                await asyncio.to_thread(
+                    self.engine.update_state, ip_to_mac, blocked, list(pending_guests))
+            except TypeError:
+                await asyncio.to_thread(
+                    self.engine.update_state, ip_to_mac, blocked)
             # The box's own internet is cut via the gateway chains (gw_blocked
             # set) — its MAC has no lease/IP, so it never enters the forward
             # blocked set above. The Gateway user's resolved state drives the
@@ -1258,30 +1278,31 @@ class Gateway:
             wan_status=await self._wan_status(),
             gateway_blocked=gateway_blocked,
             engine_available=engine_available,
+            pending_guests=pending_guests,
             ts=time.time()))
 
         # 5. Linux: reconcile the tc speed-shaping tree (settings + live IPs).
         #    update_state is signature-gated, so an unchanged state does not
         #    touch the kernel; a DB edit lands here within one tick (<=15 s).
-        await self._sync_shaping(ip_to_mac)
+        await self._timed("_sync_shaping", self._sync_shaping(ip_to_mac))
 
         # 6. Regenerate dnsmasq's domain-rule + tag config if anything
         #    changed (new device -> new tag, or a rule/preset/DNS-server
         #    edit that arrived without going through the API's immediate
         #    apply — e.g. a test or a future non-HTTP caller).
-        await self._sync_dns_rules()
+        await self._timed("_sync_dns_rules", self._sync_dns_rules())
 
         # 6b. Reconcile the DHCP-refusal fragment for the STOP-NEW + Decline-random
         #     gates (cheap content diff; self-heals a gate toggle that missed
         #     the API's immediate apply, a deleted fragment, or a leftover
         #     fragment after a gate was turned off).
-        await self._sync_refuse_fragment()
+        await self._timed("_sync_refuse_fragment", self._sync_refuse_fragment())
 
         # 7. Reconcile the VPN-share policy routing (cheap when nothing
         #    changed; re-applies when the VPN client restarts/re-creates
         #    its tunnel, and removes the rule if the tunnel vanished so
         #    clients never ride a dead VPN into a blackhole).
-        await self._sync_vpn_share()
+        await self._timed("_sync_vpn_share", self._sync_vpn_share())
 
         # 8. Reconcile the kernel firewall (quota_firewall). Re-applies ONLY
         #    when the stored config or the topology changed (signature-gated),
@@ -1290,7 +1311,7 @@ class Gateway:
         if self.firewall is not None \
                 and getattr(self.firewall, "available", False):
             try:
-                await self.firewall.reconcile()
+                await self._timed("firewall.reconcile", self.firewall.reconcile())
             except Exception:  # noqa: BLE001 — never let the firewall stall a tick
                 log.exception("firewall reconcile failed")
 
@@ -1312,10 +1333,10 @@ class Gateway:
                 config = await self.service.get_shaping_config()
                 guest_speed = await self.service.guest_speed_limit_mbps()
                 users = {u.id: u for u in await self.database.list_users()}
-                devices = {d.mac: d for d in await self.database.list_devices()}
+                devices = {d.mac.lower(): d for d in await self.database.list_devices()}
                 rate_map: list[dict[str, object]] = []
                 for ip, mac in ip_to_mac.items():
-                    dev = devices.get(mac)
+                    dev = devices.get(mac.lower())
                     if dev is None or dev.user_id is None:
                         continue  # untracked or orphaned — nothing to shape
                     user = users.get(dev.user_id)
@@ -1336,17 +1357,92 @@ class Gateway:
                         "user_down": user_down,
                         "user_up": user_up,
                     })
+                # "VPN active" = the tunnel is genuinely carrying the client
+                # subnet right now (VpnShareManager applied the policy route).
+                # The DB switch alone is NOT enough: with the switch on but the
+                # tunnel down, clients fall back to the direct uplink and must
+                # not be shaped with tunnel margins.
+                vpn_active = str(
+                    self._last_vpn_status.get("state", "")) == "on"
+                if not vpn_active:
+                    for _vc in (getattr(self, "vpn_core", None),
+                                getattr(self, "vpn_manager", None)):
+                        if _vc is not None and str(
+                                getattr(_vc, "state", "")) == "connected":
+                            vpn_active = True
+                            break
+
+                shaping_enabled = config["enabled"]
+                total_down = config["total_down_mbps"]
+                total_up = config["total_up_mbps"]
+                fair_sharing = False
+                rates_measured = False
+
+                if vpn_active:
+                    shaping_enabled = True
+                    fair_sharing = True
+                    sc = self.cfg.shaping
+                    # Panel values win; config.yaml is only the fallback.
+                    vdown = float(config.get("vpn_down_mbps") or 0) or float(
+                        getattr(sc, "vpn_down_mbps", 0) or 0)
+                    vup = float(config.get("vpn_up_mbps") or 0) or float(
+                        getattr(sc, "vpn_up_mbps", 0) or 0)
+                    if vdown > 0 and vup > 0:
+                        # Operator-measured through-VPN speeds replace the
+                        # WAN totals (a half-set pair never engages).
+                        total_down, total_up = vdown, vup
+                        rates_measured = True
+                    elif total_down <= 0 or total_up <= 0:
+                        # Unset totals leave the tunnel UNSHAPED, which is the
+                        # exact "one download freezes everyone" condition:
+                        # engage a conservative baseline and say so loudly.
+                        if not getattr(self, "_warned_vpn_rates", False):
+                            self._warned_vpn_rates = True
+                            log.warning(
+                                "VPN share is active but the line speed is "
+                                "not set (Network tab totals / shaping."
+                                "vpn_down_mbps+vpn_up_mbps) — using a 30/10 "
+                                "Mbps baseline. Run a speed test THROUGH the "
+                                "VPN and set the real numbers.")
+                        if total_down <= 0:
+                            total_down = 30.0
+                        if total_up <= 0:
+                            total_up = 10.0
+
                 # A tree rebuild runs ~70-115+ sequential `tc` subprocesses
                 # (~1.5-5 s). Keep it OFF the event loop (WS pushes + API
                 # requests starve during the rebuild otherwise). The lock
                 # still serializes tick vs API-immediate re-syncs, and
                 # update_state's signature gate makes the common no-op free.
-                await asyncio.to_thread(
-                    shaper.update_state,
-                    rate_map, config["enabled"],
-                    config["total_down_mbps"],
-                    config["total_up_mbps"],
-                    lan_rate_mbps=config["lan_rate_mbps"])
+                try:
+                    await asyncio.to_thread(
+                        shaper.update_state,
+                        rate_map, shaping_enabled,
+                        total_down,
+                        total_up,
+                        lan_rate_mbps=config["lan_rate_mbps"],
+                        fair_sharing=fair_sharing,
+                        vpn_active=vpn_active,
+                        rates_measured=rates_measured,
+                        vpn_pct=float(config.get("vpn_pct") or 0))
+                except TypeError:
+                    # Older/narrower update_state signatures: drop the newer
+                    # kwargs progressively instead of losing the shaping call.
+                    try:
+                        await asyncio.to_thread(
+                            shaper.update_state,
+                            rate_map, shaping_enabled,
+                            total_down,
+                            total_up,
+                            lan_rate_mbps=config["lan_rate_mbps"],
+                            fair_sharing=fair_sharing)
+                    except TypeError:
+                        await asyncio.to_thread(
+                            shaper.update_state,
+                            rate_map, shaping_enabled,
+                            total_down,
+                            total_up,
+                            lan_rate_mbps=config["lan_rate_mbps"])
                 self._shaping_applied = bool(getattr(shaper, "applied", True))
                 self._shaping_available = bool(
                     getattr(shaper, "available", False))
@@ -1605,11 +1701,23 @@ class Gateway:
             ip_address(srv_str)
             return srv_str
         except ValueError:
+            # Resolved on EVERY tick for every saved node: an unresolvable or
+            # slow hostname used to cost its full resolver timeout each time
+            # (the live box: _sync_vpn_share took 40 s per tick, delaying
+            # blocks/shaping/routing). Cache hits AND misses for a while and
+            # cap a lookup at 3 s.
+            cache = self.__dict__.setdefault("_node_ip_cache", {})
+            now = time.monotonic()
+            hit = cache.get(srv_str)
+            if hit is not None and now - hit[0] < (600 if hit[1] else 120):
+                return hit[1]
             try:
-                resolved = await asyncio.to_thread(socket.gethostbyname, srv_str)
-                return resolved if resolved else None
-            except Exception:
-                return None
+                resolved = await asyncio.wait_for(
+                    asyncio.to_thread(socket.gethostbyname, srv_str), 3.0)
+            except Exception:  # noqa: BLE001 — timeout or NXDOMAIN
+                resolved = None
+            cache[srv_str] = (now, resolved or None)
+            return resolved or None
 
     async def _sync_vpn_share(self) -> None:
         """Reconcile the VPN-share policy routing with the dashboard switch.
@@ -1727,10 +1835,14 @@ class Gateway:
                         self._vpn_allowed |= learned
                         try:
                             nodes = await self.database.list_vpn_nodes()
-                            for n in nodes:
-                                nip = await self._extract_node_server_ip(n)
-                                if nip:
-                                    self._vpn_allowed.add(nip)
+                            if nodes:
+                                nips = await asyncio.gather(
+                                    *(self._extract_node_server_ip(n) for n in nodes),
+                                    return_exceptions=True
+                                )
+                                for nip in nips:
+                                    if isinstance(nip, str) and nip:
+                                        self._vpn_allowed.add(nip)
                         except Exception as ex:
                             log.warning("Could not add saved VPN nodes to gw_allowed: %s", ex)
                         override = list(
@@ -1764,6 +1876,9 @@ class Gateway:
         next maintenance tick. The API schedules this after a Network-tab
         save that includes the switch (or a VPN-bypass edit)."""
         await self._sync_vpn_share()
+        # The tunnel flipped: reshape NOW (VPN margins / outer-download
+        # policer on or off) instead of running 15 s at the wrong rates.
+        await self._reshaping_now()
 
     def _vpn_status(self) -> dict[str, object]:
         """Live VPN-share state for /api/network's ``vpn_share.status``.
@@ -2039,7 +2154,9 @@ def main() -> None:
     gateway = Gateway(cfg, config_path=resolved_config_path)
 
     async def _serve() -> None:
-        await gateway.startup()
+        # Fast core boot: connects DB, re-arms config/bundle, instantiates managers (<20 ms)
+        # Port 8080 binds immediately so web UI never gets ERR_CONNECTION_REFUSED on restart.
+        await gateway.startup_core()
         # TLS fallback: enforce-https persists cert paths in BOTH config.yaml
         # AND the DB.  When the user copies the project folder to the box,
         # config.yaml gets overwritten (wiping the TLS keys) but the DB and
@@ -2105,6 +2222,7 @@ def main() -> None:
             host=cfg.web.host,
             port=cfg.web.port,
             log_level="warning",
+            timeout_graceful_shutdown=2,
             ssl_certfile=cfg.web.tls_certfile or None,
             ssl_keyfile=cfg.web.tls_keyfile or None,
         )
@@ -2116,9 +2234,17 @@ def main() -> None:
             server.should_exit = True
 
         stop_task = asyncio.create_task(_stop_listener())
+        # Launch kernel/subsystem background init concurrently with web server
+        subsystems_task = asyncio.create_task(gateway.startup_subsystems())
         try:
             await server.serve()
         finally:
+            if not subsystems_task.done():
+                subsystems_task.cancel()
+                try:
+                    await subsystems_task
+                except asyncio.CancelledError:
+                    pass
             stop_task.cancel()
             await gateway.shutdown()
 

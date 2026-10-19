@@ -906,12 +906,12 @@ class Database:
                    "limit_down_mbps", "limit_up_mbps",
                    "notified_50", "notified_75", "notified_100",
                    "history_days", "dns_server", "exempt_quota",
-                   "vpn_bypass"}
+                   "vpn_bypass", "guest"}
         sets, args = [], []
         for key, value in fields.items():
             if key in allowed:
                 sets.append(f"{key}=?")
-                args.append(value)
+                args.append(int(bool(value)) if key == "guest" else value)
         if not sets:
             return await self.get_user(user_id)
         args.append(user_id)

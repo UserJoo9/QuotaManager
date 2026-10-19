@@ -45,6 +45,7 @@ gateway:
   active websites and apps (YouTube, TikTok, Netflix, Facebook) and per-device daily timelines
 - **Static DHCP IP Reservations**: Assign fixed IP addresses to servers, printers, or
   gaming consoles directly from the dashboard with one click
+- **Local Share (Zero-Install LAN File, Folder & Live Streaming)**: Ultra-fast local file, folder, and clipboard sharing across all phones, PCs, tablets, and smart TVs on your home Wi-Fi — featuring **Live Direct Stream (0-Disk RAM Relay)** for direct device-to-device transfers without using router storage, folder bundle uploads, multi-selection batch ZIP downloads, zero app installs, pure local line speeds, and automatic 2-hour cleanup
 - Serves a **dark obsidian-glass dashboard** with instant zero-flicker tab switching
   that you can open from any phone on the LAN — the whole UI (dashboard, milestone page,
   and consumption report) is phone-friendly and touch-first

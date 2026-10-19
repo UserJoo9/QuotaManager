@@ -1293,6 +1293,124 @@ def test_shaper_applies_default_guest_speed_cap(tmp_path):
         _get_loop().run_until_complete(gw.shutdown())
 
 
+def test_shaper_applies_vpn_fair_sharing(tmp_path):
+    """When VPN is connected, _sync_shaping automatically enables shaping,
+    activates fair_sharing=True, and applies the configured VPN bandwidth limits."""
+    cfg = _cfg(tmp_path)
+    gw = Gateway(cfg, internet_probe=lambda: True)
+    _get_loop().run_until_complete(gw.startup())
+    _cancel_maintenance(gw)
+    try:
+        mac1 = "aa:bb:cc:dd:ee:01"
+        mac2 = "aa:bb:cc:dd:ee:02"
+        _get_loop().run_until_complete(gw._persist_lease(mac1, "192.168.2.101"))
+        _get_loop().run_until_complete(gw._persist_lease(mac2, "192.168.2.102"))
+        # Normally shaping is disabled in service config
+        _get_loop().run_until_complete(
+            gw.service.set_shaping(enabled=False, total_down_mbps=100.0, total_up_mbps=20.0))
+
+        calls = []
+
+        class _MockShaper:
+            available = True
+            def start(self): pass
+            def stop(self): pass
+            def update_state(self, rate_map, enabled, total_down, total_up, lan_rate_mbps=None, fair_sharing=False):
+                calls.append({
+                    "rate_map": rate_map,
+                    "enabled": enabled,
+                    "total_down": total_down,
+                    "total_up": total_up,
+                    "fair_sharing": fair_sharing,
+                })
+
+        gw.shaper = _MockShaper()
+
+        class _MockVpnCore:
+            def __init__(self, state="disconnected"):
+                self.state = state
+
+        mock_vpn = _MockVpnCore("disconnected")
+        gw.vpn_core = mock_vpn
+
+        # 1) When VPN disconnected and shaping disabled -> enabled=False, fair_sharing=False
+        _get_loop().run_until_complete(gw._sync_shaping({"192.168.2.101": mac1, "192.168.2.102": mac2}))
+        assert len(calls) == 1
+        assert calls[-1]["enabled"] is False
+        assert calls[-1]["fair_sharing"] is False
+        assert calls[-1]["total_down"] == 100.0
+
+        # 2) Connect VPN -> shaping forces on, fair_sharing=True, using Network speed (100.0 down / 20.0 up)
+        mock_vpn.state = "connected"
+        _get_loop().run_until_complete(gw._sync_shaping({"192.168.2.101": mac1, "192.168.2.102": mac2}))
+        assert len(calls) == 2
+        assert calls[-1]["enabled"] is True
+        assert calls[-1]["fair_sharing"] is True
+        assert calls[-1]["total_down"] == 100.0
+        assert calls[-1]["total_up"] == 20.0
+
+        # 3) Disconnect VPN -> returns to standard state (enabled=False, fair_sharing=False)
+        mock_vpn.state = "disconnected"
+        _get_loop().run_until_complete(gw._sync_shaping({"192.168.2.101": mac1, "192.168.2.102": mac2}))
+        assert len(calls) == 3
+        assert calls[-1]["enabled"] is False
+        assert calls[-1]["fair_sharing"] is False
+        assert calls[-1]["total_down"] == 100.0
+        assert calls[-1]["total_up"] == 20.0
+    finally:
+        _get_loop().run_until_complete(gw.shutdown())
+
+
+def test_shaper_applies_vpn_fair_sharing_with_vpn_manager_and_zero_totals(tmp_path):
+    """When VPN is connected via vpn_manager with zero/unset totals, _sync_shaping
+    detects state=='connected' and applies a 30M/10M baseline so fair sharing engages."""
+    cfg = _cfg(tmp_path)
+    gw = Gateway(cfg, internet_probe=lambda: True)
+    _get_loop().run_until_complete(gw.startup())
+    _cancel_maintenance(gw)
+    try:
+        mac1 = "aa:bb:cc:dd:ee:01"
+        mac2 = "aa:bb:cc:dd:ee:02"
+        _get_loop().run_until_complete(gw._persist_lease(mac1, "192.168.2.101"))
+        _get_loop().run_until_complete(gw._persist_lease(mac2, "192.168.2.102"))
+        _get_loop().run_until_complete(
+            gw.service.set_shaping(enabled=False, total_down_mbps=0.0, total_up_mbps=0.0))
+
+        calls = []
+
+        class _MockShaper:
+            available = True
+            def start(self): pass
+            def stop(self): pass
+            def update_state(self, rate_map, enabled, total_down, total_up, lan_rate_mbps=None, fair_sharing=False):
+                calls.append({
+                    "rate_map": rate_map,
+                    "enabled": enabled,
+                    "total_down": total_down,
+                    "total_up": total_up,
+                    "fair_sharing": fair_sharing,
+                })
+
+        gw.shaper = _MockShaper()
+
+        class _MockVpnManager:
+            def __init__(self, state="connected"):
+                self.state = state
+                self.is_connected = True
+
+        gw.vpn_core = None
+        gw.vpn_manager = _MockVpnManager("connected")
+
+        _get_loop().run_until_complete(gw._sync_shaping({"192.168.2.101": mac1, "192.168.2.102": mac2}))
+        assert len(calls) == 1
+        assert calls[-1]["enabled"] is True
+        assert calls[-1]["fair_sharing"] is True
+        assert calls[-1]["total_down"] == 30.0
+        assert calls[-1]["total_up"] == 10.0
+    finally:
+        _get_loop().run_until_complete(gw.shutdown())
+
+
 # --------------------------------------------------------------------------- #
 # v18 WAN-mode wiring: the dashboard toggle persists a topology preference that
 # applies on the NEXT restart (mirrors bundle_source). The override must land

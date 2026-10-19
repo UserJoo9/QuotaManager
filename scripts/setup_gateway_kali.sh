@@ -434,8 +434,9 @@ dhcp-range=$POOL_START,$POOL_END,$SUBNET_MASK,${LEASE_HOURS}h
 dhcp-option=3,$CLIENT_IP          # default gateway = the quota laptop
 dhcp-option=6,$CLIENT_IP          # DNS = the quota laptop (its dnsmasq forwards)
 # DNS: relay upstream. The box terminates the WAN, so there is no router
-# resolver on the LAN — forward straight to $UPSTREAM_DNS.
+# resolver on the LAN — forward straight to $UPSTREAM_DNS with all-servers.
 no-resolv
+all-servers
 server=$UPSTREAM_DNS
 # Log new leases so Quota Manager can learn MAC<->IP bindings
 log-dhcp
@@ -460,10 +461,10 @@ dhcp-option=3,$CLIENT_IP          # default gateway = the quota laptop
 dhcp-option=6,$CLIENT_IP          # DNS = the quota laptop (its dnsmasq forwards)
 # DNS: relay upstream (Android uses the gateway as a resolver; answer it).
 # Two upstreams for resilience: the router resolves via the ISP's DNS, and
-# 8.8.8.8 covers the case where the router's own resolver is flaky. A single
-# upstream (8.8.8.8 alone) means one blocked/filtered resolver kills DNS for
-# every client while the data path still works.
+# 8.8.8.8 covers the case where the router's own resolver is flaky.
+# all-servers queries all resolvers concurrently so the fastest valid response wins.
 no-resolv
+all-servers
 server=$WAN_GATEWAY
 server=$UPSTREAM_DNS
 # Log new leases so Quota Manager can learn MAC<->IP bindings
@@ -561,6 +562,15 @@ cat > "$CONF_DIR/nftables.gateway.nft" <<EOF
 # packets hit that table's forward hook before this postrouting NAT, so the
 # counters and the block drops see the real client IPs.
 table inet quota_nat {
+    chain prerouting {
+        type nat hook prerouting priority -100; policy accept;
+        # Force all DNS traffic from client subnet to local dnsmasq (:53)
+        # so domain filtering, adblocking, and browsing history always apply
+        ip saddr $CLIENT_NET udp dport 53 redirect to :53
+        ip saddr $CLIENT_NET tcp dport 53 redirect to :53
+        # Direct gateway access on HTTP port 80 -> redirect to panel port 8080
+        ip daddr $CLIENT_IP tcp dport 80 redirect to :8080
+    }
     chain postrouting {
         type nat hook postrouting priority 100; policy accept;
         # Clients (192.168.2.0/24) exit through this box -> masquerade as the
@@ -884,14 +894,14 @@ cat > /etc/systemd/system/quota-gateway.service <<EOF
 [Unit]
 Description=Quota Manager gateway (accounting + quota enforcement)
 After=$AFTER_DEP
-Wants=network-online.target
 
 [Service]
 Type=simple
 # Restart on ANY crash — a 24/7 gateway that silently dies leaves every device
 # unmanaged until someone comes home.
 Restart=always
-RestartSec=5
+RestartSec=1
+TimeoutStopSec=10
 ExecStart=$PYTHON $APP_DIR/run.py --config $CONF_DIR/config.yaml
 WorkingDirectory=$APP_DIR
 Environment=PYTHONUNBUFFERED=1

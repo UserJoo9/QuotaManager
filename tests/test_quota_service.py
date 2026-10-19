@@ -1131,7 +1131,9 @@ def test_shaping_settings_round_trip(database):
         # Latency behavior is hardwired in the shaper — no AQM/margin knobs.
         cfg = await svc.get_shaping_config()
         assert cfg == {"enabled": False, "total_down_mbps": 0.0,
-                       "total_up_mbps": 0.0, "lan_rate_mbps": 1000.0}
+                       "total_up_mbps": 0.0, "lan_rate_mbps": 1000.0,
+                       "vpn_pct": 0.0, "vpn_down_mbps": 0.0,
+                       "vpn_up_mbps": 0.0}
 
         # partial update — only the fields passed change
         cfg = await svc.set_shaping(enabled=True, total_down_mbps=100,

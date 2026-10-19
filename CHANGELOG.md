@@ -6,6 +6,85 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## [Unreleased]
+
+## [0.4.3] — 2026-10-19
+
+### Added
+- **Live Traffic Bandwidth Monitor & Top Consumer Radar**:
+  - Added a dedicated **Live traffic** view in the Browsing History section placed right before "Top Apps & Platforms".
+  - **Real-Time Bandwidth Speedometer & Live Graph**: Displays an interactive, real-time download and upload throughput graph updating every 2 seconds, tracking total active network traffic, peak bandwidth, and live download and upload line speeds.
+  - **Top Consumer Spotlight**: Instantly identifies the device consuming the highest amount of bandwidth right now, showing the device name, user, IP address, exact speed (e.g., in Mbps/Kbps), and percentage share of current household traffic.
+  - **Active App & Platform Detection**: Automatically detects and shows what each device is actively doing or streaming (e.g. YouTube, TikTok, Netflix, Google, Steam, Zoom, Shahid VIP, etc.) with brand colors, service icons, and recent domains.
+  - **Live Device Ranking**: Ranks all active household devices by their current bandwidth consumption, allowing you to click any device to immediately inspect its detailed browsing history and app usage.
+- **Local Share (Zero-Install High-Speed LAN File & Text Sharing)**:
+  - A dedicated **Local Share** tab in the sidebar allowing instant file and text sharing across all devices in your home (smartphones, PCs, laptops, tablets, and smart TVs) directly over your local Wi-Fi.
+  - **Live Direct Transfer**: Transfer files and folders directly from device to device in real time over Wi-Fi without using router storage space. Ideal for routers with limited storage.
+  - **Instant Device Discovery (Radar Beacon)**: Devices currently open on Local Share automatically detect each other on the local Wi-Fi network, allowing 1-click direct file beam.
+  - **Zero App Installation**: No apps required on your phone or computer. Anyone connected to the home network can access the portal directly in their web browser.
+  - **Folder Upload**: Upload entire directories and folders directly; automatically packaged into clean archive bundles preserving folder structures without uploading individual files one by one.
+  - **Multi-Selection & Batch ZIP**: Select multiple files or "Select All" with a single click to download them together as a single ZIP package or delete them in batches.
+  - **Mobile-Optimized Interface**: Clean responsive layout specifically designed for smartphones preventing overlapping buttons or cut off filenames.
+  - **Ultra-Fast Local Network Transfers**: Transfers happen entirely within your local home network (Wi-Fi/Ethernet) at maximum physical line speed without consuming internet quota.
+  - **Quick Mobile QR Code**: Scan a QR code on your PC screen with your smartphone camera to instantly open the Local Share portal.
+  - **Interactive Drag & Drop**: Easily drop any file or folder to share it immediately with real-time progress, transferred bytes, and live speed meter.
+  - **Instant Clipboard & Link Sharing**: Copy and paste links, notes, or Wi-Fi passwords to beam them across all connected household devices in real time with a 1-click copy button.
+  - **Multi-Folder & Multi-File Bundling**: Select one or multiple files or folders simultaneously across both standard uploads and Live Direct device-to-device transfers, bundled seamlessly into archives with preserved directory structures.
+  - **Automatic Expiration & Cleanup**: Shared files automatically expire and are cleared after 2 hours to keep the router's storage light and tidy.
+- **Convert Guest to Regular User**:
+  - Easily convert temporary guest users to permanent regular users with a single click ("👤 Make Regular") directly from user cards, device rows, or the user settings dialog.
+  - Converting a guest account immediately removes guest speed restrictions and exempts the account from monthly reset auto-deletion, granting full administrative control over customized bandwidth speeds and data quotas.
+- **Fair Bandwidth Sharing & VPN Anti-Starvation**:
+  - When your monthly bundle expires and you connect to a VPN, connection speed is automatically and fairly distributed among all active household devices.
+  - If only one device is downloading, it automatically receives 100% of the available connection speed.
+  - When multiple devices request internet simultaneously, the bandwidth is shared equally and fairly so that heavy downloads on one phone or computer cannot freeze or disconnect other devices.
+  - Seamlessly utilizes the maximum internet line speed already configured in the Network tab (WAN speed limits) without requiring duplicate or separate settings.
+- **Guest Approval Notification & Search Interception (Captive Portal)**:
+  - When a new guest connects to the home network and opens a web browser to search or browse before the network administrator has approved their device, they are automatically greeted with a friendly, clear status page explaining that their device is awaiting admin approval.
+  - Displays device information (device name, IP, and MAC address) along with a live indicator showing that approval is pending.
+  - Automatically checks for administrator approval in the background every few seconds.
+  - The moment the administrator clicks "Accept" in the dashboard, the page automatically turns green, shows the granted quota, and redirects the guest to their requested search or website within 3 seconds without needing to reload or reconnect.
+
+### Changed
+- **Live Traffic Radar & Graph Modernization**:
+  - Arranged the real-time throughput graph and top consumer card side-by-side on desktop displays to optimize screen space and provide an instant overview.
+  - Upgraded the throughput graph to ultra-smooth Bezier curves and glowing gradient fills for fluid, real-time visualization.
+  - Corrected the graph's speed axis typography with crisp, proportional numbers eliminating squished or distorted text.
+  - Refined the sidebar active tab indicator's left edge to align seamlessly with the pill's corner radius.
+- **Simplified Interface Terminology**: Removed confusing technical terms (such as "0-Disk Stream" and "Direct RAM relay") across all badges, modals, and tooltips, replacing them with clear, user-friendly labels like "Direct Wi-Fi" and "Live Direct Transfer".
+- **Streamlined Action Controls**: Cleaned up the upload area and device cards to just two simple, balanced buttons (`Files` and `Folders`), eliminating cluttered and redundant buttons while maintaining full support for multi-item selection.
+- **Streamlined VPN Speed Controls**: Simplified the "VPN mode — speed" section in the Network tab from 3 confusing inputs to just 2 direct, clean fields (`VPN down Mbps` and `VPN up Mbps`), removing the redundant percentage input so users can directly specify download and upload line limits.
+- **Direct Stream Speed & High-Throughput Buffering**: Upgraded Live Direct transmission chunk size to 512 KB, implemented ultra-fast hardware-efficient data verification, optimized network flow pacing to eliminate artificial delays, and removed in-memory duplication on receiving devices to unlock full local Wi-Fi transfer line speeds.
+- **Direct Multi-File & Folder Transfer**: Added instant folder selection and multi-file selection to Live Direct, automatically bundled into an archive with preserved directory structures.
+- **Live Direct Transfer 50 MB Safety Limit**: Added a safe 50 MB size limit on Live Direct device-to-device transfers to guarantee smooth, fast transmissions without stalling or exhausting mobile device resources. Files and folders larger than 50 MB prompt a helpful notification guiding the user to standard Local Share upload instead.
+
+### Fixed
+- **Instant Web Dashboard Startup & Zero-Delay Restart**:
+  - Fixed an issue where restarting the service after transferring updates or configuration files caused the web dashboard to become temporarily unreachable (`ERR_CONNECTION_REFUSED`) for 15 to 40 seconds.
+  - The web interface now starts listening and responding within milliseconds of service startup, allowing immediate page access while background system rules finish loading smoothly in parallel.
+  - Optimized service restart timers to eliminate artificial delays when restarting the gateway.
+- **Duplicate PC Device Cards in Local Share**: Fixed an issue where a computer (or any device with multiple browser tabs open or reconnected sessions) appeared twice on the nearby devices radar for other connected phones and tablets. Each physical device on the home network now appears exactly once.
+- **VPN Connection Stability & Speed Customization**:
+  - You can now specify custom VPN line limits (`VPN down Mbps` and `VPN up Mbps`) directly from the Network tab without editing configuration files.
+  - Eliminated connection stalls and queue congestion when running high-bandwidth downloads over VPN by dynamically regulating transmission pacing and prioritizing control signals.
+  - Upstream traffic from client devices is fairly balanced so that no single device can saturate the VPN tunnel and freeze the network for others.
+- **VPN Activation with Uninterrupted DNS & Ad Blocking**:
+  - Fixed an issue where activating the VPN tunnel bypassed local DNS servers and sent raw queries to external DNS providers.
+  - Ad-blocking rules, parental protection filters, custom domain blocklists, and DNS search history analytics now continue to apply flawlessly across all devices when connected to a VPN, while local LAN network traffic is safely excluded from encryption before rules are applied.
+- **Phone Screen Sleep & Lock Disconnections**: Added automatic Screen Wake Lock protection during active Live Direct transfers, preventing mobile phone screens from dimming or going to sleep and interrupting file streams mid-transfer. Added visual reminders to keep the screen active.
+- **Reliable Direct Download & Completion Save Button**: Added a dedicated "Save / Download" button and completion notification directly inside the transfer dialog on receiving devices. If a mobile browser blocks automatic background downloads, users can now tap the button to immediately save their received files.
+- **Instant Direct Beam Handshake**: Eliminated the initial delay when tapping "Send Direct" by registering device names immediately upon connection, using warm network keep-alive signals, and ensuring sender-receiver pairing even if devices reconnect.
+- **Large Multi-Folder Direct Stream Freezing**: Fixed an issue where sending large folders or multi-folder bundles (such as several albums totaling hundreds of megabytes) caused transfers to stall on "Waiting for receiver to accept…". Streaming now initializes instantly without high browser memory usage, includes connection keep-alive heartbeats, and features automatic peer resolution to prevent dropped requests.
+- **Large Payload Memory Crash & Disappearing Files**: Fixed an issue where receiving large payloads (such as 780 MB multi-folder transfers) caused mobile browsers to exhaust their memory limit and crash or reload the tab, causing the received data to be lost. Receiving devices now stream directly into their device storage through a native stream pipeline, keeping browser memory usage at virtually zero and completely preventing tab crashes.
+- **Direct Stream 0 KB / Opus File Issue**: Fixed an issue where binary transfer headers could cause received files to save as 0 KB or with a `.opus` audio extension on mobile devices.
+- **Receiver Progress Display**: Fixed an issue where the receiving device's progress bar remained at 0% during direct transmission; progress and live transfer speed now display accurately.
+- **Gateway Local Traffic VPN Tunneling**: Fixed an issue where connecting to a VPN routed all household client devices through the tunnel while the gateway machine itself still used the direct unencrypted ISP connection. The gateway machine's own traffic now seamlessly routes through the active VPN tunnel alongside connected devices.
+- **Local Share Self-Device Filtering in Live Transfer**: Fixed an issue where a computer or smartphone could appear in its own list of online devices in Local Share when opening multiple tabs or refreshing the page. The device list now accurately displays only other nearby devices connected to your home network.
+- **Heavy Download VPN Starvation & Program/Device Freezing**:
+  - Resolved an issue where a heavy download on one computer or phone in VPN mode (especially when the monthly bundle is finished) would cause the internet to disconnect on all other household devices, and would even freeze browsing and messaging apps on the downloading computer itself.
+  - Fixed an issue where upstream DNS queries to resolve website addresses were being sent directly out the expired ISP connection instead of through the active VPN tunnel, causing new websites and apps to hang and time out while established downloads continued.
+  - Added concurrent multi-resolver querying and upstream upload filtering to ensure that internet browsing, gaming, social apps, and video streaming stay fast and uninterrupted on all devices, even when someone is downloading at maximum speed.
+
 ## [0.4.2] — 2026-10-09
 
 ### Fixed

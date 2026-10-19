@@ -344,6 +344,10 @@ def generate_sing_box_config(outbound_or_config: dict[str, Any],
             for ob in cfg["outbounds"]:
                 if isinstance(ob, dict) and "tls" in ob and isinstance(ob["tls"], dict):
                     ob["tls"]["insecure"] = True
+        for ib in cfg.get("inbounds", []):
+            if isinstance(ib, dict) and ib.get("type") == "tun":
+                ib["auto_route"] = True
+                ib.setdefault("strict_route", False)
         return cfg
 
     proxy_outbound = json.loads(json.dumps(outbound_or_config))
@@ -366,11 +370,10 @@ def generate_sing_box_config(outbound_or_config: dict[str, Any],
         "dns": {
             "servers": [
                 {
-                    "type": "tcp",
-                    "tag": "remote-dns",
-                    "server": "8.8.8.8",
+                    "type": "udp",
+                    "tag": "local-dnsmasq",
+                    "server": "127.0.0.1",
                     "server_port": 53,
-                    "detour": "proxy-out",
                 },
                 {
                     "type": "local",
@@ -380,14 +383,14 @@ def generate_sing_box_config(outbound_or_config: dict[str, Any],
             "rules": [
                 {
                     "outbound": "any",
-                    "server": "direct-dns",
+                    "server": "local-dnsmasq",
                 },
                 {
                     "clash_mode": "Direct",
-                    "server": "direct-dns",
+                    "server": "local-dnsmasq",
                 },
             ],
-            "final": "remote-dns",
+            "final": "local-dnsmasq",
             "strategy": "ipv4_only",
         },
         "inbounds": [
@@ -396,11 +399,11 @@ def generate_sing_box_config(outbound_or_config: dict[str, Any],
                 "tag": "tun-in",
                 "interface_name": tun_interface,
                 "address": ["172.19.0.1/30"],
-                "mtu": 1500,
-                "auto_route": False,
+                "mtu": 1400,
+                "auto_route": True,
                 "strict_route": False,
                 "endpoint_independent_nat": True,
-                "stack": "gvisor",
+                "stack": "system" if os.name == "posix" else "gvisor",
             },
             {
                 "type": "mixed",
@@ -430,14 +433,6 @@ def generate_sing_box_config(outbound_or_config: dict[str, Any],
                         "192.168.0.0/16",
                     ],
                     "outbound": "direct",
-                },
-                {
-                    "protocol": "dns",
-                    "action": "hijack-dns",
-                },
-                {
-                    "port": 53,
-                    "action": "hijack-dns",
                 },
                 {
                     "action": "sniff",

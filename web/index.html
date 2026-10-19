@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quota Manager</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=1">
+    <link rel="stylesheet" href="/assets/styles.css?v=2">
   <script disable-devtool-auto src='/assets/detector.js'></script>
 </head>
 <body>
@@ -95,6 +95,10 @@
           <span class="nav-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></span>
           <span class="nav-label">VPN</span>
         </button>
+        <button class="nav-tab" data-panel="share">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg></span>
+          <span class="nav-label">Local Share</span>
+        </button>
       </nav>
 
       <!-- COMPACT BUNDLE WIDGET — always visible from any tab -->
@@ -129,8 +133,10 @@
               <!-- Danger Track Track (80-100%) -->
               <path class="gauge-track-danger" d="M 146.8 44.4 A 64 64 0 0 1 159 82" />
 
-              <!-- Active Animated Progress Path -->
-              <path id="gauge-svg-fill" class="gauge-fill-path" d="M 31 82 A 64 64 0 0 1 159 82" />
+              <!-- Active Animated Progress Path: Safe Zone (0-80%) -->
+              <path id="gauge-svg-fill" class="gauge-fill-path gauge-fill-safe" stroke="url(#gauge-fill-grad)" d="M 31 82 A 64 64 0 0 1 146.8 44.4" />
+              <!-- Active Animated Progress Path: Danger Redline Zone (80-100%) -->
+              <path id="gauge-svg-fill-danger" class="gauge-fill-path gauge-fill-danger" stroke="#f43f5e" style="stroke: #f43f5e !important;" d="M 146.8 44.4 A 64 64 0 0 1 159 82" />
 
               <!-- Needle (Pivot at 95, 82 - comfortably raised from text, length 40 staying within dial) -->
               <g id="gauge-svg-needle-group" class="gauge-svg-needle-group">
@@ -466,6 +472,12 @@
               <div class="recharge-row">
                 <input type="number" id="set-total-down" min="0" step="any" placeholder="WAN down Mbps">
                 <input type="number" id="set-total-up" min="0" step="any" placeholder="WAN up Mbps">
+              </div>
+              <p class="muted small"><strong>VPN mode — speed</strong></p>
+              <p class="muted small">Maximum speeds measured through the VPN (Mbps). Leave empty or 0 for automatic line-speed adaptation.</p>
+              <div class="recharge-row">
+                <input type="number" id="set-vpn-down" min="0" step="any" placeholder="VPN down Mbps (0 = auto)">
+                <input type="number" id="set-vpn-up" min="0" step="any" placeholder="VPN up Mbps (0 = auto)">
               </div>
               <p class="muted small"><strong>LAN — internal transfers</strong></p>
               <p class="muted small">Maximum allowed speed for internal local network transfers (0 = 1000 Mbps default).</p>
@@ -1142,6 +1154,7 @@
 
           <!-- VIEW TABS -->
           <div class="hist-view-tabs" role="tablist">
+            <button type="button" class="hist-tab" data-view="live"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> Live traffic</button>
             <button type="button" class="hist-tab active" data-view="apps"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg> Top Apps &amp; Platforms</button>
             <button type="button" class="hist-tab" data-view="websites"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg> Top Websites</button>
             <button type="button" class="hist-tab" data-view="timeline"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> Activity Timeline</button>
@@ -1154,6 +1167,57 @@
             <span>Loading browsing history &amp; visual analytics...</span>
           </div>
           <div id="hist-empty" class="muted small hidden" style="text-align: center; padding: 24px;">No browsing activity recorded in this lookback window.</div>
+
+          <!-- LIVE TRAFFIC VIEW -->
+          <div id="hist-view-live" class="hist-view hidden">
+            <!-- Top Section: Live Chart (left) + Top Consumer Spotlight (right) Side-by-Side -->
+            <div class="hist-live-top-row">
+              <!-- Real-time Live Bandwidth Graph -->
+              <div class="hist-live-chart-container glass">
+                <div class="hist-live-chart-header">
+                  <div>
+                    <span class="hist-live-chart-title">Real-Time Bandwidth Monitor</span>
+                    <span class="muted small" style="margin-left: 8px;">Live throughput over the last 60 seconds</span>
+                  </div>
+                  <div class="hist-live-chart-legend">
+                    <span class="legend-item"><span class="legend-dot" style="background:#38bdf8;"></span> Download</span>
+                    <span class="legend-item"><span class="legend-dot" style="background:#10b981;"></span> Upload</span>
+                    <span class="live-pill-badge" id="hist-live-total-pill">0.0 Mbps</span>
+                  </div>
+                </div>
+                <div class="hist-live-svg-wrap">
+                  <svg id="hist-live-svg" preserveAspectRatio="none">
+                    <defs>
+                      <linearGradient id="histGradDown" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.35"/>
+                        <stop offset="100%" stop-color="#38bdf8" stop-opacity="0.0"/>
+                      </linearGradient>
+                      <linearGradient id="histGradUp" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stop-color="#10b981" stop-opacity="0.25"/>
+                        <stop offset="100%" stop-color="#10b981" stop-opacity="0.0"/>
+                      </linearGradient>
+                    </defs>
+                  </svg>
+                </div>
+                <div class="hist-live-chart-footer">
+                  <span class="small muted">Updates live every 2 seconds</span>
+                  <span id="hist-live-peak" class="small muted">Peak: 0.0 Mbps</span>
+                </div>
+              </div>
+
+              <!-- Top Consumer Hero Card (Beside Graph) -->
+              <div id="hist-live-hero" class="hist-live-hero-card glass"></div>
+            </div>
+
+            <!-- Active Devices Ranked by Bandwidth -->
+            <div class="hist-live-devices-card glass">
+              <div class="hist-live-devices-header">
+                <h4>Active Devices Ranked by Current Bandwidth</h4>
+                <span class="muted small" id="hist-live-device-count">0 devices active</span>
+              </div>
+              <div id="hist-live-devices-list" class="hist-live-devices-list"></div>
+            </div>
+          </div>
 
           <!-- APPS VIEW -->
           <div id="hist-view-apps" class="hist-view">
@@ -1465,6 +1529,140 @@
 
         </div>
       </section>
+
+      <!-- LOCAL SHARE PANEL -->
+      <section id="panel-share" class="nav-panel hidden">
+        <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 12px;">
+          <div>
+            <h2 style="display: flex; align-items: center; gap: 10px;">
+              <span>Local Share</span>
+              <span class="badge" style="background: rgba(14, 165, 233, 0.15); color: #38bdf8; font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 600;">● LAN Direct</span>
+            </h2>
+            <p class="muted small" style="margin-top: 4px;">Fast local file and clipboard sharing across all phones, PCs, and TVs on your home Wi-Fi.</p>
+          </div>
+          <div style="display: flex; gap: 10px; align-items: center;">
+            <button type="button" id="share-qr-btn" class="btn ghost small" title="Show QR Code for mobile phones">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+              Mobile QR Code
+            </button>
+            <a href="/share" target="_blank" class="btn ghost small" title="Open standalone mobile/guest portal">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+              Open Web Portal
+            </a>
+            <button type="button" id="share-clear-all-btn" class="btn danger small" title="Clear all shared files">Clear All</button>
+          </div>
+        </div>
+
+        <!-- QUICK DROP ZONE -->
+        <div class="glass card" style="margin-bottom: 20px; padding: 24px; text-align: center; border: 2px dashed rgba(56, 189, 248, 0.3); border-radius: 12px; cursor: pointer; transition: all 0.2s;" id="dash-drop-zone">
+          <input type="file" id="dash-file-input" multiple style="display: none;">
+          <input type="file" id="dash-folder-input" webkitdirectory directory multiple style="display: none;">
+          <div style="width: 48px; height: 48px; border-radius: 50%; background: rgba(14, 165, 233, 0.12); color: #38bdf8; display: flex; align-items: center; justify-content: center; margin: 0 auto 12px;">
+            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+          </div>
+          <h3 style="font-size: 1.05rem; margin-bottom: 4px;">Click or Drag & Drop files or folders here</h3>
+          <p class="muted small" style="margin-bottom: 14px;">Files stream directly over your local Wi-Fi with automatic cleanup after 2 hours.</p>
+
+          <div style="display: flex; gap: 10px; justify-content: center; align-items: center; margin-bottom: 8px;" class="dash-upload-btns">
+            <button type="button" class="btn small primary" id="dash-btn-files" title="Select one or multiple files">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 4px;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+              Upload Files
+            </button>
+            <button type="button" class="btn small" style="background: rgba(14, 165, 233, 0.15); border: 1px solid rgba(14, 165, 233, 0.4); color: #38bdf8;" id="dash-btn-folder" title="Select one or multiple folders">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 4px;"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+              Upload Folders
+            </button>
+          </div>
+
+          <div id="dash-upload-prog-wrap" class="hidden" style="margin-top: 16px; text-align: left; background: rgba(0,0,0,0.25); padding: 12px 16px; border-radius: 8px;">
+            <div style="display: flex; justify-content: space-between; font-size: 0.8rem; margin-bottom: 6px;">
+              <span id="dash-upload-name">Uploading...</span>
+              <span id="dash-upload-stat">0%</span>
+            </div>
+            <div style="width: 100%; height: 6px; background: rgba(255,255,255,0.08); border-radius: 3px; overflow: hidden;">
+              <div id="dash-upload-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #0284c7, #38bdf8); transition: width 0.1s linear;"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- LIVE DIRECT TRANSFER CARD -->
+        <div class="glass card" style="margin-bottom: 20px; padding: 20px;" id="dash-live-share-card">
+          <input type="file" id="dash-live-peer-file-input" multiple style="display: none;">
+          <input type="file" id="dash-live-peer-folder-input" webkitdirectory directory multiple style="display: none;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <h3 style="font-size: 0.95rem; margin: 0;">Live Direct Transfer</h3>
+              <span class="badge" style="background: rgba(14, 165, 233, 0.15); color: #38bdf8; font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 600;">● Direct Wi-Fi</span>
+            </div>
+            <span id="dash-live-peers-count" class="muted small">0 online</span>
+          </div>
+          <p class="muted small" style="margin: 0 0 14px;">Instant device-to-device transfer across your local Wi-Fi at maximum speed.</p>
+
+          <div id="dash-live-peers-list" class="live-peers-grid">
+            <div class="live-empty-peers">
+              <div class="radar-pulse"></div>
+              <div style="font-size: 0.84rem; font-weight: 500; color: #cbd5e1; margin-top: 10px;">Waiting for other devices on your Wi-Fi...</div>
+              <div class="muted small" style="margin-top: 2px;">Open Local Share on your phone, laptop, or tablet to stream directly.</div>
+            </div>
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 340px; gap: 20px; align-items: start;" class="share-grid-wrap">
+          <!-- SHARED FILES TABLE -->
+          <div class="glass card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; flex-wrap: wrap; gap: 8px;">
+              <div style="display: flex; align-items: center; gap: 10px;">
+                <h3 style="font-size: 0.95rem; margin: 0;">Shared Files</h3>
+                <span id="dash-share-file-count" class="muted small">0 files</span>
+              </div>
+              <!-- BATCH TOOLBAR -->
+              <div id="dash-batch-bar" class="hidden" style="display: flex; align-items: center; gap: 8px; background: rgba(14, 165, 233, 0.12); border: 1px solid rgba(14, 165, 233, 0.3); border-radius: 8px; padding: 4px 10px;">
+                <span id="dash-batch-count" style="font-size: 0.78rem; font-weight: 600; color: #38bdf8;">0 selected</span>
+                <button type="button" class="btn primary small" id="dash-batch-download" style="padding: 3px 8px; font-size: 0.74rem;">
+                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 2px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                  Download ZIP
+                </button>
+                <button type="button" class="btn danger small" id="dash-batch-delete" style="padding: 3px 8px; font-size: 0.74rem;">
+                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 2px;"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                  Delete
+                </button>
+                <button type="button" class="btn ghost small" id="dash-batch-cancel" style="padding: 3px 6px; font-size: 0.74rem;">✕</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="history-table" id="share-files-table">
+                <thead>
+                  <tr>
+                    <th style="width: 34px;"><input type="checkbox" id="dash-select-all-cb" title="Select all files"></th>
+                    <th>File</th>
+                    <th>Size</th>
+                    <th>Uploaded</th>
+                    <th>Expires</th>
+                    <th class="num">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="share-files-tbody">
+                  <tr><td colspan="6" class="muted small" style="text-align: center; padding: 20px;">No files shared yet. Drop any file or folder above to get started.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- QUICK TEXT & CLIPBOARD -->
+          <div class="glass card">
+            <h3 style="font-size: 0.95rem; margin-bottom: 12px;">Quick Text & Clipboard</h3>
+            <form id="dash-text-form" style="display: flex; gap: 8px; margin-bottom: 14px;">
+              <input type="text" id="dash-text-input" placeholder="Type or paste text/link..." style="flex: 1;" autocomplete="off">
+              <button type="submit" class="btn primary small">Share</button>
+            </form>
+            <div id="dash-texts-list" style="display: flex; flex-direction: column; gap: 8px; max-height: 400px; overflow-y: auto;">
+              <div class="muted small" style="text-align: center; padding: 12px 0;">No text shared yet.</div>
+            </div>
+          </div>
+        </div>
+      </section>
     </main>
   </div>
 
@@ -1574,6 +1772,10 @@
         <label class="check" title="Never quota-block this user, however much they use. Manual admin cuts still apply.">
           <input type="checkbox" id="u-exempt">
           <span>Exempt from quota (unlimited usage)</span>
+        </label>
+        <label class="check hidden" id="u-guest-wrap" title="Guest account (subject to guest speed limit and auto-deletion on monthly reset). Uncheck to make regular permanent user.">
+          <input type="checkbox" id="u-is-guest">
+          <span>Guest account (حساب ضيف مؤقت)</span>
         </label>
         <div class="modal-actions">
           <button type="button" id="user-modal-cancel" class="btn ghost">Cancel</button>
@@ -1933,8 +2135,102 @@
         </div>
       </form>
     </div>
+  <!-- LOCAL SHARE QR MODAL -->
+  <div id="dash-qr-modal" class="modal hidden">
+    <div class="glass card modal-card" style="text-align: center; max-width: 360px;">
+      <h3 style="margin-bottom: 6px;">Scan with your Phone</h3>
+      <p class="muted small" style="margin-bottom: 12px;">Open Local Share immediately on any mobile device or TV on Wi-Fi</p>
+      <div id="dash-qr-target" style="background: #fff; padding: 12px; border-radius: 12px; margin: 0 auto 14px; width: 200px; height: 200px; display: flex; align-items: center; justify-content: center;"></div>
+      <div id="dash-qr-url" style="font-family: monospace; font-size: 0.8rem; background: rgba(0,0,0,0.3); padding: 8px 10px; border-radius: 6px; color: #38bdf8; word-break: break-all; margin-bottom: 16px;"></div>
+      <button type="button" id="dash-qr-close" class="btn ghost" style="width: 100%;">Close</button>
+    </div>
   </div>
 
-    <script src="/assets/app.js?v=1"></script>
+  <!-- DASH LIVE INCOMING PROMPT MODAL -->
+  <div id="dash-live-incoming-modal" class="modal hidden">
+    <div class="glass card modal-card" style="text-align: center; max-width: 380px;">
+      <div style="width: 48px; height: 48px; border-radius: 50%; background: rgba(56, 189, 248, 0.15); color: #38bdf8; display: flex; align-items: center; justify-content: center; margin: 0 auto 12px; font-size: 1.5rem;">
+        ⚡
+      </div>
+      <h3 style="margin-bottom: 4px;">Direct Live Stream Request</h3>
+      <p class="muted small" style="margin-bottom: 14px;" id="dash-incoming-sender-text">A device wants to send you a file directly</p>
+      
+      <div style="background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 10px 12px; margin-bottom: 16px; text-align: left;">
+        <div style="font-weight: 600; font-size: 0.85rem; color: #f8fafc; word-break: break-all;" id="dash-incoming-file-name">filename</div>
+        <div class="muted small" style="margin-top: 4px;" id="dash-incoming-file-size">0 MB</div>
+      </div>
+
+      <div style="display: flex; gap: 8px; justify-content: center;">
+        <button type="button" class="btn primary small" id="dash-btn-accept-transfer" style="padding: 9px 18px;">Accept & Save</button>
+        <button type="button" class="btn danger small" id="dash-btn-decline-transfer" style="padding: 9px 16px;">Decline</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- DASH LIVE ACTIVE TRANSFER MODAL -->
+  <div id="dash-live-transfer-modal" class="modal hidden">
+    <div class="glass card modal-card" style="text-align: center; max-width: 380px;">
+      <h3 style="margin-bottom: 4px;" id="dash-live-modal-title">Direct Transfer...</h3>
+      <p style="font-size: 0.76rem; color: #38bdf8; margin-bottom: 10px;">● Direct Wi-Fi Transfer (نقل مباشر فائق السرعة)</p>
+
+      <div id="dash-live-modal-screen-warning" style="font-size: 0.72rem; color: #fbbf24; background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.25); border-radius: 6px; padding: 6px 10px; margin-bottom: 12px; display: flex; align-items: center; gap: 6px; text-align: left;">
+        <span>💡</span>
+        <span>Keep screen on & browser open during transfer (يرجى إبقاء الشاشة مفتوحة)</span>
+      </div>
+
+      <div style="font-size: 0.84rem; font-weight: 600; color: #f8fafc; word-break: break-all; margin-bottom: 6px;" id="dash-live-modal-filename">filename</div>
+      <div style="display: flex; justify-content: space-between; font-size: 0.76rem; color: #94a3b8; margin-bottom: 6px;">
+        <span id="dash-live-modal-stats">0%</span>
+        <span id="dash-live-modal-speed">0 MB/s</span>
+      </div>
+
+      <div style="width: 100%; height: 8px; background: rgba(255,255,255,0.08); border-radius: 4px; overflow: hidden; margin-bottom: 16px;">
+        <div id="dash-live-modal-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #0284c7, #38bdf8); transition: width 0.1s linear;"></div>
+      </div>
+
+      <div id="dash-live-modal-actions" style="display: flex; gap: 8px; justify-content: center; flex-wrap: wrap;">
+        <button type="button" class="btn danger small" id="dash-btn-cancel-transfer" style="padding: 8px 18px;">Cancel Transfer</button>
+        <button type="button" class="btn primary small hidden" id="dash-btn-live-save-download" style="padding: 8px 18px; font-weight: 600;">💾 Save / Download</button>
+        <button type="button" class="btn secondary small hidden" id="dash-btn-live-close-done" style="padding: 8px 18px;">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- DASH MULTI-FOLDER STAGING MODAL -->
+  <div id="dash-multi-folder-modal" class="modal hidden">
+    <div class="glass card modal-card" style="text-align: left; max-width: 440px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+        <h3 style="margin: 0; font-size: 1.05rem; display: flex; align-items: center; gap: 8px;">
+          <span>📂</span> <span id="dash-mf-modal-title">Selected Folders</span>
+        </h3>
+        <span class="badge" id="dash-mf-modal-target-badge" style="display: none; background: rgba(14, 165, 233, 0.15); color: #38bdf8;">To: Device</span>
+      </div>
+      <p class="muted small" style="margin: 0 0 12px;" id="dash-mf-modal-hint">
+        Choose another folder to bundle and send them together:
+      </p>
+
+      <div id="dash-mf-folder-list" style="max-height: 180px; overflow-y: auto; margin-bottom: 12px; display: flex; flex-direction: column; gap: 6px;"></div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.78rem; color: #cbd5e1; margin-bottom: 16px; padding: 7px 12px; background: rgba(255,255,255,0.04); border-radius: 8px; border: 1px solid rgba(255,255,255,0.06);">
+        <span id="dash-mf-total-count">0 folders, 0 files</span>
+        <span id="dash-mf-total-size" style="font-weight: 600; color: #38bdf8;">0 B</span>
+      </div>
+
+      <div style="display: flex; gap: 8px; justify-content: flex-end;">
+        <button type="button" class="btn small" id="dash-mf-btn-add-more" style="background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.35); color: #fbbf24;">
+          + Add Another Folder
+        </button>
+        <button type="button" class="btn primary small" id="dash-mf-btn-confirm">
+          Send All ⚡
+        </button>
+        <button type="button" class="btn ghost small" id="dash-mf-btn-cancel">
+          Cancel
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/assets/qrcode.min.js"></script>
+  <script src="/assets/app.js?v=2"></script>
 </body>
 </html>

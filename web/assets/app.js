@@ -417,30 +417,43 @@ function renderBundle(b, devices, users) {
   if (ringEl) {
     ringEl.style.setProperty("--p", usedPct.toFixed(1));
 
-    // Half-circle arc: radius=64, arc length = π×64 ≈ 201.1
-    // dashoffset=201.1 → empty; dashoffset=0 → full
-    const totalArcLen = 201.1;
-    const offset = Math.max(0, totalArcLen - (usedPct / 100) * totalArcLen);
-    const fillPath = $("gauge-svg-fill");
-    if (fillPath) {
-      fillPath.style.strokeDashoffset = offset.toFixed(1);
-      if (usedPct >= 80) {
-        fillPath.setAttribute("stroke", "url(#gauge-redline-grad)");
-        fillPath.style.filter = "drop-shadow(0 0 8px rgba(244,63,94,0.85))";
-      } else {
-        fillPath.setAttribute("stroke", "url(#gauge-fill-grad)");
-        fillPath.style.filter = "drop-shadow(0 0 5px rgba(56,189,248,0.7))";
-      }
+    // Half-circle arc: radius=64, total arc length = π×64 ≈ 201.1
+    // Safe arc (0-80%): length = 0.8 * 201.1 ≈ 160.9
+    // Danger arc (80-100%): length = 0.2 * 201.1 ≈ 40.2
+    const safeArcLen = 160.9;
+    const dangerArcLen = 40.2;
+
+    const safePct = Math.min(1, Math.max(0, usedPct / 80));
+    const safeOffset = Math.max(0, safeArcLen * (1 - safePct));
+
+    const dangerPct = Math.min(1, Math.max(0, (usedPct - 80) / 20));
+    const dangerOffset = Math.max(0, dangerArcLen * (1 - dangerPct));
+
+    const fillSafe = $("gauge-svg-fill");
+    if (fillSafe) {
+      fillSafe.style.strokeDashoffset = safeOffset.toFixed(1);
     }
 
-    // Needle: pivot at (100,100); -90° = 0%, +90° = 100%
+    const fillDanger = $("gauge-svg-fill-danger");
+    if (fillDanger) {
+      fillDanger.style.strokeDashoffset = dangerOffset.toFixed(1);
+      fillDanger.style.setProperty("stroke", "#f43f5e", "important");
+      fillDanger.style.setProperty("filter", "drop-shadow(0 0 10px rgba(244, 63, 94, 0.95))", "important");
+    }
+
+    // Needle: pivot at (95,82); -90° = 0%, +90° = 100%
     const needleDeg = -90 + (usedPct * 1.8);
     const needleGroup = $("gauge-svg-needle-group");
     if (needleGroup) {
       needleGroup.style.transform = `rotate(${needleDeg.toFixed(1)}deg)`;
     }
 
-    ringEl.classList.toggle("redline", usedPct >= 80);
+    const isRedline = usedPct >= 80;
+    ringEl.classList.toggle("redline", isRedline);
+    const sidebarBundle = $("sidebar-bundle");
+    if (sidebarBundle) {
+      sidebarBundle.classList.toggle("redline", isRedline);
+    }
   }
   $("bundle-used").textContent = fmt(b.used_gb);
   $("bundle-total").textContent = b.total_gb;
@@ -626,7 +639,9 @@ function userCard(u, udevs, gw, ghost) {
   const guestActions = u.guest ? (
     u.blocked ? `
       <button class="btn ok small" data-ua="guest-accept" data-uid="${u.id}" title="Accept guest — unblock and grant quota">Accept</button>
+      <button class="btn small" data-ua="make-regular" data-uid="${u.id}" title="Convert to regular permanent user (lifts guest speed cap & auto-deletion)">👤 Make Regular</button>
       <button class="btn danger small" data-ua="guest-reject" data-uid="${u.id}" title="Reject guest — keep blocked">Reject</button>` : `
+      <button class="btn small" data-ua="make-regular" data-uid="${u.id}" title="Convert to regular permanent user (lifts guest speed cap & auto-deletion)">👤 Make Regular</button>
       <button class="btn danger small" data-ua="guest-reject" data-uid="${u.id}" title="Cut / block guest access">Reject</button>`
   ) : "";
   const actions = ghost ? "" : `
@@ -729,7 +744,9 @@ function deviceRow(d) {
   const guestDevActions = d.guest ? (
     d.blocked ? `
       <button class="btn ok small" data-act="guest-accept" data-id="${d.id}" title="Accept guest — unblock and grant quota">Accept</button>
+      <button class="btn small" data-act="make-regular" data-id="${d.id}" title="Convert to regular permanent user (lifts guest speed cap & auto-deletion)">👤 Make Regular</button>
       <button class="btn danger small" data-act="guest-reject" data-id="${d.id}" title="Reject guest — keep blocked">Reject</button>` : `
+      <button class="btn small" data-act="make-regular" data-id="${d.id}" title="Convert to regular permanent user (lifts guest speed cap & auto-deletion)">👤 Make Regular</button>
       <button class="btn danger small" data-act="guest-reject" data-id="${d.id}" title="Cut / block guest access">Reject</button>`
   ) : "";
   const deleteBtn = d.gateway ? "" : `
@@ -843,6 +860,9 @@ function isPanelContentLoaded(name) {
   if (name === "vpn") {
     return !!vpnStatusCache;
   }
+  if (name === "share") {
+    return !!shareDataCache;
+  }
   if (name === "admin") {
     return Array.isArray(logLines) && logLines.length > 0;
   }
@@ -878,11 +898,17 @@ async function switchPanel(name) {
       await refreshFirewall();
     } else if (name === "history") {
       await refreshHistory();
+      if (currentHistoryView === "live") {
+        startLiveTrafficPolling();
+      }
     } else if (name === "dns") {
       await refreshDns();
     } else if (name === "vpn") {
       await refreshVpn(!isLoaded);
       startVpnLogPolling();
+    } else if (name === "share") {
+      await refreshShare();
+      startSharePolling();
     } else if (name === "management") {
       await refreshAll();
     }
@@ -890,8 +916,14 @@ async function switchPanel(name) {
   } catch (err) {
     console.warn("Panel refresh notice:", err);
   } finally {
+    if (name !== "history") {
+      stopLiveTrafficPolling();
+    }
     if (name !== "vpn") {
       stopVpnLogPolling();
+    }
+    if (name !== "share") {
+      stopSharePolling();
     }
     if (!isLoaded) {
       const elapsed = Date.now() - startTime;
@@ -1406,7 +1438,7 @@ function dnsQuickActions(domain, deviceId) {
 }
 
 let historyAnalyticsCache = null;
-let currentHistoryView = "apps";
+let currentHistoryView = "live";
 
 async function refreshHistory(showLoading = false) {
   const sel = $("hist-device");
@@ -1453,13 +1485,18 @@ function renderHistory(d, analytics) {
   const empty = $("hist-empty"), summary = $("hist-summary"), loading = $("hist-loading");
   if (loading) loading.classList.add("hidden");
   if (!d || !d.top_domains || !d.top_domains.length) {
-    empty.classList.remove("hidden");
-    if ($("hist-stat-cards")) $("hist-stat-cards").classList.add("hidden");
-    document.querySelectorAll(".hist-view").forEach((v) => v.classList.add("hidden"));
-    if (summary) summary.classList.add("hidden");
-    empty.textContent = d && d.device_id === "all"
-      ? "No browsing history recorded for the household in this window yet."
-      : "No browsing history recorded for this device in this window yet.";
+    if (currentHistoryView !== "live") {
+      empty.classList.remove("hidden");
+      if ($("hist-stat-cards")) $("hist-stat-cards").classList.add("hidden");
+      document.querySelectorAll(".hist-view").forEach((v) => {
+        if (v.id !== "hist-view-live") v.classList.add("hidden");
+      });
+      if (summary) summary.classList.add("hidden");
+      empty.textContent = d && d.device_id === "all"
+        ? "No browsing history recorded for the household in this window yet."
+        : "No browsing history recorded for this device in this window yet.";
+    }
+    switchHistoryView(currentHistoryView);
     return;
   }
   empty.classList.add("hidden");
@@ -1601,6 +1638,334 @@ function switchHistoryView(view) {
   });
   const target = $(`hist-view-${view}`);
   if (target) target.classList.remove("hidden");
+  if (view === "live") {
+    startLiveTrafficPolling();
+  } else {
+    stopLiveTrafficPolling();
+  }
+}
+
+/* ==========================================================================
+   LIVE TRAFFIC REAL-TIME MONITORING & BANDWIDTH ENGINE
+   ========================================================================== */
+
+let histLivePollTimer = null;
+let histLiveChartPoints = [];
+const HIST_LIVE_MAX_POINTS = 30; // 30 points @ 2s = 60s
+let histLivePeakBps = 0;
+let lastLiveTrafficRaw = null;
+
+function formatLiveSpeed(bps) {
+  const n = Number(bps) || 0;
+  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(2) + " Gbps";
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + " Mbps";
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + " Kbps";
+  return n.toFixed(0) + " bps";
+}
+
+function getLiveDeviceIcon(name) {
+  const n = (name || "").toLowerCase();
+  if (n.includes("phone") || n.includes("iphone") || n.includes("android")) return "📱";
+  if (n.includes("tv") || n.includes("tizen") || n.includes("webos") || n.includes("smart-tv")) return "📺";
+  if (n.includes("pad") || n.includes("tablet") || n.includes("ipad")) return "📱";
+  return "💻";
+}
+
+async function fetchAndRenderLiveTraffic() {
+  if (currentHistoryView !== "live") return;
+  const histPanel = $("panel-history");
+  if (!histPanel || histPanel.classList.contains("hidden")) return;
+
+  const sel = $("hist-device");
+  const deviceId = sel ? sel.value : "all";
+
+  try {
+    const data = await API.get(`/api/history/live?device_id=${encodeURIComponent(deviceId)}`);
+    renderLiveTrafficView(data);
+  } catch (err) {
+    console.warn("Failed to fetch live traffic:", err);
+  }
+}
+
+function startLiveTrafficPolling() {
+  if (histLivePollTimer) clearInterval(histLivePollTimer);
+  fetchAndRenderLiveTraffic();
+  histLivePollTimer = setInterval(fetchAndRenderLiveTraffic, 2000);
+}
+
+function stopLiveTrafficPolling() {
+  if (histLivePollTimer) {
+    clearInterval(histLivePollTimer);
+    histLivePollTimer = null;
+  }
+}
+
+function renderLiveTrafficView(data) {
+  if (!data) return;
+  lastLiveTrafficRaw = data;
+
+  const totalDown = data.total_down_bps || 0;
+  const totalUp = data.total_up_bps || 0;
+  const netBps = totalDown + totalUp;
+  if (netBps > histLivePeakBps) histLivePeakBps = netBps;
+
+  // Add sample point to rolling chart points
+  histLiveChartPoints.push({
+    time: Date.now(),
+    down: totalDown,
+    up: totalUp,
+    topDev: data.top_consumer ? data.top_consumer.name : "",
+    topApp: data.top_consumer && data.top_consumer.active_app ? data.top_consumer.active_app.name : ""
+  });
+  if (histLiveChartPoints.length > HIST_LIVE_MAX_POINTS) {
+    histLiveChartPoints.shift();
+  }
+
+  // Update total pill & peak
+  const pill = $("hist-live-total-pill");
+  if (pill) pill.textContent = formatLiveSpeed(netBps);
+  const peak = $("hist-live-peak");
+  if (peak) peak.textContent = `Peak: ${formatLiveSpeed(histLivePeakBps)}`;
+
+  // 1. Render SVG Chart
+  drawLiveTrafficSvg();
+
+  // 2. Render Hero Card
+  renderLiveTrafficHero(data.top_consumer, netBps);
+
+  // 3. Render Devices List
+  renderLiveTrafficDevices(data.devices || []);
+}
+
+function buildCatmullRomSpline(points, baselineY) {
+  if (!points || points.length === 0) return { line: "", area: "" };
+  if (points.length === 1) {
+    const p = points[0];
+    return {
+      line: `M ${p.x.toFixed(1)} ${p.y.toFixed(1)}`,
+      area: `M ${p.x.toFixed(1)} ${baselineY} L ${p.x.toFixed(1)} ${p.y.toFixed(1)} L ${p.x.toFixed(1)} ${baselineY} Z`
+    };
+  }
+
+  let lineD = `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)}`;
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = i > 0 ? points[i - 1] : points[i];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = i < points.length - 2 ? points[i + 2] : p2;
+
+    const cp1x = p1.x + (p2.x - p0.x) * 0.2;
+    const cp1y = p1.y + (p2.y - p0.y) * 0.2;
+    const cp2x = p2.x - (p3.x - p1.x) * 0.2;
+    const cp2y = p2.y - (p3.y - p1.y) * 0.2;
+
+    lineD += ` C ${cp1x.toFixed(1)} ${cp1y.toFixed(1)}, ${cp2x.toFixed(1)} ${cp2y.toFixed(1)}, ${p2.x.toFixed(1)} ${p2.y.toFixed(1)}`;
+  }
+
+  const firstX = points[0].x.toFixed(1);
+  const lastX = points[points.length - 1].x.toFixed(1);
+  const areaD = `${lineD} L ${lastX} ${baselineY} L ${firstX} ${baselineY} Z`;
+  return { line: lineD, area: areaD };
+}
+
+function drawLiveTrafficSvg() {
+  const svg = $("hist-live-svg");
+  if (!svg) return;
+
+  const pts = histLiveChartPoints;
+  if (!pts || pts.length === 0) return;
+
+  const rect = svg.getBoundingClientRect();
+  const width = Math.max(320, Math.round(rect.width || svg.clientWidth || 700));
+  const height = 180;
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.removeAttribute("preserveAspectRatio");
+
+  const padBottom = 24;
+  const padTop = 14;
+  const padLeft = 68;
+  const padRight = 16;
+  const chartW = width - padLeft - padRight;
+  const chartH = height - padTop - padBottom;
+  const baselineY = (padTop + chartH).toFixed(1);
+
+  const maxVal = Math.max(1_000_000, ...pts.map(p => Math.max(p.down, p.up)), histLivePeakBps * 0.9);
+
+  // Build grid lines
+  let gridLines = "";
+  const steps = 3;
+  for (let i = 0; i <= steps; i++) {
+    const y = (padTop + (chartH / steps) * i).toFixed(1);
+    const val = maxVal * (1 - i / steps);
+    gridLines += `
+      <line x1="${padLeft}" y1="${y}" x2="${width - padRight}" y2="${y}" stroke="rgba(255,255,255,0.06)" stroke-dasharray="3 3"/>
+      <text x="${padLeft - 10}" y="${(Number(y) + 4).toFixed(1)}" fill="#94a3b8" font-size="10.5" font-weight="500" text-anchor="end" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif">${formatLiveSpeed(val)}</text>
+    `;
+  }
+
+  // Time labels
+  gridLines += `
+    <text x="${padLeft}" y="${height - 6}" fill="#64748b" font-size="10" font-weight="500" text-anchor="start" font-family="system-ui, -apple-system, sans-serif">60s ago</text>
+    <text x="${(padLeft + chartW / 2).toFixed(1)}" y="${height - 6}" fill="#64748b" font-size="10" font-weight="500" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif">30s ago</text>
+    <text x="${width - padRight}" y="${height - 6}" fill="#38bdf8" font-size="10" font-weight="700" text-anchor="end" font-family="system-ui, -apple-system, sans-serif">Now</text>
+  `;
+
+  // Compute X and Y coords
+  const count = HIST_LIVE_MAX_POINTS;
+  const getX = (idx) => padLeft + (idx / (count - 1)) * chartW;
+  const getY = (val) => padTop + chartH - (Math.min(val, maxVal) / maxVal) * chartH;
+  const offset = count - pts.length;
+
+  const downPoints = [];
+  const upPoints = [];
+
+  pts.forEach((p, i) => {
+    const x = getX(offset + i);
+    downPoints.push({ x, y: getY(p.down) });
+    upPoints.push({ x, y: getY(p.up) });
+  });
+
+  const downCurve = buildCatmullRomSpline(downPoints, baselineY);
+  const upCurve = buildCatmullRomSpline(upPoints, baselineY);
+
+  const lastDown = downPoints[downPoints.length - 1];
+  const lastUp = upPoints[upPoints.length - 1];
+
+  const defs = `
+    <defs>
+      <linearGradient id="histGradDown" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.35"/>
+        <stop offset="100%" stop-color="#38bdf8" stop-opacity="0.0"/>
+      </linearGradient>
+      <linearGradient id="histGradUp" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#10b981" stop-opacity="0.25"/>
+        <stop offset="100%" stop-color="#10b981" stop-opacity="0.0"/>
+      </linearGradient>
+      <filter id="histGlow" x="-20%" y="-20%" width="140%" height="140%">
+        <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#38bdf8" flood-opacity="0.4"/>
+      </filter>
+    </defs>
+  `;
+
+  svg.innerHTML = `
+    ${defs}
+    ${gridLines}
+    <path d="${downCurve.area}" fill="url(#histGradDown)"/>
+    <path d="${upCurve.area}" fill="url(#histGradUp)"/>
+    <path d="${downCurve.line}" fill="none" stroke="#38bdf8" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" filter="url(#histGlow)"/>
+    <path d="${upCurve.line}" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="${lastDown.x.toFixed(1)}" cy="${lastDown.y.toFixed(1)}" r="4.5" fill="#38bdf8" stroke="#0f172a" stroke-width="2"/>
+    <circle cx="${lastUp.x.toFixed(1)}" cy="${lastUp.y.toFixed(1)}" r="4" fill="#10b981" stroke="#0f172a" stroke-width="2"/>
+  `;
+}
+
+function renderLiveTrafficHero(top, netBps) {
+  const container = $("hist-live-hero");
+  if (!container) return;
+
+  if (!top || (top.total_bps === 0 && top.live_down_bytes === 0)) {
+    container.innerHTML = `
+      <div class="hist-live-hero-badge">
+        <span class="live-pulse-dot idle"></span>
+        <span class="hero-label">Live Traffic Monitor</span>
+      </div>
+      <div class="hist-live-hero-idle-v">
+        <div class="idle-icon">💤</div>
+        <div class="idle-title">Network is Quiet</div>
+        <div class="muted small">All devices are currently idle (&lt; 10 Kbps). Waiting for active traffic...</div>
+      </div>
+    `;
+    return;
+  }
+
+  const icon = getLiveDeviceIcon(top.name);
+  const app = top.active_app || { name: "General Traffic", category: "Network Traffic", color: "#38bdf8" };
+  const domainsStr = (top.recent_domains && top.recent_domains.length > 0)
+    ? top.recent_domains.slice(0, 3).join(", ")
+    : (app.domain || "active connection");
+
+  const appColor = app.color || "#38bdf8";
+
+  container.innerHTML = `
+    <div class="hist-live-hero-badge">
+      <span class="live-pulse-dot"></span>
+      <span class="hero-label">Top Consumer Right Now</span>
+    </div>
+    <div class="hist-live-hero-body-v">
+      <div class="hist-live-hero-dev">
+        <div class="hist-live-dev-icon">${icon}</div>
+        <div class="hist-live-dev-details">
+          <div class="hist-live-dev-name">${esc(top.name)}</div>
+          <div class="hist-live-dev-meta">${esc(top.user_name || "Device")} • ${esc(top.ip || "LAN")}</div>
+        </div>
+      </div>
+      <div class="hist-live-hero-app">
+        <span class="hist-app-pill" style="background: rgba(255, 255, 255, 0.05); border-color: ${appColor};">
+          <span class="app-indicator" style="background: ${appColor};"></span>
+          <span class="app-title">${esc(app.name)}</span>
+          <span class="app-sub">${esc(app.category)}</span>
+        </span>
+        <div class="hist-hero-domains" title="${esc(domainsStr)}">Active: ${esc(domainsStr)}</div>
+      </div>
+      <div class="hist-live-hero-speed-box">
+        <div class="hist-speed-row">
+          <span class="hist-speed-down">⬇ ${formatLiveSpeed(top.down_bps)}</span>
+          <span class="hist-speed-up">⬆ ${formatLiveSpeed(top.up_bps)}</span>
+        </div>
+        <div class="hist-speed-share-pill">${top.share_pct}% of current traffic</div>
+      </div>
+    </div>
+  `;
+}
+
+function renderLiveTrafficDevices(devices) {
+  const container = $("hist-live-devices-list");
+  const countEl = $("hist-live-device-count");
+  if (!container) return;
+
+  if (countEl) countEl.textContent = `${devices.length} device${devices.length === 1 ? '' : 's'} active`;
+
+  if (!devices || devices.length === 0) {
+    container.innerHTML = `<p class="muted small" style="text-align:center; padding: 16px;">No devices detected on the network.</p>`;
+    return;
+  }
+
+  container.innerHTML = devices.map((d, index) => {
+    const icon = getLiveDeviceIcon(d.name);
+    const app = d.active_app || { name: "General Traffic", category: "Network Traffic", color: "#94a3b8" };
+    const appColor = app.color || "#38bdf8";
+    const domainsStr = (d.recent_domains && d.recent_domains.length > 0)
+      ? d.recent_domains.slice(0, 2).join(", ")
+      : (app.domain || "");
+
+    return `
+      <div class="hist-device-row" data-device-id="${d.id}" style="cursor: pointer;" title="Click to inspect browsing history for ${esc(d.name)}">
+        <div class="hist-device-rank">#${index + 1}</div>
+        <div class="hist-device-info">
+          <div class="hist-device-title">${icon} ${esc(d.name)}</div>
+          <div class="hist-device-sub muted small">${esc(d.user_name || "Device")} • ${esc(d.ip || "LAN")}</div>
+        </div>
+        <div class="hist-device-app">
+          <span class="hist-app-pill small" style="background: rgba(255, 255, 255, 0.04); border-color: ${appColor};">
+            <span class="app-indicator" style="background: ${appColor};"></span>
+            <b>${esc(app.name)}</b>
+            <span class="app-sub">${esc(app.category)}</span>
+          </span>
+          <span class="hist-domain-tag muted small" title="${esc(domainsStr)}">${esc(domainsStr)}</span>
+        </div>
+        <div class="hist-device-meter">
+          <div class="hist-device-speeds">
+            <span class="down">⬇ ${formatLiveSpeed(d.down_bps)}</span>
+            <span class="up">⬆ ${formatLiveSpeed(d.up_bps)}</span>
+            <span class="pct">${d.share_pct}%</span>
+          </div>
+          <div class="hist-progress-bg">
+            <div class="hist-progress-fill" style="width: ${d.share_pct}%; background: linear-gradient(90deg, #38BDF8, #818CF8);"></div>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join("");
 }
 
 /* level filter + search are applied client-side to the raw /api/logs lines;
@@ -2025,6 +2390,12 @@ async function doAction(act, id) {
       await API.post(`/api/guest/${id}/approve`);
     } else if (act === "guest-reject") {
       await API.post(`/api/guest/${id}/reject`);
+    } else if (act === "make-regular") {
+      const dev = (dashboard.devices || []).find((x) => x.id === id);
+      if (dev && dev.user_id) {
+        await API.post(`/api/users/${dev.user_id}/make-regular`);
+        showToast("Converted to regular user! Guest restrictions lifted.");
+      }
     }
   } catch (err) {
     alert("Action failed: " + (err.message || String(err)));
@@ -2063,6 +2434,9 @@ async function doUserAction(act, uid) {
       await API.post(`/api/guest/user/${uid}/approve`);
     } else if (act === "guest-reject") {
       await API.post(`/api/guest/user/${uid}/reject`);
+    } else if (act === "make-regular") {
+      await API.post(`/api/users/${uid}/make-regular`);
+      showToast("Converted to regular user! Guest restrictions lifted.");
     }
   } catch (err) {
     alert("Action failed: " + (err.message || String(err)));
@@ -2249,6 +2623,16 @@ function openUserModal(id) {
   $("u-exempt").checked = u ? !!u.exempt_quota : false;
   const uVpn = $("u-vpn-bypass");
   if (uVpn) uVpn.checked = u ? !!u.vpn_bypass : false;
+  const uGuestWrap = $("u-guest-wrap");
+  if (uGuestWrap) {
+    if (u && u.guest) {
+      uGuestWrap.classList.remove("hidden");
+      if ($("u-is-guest")) $("u-is-guest").checked = true;
+    } else {
+      uGuestWrap.classList.add("hidden");
+      if ($("u-is-guest")) $("u-is-guest").checked = false;
+    }
+  }
   $("u-fixed-wrap").classList.toggle("hidden", $("u-mode").value !== "fixed");
   $("user-modal-submit").textContent = u ? "Save" : "Add";
   $("user-modal").classList.remove("hidden");
@@ -2276,6 +2660,9 @@ async function submitUser(ev) {
   const exemptQuota = $("u-exempt").checked;
   const uVpn = $("u-vpn-bypass");
   const vpnBypass = uVpn ? uVpn.checked : false;
+  const uGuestWrap = $("u-guest-wrap");
+  const isGuestEl = $("u-is-guest");
+  const isGuest = (uGuestWrap && !uGuestWrap.classList.contains("hidden") && isGuestEl) ? isGuestEl.checked : undefined;
   let targetUserId = editUserId;
   if (editUserId == null) {
     const created = await API.post("/api/users", { name, quota_mode: mode, fixed_gb: fixed,
@@ -2283,9 +2670,11 @@ async function submitUser(ev) {
       vpn_bypass: vpnBypass });
     targetUserId = created.id;
   } else {
-    await API.patch(`/api/users/${editUserId}`, { name, quota_mode: mode, fixed_gb: fixed,
+    const patchData = { name, quota_mode: mode, fixed_gb: fixed,
       limit_down_mbps: limitDown, limit_up_mbps: limitUp, history_days: historyDays,
-      exempt_quota: exemptQuota, vpn_bypass: vpnBypass });
+      exempt_quota: exemptQuota, vpn_bypass: vpnBypass };
+    if (isGuest !== undefined) patchData.guest = isGuest;
+    await API.patch(`/api/users/${editUserId}`, patchData);
   }
   if (targetUserId != null) {
     try { await API.patch(`/api/users/${targetUserId}/dns`, { dns_server: dnsServer }); }
@@ -2899,6 +3288,10 @@ async function refreshNetwork() {
     $("set-total-down").value = n.total_down_mbps || "";
     $("set-total-up").value = n.total_up_mbps || "";
     $("set-lan-rate").value = n.lan_rate_mbps || "";
+    const vpnPctEl = $("set-vpn-pct");
+    if (vpnPctEl) vpnPctEl.value = n.vpn_pct || "";
+    $("set-vpn-down").value = n.vpn_down_mbps || "";
+    $("set-vpn-up").value = n.vpn_up_mbps || "";
     // random-MAC gate: toggle + the one-shot "cut existing" checkbox (the
     // latter only makes sense while the gate is on).
     $("decline-random-toggle").checked = !!n.decline_random_macs;
@@ -3009,6 +3402,9 @@ async function submitNetwork() {
     total_down_mbps: parseFloat($("set-total-down").value) || 0,
     total_up_mbps: parseFloat($("set-total-up").value) || 0,
     lan_rate_mbps: parseFloat($("set-lan-rate").value) || 0,
+    vpn_pct: $("set-vpn-pct") ? (parseFloat($("set-vpn-pct").value) || 0) : 0,
+    vpn_down_mbps: parseFloat($("set-vpn-down").value) || 0,
+    vpn_up_mbps: parseFloat($("set-vpn-up").value) || 0,
   };
   const vpnToggle = $("vpn-toggle");
   if (vpnToggle) body.vpn_share = vpnToggle.checked;
@@ -3691,6 +4087,1742 @@ async function enableTotp() {
 async function logout() {
   await API.post("/api/logout").catch(() => {});
   showLogin();
+}
+
+/* ==========================================================================
+   LOCAL SHARE SUBSYSTEM (LAN Direct Transfer & Clipboard)
+   ========================================================================== */
+
+let shareDataCache = null;
+let sharePollingInterval = null;
+let dashSelectedFileIds = new Set();
+
+function startSharePolling() {
+  stopSharePolling();
+  sharePollingInterval = setInterval(() => {
+    if (document.visibilityState === "visible") {
+      refreshShare(false).catch(() => {});
+    }
+  }, 3000);
+}
+
+function stopSharePolling() {
+  if (sharePollingInterval) {
+    clearInterval(sharePollingInterval);
+    sharePollingInterval = null;
+  }
+}
+
+async function refreshShare(force = true) {
+  try {
+    const data = await API.get("/api/share/list");
+    shareDataCache = data;
+    renderShare(data);
+  } catch (err) {
+    console.warn("Local share refresh error:", err);
+  }
+}
+
+function updateDashBatchBar() {
+  const bar = $("dash-batch-bar");
+  const countEl = $("dash-batch-count");
+  const selectAllCb = $("dash-select-all-cb");
+  const count = dashSelectedFileIds.size;
+  const total = (shareDataCache && shareDataCache.files) ? shareDataCache.files.length : 0;
+
+  if (bar) bar.classList.toggle("hidden", count === 0);
+  if (countEl) countEl.textContent = `${count} selected`;
+  if (selectAllCb) {
+    selectAllCb.checked = total > 0 && count === total;
+    selectAllCb.indeterminate = count > 0 && count < total;
+  }
+}
+
+function renderShare(data) {
+  if (!data) return;
+  const filesTbody = $("share-files-tbody");
+  const files = data.files || [];
+  const fileCountEl = $("dash-share-file-count");
+  if (fileCountEl) {
+    fileCountEl.textContent = `${files.length} file${files.length === 1 ? "" : "s"} (${formatBytes(data.total_size || 0)})`;
+  }
+
+  // Prune deleted file IDs from selection
+  const validIds = new Set(files.map((f) => f.id));
+  for (const id of Array.from(dashSelectedFileIds)) {
+    if (!validIds.has(id)) dashSelectedFileIds.delete(id);
+  }
+  updateDashBatchBar();
+
+  if (filesTbody) {
+    if (files.length === 0) {
+      filesTbody.innerHTML = `<tr><td colspan="6" class="muted small" style="text-align: center; padding: 24px;">No files shared yet. Drop any file or folder above to get started.</td></tr>`;
+    } else {
+      filesTbody.innerHTML = files.map((f) => {
+        const isSelected = dashSelectedFileIds.has(f.id);
+        const isZip = f.name.toLowerCase().endsWith(".zip");
+        return `
+        <tr class="${isSelected ? "selected-row" : ""}">
+          <td style="width: 34px;">
+            <input type="checkbox" class="dash-file-cb" data-id="${f.id}" ${isSelected ? "checked" : ""}>
+          </td>
+          <td>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span style="color: ${isZip ? '#f59e0b' : '#38bdf8'}; font-size: 1.1rem;">${isZip ? '📦' : '📄'}</span>
+              <div style="min-width: 0;">
+                <strong style="color: #f8fafc; word-break: break-all;" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</strong>
+                ${isZip ? '<span class="badge" style="background: rgba(245,158,11,0.15); color: #f59e0b; font-size: 10px; margin-left: 6px; padding: 1px 6px; border-radius: 4px;">Folder Archive</span>' : ''}
+              </div>
+            </div>
+          </td>
+          <td>${formatBytes(f.size)}</td>
+          <td class="muted small">${formatTimeAgo(f.uploaded_at)}</td>
+          <td class="muted small">⏳ ${formatExpiry(f.expires_at)}</td>
+          <td class="num">
+            <div style="display: flex; gap: 6px; justify-content: flex-end;">
+              <a href="/api/share/download/${f.id}" class="btn primary small" download="${escapeHtml(f.name)}" title="Download">Download</a>
+              <button type="button" class="btn ghost small dash-file-copy-btn" data-id="${f.id}" title="Copy Link">Link</button>
+              <button type="button" class="btn danger small dash-file-del-btn" data-id="${f.id}" title="Delete">✕</button>
+            </div>
+          </td>
+        </tr>
+      `;
+      }).join("");
+    }
+  }
+
+  // Render texts
+  const textsList = $("dash-texts-list");
+  const texts = data.texts || [];
+  if (textsList) {
+    if (texts.length === 0) {
+      textsList.innerHTML = `<div class="muted small" style="text-align: center; padding: 16px 0;">No text shared yet.</div>`;
+    } else {
+      textsList.innerHTML = texts.map((t) => `
+        <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; padding: 10px 12px; display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;">
+          <div style="flex: 1; min-width: 0;">
+            <div style="font-size: 0.85rem; word-break: break-word; white-space: pre-wrap; color: #e2e8f0;">${renderShareText(t.text)}</div>
+            <div class="muted" style="font-size: 0.72rem; margin-top: 4px;">From ${t.sender_ip} • ${formatTimeAgo(t.created_at)}</div>
+          </div>
+          <div style="display: flex; gap: 4px;">
+            <button type="button" class="btn ghost small dash-text-copy-btn" data-text="${escapeHtml(t.text)}" title="Copy">Copy</button>
+            <button type="button" class="btn ghost small dash-text-del-btn" data-id="${t.id}" title="Delete" style="color: #f87171;">✕</button>
+          </div>
+        </div>
+      `).join("");
+    }
+  }
+}
+
+function renderShareText(text) {
+  const esc = (text || "").replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[m]);
+  return esc.replace(/(https?:\/\/[^\s]+)/g, (url) => `<a href="${url}" target="_blank" rel="noopener noreferrer" style="color: #38bdf8; text-decoration: underline;">${url}</a>`);
+}
+
+function formatExpiry(epochSec) {
+  const left = Math.max(0, Math.floor(epochSec - Date.now() / 1000));
+  if (left <= 0) return "expired";
+  if (left < 60) return `${left}s left`;
+  if (left < 3600) return `${Math.floor(left / 60)}m left`;
+  return `${Math.floor(left / 3600)}h ${Math.floor((left % 3600) / 60)}m left`;
+}
+
+window.copyDashFileLink = function(fileId) {
+  const link = `${window.location.origin}/api/share/download/${fileId}`;
+  navigator.clipboard.writeText(link).then(() => {
+    showToast("Download link copied!");
+  }).catch(() => {
+    prompt("Copy link:", link);
+  });
+};
+
+window.copyDashText = function(text) {
+  navigator.clipboard.writeText(text).then(() => {
+    showToast("Copied to clipboard!");
+  }).catch(() => {
+    prompt("Copy text:", text);
+  });
+};
+
+window.deleteDashFile = async function(fileId) {
+  if (!confirm("Delete this shared file from the router?")) return;
+  try {
+    await API.del(`/api/share/files/${fileId}`);
+    showToast("File deleted");
+    dashSelectedFileIds.delete(fileId);
+    await refreshShare();
+  } catch (err) {
+    showToast("Could not delete file: " + err.message);
+  }
+};
+
+window.deleteDashText = async function(textId) {
+  try {
+    await API.del(`/api/share/texts/${textId}`);
+    showToast("Note deleted");
+    await refreshShare();
+  } catch (err) {
+    showToast("Could not delete note: " + err.message);
+  }
+};
+
+function initShareUI() {
+  const dropZone = $("dash-drop-zone");
+  const fileInput = $("dash-file-input");
+  const folderInput = $("dash-folder-input");
+  const btnFiles = $("dash-btn-files");
+  const btnFolder = $("dash-btn-folder");
+  const progWrap = $("dash-upload-prog-wrap");
+  const progName = $("dash-upload-name");
+  const progStat = $("dash-upload-stat");
+  const progBar = $("dash-upload-bar");
+
+  // Dashboard Multi-Folder Staging
+  let dashMultiFolderStaging = {
+    active: false,
+    mode: "upload",
+    targetPeerId: null,
+    targetPeerName: "",
+    folders: []
+  };
+
+  function startDashMultiFolderStaging(mode, targetPeerId = null, targetPeerName = "", targetPeerIp = "") {
+    dashMultiFolderStaging.active = true;
+    dashMultiFolderStaging.mode = mode;
+    dashMultiFolderStaging.targetPeerId = targetPeerId;
+    dashMultiFolderStaging.targetPeerName = targetPeerName;
+    dashMultiFolderStaging.targetPeerIp = targetPeerIp || dashTargetPeerForUploadIp || "";
+    dashMultiFolderStaging.folders = [];
+    requestDashScreenWakeLock();
+    if (mode === "direct") {
+      const pFolderInp = $("dash-live-peer-folder-input");
+      if (pFolderInp) pFolderInp.click();
+    } else {
+      if (folderInput) folderInput.click();
+    }
+  }
+
+  function addFilesToDashMultiFolderStaging(filesList) {
+    if (!filesList || filesList.length === 0) return;
+    const files = Array.from(filesList);
+
+    const groups = new Map();
+    for (const file of files) {
+      let fName = "Folder";
+      if (file.webkitRelativePath && file.webkitRelativePath.includes("/")) {
+        fName = file.webkitRelativePath.split("/")[0];
+      } else {
+        fName = file.name;
+      }
+      if (!groups.has(fName)) groups.set(fName, []);
+      groups.get(fName).push(file);
+    }
+
+    for (const [name, gFiles] of groups.entries()) {
+      for (const f of gFiles) {
+        f._folderName = name;
+      }
+      dashMultiFolderStaging.folders.push({
+        name: name,
+        files: gFiles
+      });
+    }
+
+    renderDashMultiFolderModal();
+  }
+
+  function renderDashMultiFolderModal() {
+    const modal = $("dash-multi-folder-modal");
+    const listEl = $("dash-mf-folder-list");
+    const titleEl = $("dash-mf-modal-title");
+    const hintEl = $("dash-mf-modal-hint");
+    const badgeEl = $("dash-mf-modal-target-badge");
+    const countEl = $("dash-mf-total-count");
+    const sizeEl = $("dash-mf-total-size");
+    const confirmBtn = $("dash-mf-btn-confirm");
+
+    if (!modal || !listEl) return;
+
+    if (dashMultiFolderStaging.folders.length === 0) {
+      modal.classList.add("hidden");
+      dashMultiFolderStaging.active = false;
+      return;
+    }
+
+    if (dashMultiFolderStaging.mode === "direct") {
+      if (titleEl) titleEl.textContent = "Send Folders Directly";
+      if (hintEl) hintEl.textContent = `Bundle and send to "${dashMultiFolderStaging.targetPeerName || "device"}" without storing on router:`;
+      if (badgeEl) {
+        badgeEl.textContent = `To: ${dashMultiFolderStaging.targetPeerName || "Device"}`;
+        badgeEl.style.display = "inline-block";
+      }
+      if (confirmBtn) confirmBtn.textContent = `Send Direct ⚡`;
+    } else {
+      if (titleEl) titleEl.textContent = "Upload Folders Bundle";
+      if (hintEl) hintEl.textContent = "Bundle multiple folders and upload them to Local Share together:";
+      if (badgeEl) badgeEl.style.display = "none";
+      if (confirmBtn) confirmBtn.textContent = `Upload All 🚀`;
+    }
+
+    let totalFiles = 0;
+    let totalBytes = 0;
+
+    listEl.innerHTML = dashMultiFolderStaging.folders.map((f, idx) => {
+      const fSize = f.files.reduce((acc, curr) => acc + curr.size, 0);
+      totalFiles += f.files.length;
+      totalBytes += fSize;
+      return `
+        <div class="mf-folder-item">
+          <div class="mf-folder-info">
+            <span style="font-size: 1.15rem;">📁</span>
+            <div style="overflow: hidden; text-overflow: ellipsis;">
+              <div style="font-weight: 600; color: #f8fafc; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(f.name)}</div>
+              <div class="muted tiny">${f.files.length} files • ${formatBytes(fSize)}</div>
+            </div>
+          </div>
+          <button type="button" class="mf-del-btn" data-del-idx="${idx}" title="Remove folder">✕</button>
+        </div>
+      `;
+    }).join("");
+
+    if (countEl) countEl.textContent = `${dashMultiFolderStaging.folders.length} folder(s), ${totalFiles} file(s)`;
+    if (sizeEl) sizeEl.textContent = formatBytes(totalBytes);
+    modal.classList.remove("hidden");
+  }
+
+  const mfAddMoreBtn = $("dash-mf-btn-add-more");
+  if (mfAddMoreBtn) {
+    mfAddMoreBtn.addEventListener("click", () => {
+      if (dashMultiFolderStaging.mode === "direct") {
+        const pFolderInp = $("dash-live-peer-folder-input");
+        if (pFolderInp) pFolderInp.click();
+      } else {
+        if (folderInput) folderInput.click();
+      }
+    });
+  }
+
+  const mfListEl = $("dash-mf-folder-list");
+  if (mfListEl) {
+    mfListEl.addEventListener("click", (e) => {
+      const delBtn = e.target.closest(".mf-del-btn");
+      if (delBtn) {
+        const idx = parseInt(delBtn.dataset.delIdx, 10);
+        if (!isNaN(idx)) {
+          dashMultiFolderStaging.folders.splice(idx, 1);
+          renderDashMultiFolderModal();
+        }
+      }
+    });
+  }
+
+  const mfConfirmBtn = $("dash-mf-btn-confirm");
+  if (mfConfirmBtn) {
+    mfConfirmBtn.addEventListener("click", () => {
+      if (dashMultiFolderStaging.folders.length === 0) return;
+      const allFiles = dashMultiFolderStaging.folders.flatMap(f => f.files);
+      const isDirect = dashMultiFolderStaging.mode === "direct";
+      const targetId = dashMultiFolderStaging.targetPeerId;
+      const targetIp = dashMultiFolderStaging.targetPeerIp;
+
+      const modal = $("dash-multi-folder-modal");
+      if (modal) modal.classList.add("hidden");
+      dashMultiFolderStaging.active = false;
+      dashMultiFolderStaging.folders = [];
+
+      if (isDirect && targetId) {
+        const totalBytes = allFiles.reduce((acc, f) => acc + f.size, 0);
+        if (totalBytes > 50 * 1024 * 1024) {
+          showToast("حجم المجلدات يتجاوز 50 ميجا! يرجى استخدام الرفع العادي للملفات الكبيرة. / Direct Transfer limit is 50 MB.");
+          return;
+        }
+        initiateDashSendDirect(targetId, allFiles, targetIp);
+      } else {
+        uploadDashFolder(allFiles);
+      }
+    });
+  }
+
+  const mfCancelBtn = $("dash-mf-btn-cancel");
+  if (mfCancelBtn) {
+    mfCancelBtn.addEventListener("click", () => {
+      const modal = $("dash-multi-folder-modal");
+      if (modal) modal.classList.add("hidden");
+      dashMultiFolderStaging.active = false;
+      dashMultiFolderStaging.folders = [];
+    });
+  }
+
+  async function readDashEntriesAll(reader) {
+    let all = [];
+    while (true) {
+      const batch = await new Promise(res => reader.readEntries(res, () => res([])));
+      if (!batch || batch.length === 0) break;
+      all = all.concat(batch);
+    }
+    return all;
+  }
+
+  async function extractDashFilesFromDataTransfer(dataTransfer) {
+    const items = dataTransfer.items;
+    const files = [];
+    let hasDirectory = false;
+    const folderSet = new Set();
+
+    async function readDir(dirEntry, path = "") {
+      const reader = dirEntry.createReader();
+      const entries = await readDashEntriesAll(reader);
+      for (const ent of entries) {
+        if (ent.isFile) {
+          const file = await new Promise(res => ent.file(res));
+          Object.defineProperty(file, "webkitRelativePath", {
+            value: `${path}${dirEntry.name}/${file.name}`
+          });
+          files.push(file);
+        } else if (ent.isDirectory) {
+          await readDir(ent, `${path}${dirEntry.name}/`);
+        }
+      }
+    }
+
+    if (items && items.length > 0 && items[0].webkitGetAsEntry) {
+      for (let i = 0; i < items.length; i++) {
+        const entry = items[i].webkitGetAsEntry ? items[i].webkitGetAsEntry() : null;
+        if (entry) {
+          if (entry.isDirectory) {
+            hasDirectory = true;
+            folderSet.add(entry.name);
+            await readDir(entry, "");
+          } else if (entry.isFile) {
+            const file = await new Promise(res => ent.file(res));
+            files.push(file);
+          }
+        }
+      }
+    } else if (dataTransfer.files && dataTransfer.files.length > 0) {
+      files.push(...Array.from(dataTransfer.files));
+    }
+    return { files, hasDirectory, folderCount: folderSet.size };
+  }
+
+  if (btnFiles && fileInput) {
+    btnFiles.addEventListener("click", (e) => {
+      e.stopPropagation();
+      fileInput.click();
+    });
+  }
+
+  if (btnFolder) {
+    btnFolder.addEventListener("click", (e) => {
+      e.stopPropagation();
+      startDashMultiFolderStaging("upload");
+    });
+  }
+
+  if (folderInput) {
+    folderInput.addEventListener("change", (e) => {
+      if (e.target.files && e.target.files.length > 0) {
+        if (dashMultiFolderStaging.active) {
+          addFilesToDashMultiFolderStaging(e.target.files);
+        } else {
+          uploadDashFolder(Array.from(e.target.files));
+        }
+        folderInput.value = "";
+      }
+    });
+  }
+
+  if (dropZone && fileInput) {
+    dropZone.addEventListener("click", (e) => {
+      if (e.target.closest("#dash-upload-prog-wrap") || e.target.closest(".dash-upload-btns")) return;
+      fileInput.click();
+    });
+
+    fileInput.addEventListener("change", (e) => {
+      if (e.target.files && e.target.files.length > 0) {
+        uploadDashFiles(Array.from(e.target.files));
+        fileInput.value = "";
+      }
+    });
+
+    dropZone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      dropZone.style.borderColor = "var(--accent, #0ea5e9)";
+      dropZone.style.background = "rgba(14, 165, 233, 0.08)";
+    });
+
+    dropZone.addEventListener("dragleave", (e) => {
+      e.preventDefault();
+      dropZone.style.borderColor = "rgba(56, 189, 248, 0.3)";
+      dropZone.style.background = "";
+    });
+
+    dropZone.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      dropZone.style.borderColor = "rgba(56, 189, 248, 0.3)";
+      dropZone.style.background = "";
+
+      const { files, hasDirectory, folderCount } = await extractDashFilesFromDataTransfer(e.dataTransfer);
+      if (files.length === 0) return;
+
+      if (hasDirectory) {
+        if (folderCount > 1) {
+          dashMultiFolderStaging.active = true;
+          dashMultiFolderStaging.mode = "upload";
+          dashMultiFolderStaging.folders = [];
+          addFilesToDashMultiFolderStaging(files);
+        } else {
+          uploadDashFolder(files);
+        }
+      } else {
+        uploadDashFiles(files);
+      }
+    });
+  }
+
+  function uploadDashFiles(files) {
+    if (!files || files.length === 0) return;
+    if (progWrap) progWrap.classList.remove("hidden");
+
+    let idx = 0;
+    function next() {
+      if (idx >= files.length) {
+        setTimeout(() => { if (progWrap) progWrap.classList.add("hidden"); }, 1200);
+        showToast(`Uploaded ${files.length} file(s)!`);
+        refreshShare();
+        return;
+      }
+      const file = files[idx];
+      if (progName) progName.textContent = `Uploading (${idx + 1}/${files.length}): ${file.name}`;
+      if (progBar) progBar.style.width = "0%";
+      if (progStat) progStat.textContent = "0%";
+
+      const xhr = new XMLHttpRequest();
+      let startTime = Date.now();
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const percent = Math.round((e.loaded / e.total) * 100);
+          if (progBar) progBar.style.width = `${percent}%`;
+          const elapsedSec = (Date.now() - startTime) / 1000;
+          const speed = elapsedSec > 0 ? e.loaded / elapsedSec : 0;
+          if (progStat) progStat.textContent = `${percent}% (${formatBytes(e.loaded)} / ${formatBytes(e.total)}) • ${formatBytes(speed)}/s`;
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          idx++;
+          next();
+        } else {
+          showToast(`Upload failed: ${xhr.statusText || xhr.status}`);
+          if (progWrap) progWrap.classList.add("hidden");
+        }
+      };
+
+      xhr.onerror = () => {
+        showToast("Network upload error");
+        if (progWrap) progWrap.classList.add("hidden");
+      };
+
+      xhr.open("POST", "/api/share/upload");
+      xhr.setRequestHeader("X-Filename", encodeURIComponent(file.name));
+      xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+      xhr.setRequestHeader("X-QM-CSRF", "1");
+      xhr.send(file);
+    }
+    next();
+  }
+
+  async function uploadDashFolder(files) {
+    if (!files || files.length === 0) return;
+    if (progWrap) progWrap.classList.remove("hidden");
+
+    // Extract top folder name(s)
+    const folderSet = new Set();
+    for (const f of files) {
+      if (f.webkitRelativePath && f.webkitRelativePath.includes("/")) {
+        folderSet.add(f.webkitRelativePath.split("/")[0]);
+      }
+    }
+    const folderNames = Array.from(folderSet);
+    let folderName = "Folder";
+    if (folderNames.length === 1) folderName = folderNames[0];
+    else if (folderNames.length === 2) folderName = `${folderNames[0]}_and_${folderNames[1]}`;
+    else if (folderNames.length > 2) folderName = `${folderNames[0]}_${folderNames[1]}_and_${folderNames.length - 2}_more`;
+
+    if (progName) progName.textContent = `Creating folder bundle: "${folderName}.zip"...`;
+    if (progBar) progBar.style.width = "5%";
+    if (progStat) progStat.textContent = "Initializing...";
+
+    try {
+      const initRes = await fetch("/api/share/folder/init", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-QM-CSRF": "1" },
+        body: JSON.stringify({ folder_name: folderName, ttl: 7200 })
+      });
+      if (!initRes.ok) throw new Error("Could not initialize folder archive");
+      const { folder_id } = await initRes.json();
+
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const relPath = file.webkitRelativePath || file.name;
+        if (progName) progName.textContent = `Archiving "${folderName}" (${i + 1}/${files.length}): ${file.name}`;
+
+        await new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          let startTime = Date.now();
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+              const percent = Math.round(((i + (e.loaded / e.total)) / files.length) * 100);
+              if (progBar) progBar.style.width = `${percent}%`;
+              const elapsedSec = (Date.now() - startTime) / 1000;
+              const speed = elapsedSec > 0 ? e.loaded / elapsedSec : 0;
+              if (progStat) progStat.textContent = `${percent}% • ${formatBytes(speed)}/s`;
+            }
+          };
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) resolve();
+            else reject(new Error(xhr.statusText));
+          };
+          xhr.onerror = () => reject(new Error("Network error during file archive"));
+          xhr.open("POST", `/api/share/folder/file?folder_id=${encodeURIComponent(folder_id)}&path=${encodeURIComponent(relPath)}`);
+          xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+          xhr.setRequestHeader("X-QM-CSRF", "1");
+          xhr.send(file);
+        });
+      }
+
+      if (progName) progName.textContent = `Finalizing "${folderName}.zip"...`;
+      const finRes = await fetch("/api/share/folder/finalize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-QM-CSRF": "1" },
+        body: JSON.stringify({ folder_id: folder_id })
+      });
+      if (!finRes.ok) throw new Error("Could not finalize folder archive");
+
+      if (progBar) progBar.style.width = "100%";
+      if (progStat) progStat.textContent = "100% Complete";
+      setTimeout(() => { if (progWrap) progWrap.classList.add("hidden"); }, 1200);
+      showToast(`Folder "${folderName}" uploaded successfully as a single package!`);
+      await refreshShare();
+    } catch (err) {
+      if (progWrap) progWrap.classList.add("hidden");
+      showToast("Folder upload failed: " + err.message);
+    }
+  }
+
+  // Batch toolbar events
+  const selectAllCb = $("dash-select-all-cb");
+  if (selectAllCb) {
+    selectAllCb.addEventListener("change", (e) => {
+      const checked = e.target.checked;
+      const files = (shareDataCache && shareDataCache.files) || [];
+      if (checked) {
+        files.forEach((f) => dashSelectedFileIds.add(f.id));
+      } else {
+        dashSelectedFileIds.clear();
+      }
+      document.querySelectorAll(".dash-file-cb").forEach((cb) => (cb.checked = checked));
+      updateDashBatchBar();
+    });
+  }
+
+  const tableBody = $("share-files-tbody");
+  if (tableBody) {
+    tableBody.addEventListener("change", (e) => {
+      if (e.target.classList.contains("dash-file-cb")) {
+        const id = e.target.dataset.id;
+        if (e.target.checked) dashSelectedFileIds.add(id);
+        else dashSelectedFileIds.delete(id);
+        updateDashBatchBar();
+      }
+    });
+
+    tableBody.addEventListener("click", (e) => {
+      const copyBtn = e.target.closest(".dash-file-copy-btn");
+      if (copyBtn) {
+        copyDashFileLink(copyBtn.dataset.id);
+        return;
+      }
+      const delBtn = e.target.closest(".dash-file-del-btn");
+      if (delBtn) {
+        deleteDashFile(delBtn.dataset.id);
+        return;
+      }
+    });
+  }
+
+  const textsList = $("dash-texts-list");
+  if (textsList) {
+    textsList.addEventListener("click", (e) => {
+      const copyBtn = e.target.closest(".dash-text-copy-btn");
+      if (copyBtn) {
+        copyDashText(copyBtn.dataset.text);
+        return;
+      }
+      const delBtn = e.target.closest(".dash-text-del-btn");
+      if (delBtn) {
+        deleteDashText(delBtn.dataset.id);
+        return;
+      }
+    });
+  }
+
+  const batchCancelBtn = $("dash-batch-cancel");
+  if (batchCancelBtn) {
+    batchCancelBtn.addEventListener("click", () => {
+      dashSelectedFileIds.clear();
+      document.querySelectorAll(".dash-file-cb").forEach((cb) => (cb.checked = false));
+      updateDashBatchBar();
+    });
+  }
+
+  const batchDlBtn = $("dash-batch-download");
+  if (batchDlBtn) {
+    batchDlBtn.addEventListener("click", () => {
+      if (dashSelectedFileIds.size === 0) return;
+      const idsParam = Array.from(dashSelectedFileIds).join(",");
+      const url = `/api/share/download-zip?ids=${idsParam}`;
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "LocalShare_Bundle.zip";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    });
+  }
+
+  const batchDelBtn = $("dash-batch-delete");
+  if (batchDelBtn) {
+    batchDelBtn.addEventListener("click", async () => {
+      const count = dashSelectedFileIds.size;
+      if (count === 0) return;
+      if (!confirm(`Delete ${count} selected file(s) from the router?`)) return;
+      try {
+        await API.post("/api/share/delete-batch", { ids: Array.from(dashSelectedFileIds) });
+        showToast(`Deleted ${count} file(s)`);
+        dashSelectedFileIds.clear();
+        await refreshShare();
+      } catch (err) {
+        showToast("Error deleting files: " + err.message);
+      }
+    });
+  }
+
+  const textForm = $("dash-text-form");
+  if (textForm) {
+    textForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const input = $("dash-text-input");
+      const val = input.value.trim();
+      if (!val) return;
+      try {
+        await API.post("/api/share/text", { text: val });
+        input.value = "";
+        showToast("Shared to all devices!");
+        await refreshShare();
+      } catch (err) {
+        showToast("Failed to share text: " + err.message);
+      }
+    });
+  }
+
+  const clearAllBtn = $("share-clear-all-btn");
+  if (clearAllBtn) {
+    clearAllBtn.addEventListener("click", async () => {
+      if (!confirm("Are you sure you want to clear all shared files and texts?")) return;
+      try {
+        await API.post("/api/share/clear");
+        showToast("All shared items cleared");
+        await refreshShare();
+      } catch (err) {
+        showToast("Error clearing: " + err.message);
+      }
+    });
+  }
+
+  const qrBtn = $("share-qr-btn");
+  const qrModal = $("dash-qr-modal");
+  const qrClose = $("dash-qr-close");
+  const qrTarget = $("dash-qr-target");
+  const qrUrl = $("dash-qr-url");
+
+  if (qrBtn && qrModal) {
+    qrBtn.addEventListener("click", () => {
+      const shareUrl = window.location.origin + "/share";
+      if (qrUrl) qrUrl.textContent = shareUrl;
+      if (qrTarget) {
+        qrTarget.innerHTML = "";
+        if (typeof QRCode !== "undefined") {
+          new QRCode(qrTarget, {
+            text: shareUrl,
+            width: 176,
+            height: 176,
+            colorDark: "#0f172a",
+            colorLight: "#ffffff",
+            correctLevel: QRCode.CorrectLevel.M
+          });
+        }
+      }
+      qrModal.classList.remove("hidden");
+    });
+  }
+
+  if (qrClose && qrModal) {
+    qrClose.addEventListener("click", () => {
+      qrModal.classList.add("hidden");
+    });
+  }
+
+  // ==========================================
+  // DASHBOARD LIVE DIRECT STREAM ENGINE (ZERO DISK)
+  // ==========================================
+  let dashLiveWs = null;
+  let dashLiveSelfId = null;
+  let dashLivePeers = [];
+  let dashActiveTransfer = null;
+  let dashTargetPeerForUpload = null;
+  let dashTargetPeerForUploadIp = "";
+  let dashPendingIncomingRequest = null;
+  let dashAcceptTimeoutTimer = null;
+  let dashLiveWsPingInterval = null;
+  let dashWakeLock = null;
+  let dashActiveDownloadUrl = null;
+  let dashActiveDownloadName = "";
+  const dashDeviceName = localStorage.getItem("qm_live_dev_name") || "";
+
+  async function requestDashScreenWakeLock() {
+    if ("wakeLock" in navigator) {
+      try {
+        if (!dashWakeLock) {
+          dashWakeLock = await navigator.wakeLock.request("screen");
+          dashWakeLock.addEventListener("release", () => {
+            dashWakeLock = null;
+          });
+        }
+      } catch (e) {}
+    }
+  }
+
+  function releaseDashScreenWakeLock() {
+    if (dashWakeLock) {
+      try {
+        dashWakeLock.release();
+      } catch (e) {}
+      dashWakeLock = null;
+    }
+  }
+
+  document.addEventListener("visibilitychange", async () => {
+    if (document.visibilityState === "visible") {
+      if (dashActiveTransfer) {
+        await requestDashScreenWakeLock();
+      }
+      if (!dashLiveWs || dashLiveWs.readyState === WebSocket.CLOSED || dashLiveWs.readyState === WebSocket.CLOSING) {
+        initDashLiveShare();
+      }
+    }
+  });
+
+  window.addEventListener("focus", () => {
+    if (dashActiveTransfer) {
+      requestDashScreenWakeLock();
+    }
+    if (!dashLiveWs || dashLiveWs.readyState === WebSocket.CLOSED || dashLiveWs.readyState === WebSocket.CLOSING) {
+      initDashLiveShare();
+    }
+  });
+
+  document.addEventListener("click", () => {
+    requestDashScreenWakeLock();
+  }, { once: true });
+
+  function clearDashTransferAcceptTimeout() {
+    if (dashAcceptTimeoutTimer) {
+      clearTimeout(dashAcceptTimeoutTimer);
+      dashAcceptTimeoutTimer = null;
+    }
+  }
+
+  function startDashTransferAcceptTimeout(transferId) {
+    clearDashTransferAcceptTimeout();
+    dashAcceptTimeoutTimer = setTimeout(() => {
+      if (dashActiveTransfer && dashActiveTransfer.id === transferId && dashActiveTransfer.role === "sender") {
+        finishDashLiveTransfer("Transfer timed out: Receiver did not respond in time.");
+        if (dashLiveWs && dashLiveWs.readyState === WebSocket.OPEN) {
+          dashLiveWs.send(JSON.stringify({
+            type: "transfer-cancel",
+            transfer_id: transferId,
+            target_id: dashActiveTransfer.targetId,
+            target_ip: dashActiveTransfer.targetIp
+          }));
+        }
+      }
+    }, 45000);
+  }
+
+  function initDashLiveShare() {
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const devParam = dashDeviceName ? `?name=${encodeURIComponent(dashDeviceName)}` : "";
+    const wsUrl = `${proto}//${window.location.host}/api/share/live/ws${devParam}`;
+
+    try {
+      dashLiveWs = new WebSocket(wsUrl);
+    } catch (e) {
+      console.warn("Dashboard Live WebSocket init error:", e);
+      return;
+    }
+
+    dashLiveWs.binaryType = "arraybuffer";
+
+    dashLiveWs.onopen = () => {
+      if (dashDeviceName) {
+        dashLiveWs.send(JSON.stringify({ type: "join", name: dashDeviceName }));
+      }
+      if (dashLiveWsPingInterval) clearInterval(dashLiveWsPingInterval);
+      dashLiveWsPingInterval = setInterval(() => {
+        if (dashLiveWs && dashLiveWs.readyState === WebSocket.OPEN) {
+          dashLiveWs.send(JSON.stringify({ type: "ping" }));
+        }
+      }, 3000); // 3s ping keeps mobile connection warm and avoids Wi-Fi sleep
+    };
+
+    dashLiveWs.onmessage = async (event) => {
+      let data = event.data;
+      if (data instanceof Blob) {
+        data = await data.arrayBuffer();
+      }
+      if (data instanceof ArrayBuffer) {
+        handleDashBinaryChunk(data);
+        return;
+      }
+
+      try {
+        const msg = JSON.parse(data);
+        handleDashLiveMessage(msg);
+      } catch (e) {
+        // ignore
+      }
+    };
+
+    dashLiveWs.onclose = () => {
+      clearDashTransferAcceptTimeout();
+      if (dashActiveTransfer && dashActiveTransfer.role === "sender" && !dashActiveTransfer.cancelled) {
+        finishDashLiveTransfer("Live connection interrupted. Reconnecting...");
+      }
+      setTimeout(initDashLiveShare, 2000);
+    };
+  }
+
+  // Ultra-fast slicing-by-8 incremental CRC32 calculator for dashboard (>700 MB/s line rate)
+  const dashLiveCrcTables = [];
+  for (let i = 0; i < 8; i++) dashLiveCrcTables.push(new Uint32Array(256));
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    dashLiveCrcTables[0][i] = c >>> 0;
+  }
+  for (let i = 0; i < 256; i++) {
+    for (let k = 1; k < 8; k++) {
+      dashLiveCrcTables[k][i] = (dashLiveCrcTables[k - 1][i] >>> 8) ^ dashLiveCrcTables[0][dashLiveCrcTables[k - 1][i] & 0xFF];
+    }
+  }
+  const [dlcT0, dlcT1, dlcT2, dlcT3, dlcT4, dlcT5, dlcT6, dlcT7] = dashLiveCrcTables;
+
+  function updateDashLiveCrc32(runningCrc, uint8) {
+    let crc = runningCrc >>> 0;
+    let len = uint8.length;
+    let pos = 0;
+    while (len >= 8) {
+      const one = (uint8[pos] ^ (crc & 0xFF));
+      const two = (uint8[pos + 1] ^ ((crc >>> 8) & 0xFF));
+      const three = (uint8[pos + 2] ^ ((crc >>> 16) & 0xFF));
+      const four = (uint8[pos + 3] ^ (crc >>> 24));
+      crc = dlcT7[one] ^ dlcT6[two] ^ dlcT5[three] ^ dlcT4[four] ^
+            dlcT3[uint8[pos + 4]] ^ dlcT2[uint8[pos + 5]] ^ dlcT1[uint8[pos + 6]] ^ dlcT0[uint8[pos + 7]];
+      pos += 8;
+      len -= 8;
+    }
+    while (len > 0) {
+      crc = (crc >>> 8) ^ dlcT0[(crc ^ uint8[pos]) & 0xFF];
+      pos++;
+      len--;
+    }
+    return crc >>> 0;
+  }
+
+  function handleDashLiveMessage(msg) {
+    if (msg.type === "peers") {
+      dashLiveSelfId = msg.self_id || dashLiveSelfId;
+      const myIp = msg.self_ip || (shareDataCache && shareDataCache.client_ip) || "";
+      const rawPeers = (msg.peers || []).filter(p => p.id !== dashLiveSelfId && (!myIp || p.ip !== myIp));
+      const seenIps = new Set();
+      dashLivePeers = [];
+      for (const p of rawPeers) {
+        if (!seenIps.has(p.ip)) {
+          seenIps.add(p.ip);
+          dashLivePeers.push(p);
+        }
+      }
+      renderDashLivePeers();
+    } else if (msg.type === "transfer-request") {
+      dashPendingIncomingRequest = msg;
+      requestDashScreenWakeLock();
+      try {
+        if (navigator.vibrate) navigator.vibrate([150, 80, 150]);
+      } catch (e) {}
+      const sendText = $("dash-incoming-sender-text");
+      const fName = $("dash-incoming-file-name");
+      const fSize = $("dash-incoming-file-size");
+      const modal = $("dash-live-incoming-modal");
+      if (sendText) sendText.textContent = `"${msg.sender_name}" (${msg.sender_ip}) wants to send:`;
+      if (fName) fName.textContent = msg.file_name;
+      if (fSize) fSize.textContent = formatBytes(msg.file_size);
+      if (modal) modal.classList.remove("hidden");
+    } else if (msg.type === "transfer-response") {
+      if (dashActiveTransfer && dashActiveTransfer.id === msg.transfer_id && dashActiveTransfer.role === "sender") {
+        clearDashTransferAcceptTimeout();
+        if (msg.accepted) {
+          startDashLiveSenderStream();
+        } else {
+          finishDashLiveTransfer("Transfer declined by receiver");
+        }
+      }
+    } else if (msg.type === "transfer-progress") {
+      if (dashActiveTransfer && dashActiveTransfer.id === msg.transfer_id && dashActiveTransfer.role === "receiver") {
+        dashActiveTransfer.currentBytes = msg.loaded;
+        updateDashLiveProgressThrottled(msg.loaded, msg.total, dashActiveTransfer.startTime);
+      }
+    } else if (msg.type === "transfer-error") {
+      clearDashTransferAcceptTimeout();
+      finishDashLiveTransfer(msg.message || "Target device is offline or unavailable.");
+    } else if (msg.type === "transfer-done") {
+      if (dashActiveTransfer && dashActiveTransfer.id === msg.transfer_id && dashActiveTransfer.role === "receiver") {
+        finishDashLiveReceiver();
+      }
+    } else if (msg.type === "transfer-cancel") {
+      if (dashActiveTransfer && dashActiveTransfer.id === msg.transfer_id) {
+        clearDashTransferAcceptTimeout();
+        finishDashLiveTransfer("Transfer cancelled by other device");
+      }
+    }
+  }
+
+  function renderDashLivePeers() {
+    const container = $("dash-live-peers-list");
+    const countEl = $("dash-live-peers-count");
+    if (!container) return;
+    if (countEl) countEl.textContent = `${dashLivePeers.length} online`;
+
+    if (dashLivePeers.length === 0) {
+      container.innerHTML = `
+        <div class="live-empty-peers">
+          <div class="radar-pulse"></div>
+          <div style="font-size: 0.84rem; font-weight: 500; color: #cbd5e1; margin-top: 10px;">Waiting for other devices on your Wi-Fi...</div>
+          <div class="muted small" style="margin-top: 2px;">Open Local Share on your phone, laptop, or tablet to transfer directly over Wi-Fi.</div>
+        </div>
+      `;
+      return;
+    }
+
+    container.innerHTML = dashLivePeers.map(p => {
+      const icon = getDashDeviceIcon(p.name);
+      return `
+        <div class="peer-card dash-peer-card" data-peer-id="${escapeHtml(p.id)}">
+          <div class="peer-avatar">${icon}</div>
+          <div class="peer-name" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</div>
+          <div class="peer-ip">${escapeHtml(p.ip)}</div>
+          <div class="peer-actions-btn-group">
+            <button type="button" class="peer-send-btn dash-peer-send-files" data-peer-id="${escapeHtml(p.id)}" title="Send one or multiple files directly">
+              Files 📁
+            </button>
+            <button type="button" class="peer-send-btn folder dash-peer-send-folder" data-peer-id="${escapeHtml(p.id)}" title="Send one or multiple folders directly">
+              Folders 📂
+            </button>
+          </div>
+        </div>
+      `;
+    }).join("");
+  }
+
+  function getDashDeviceIcon(name) {
+    const n = (name || "").toLowerCase();
+    if (n.includes("phone") || n.includes("iphone") || n.includes("android")) return "📱";
+    if (n.includes("pc") || n.includes("windows") || n.includes("laptop") || n.includes("mac") || n.includes("linux")) return "💻";
+    if (n.includes("tv")) return "📺";
+    if (n.includes("pad") || n.includes("tablet")) return "📱";
+    return "💻";
+  }
+
+  // Start sending direct from dashboard (Instant request + on-the-fly streaming)
+  async function initiateDashSendDirect(targetPeerId, filesList, fallbackTargetIp = "") {
+    if (!filesList || filesList.length === 0 || !targetPeerId) return;
+    const files = Array.from(filesList);
+
+    requestDashScreenWakeLock();
+
+    const isSingle = files.length === 1 && (!files[0].webkitRelativePath || !files[0].webkitRelativePath.includes("/"));
+    let sendName = "Shared_Files.zip";
+    let sendType = "application/zip";
+    const totalSize = files.reduce((acc, f) => acc + f.size, 0);
+    const MAX_LIVE_DIRECT_BYTES = 50 * 1024 * 1024; // 50 MB
+    if (totalSize > MAX_LIVE_DIRECT_BYTES) {
+      showToast("حجم الملفات يتجاوز 50 ميجا! يرجى استخدام الرفع العادي للملفات الكبيرة. / Direct Transfer limit is 50 MB. Use standard upload for larger files.");
+      return;
+    }
+
+    if (isSingle) {
+      sendName = files[0].name;
+      sendType = files[0].type || "application/octet-stream";
+    } else {
+      if (files.some(f => (f.webkitRelativePath && f.webkitRelativePath.includes("/")) || f._folderName)) {
+        const folderSet = new Set();
+        for (const f of files) {
+          if (f.webkitRelativePath && f.webkitRelativePath.includes("/")) {
+            folderSet.add(f.webkitRelativePath.split("/")[0]);
+          } else if (f._folderName) {
+            folderSet.add(f._folderName);
+          }
+        }
+        const folderNames = Array.from(folderSet);
+        if (folderNames.length === 1) sendName = `${folderNames[0]}.zip`;
+        else if (folderNames.length === 2) sendName = `${folderNames[0]}_and_${folderNames[1]}.zip`;
+        else if (folderNames.length > 2) sendName = `${folderNames[0]}_${folderNames[1]}_and_${folderNames.length - 2}_more.zip`;
+        else sendName = "Folders.zip";
+      } else {
+        const now = new Date();
+        const dStr = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}`;
+        sendName = `Files_${dStr}.zip`;
+      }
+    }
+
+    let peer = dashLivePeers.find(p => p.id === targetPeerId);
+    const targetIp = peer ? peer.ip : (fallbackTargetIp || dashTargetPeerForUploadIp || "");
+    if (!peer && targetIp) {
+      peer = dashLivePeers.find(p => p.ip === targetIp);
+    }
+    const finalTargetId = peer ? peer.id : targetPeerId;
+
+    const transferId = "t_" + Math.random().toString(36).slice(2, 10);
+    const tidBytes = new Uint8Array(16).fill(32);
+    tidBytes.set(new TextEncoder().encode(transferId).subarray(0, 16));
+
+    dashActiveTransfer = {
+      id: transferId,
+      idBytes: tidBytes,
+      role: "sender",
+      targetId: finalTargetId,
+      targetIp: targetIp,
+      files: files,
+      name: sendName,
+      size: totalSize,
+      type: sendType,
+      isBundle: !isSingle,
+      currentBytes: 0,
+      startTime: Date.now(),
+      cancelled: false,
+    };
+
+    setDashLiveModalState("Waiting for receiver to accept...", sendName, totalSize);
+    const modal = $("dash-live-transfer-modal");
+    if (modal) modal.classList.remove("hidden");
+
+    startDashTransferAcceptTimeout(transferId);
+
+    // If WS is not open, connect and wait up to 3 seconds
+    if (!dashLiveWs || dashLiveWs.readyState !== WebSocket.OPEN) {
+      initDashLiveShare();
+      for (let i = 0; i < 30; i++) {
+        if (dashLiveWs && dashLiveWs.readyState === WebSocket.OPEN) break;
+        await new Promise(r => setTimeout(r, 100));
+      }
+    }
+
+    if (dashLiveWs && dashLiveWs.readyState === WebSocket.OPEN) {
+      dashLiveWs.send(JSON.stringify({
+        type: "transfer-request",
+        target_id: finalTargetId,
+        target_ip: targetIp,
+        transfer_id: transferId,
+        file_name: sendName,
+        file_size: totalSize,
+        file_type: sendType
+      }));
+    } else {
+      clearDashTransferAcceptTimeout();
+      finishDashLiveTransfer("Live connection not ready. Reconnecting...");
+    }
+  }
+
+  let lastDashLiveProgressTime = 0;
+  function updateDashLiveProgressThrottled(loaded, total, startTime, force = false) {
+    const now = Date.now();
+    if (!force && now - lastDashLiveProgressTime < 100) return;
+    lastDashLiveProgressTime = now;
+    updateDashLiveProgress(loaded, total, startTime);
+  }
+
+  async function startDashLiveSenderStream() {
+    if (!dashActiveTransfer || !dashActiveTransfer.files || dashActiveTransfer.files.length === 0) return;
+    const transferId = dashActiveTransfer.id;
+    const CHUNK_SIZE = 512 * 1024; // 512 KB high-throughput chunks
+    const headerBuf = dashActiveTransfer.idBytes || (new Uint8Array(16).fill(32));
+    if (!dashActiveTransfer.idBytes) {
+      headerBuf.set(new TextEncoder().encode(transferId).subarray(0, 16));
+    }
+
+    setDashLiveModalState("Transferring directly over Wi-Fi...", dashActiveTransfer.name, dashActiveTransfer.size);
+
+    async function sendDashLiveChunk(buf) {
+      if (!dashActiveTransfer || dashActiveTransfer.id !== transferId || dashActiveTransfer.cancelled) return false;
+      // High-watermark 4 MB, Low-watermark 1 MB hysteresis avoids unnecessary timer sleep thrashing
+      if (dashLiveWs && dashLiveWs.bufferedAmount > 4 * 1024 * 1024) {
+        while (dashLiveWs && dashLiveWs.bufferedAmount > 1024 * 1024) {
+          await new Promise(r => setTimeout(r, 4));
+        }
+      }
+      if (!dashLiveWs || dashLiveWs.readyState !== WebSocket.OPEN) return false;
+      const packet = new Uint8Array(16 + buf.byteLength);
+      packet.set(headerBuf, 0);
+      packet.set(new Uint8Array(buf), 16);
+      dashLiveWs.send(packet.buffer);
+      return true;
+    }
+
+    if (!dashActiveTransfer.isBundle) {
+      const file = dashActiveTransfer.files[0];
+      let offset = 0;
+      while (offset < file.size) {
+        if (!dashActiveTransfer || dashActiveTransfer.id !== transferId || dashActiveTransfer.cancelled) break;
+        const slice = file.slice(offset, offset + CHUNK_SIZE);
+        const buf = await slice.arrayBuffer();
+        if (!await sendDashLiveChunk(buf)) break;
+        offset += buf.byteLength;
+        dashActiveTransfer.currentBytes = offset;
+        updateDashLiveProgressThrottled(offset, file.size, dashActiveTransfer.startTime);
+      }
+    } else {
+      // High-performance zero-RAM streaming ZIP bundle
+      let localOffset = 0;
+      const entries = [];
+      let totalSentBytes = 0;
+
+      for (const file of dashActiveTransfer.files) {
+        if (!dashActiveTransfer || dashActiveTransfer.id !== transferId || dashActiveTransfer.cancelled) break;
+        const rawPath = file.webkitRelativePath || (file._folderName ? `${file._folderName}/${file.name}` : file.name);
+        const relPath = rawPath.replace(/\\/g, "/").replace(/^\/+/, "");
+        const nameBytes = new TextEncoder().encode(relPath);
+
+        // 1. Local Header (flag 0x0808: UTF-8 + Data Descriptor)
+        const lHdr = new Uint8Array(30 + nameBytes.length);
+        const lDv = new DataView(lHdr.buffer);
+        lDv.setUint32(0, 0x04034b50, true);
+        lDv.setUint16(4, 20, true);
+        lDv.setUint16(6, 0x0808, true); // STORE + streaming descriptor
+        lDv.setUint16(8, 0, true);
+        lDv.setUint16(10, 0, true);
+        lDv.setUint16(12, 0, true);
+        lDv.setUint32(14, 0, true);
+        lDv.setUint32(18, 0, true);
+        lDv.setUint32(22, 0, true);
+        lDv.setUint16(26, nameBytes.length, true);
+        lDv.setUint16(28, 0, true);
+        lHdr.set(nameBytes, 30);
+
+        const entryOffset = localOffset;
+        if (!await sendDashLiveChunk(lHdr.buffer)) break;
+        localOffset += lHdr.byteLength;
+
+        // 2. Stream file data with slicing-by-8 CRC32 (>700 MB/s)
+        let fOffset = 0;
+        let fCrcState = 0xFFFFFFFF;
+        while (fOffset < file.size) {
+          if (!dashActiveTransfer || dashActiveTransfer.id !== transferId || dashActiveTransfer.cancelled) break;
+          const slice = file.slice(fOffset, fOffset + CHUNK_SIZE);
+          const sBuf = await slice.arrayBuffer();
+          fCrcState = updateDashLiveCrc32(fCrcState, new Uint8Array(sBuf));
+          if (!await sendDashLiveChunk(sBuf)) break;
+          fOffset += sBuf.byteLength;
+          localOffset += sBuf.byteLength;
+          totalSentBytes += sBuf.byteLength;
+          updateDashLiveProgressThrottled(totalSentBytes, dashActiveTransfer.size, dashActiveTransfer.startTime);
+        }
+        const fCrc = (fCrcState ^ 0xFFFFFFFF) >>> 0;
+
+        // 3. Data Descriptor
+        const desc = new Uint8Array(16);
+        const dDv = new DataView(desc.buffer);
+        dDv.setUint32(0, 0x08074b50, true);
+        dDv.setUint32(4, fCrc, true);
+        dDv.setUint32(8, file.size, true);
+        dDv.setUint32(12, file.size, true);
+        if (!await sendDashLiveChunk(desc.buffer)) break;
+        localOffset += desc.byteLength;
+
+        entries.push({ nameBytes, crc: fCrc, size: file.size, offset: entryOffset });
+      }
+
+      if (dashActiveTransfer && dashActiveTransfer.id === transferId && !dashActiveTransfer.cancelled) {
+        // 4. Central Directory
+        const cdOffset = localOffset;
+        let cdSize = 0;
+        for (const ent of entries) {
+          const cd = new Uint8Array(46 + ent.nameBytes.length);
+          const cdDv = new DataView(cd.buffer);
+          cdDv.setUint32(0, 0x02014b50, true);
+          cdDv.setUint16(4, 20, true);
+          cdDv.setUint16(6, 20, true);
+          cdDv.setUint16(8, 0x0808, true);
+          cdDv.setUint16(10, 0, true);
+          cdDv.setUint16(12, 0, true);
+          cdDv.setUint16(14, 0, true);
+          cdDv.setUint32(16, ent.crc, true);
+          cdDv.setUint32(20, ent.size, true);
+          cdDv.setUint32(24, ent.size, true);
+          cdDv.setUint16(28, ent.nameBytes.length, true);
+          cdDv.setUint16(30, 0, true);
+          cdDv.setUint16(32, 0, true);
+          cdDv.setUint16(34, 0, true);
+          cdDv.setUint16(36, 0, true);
+          cdDv.setUint32(38, 0, true);
+          cdDv.setUint32(42, ent.offset, true);
+          cd.set(ent.nameBytes, 46);
+
+          if (!await sendDashLiveChunk(cd.buffer)) break;
+          localOffset += cd.byteLength;
+          cdSize += cd.byteLength;
+        }
+
+        // 5. End of Central Directory
+        const eocd = new Uint8Array(22);
+        const eocdDv = new DataView(eocd.buffer);
+        eocdDv.setUint32(0, 0x06054b50, true);
+        eocdDv.setUint16(4, 0, true);
+        eocdDv.setUint16(6, 0, true);
+        eocdDv.setUint16(8, entries.length, true);
+        eocdDv.setUint16(10, entries.length, true);
+        eocdDv.setUint32(12, cdSize, true);
+        eocdDv.setUint32(16, cdOffset, true);
+        eocdDv.setUint16(20, 0, true);
+        await sendDashLiveChunk(eocd.buffer);
+      }
+    }
+
+    if (dashActiveTransfer && dashActiveTransfer.id === transferId && !dashActiveTransfer.cancelled) {
+      if (dashLiveWs && dashLiveWs.readyState === WebSocket.OPEN) {
+        dashLiveWs.send(JSON.stringify({
+          type: "transfer-done",
+          transfer_id: transferId,
+          target_id: dashActiveTransfer.targetId,
+          target_ip: dashActiveTransfer.targetIp
+        }));
+      }
+      updateDashLiveProgressThrottled(dashActiveTransfer.size, dashActiveTransfer.size, dashActiveTransfer.startTime, true);
+      const tEl = $("dash-live-modal-title");
+      if (tEl) tEl.textContent = "Transfer Complete! 🎉";
+      const barEl = $("dash-live-modal-bar");
+      if (barEl) barEl.style.background = "#10b981";
+      await new Promise(r => setTimeout(r, 600));
+      finishDashLiveTransfer(`File "${dashActiveTransfer.name}" sent directly!`);
+    }
+  }
+
+  function handleDashBinaryChunk(buf) {
+    if (buf.byteLength < 16) return;
+    if (!dashActiveTransfer || dashActiveTransfer.role !== "receiver") return;
+    if (dashActiveTransfer.useHttpStream) return; // Zero JS RAM: streamed via HTTP directly to storage!
+
+    if (dashActiveTransfer.idBytes) {
+      const u8 = new Uint8Array(buf, 0, 16);
+      let match = true;
+      for (let i = 0; i < 16; i++) {
+        if (u8[i] !== dashActiveTransfer.idBytes[i]) {
+          match = false;
+          break;
+        }
+      }
+      if (!match) return;
+    }
+
+    // Zero-copy view into payload memory (eliminates ArrayBuffer duplication)
+    const chunkView = new Uint8Array(buf, 16);
+    dashActiveTransfer.chunks.push(chunkView);
+    dashActiveTransfer.currentBytes += chunkView.byteLength;
+    updateDashLiveProgressThrottled(dashActiveTransfer.currentBytes, dashActiveTransfer.size, dashActiveTransfer.startTime);
+  }
+
+  function finishDashLiveReceiver() {
+    if (!dashActiveTransfer || dashActiveTransfer.role !== "receiver") return;
+    if (dashActiveTransfer.useHttpStream) {
+      updateDashLiveProgressThrottled(dashActiveTransfer.size, dashActiveTransfer.size, dashActiveTransfer.startTime, true);
+      try { if (navigator.vibrate) navigator.vibrate([200, 100, 200]); } catch (e) {}
+      const tEl = $("dash-live-modal-title");
+      if (tEl) tEl.textContent = "Transfer Complete! 🎉";
+      const warnEl = $("dash-live-modal-screen-warning");
+      if (warnEl) warnEl.style.display = "none";
+      const barEl = $("dash-live-modal-bar");
+      if (barEl) {
+        barEl.style.width = "100%";
+        barEl.style.background = "#10b981";
+      }
+      const stEl = $("dash-live-modal-stats");
+      if (stEl) stEl.textContent = `100% (${formatBytes(dashActiveTransfer.size)})`;
+      const spEl = $("dash-live-modal-speed");
+      if (spEl) spEl.textContent = "Saved to Downloads ⚡";
+      const cancelBtn = $("dash-btn-cancel-transfer");
+      const saveBtn = $("dash-btn-live-save-download");
+      const doneBtn = $("dash-btn-live-close-done");
+      if (cancelBtn) cancelBtn.classList.add("hidden");
+      if (saveBtn) saveBtn.classList.add("hidden");
+      if (doneBtn) doneBtn.classList.remove("hidden");
+      showToast(`File "${dashActiveTransfer.name}" saved directly to your Downloads!`);
+      return;
+    }
+    if (!dashActiveTransfer.chunks || dashActiveTransfer.chunks.length === 0) {
+      finishDashLiveTransfer("Transfer finished but received 0 bytes.");
+      return;
+    }
+    updateDashLiveProgressThrottled(dashActiveTransfer.currentBytes, dashActiveTransfer.size, dashActiveTransfer.startTime, true);
+    const mimeType = dashActiveTransfer.type || "application/octet-stream";
+    const blob = new Blob(dashActiveTransfer.chunks, { type: mimeType });
+    if (blob.size === 0) {
+      finishDashLiveTransfer("Received empty file (0 bytes).");
+      return;
+    }
+
+    try {
+      if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+    } catch (e) {}
+
+    const fileName = dashActiveTransfer.name || "downloaded_file";
+    const downloadUrl = URL.createObjectURL(blob);
+
+    try {
+      const a = document.createElement("a");
+      a.href = downloadUrl;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch (err) {
+      console.warn("Auto click download error:", err);
+    }
+
+    requestDashScreenWakeLock();
+    clearDashTransferAcceptTimeout();
+
+    const tEl = $("dash-live-modal-title");
+    if (tEl) tEl.textContent = "Transfer Complete! 🎉";
+    const warnEl = $("dash-live-modal-screen-warning");
+    if (warnEl) warnEl.style.display = "none";
+    const barEl = $("dash-live-modal-bar");
+    if (barEl) {
+      barEl.style.width = "100%";
+      barEl.style.background = "#10b981";
+    }
+    const statEl = $("dash-live-modal-stats");
+    if (statEl) statEl.textContent = `100% (${formatBytes(blob.size)})`;
+    const spdEl = $("dash-live-modal-speed");
+    if (spdEl) spdEl.textContent = "Done ⚡";
+
+    dashActiveDownloadUrl = downloadUrl;
+    dashActiveDownloadName = fileName;
+
+    const cancelBtn = $("dash-btn-cancel-transfer");
+    const saveBtn = $("dash-btn-live-save-download");
+    const doneBtn = $("dash-btn-live-close-done");
+
+    if (cancelBtn) cancelBtn.classList.add("hidden");
+    if (saveBtn) {
+      saveBtn.classList.remove("hidden");
+      saveBtn.textContent = `💾 Save / Download (${formatBytes(blob.size)})`;
+    }
+    if (doneBtn) {
+      doneBtn.classList.remove("hidden");
+    }
+
+    showToast(`Received "${fileName}" (${formatBytes(blob.size)})!`);
+  }
+
+  function setDashLiveModalState(title, filename, size, isReceiver = false) {
+    const tEl = $("dash-live-modal-title");
+    const fnEl = $("dash-live-modal-filename");
+    const barEl = $("dash-live-modal-bar");
+    const statEl = $("dash-live-modal-stats");
+    const spdEl = $("dash-live-modal-speed");
+    if (tEl) tEl.textContent = title;
+    if (fnEl) fnEl.textContent = filename;
+    if (barEl) {
+      barEl.style.width = "0%";
+      barEl.style.background = "linear-gradient(90deg, #0284c7, #38bdf8)";
+    }
+    if (statEl) statEl.textContent = `0% (0 B / ${formatBytes(size)})`;
+    if (spdEl) spdEl.textContent = "0 B/s";
+    const warnEl = $("dash-live-modal-screen-warning");
+    if (warnEl) {
+      warnEl.style.display = "flex";
+      if (isReceiver) {
+        warnEl.innerHTML = `<span>💡</span><div><b>تنبيه للمستلم:</b> إذا ظهر شريط <b>Save...</b> أو <b>تنزيل</b> أسفل شاشة المتصفح، اضغط عليه فوراً لمتابعة الحفظ. مع إبقاء الشاشة مفتوحة.</div>`;
+      } else {
+        warnEl.innerHTML = `<span>💡</span><span>Keep screen on & browser open during transfer (يرجى إبقاء الشاشة مفتوحة)</span>`;
+      }
+    }
+    const cancelBtn = $("dash-btn-cancel-transfer");
+    const saveBtn = $("dash-btn-live-save-download");
+    const doneBtn = $("dash-btn-live-close-done");
+    if (cancelBtn) cancelBtn.classList.remove("hidden");
+    if (saveBtn) saveBtn.classList.add("hidden");
+    if (doneBtn) doneBtn.classList.add("hidden");
+  }
+
+  function updateDashLiveProgress(loaded, total, startTime) {
+    const pct = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+    const barEl = $("dash-live-modal-bar");
+    const statEl = $("dash-live-modal-stats");
+    const spdEl = $("dash-live-modal-speed");
+    if (barEl) barEl.style.width = `${pct}%`;
+    const elapsedSec = (Date.now() - startTime) / 1000;
+    const speed = elapsedSec > 0.1 ? loaded / elapsedSec : 0;
+    if (statEl) statEl.textContent = `${pct}% (${formatBytes(loaded)} / ${formatBytes(total)})`;
+    if (spdEl) spdEl.textContent = `${formatBytes(speed)}/s`;
+  }
+
+  function finishDashLiveTransfer(msg) {
+    clearDashTransferAcceptTimeout();
+    releaseDashScreenWakeLock();
+    const trModal = $("dash-live-transfer-modal");
+    const inModal = $("dash-live-incoming-modal");
+    if (trModal) trModal.classList.add("hidden");
+    if (inModal) inModal.classList.add("hidden");
+    const cancelBtn = $("dash-btn-cancel-transfer");
+    const saveBtn = $("dash-btn-live-save-download");
+    const doneBtn = $("dash-btn-live-close-done");
+    if (cancelBtn) cancelBtn.classList.remove("hidden");
+    if (saveBtn) saveBtn.classList.add("hidden");
+    if (doneBtn) doneBtn.classList.add("hidden");
+    dashActiveTransfer = null;
+    dashPendingIncomingRequest = null;
+    if (msg) showToast(msg);
+  }
+
+  const livePeersList = $("dash-live-peers-list");
+  const livePeerFileInput = $("dash-live-peer-file-input");
+  const livePeerFolderInput = $("dash-live-peer-folder-input");
+
+  if (livePeersList) {
+    livePeersList.addEventListener("click", (e) => {
+      const filesBtn = e.target.closest(".dash-peer-send-files");
+      if (filesBtn && livePeerFileInput) {
+        dashTargetPeerForUpload = filesBtn.dataset.peerId;
+        const card = filesBtn.closest(".dash-peer-card");
+        dashTargetPeerForUploadIp = card && card.querySelector(".peer-ip") ? card.querySelector(".peer-ip").textContent.trim() : "";
+        dashMultiFolderStaging.active = false;
+        livePeerFileInput.click();
+        return;
+      }
+      const folderBtn = e.target.closest(".dash-peer-send-folder");
+      if (folderBtn && livePeerFolderInput) {
+        dashTargetPeerForUpload = folderBtn.dataset.peerId;
+        const card = folderBtn.closest(".dash-peer-card");
+        const peerName = card && card.querySelector(".peer-name") ? card.querySelector(".peer-name").textContent : "";
+        dashTargetPeerForUploadIp = card && card.querySelector(".peer-ip") ? card.querySelector(".peer-ip").textContent.trim() : "";
+        startDashMultiFolderStaging("direct", dashTargetPeerForUpload, peerName, dashTargetPeerForUploadIp);
+        return;
+      }
+      const card = e.target.closest(".dash-peer-card");
+      if (card && livePeerFileInput) {
+        dashTargetPeerForUpload = card.dataset.peerId;
+        dashTargetPeerForUploadIp = card.querySelector(".peer-ip") ? card.querySelector(".peer-ip").textContent.trim() : "";
+        dashMultiFolderStaging.active = false;
+        livePeerFileInput.click();
+      }
+    });
+
+    if (livePeerFileInput) {
+      livePeerFileInput.addEventListener("change", (e) => {
+        if (e.target.files && e.target.files.length > 0 && dashTargetPeerForUpload) {
+          initiateDashSendDirect(dashTargetPeerForUpload, e.target.files, dashTargetPeerForUploadIp);
+          e.target.value = "";
+        }
+      });
+    }
+
+    if (livePeerFolderInput) {
+      livePeerFolderInput.addEventListener("change", (e) => {
+        if (e.target.files && e.target.files.length > 0) {
+          if (dashMultiFolderStaging.active) {
+            addFilesToDashMultiFolderStaging(e.target.files);
+          } else if (dashTargetPeerForUpload) {
+            initiateDashSendDirect(dashTargetPeerForUpload, e.target.files, dashTargetPeerForUploadIp);
+          }
+          e.target.value = "";
+        }
+      });
+    }
+
+    // Drag and drop onto dashboard peer cards
+    livePeersList.addEventListener("dragover", (e) => {
+      const card = e.target.closest(".dash-peer-card");
+      if (card) {
+        e.preventDefault();
+        card.classList.add("dragover");
+      }
+    });
+    livePeersList.addEventListener("dragleave", (e) => {
+      const card = e.target.closest(".dash-peer-card");
+      if (card) {
+        card.classList.remove("dragover");
+      }
+    });
+    livePeersList.addEventListener("drop", async (e) => {
+      const card = e.target.closest(".dash-peer-card");
+      if (!card) return;
+      e.preventDefault();
+      card.classList.remove("dragover");
+      const peerId = card.dataset.peerId;
+      if (!peerId) return;
+      const peerName = card.querySelector(".peer-name") ? card.querySelector(".peer-name").textContent : "";
+      const peerIp = card.querySelector(".peer-ip") ? card.querySelector(".peer-ip").textContent.trim() : "";
+
+      const { files, hasDirectory, folderCount } = await extractDashFilesFromDataTransfer(e.dataTransfer);
+      if (files.length === 0) return;
+
+      if (hasDirectory && folderCount > 1) {
+        dashMultiFolderStaging.active = true;
+        dashMultiFolderStaging.mode = "direct";
+        dashMultiFolderStaging.targetPeerId = peerId;
+        dashMultiFolderStaging.targetPeerName = peerName;
+        dashMultiFolderStaging.targetPeerIp = peerIp;
+        dashMultiFolderStaging.folders = [];
+        addFilesToDashMultiFolderStaging(files);
+      } else {
+        initiateDashSendDirect(peerId, files, peerIp);
+      }
+    });
+  }
+
+  const acceptBtn = $("dash-btn-accept-transfer");
+  if (acceptBtn) {
+    acceptBtn.addEventListener("click", () => {
+      if (!dashPendingIncomingRequest) return;
+      const req = dashPendingIncomingRequest;
+      const inModal = $("dash-live-incoming-modal");
+      if (inModal) inModal.classList.add("hidden");
+      requestDashScreenWakeLock();
+
+      const tidBytes = new Uint8Array(16).fill(32);
+      tidBytes.set(new TextEncoder().encode(req.transfer_id).subarray(0, 16));
+
+      const downloadUrl = `/api/share/live/download/${encodeURIComponent(req.transfer_id)}`;
+      dashActiveDownloadUrl = downloadUrl;
+      dashActiveDownloadName = req.file_name;
+
+      dashActiveTransfer = {
+        id: req.transfer_id,
+        idBytes: tidBytes,
+        role: "receiver",
+        targetId: req.sender_id,
+        targetIp: req.sender_ip,
+        name: req.file_name,
+        size: req.file_size,
+        type: req.file_type,
+        currentBytes: 0,
+        chunks: [],
+        startTime: Date.now(),
+        cancelled: false,
+        useHttpStream: true,
+      };
+
+      setDashLiveModalState(`Receiving from "${req.sender_name}"...`, req.file_name, req.file_size, true);
+      const trModal = $("dash-live-transfer-modal");
+      if (trModal) trModal.classList.remove("hidden");
+
+      // Trigger native browser streaming download directly to storage (0 JS heap RAM!)
+      try {
+        const a = document.createElement("a");
+        a.href = downloadUrl;
+        a.download = req.file_name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      } catch (err) {
+        console.warn("Direct stream download trigger error:", err);
+      }
+
+      dashLiveWs.send(JSON.stringify({
+        type: "transfer-response",
+        transfer_id: req.transfer_id,
+        target_id: req.sender_id,
+        target_ip: req.sender_ip,
+        accepted: true,
+        http_stream: true
+      }));
+    });
+  }
+
+  const declineBtn = $("dash-btn-decline-transfer");
+  if (declineBtn) {
+    declineBtn.addEventListener("click", () => {
+      if (!dashPendingIncomingRequest) return;
+      const req = dashPendingIncomingRequest;
+      const inModal = $("dash-live-incoming-modal");
+      if (inModal) inModal.classList.add("hidden");
+      dashLiveWs.send(JSON.stringify({
+        type: "transfer-response",
+        transfer_id: req.transfer_id,
+        target_id: req.sender_id,
+        target_ip: req.sender_ip,
+        accepted: false
+      }));
+      dashPendingIncomingRequest = null;
+      showToast("Transfer declined");
+    });
+  }
+
+  const cancelTrBtn = $("dash-btn-cancel-transfer");
+  if (cancelTrBtn) {
+    cancelTrBtn.addEventListener("click", () => {
+      if (!dashActiveTransfer) return;
+      dashActiveTransfer.cancelled = true;
+      if (dashLiveWs && dashLiveWs.readyState === WebSocket.OPEN) {
+        dashLiveWs.send(JSON.stringify({
+          type: "transfer-cancel",
+          transfer_id: dashActiveTransfer.id,
+          target_id: dashActiveTransfer.targetId,
+          target_ip: dashActiveTransfer.targetIp
+        }));
+      }
+      finishDashLiveTransfer("Transfer cancelled");
+    });
+  }
+
+  const saveLiveBtn = $("dash-btn-live-save-download");
+  if (saveLiveBtn) {
+    saveLiveBtn.addEventListener("click", () => {
+      if (!dashActiveDownloadUrl) return;
+      const a = document.createElement("a");
+      a.href = dashActiveDownloadUrl;
+      a.download = dashActiveDownloadName || "downloaded_file";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      showToast(`Saving ${dashActiveDownloadName}...`);
+    });
+  }
+
+  const doneLiveBtn = $("dash-btn-live-close-done");
+  if (doneLiveBtn) {
+    doneLiveBtn.addEventListener("click", () => {
+      if (dashActiveDownloadUrl) {
+        try { URL.revokeObjectURL(dashActiveDownloadUrl); } catch (e) {}
+        dashActiveDownloadUrl = null;
+      }
+      finishDashLiveTransfer();
+    });
+  }
+
+  // START DASH LIVE WEBSOCKET
+  initDashLiveShare();
 }
 
 /* ==========================================================================
@@ -4787,14 +6919,34 @@ async function init() {
     if (ev.target === $("changelog-modal")) $("changelog-modal").classList.add("hidden");
   });
   // browsing history: refetch on device/window change or manual refresh
-  $("hist-device").addEventListener("change", refreshHistory);
+  $("hist-device").addEventListener("change", () => {
+    refreshHistory();
+    if (currentHistoryView === "live") fetchAndRenderLiveTraffic();
+  });
   $("hist-window").addEventListener("change", refreshHistory);
-  $("hist-refresh").addEventListener("click", refreshHistory);
+  $("hist-refresh").addEventListener("click", () => {
+    refreshHistory();
+    if (currentHistoryView === "live") fetchAndRenderLiveTraffic();
+  });
 
   // browsing history view tabs
   document.querySelectorAll(".hist-tab").forEach((btn) => {
     btn.addEventListener("click", () => switchHistoryView(btn.dataset.view));
   });
+  const histLiveList = $("hist-live-devices-list");
+  if (histLiveList) {
+    histLiveList.addEventListener("click", (ev) => {
+      const row = ev.target.closest(".hist-device-row");
+      if (!row || !row.dataset.deviceId) return;
+      const devId = row.dataset.deviceId;
+      const sel = $("hist-device");
+      if (sel) {
+        sel.value = devId;
+        refreshHistory();
+        fetchAndRenderLiveTraffic();
+      }
+    });
+  }
   const histTop = $("hist-top");
   if (histTop) {
     histTop.addEventListener("click", (ev) => {
@@ -5108,6 +7260,8 @@ async function init() {
   $("d-mode").addEventListener("change", () => {
     $("d-fixed-wrap").classList.toggle("hidden", $("d-mode").value !== "fixed");
   });
+
+  initShareUI();
 
 
   // event delegation for dynamic device/user buttons

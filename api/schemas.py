@@ -74,6 +74,8 @@ class UserUpdate(BaseModel):
     #: the direct uplink; quota/blocks/caps still apply). A per-device
     #: ``vpn_bypass`` wins independently of this flag.
     vpn_bypass: Optional[bool] = None
+    #: Guest flag — setting to false converts a guest user to a permanent regular user.
+    guest: Optional[bool] = None
 
 
 class NetworkUpdate(BaseModel):
@@ -90,6 +92,11 @@ class NetworkUpdate(BaseModel):
     #: <-> uplink-subnet) traffic. 0/empty = the 1000 Mbps default; the WAN
     #: caps never apply to LAN transfers.
     lan_rate_mbps: Optional[float] = _cap_field()
+    #: VPN mode: % of the WAN totals used while the tunnel is active
+    #: (0 = built-in margins) and optional measured through-VPN rates.
+    vpn_pct: Optional[float] = _cap_field()
+    vpn_down_mbps: Optional[float] = _cap_field()
+    vpn_up_mbps: Optional[float] = _cap_field()
     #: "VPN share" master switch: route the whole client subnet through the
     #: box's VPN tunnel (quota/vpnshare.py policy routing). None = leave the
     #: current switch untouched (only the shaping fields changed).
@@ -574,7 +581,7 @@ class VpnRoutingUpdateRequest(BaseModel):
 
 class VpnSettingsUpdate(BaseModel):
     """VPN subsystem settings."""
-    allow_insecure: bool = False
+    allow_insecure: Optional[bool] = None
 
 
 

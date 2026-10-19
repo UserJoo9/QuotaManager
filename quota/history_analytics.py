@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import collections
 import datetime as _dt
+import time
 from typing import Any
 
 from quota.db import Database
@@ -107,6 +108,46 @@ KNOWN_SERVICES: list[tuple[list[str], str, str, str, str]] = [
     (
         ["github.com", "githubusercontent.com"],
         "GitHub", "Developer Tools", "#24292E", "github"
+    ),
+    (
+        ["zoom.us", "zoom.com"],
+        "Zoom", "Video Conferencing", "#2D8CFF", "video"
+    ),
+    (
+        ["epicgames.com", "unrealengine.com"],
+        "Epic Games", "Gaming", "#313131", "gamepad"
+    ),
+    (
+        ["playstation.com", "sonyentertainmentnetwork.com", "playstation.net"],
+        "PlayStation", "Gaming", "#003791", "gamepad"
+    ),
+    (
+        ["xbox.com", "xboxlive.com"],
+        "Xbox", "Gaming", "#107C10", "gamepad"
+    ),
+    (
+        ["shahid.net", "mbc.net"],
+        "Shahid VIP", "Video & Streaming", "#00A859", "video"
+    ),
+    (
+        ["watchit.com"],
+        "Watch It", "Video & Streaming", "#E50914", "video"
+    ),
+    (
+        ["pinterest.com", "pinimg.com"],
+        "Pinterest", "Social Media", "#E60023", "image"
+    ),
+    (
+        ["linkedin.com", "licdn.com"],
+        "LinkedIn", "Professional", "#0A66C2", "briefcase"
+    ),
+    (
+        ["speedtest.net", "ookla.com"],
+        "Speedtest", "Network Tools", "#141526", "gauge"
+    ),
+    (
+        ["bittorrent.com", "utorrent.com"],
+        "Torrent / P2P", "File Sharing", "#38BDF8", "download"
     ),
 ]
 
@@ -226,3 +267,133 @@ async def get_history_analytics(db: Database,
         "unclassified_queries": sum(website_counts.values()),
         "app_queries": sum(a["queries"] for a in top_apps),
     }
+
+
+async def get_live_traffic_analytics(
+    db: Database,
+    devices: list[Any],
+    leases: dict[str, str],
+    live: Any,
+    users: dict[int, str] | None = None,
+    selected_device_id: int | None = None,
+) -> dict[str, Any]:
+    """Compile real-time bandwidth consumption ranking, top consumer, and active apps per device."""
+    now_ts = time.time()
+    users_map = users or {}
+
+    target_devices = [
+        d for d in devices
+        if selected_device_id is None or d.id == selected_device_id
+    ]
+
+    device_results = []
+    for dev in target_devices:
+        ip = leases.get(dev.mac, "")
+        # Read live counters from EngineSnapshot
+        live_c = getattr(live, "by_ip", {}).get(ip) if ip else None
+        live_up = getattr(live_c, "up", 0) if live_c else 0
+        live_down = getattr(live_c, "down", 0) if live_c else 0
+
+        # Estimated instantaneous speed based on 15s maintenance flush delta
+        down_bps = int((live_down * 8) / 15.0) if live_down else 0
+        up_bps = int((live_up * 8) / 15.0) if live_up else 0
+        total_bps = down_bps + up_bps
+
+        # Determine what this device is currently accessing ("ساحبه ف ايه")
+        recent_rows = await db.conn.execute_fetchall(
+            """
+            SELECT domain, SUM(count) as hits, MAX(bucket_minute) as last_seen
+            FROM dns_history
+            WHERE device_id = ?
+            GROUP BY domain
+            ORDER BY last_seen DESC, hits DESC
+            LIMIT 10
+            """,
+            (dev.id,)
+        )
+
+        active_app = None
+        recent_domains = []
+        for r in recent_rows:
+            d_name = r["domain"]
+            recent_domains.append(d_name)
+            if not active_app:
+                svc = classify_domain(d_name)
+                if svc:
+                    active_app = {
+                        "name": svc[0],
+                        "category": svc[1],
+                        "color": svc[2],
+                        "icon": svc[3],
+                        "domain": d_name,
+                    }
+
+        if not active_app:
+            if recent_domains:
+                base = get_base_domain(recent_domains[0])
+                active_app = {
+                    "name": base,
+                    "category": "Web Browsing",
+                    "color": "#38BDF8",
+                    "icon": "globe",
+                    "domain": recent_domains[0],
+                }
+            else:
+                active_app = {
+                    "name": "General Traffic",
+                    "category": "Network Traffic",
+                    "color": "#94A3B8",
+                    "icon": "activity",
+                    "domain": ip or "direct",
+                }
+
+        device_results.append({
+            "id": dev.id,
+            "name": dev.name,
+            "ip": ip,
+            "mac": dev.mac,
+            "user_id": dev.user_id,
+            "user_name": users_map.get(dev.user_id, ""),
+            "live_down_bytes": live_down,
+            "live_up_bytes": live_up,
+            "down_bps": down_bps,
+            "up_bps": up_bps,
+            "total_bps": total_bps,
+            "active_app": active_app,
+            "recent_domains": recent_domains[:4],
+        })
+
+    # Sort devices by total bandwidth descending
+    device_results.sort(
+        key=lambda d: (d["total_bps"], d["live_down_bytes"] + d["live_up_bytes"]),
+        reverse=True,
+    )
+
+    total_down_bps = sum(d["down_bps"] for d in device_results)
+    total_up_bps = sum(d["up_bps"] for d in device_results)
+    net_total_bps = total_down_bps + total_up_bps
+
+    # Compute bandwidth share %
+    for d in device_results:
+        d["share_pct"] = (
+            round((d["total_bps"] / max(1, net_total_bps)) * 100, 1)
+            if net_total_bps > 0
+            else 0.0
+        )
+
+    # Top consumer is the #1 active device
+    top_consumer = (
+        device_results[0]
+        if (device_results and (device_results[0]["total_bps"] > 0 or device_results[0]["live_down_bytes"] > 0))
+        else (device_results[0] if device_results else None)
+    )
+
+    return {
+        "timestamp": now_ts,
+        "total_down_bps": total_down_bps,
+        "total_up_bps": total_up_bps,
+        "net_total_bps": net_total_bps,
+        "top_consumer": top_consumer,
+        "devices": device_results,
+    }
+

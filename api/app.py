@@ -21,6 +21,7 @@ import secrets
 import socket
 import subprocess
 import time
+import urllib.parse
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -28,7 +29,9 @@ from typing import Any, Callable, Optional
 import yaml
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               PlainTextResponse, RedirectResponse,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
@@ -57,7 +60,13 @@ from quota import dns_rules as _dns_rules
 from quota import totp as _totp
 from quota import wan_telegram as _wan_tg
 from quota.engine import GATEWAY_MAC, EngineSnapshot, SnapshotHolder
-from quota.history_analytics import get_history_analytics
+from quota.history_analytics import get_history_analytics, get_live_traffic_analytics
+from quota.local_share import (
+    MAX_LIVE_DIRECT_BYTES,
+    LocalShareManager,
+    detect_device_name,
+    sanitize_filename,
+)
 from quota.service import GB, QuotaService
 from quota.vendor import vendor_for
 from quota.version import __version__
@@ -285,9 +294,13 @@ def create_app(
     engine: Optional[object] = None,
     web_config: WebConfig | None = None,
     waf_config: WafConfig | None = None,
+    local_share_manager: LocalShareManager | None = None,
 ) -> FastAPI:
     web_cfg: WebConfig = web_config or WebConfig()
     waf_cfg: WafConfig = waf_config or WafConfig()
+    local_share = local_share_manager or LocalShareManager(
+        Path(__file__).resolve().parent.parent / "data" / "local_share"
+    )
     # API surface hygiene: the auto-generated docs (Swagger UI + the full
     # OpenAPI schema) are a structured endpoint map served to ANYONE who can
     # reach the port — a perfect recon target on a WAN-facing box. Off unless
@@ -446,6 +459,23 @@ def create_app(
             allowed.append(client_subnet)
         if not allowed or not any(_ip_in_network(host, e) for e in allowed):
             raise HTTPException(403, "report access denied")
+
+    async def _require_local_share_access(request: Request) -> None:
+        """Allow access to local share from private LAN subnets or if authenticated admin."""
+        token = request.cookies.get(COOKIE_NAME, "")
+        stored = await database.get_setting("session_token", "")
+        if token and stored and hmac.compare_digest(token, stored):
+            return
+
+        host = request.client.host if request.client else ""
+        try:
+            ip = ipaddress.ip_address(host)
+            if ip.is_private or ip.is_loopback:
+                return
+        except ValueError:
+            pass
+
+        raise HTTPException(403, "Local Share is only accessible from the home network")
 
     # -- serialization helper ------------------------------------------------
 
@@ -907,6 +937,378 @@ def create_app(
         page = WEB_DIR / "milestone.html"
         return FileResponse(str(page))
 
+    # -- Local Share routes (public to home LAN, zero-install) ---------------
+
+    @app.get("/share", dependencies=[Depends(_require_local_share_access)],
+             response_class=FileResponse)
+    async def local_share_page() -> FileResponse:
+        """The household local share web portal — zero install on any phone/PC."""
+        page = WEB_DIR / "share.html"
+        return FileResponse(str(page))
+
+    @app.get("/api/share/list", dependencies=[Depends(_require_local_share_access)])
+    async def list_shared_items(request: Request) -> dict[str, Any]:
+        """List active shared files and texts with storage statistics."""
+        data = await local_share.list_all()
+        host = request.client.host if request.client else ""
+        data["client_ip"] = host
+        data["server_host"] = request.headers.get("host") or request.url.netloc or "router.local"
+        return data
+
+    @app.post("/api/share/upload", dependencies=[Depends(_require_local_share_access)])
+    async def upload_share_file(
+        request: Request,
+        ttl: int = 7200,
+    ) -> dict[str, Any]:
+        """Stream an uploaded file to the local share cache with automatic TTL.
+        Uses pure request streaming — zero dependencies on python-multipart and
+        minimal memory overhead for multi-gigabyte transfers.
+        """
+        raw_name = request.headers.get("x-filename") or request.query_params.get("filename") or "shared_file"
+        try:
+            raw_name = urllib.parse.unquote(raw_name)
+        except Exception:
+            pass
+        content_type = request.headers.get("content-type") or "application/octet-stream"
+        sender_ip = request.client.host if request.client else "127.0.0.1"
+
+        sf = await local_share.save_file_stream(
+            stream=request.stream(),
+            filename=raw_name,
+            content_type=content_type,
+            sender_ip=sender_ip,
+            ttl_seconds=ttl,
+        )
+        return {"ok": True, "file": sf.to_dict()}
+
+    @app.get("/api/share/download/{file_id}", dependencies=[Depends(_require_local_share_access)])
+    async def download_shared_file(file_id: str) -> FileResponse:
+        """Download a shared file at full local LAN speed."""
+        item = await local_share.get_file(file_id)
+        if not item:
+            raise HTTPException(404, "File not found or expired")
+        file_path, filename, content_type = item
+        return FileResponse(
+            str(file_path),
+            filename=filename,
+            media_type=content_type or "application/octet-stream",
+        )
+
+    @app.delete("/api/share/files/{file_id}", dependencies=[Depends(_require_local_share_access)])
+    async def delete_shared_file(file_id: str) -> dict[str, Any]:
+        """Delete a shared file from the router."""
+        ok = await local_share.delete_file(file_id)
+        if not ok:
+            raise HTTPException(404, "File not found")
+        return {"ok": True}
+
+    @app.post("/api/share/text", dependencies=[Depends(_require_local_share_access)])
+    async def add_shared_text(request: Request) -> dict[str, Any]:
+        """Share a text snippet or URL across all devices in the house."""
+        body = await request.json()
+        text = (body.get("text") or "").strip()
+        if not text:
+            raise HTTPException(400, "Text cannot be empty")
+        sender_ip = request.client.host if request.client else "127.0.0.1"
+        st = await local_share.save_text(text, sender_ip)
+        return {"ok": True, "item": st.to_dict()}
+
+    @app.delete("/api/share/texts/{text_id}", dependencies=[Depends(_require_local_share_access)])
+    async def delete_shared_text(text_id: str) -> dict[str, Any]:
+        """Delete a shared text snippet."""
+        ok = await local_share.delete_text(text_id)
+        if not ok:
+            raise HTTPException(404, "Text item not found")
+        return {"ok": True}
+
+    @app.post("/api/share/clear", dependencies=[Depends(_require_local_share_access)])
+    async def clear_all_shares() -> dict[str, Any]:
+        """Clear all shared files and texts."""
+        await local_share.clear_all()
+        return {"ok": True}
+
+    @app.get("/api/share/download-zip", dependencies=[Depends(_require_local_share_access)])
+    async def download_shared_zip(ids: str = "") -> FileResponse:
+        """Download multiple selected files bundled as a single ZIP archive."""
+        file_ids = [fid.strip() for fid in ids.split(",") if fid.strip()]
+        if not file_ids:
+            raise HTTPException(400, "No file IDs specified")
+        res = await local_share.create_batch_zip(file_ids)
+        if not res:
+            raise HTTPException(404, "No valid files found to bundle")
+        bundle_path, fname = res
+        return FileResponse(
+            str(bundle_path),
+            filename=fname,
+            media_type="application/zip",
+        )
+
+    @app.post("/api/share/delete-batch", dependencies=[Depends(_require_local_share_access)])
+    async def delete_shared_batch(request: Request) -> dict[str, Any]:
+        """Delete multiple selected files in one call."""
+        body = await request.json()
+        ids = body.get("ids") or []
+        if not isinstance(ids, list):
+            raise HTTPException(400, "ids must be a list")
+        count = await local_share.delete_batch([str(i) for i in ids])
+        return {"ok": True, "deleted": count}
+
+    @app.post("/api/share/folder/init", dependencies=[Depends(_require_local_share_access)])
+    async def init_share_folder(request: Request) -> dict[str, Any]:
+        """Initialize an on-the-fly folder ZIP upload session."""
+        body = await request.json()
+        folder_name = (body.get("folder_name") or "folder").strip()
+        ttl = int(body.get("ttl", 7200))
+        sender_ip = request.client.host if request.client else "127.0.0.1"
+        folder_id = await local_share.init_folder_upload(folder_name, sender_ip, ttl)
+        return {"ok": True, "folder_id": folder_id}
+
+    @app.post("/api/share/folder/file", dependencies=[Depends(_require_local_share_access)])
+    async def append_share_folder_file(request: Request, folder_id: str, path: str) -> dict[str, Any]:
+        """Stream a single file directly into the folder's in-progress ZIP archive."""
+        raw_path = urllib.parse.unquote(path)
+        bytes_written = await local_share.append_folder_file(folder_id, raw_path, request.stream())
+        return {"ok": True, "bytes": bytes_written}
+
+    @app.post("/api/share/folder/finalize", dependencies=[Depends(_require_local_share_access)])
+    async def finalize_share_folder(request: Request) -> dict[str, Any]:
+        """Finalize and close the folder ZIP archive, publishing it as a shared file."""
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            pass
+        folder_id = body.get("folder_id") or request.query_params.get("folder_id")
+        if not folder_id:
+            raise HTTPException(400, "folder_id required")
+        sf = await local_share.finalize_folder_upload(str(folder_id))
+        return {"ok": True, "file": sf.to_dict()}
+
+    async def _check_ws_local_share_access(ws: WebSocket) -> bool:
+        token = ws.cookies.get(COOKIE_NAME, "")
+        stored = await database.get_setting("session_token", "")
+        if token and stored and hmac.compare_digest(token, stored):
+            return True
+        host = ws.client.host if ws.client else ""
+        try:
+            ip = ipaddress.ip_address(host)
+            if ip.is_private or ip.is_loopback:
+                return True
+        except ValueError:
+            pass
+        return False
+
+    @app.get("/api/share/live/download/{transfer_id}", dependencies=[Depends(_require_local_share_access)])
+    async def live_download_stream(transfer_id: str) -> StreamingResponse:
+        """Stream direct device-to-device file transfer directly to receiver storage (0 JS heap RAM / 0 router disk)."""
+        hub = local_share.live_hub
+        if transfer_id not in hub.active_transfers:
+            # Wait briefly in case HTTP GET arrives slightly before WS transfer-request registration
+            for _ in range(50):
+                if transfer_id in hub.active_transfers:
+                    break
+                await asyncio.sleep(0.1)
+        if transfer_id not in hub.active_transfers:
+            raise HTTPException(404, "Direct transfer session not found or expired")
+
+        meta = hub.transfers_meta.get(transfer_id, {})
+        raw_name = meta.get("name") or "download.zip"
+        safe_name = sanitize_filename(raw_name)
+        file_size = int(meta.get("size") or 0)
+        content_type = meta.get("type") or "application/octet-stream"
+
+        encoded_name = urllib.parse.quote(safe_name)
+        headers = {
+            "Content-Disposition": f'attachment; filename="{safe_name}"; filename*=UTF-8\'\'{encoded_name}',
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "X-Content-Type-Options": "nosniff",
+        }
+        if file_size > 0:
+            headers["Content-Length"] = str(file_size)
+
+        queue = await hub.get_or_create_stream_queue(transfer_id)
+
+        async def stream_generator():
+            try:
+                while True:
+                    chunk = await queue.get()
+                    if chunk is None:
+                        break
+                    yield chunk
+            except (asyncio.CancelledError, GeneratorExit):
+                pass
+            finally:
+                await hub.finish_stream_queue(transfer_id)
+
+        return StreamingResponse(
+            stream_generator(),
+            media_type=content_type,
+            headers=headers,
+        )
+
+    @app.websocket("/api/share/live/ws")
+    async def share_live_ws(ws: WebSocket) -> None:
+        """Direct peer-to-peer and zero-disk WebSocket live stream relay."""
+        if not await _check_ws_local_share_access(ws):
+            await ws.close(code=4403)
+            return
+        await ws.accept()
+        peer_id = f"p_{secrets.token_hex(4)}"
+        host = ws.client.host if ws.client else "127.0.0.1"
+        ua = ws.headers.get("user-agent", "")
+        dev_name = detect_device_name(ua, host)
+        requested_name = ws.query_params.get("name")
+        if requested_name:
+            dev_name = requested_name.strip()[:40] or dev_name
+        hub = local_share.live_hub
+        await hub.register_peer(peer_id, host, dev_name, ws)
+        try:
+            while True:
+                msg = await ws.receive()
+                if "bytes" in msg and msg["bytes"]:
+                    await hub.route_binary_chunk(msg["bytes"])
+                elif "text" in msg and msg["text"]:
+                    text = msg["text"]
+                    if text == "ping":
+                        await ws.send_text("pong")
+                        continue
+                    try:
+                        data = json.loads(text)
+                    except Exception:
+                        continue
+                    mtype = data.get("type")
+                    if mtype == "ping":
+                        await ws.send_text("pong")
+                        continue
+                    elif mtype == "join":
+                        new_name = str(data.get("name", "")).strip()[:40]
+                        if new_name:
+                            p = hub.peers.get(peer_id)
+                            if p:
+                                p.device_name = new_name
+                                await hub.broadcast_peer_list()
+                    elif mtype == "transfer-request":
+                        tid = data.get("transfer_id") or secrets.token_hex(6)
+                        target_id = data.get("target_id")
+                        target_ip = data.get("target_ip")
+                        file_size = int(data.get("file_size", 0) or 0)
+                        if file_size > MAX_LIVE_DIRECT_BYTES:
+                            await ws.send_json({
+                                "type": "transfer-error",
+                                "transfer_id": tid,
+                                "message": "Live Direct Transfer is limited to 50 MB. For larger files or folders, please use standard Local Share upload.",
+                            })
+                            continue
+                        target_peer = hub.peers.get(target_id)
+                        if not target_peer and target_ip:
+                            for p in hub.peers.values():
+                                if p.client_ip == target_ip and p.peer_id != peer_id:
+                                    target_peer = p
+                                    target_id = p.peer_id
+                                    break
+                        if target_peer and target_peer.peer_id == peer_id:
+                            await ws.send_json({
+                                "type": "transfer-error",
+                                "transfer_id": tid,
+                                "message": "Cannot send files to the same device.",
+                            })
+                            continue
+                        if target_peer and target_id in hub.peers:
+                            meta = {
+                                "name": data.get("file_name", "file"),
+                                "size": int(data.get("file_size", 0) or 0),
+                                "type": data.get("file_type", "application/octet-stream"),
+                            }
+                            await hub.register_transfer(tid, peer_id, target_id, meta)
+                            await hub.send_to_peer(target_id, {
+                                "type": "transfer-request",
+                                "transfer_id": tid,
+                                "sender_id": peer_id,
+                                "sender_name": hub.peers[peer_id].device_name if peer_id in hub.peers else "Device",
+                                "sender_ip": host,
+                                "file_name": data.get("file_name", "file"),
+                                "file_size": data.get("file_size", 0),
+                                "file_type": data.get("file_type", "application/octet-stream"),
+                            })
+                        else:
+                            await ws.send_json({
+                                "type": "transfer-error",
+                                "transfer_id": tid,
+                                "message": "Target device is offline. Make sure Local Share is open on the other device.",
+                            })
+                    elif mtype == "transfer-response":
+                        tid = data.get("transfer_id")
+                        target_id = data.get("target_id")
+                        target_ip = data.get("target_ip")
+                        accepted = bool(data.get("accepted"))
+                        if not accepted and tid:
+                            await hub.unregister_transfer(tid)
+                        target_peer = hub.peers.get(target_id)
+                        if not target_peer and target_ip:
+                            for p in hub.peers.values():
+                                if p.client_ip == target_ip and p.peer_id != peer_id:
+                                    target_peer = p
+                                    target_id = p.peer_id
+                                    break
+                        if target_peer and target_id:
+                            await hub.send_to_peer(target_id, {
+                                "type": "transfer-response",
+                                "transfer_id": tid,
+                                "sender_id": peer_id,
+                                "accepted": accepted,
+                            })
+                        else:
+                            await ws.send_json({
+                                "type": "transfer-error",
+                                "transfer_id": tid,
+                                "message": "Sender device is no longer connected.",
+                            })
+                    elif mtype == "signal":
+                        target_id = data.get("target_id")
+                        if target_id:
+                            await hub.send_to_peer(target_id, {
+                                "type": "signal",
+                                "sender_id": peer_id,
+                                "transfer_id": data.get("transfer_id"),
+                                "signal": data.get("signal"),
+                            })
+                    elif mtype in ("transfer-done", "transfer-cancel"):
+                        tid = data.get("transfer_id")
+                        target_id = data.get("target_id")
+                        target_ip = data.get("target_ip")
+                        if tid and tid in hub.active_transfers:
+                            s_id, t_id = hub.active_transfers[tid]
+                            if peer_id == s_id and not target_id:
+                                target_id = t_id
+                            elif peer_id == t_id and not target_id:
+                                target_id = s_id
+                        target_peer = hub.peers.get(target_id)
+                        if not target_peer and target_ip:
+                            for p in hub.peers.values():
+                                if p.client_ip == target_ip and p.peer_id != peer_id:
+                                    target_peer = p
+                                    target_id = p.peer_id
+                                    break
+                        if target_peer and target_id:
+                            await hub.send_to_peer(target_id, {
+                                "type": mtype,
+                                "transfer_id": tid,
+                                "sender_id": peer_id,
+                            })
+                        if tid:
+                            if mtype == "transfer-done":
+                                await hub.finish_stream_queue(tid)
+                                async def _delayed_unreg(h, t):
+                                    await asyncio.sleep(8.0)
+                                    await h.unregister_transfer(t)
+                                asyncio.create_task(_delayed_unreg(hub, tid))
+                            else:
+                                await hub.unregister_transfer(tid)
+        except (WebSocketDisconnect, Exception):
+            pass
+        finally:
+            await hub.unregister_peer(peer_id)
+
     # -- REST routes ----------------------------------------------------------
 
     @app.get("/api/dashboard", dependencies=[Depends(_require_auth)])
@@ -921,6 +1323,24 @@ def create_app(
         push and this endpoint never disagree.
         """
         return (await _dashboard_payload())["rogue"]
+
+    @app.get("/api/history/live", dependencies=[Depends(_require_auth)])
+    async def get_live_traffic(device_id: str | None = None) -> dict[str, Any]:
+        """Real-time live bandwidth traffic ranking, active apps, and top consumer."""
+        did = None if not device_id or str(device_id).lower() in ("all", "0") else int(device_id)
+        devices = await database.list_devices()
+        users_list = await database.list_users()
+        users_map = {u.id: u.name for u in users_list}
+        leases = {l.mac: l.ip for l in await database.list_leases()}
+        live = holder.get()
+        return await get_live_traffic_analytics(
+            db=database,
+            devices=devices,
+            leases=leases,
+            live=live,
+            users=users_map,
+            selected_device_id=did,
+        )
 
     @app.get("/api/history/{device_id}", dependencies=[Depends(_require_auth)])
     async def device_history(device_id: int | str, window: int = 24,
@@ -1684,7 +2104,7 @@ def create_app(
         fields: dict[str, Any] = {}
         for key in ("name", "quota_mode", "fixed_gb",
                     "limit_down_mbps", "limit_up_mbps", "history_days",
-                    "exempt_quota", "vpn_bypass"):
+                    "exempt_quota", "vpn_bypass", "guest"):
             value = getattr(body, key)
             if value is not None:
                 fields[key] = value
@@ -1698,6 +2118,19 @@ def create_app(
         if body.vpn_bypass is not None:
             _schedule_vpn_apply()
         return {"id": user_id, "updated": True}
+
+    @app.post("/api/users/{user_id}/make-regular", dependencies=[Depends(_require_auth)])
+    async def make_user_regular(user_id: int) -> dict[str, Any]:
+        """Convert a guest account to a permanent, regular user account."""
+        user = await database.get_user(user_id)
+        if user is None:
+            raise HTTPException(404, "user not found")
+        await database.update_user(user_id, guest=False)
+        await database.add_event(
+            f"User '{user.name or user_id}' converted from guest to regular user",
+            "info", user_id=user_id)
+        _schedule_shaping_sync()
+        return {"id": user_id, "guest": False, "status": "converted"}
 
     @app.delete("/api/users/{user_id}", dependencies=[Depends(_require_auth)])
     async def delete_user(user_id: int, blacklist: bool = False) -> dict[str, Any]:
@@ -2271,6 +2704,88 @@ def create_app(
         _schedule_shaping_sync()
         return {"ok": True, "block_state": _db.BLOCK_ADMIN}
 
+    # -- captive portal & guest approval status --------------------------------
+
+    @app.get("/api/guest/status")
+    async def get_guest_status(request: Request) -> dict[str, Any]:
+        """Check connection and approval status for the requesting client."""
+        host = request.client.host if request.client else ""
+        snapshot = holder.get() if holder else None
+        mac = snapshot.ip_to_mac.get(host, "") if snapshot else ""
+        dev = None
+        if host:
+            dev = await database.get_device_by_ip(host)
+        if not dev and mac:
+            dev = await database.get_device(mac=mac.lower())
+        if not mac and dev:
+            mac = dev.mac
+        user = await database.get_user(dev.user_id) if dev and dev.user_id else None
+
+        is_guest = bool((user and user.guest) or (dev and dev.guest))
+        is_blocked = bool(
+            (snapshot and host in snapshot.pending_guests) or
+            (dev and dev.block_state != _db.BLOCK_OK) or
+            (user and user.block_state != _db.BLOCK_OK)
+        )
+
+        is_approved = is_guest and not is_blocked
+        is_pending = is_guest and is_blocked
+
+        return {
+            "status": "pending" if is_pending else ("approved" if is_approved else ("blocked" if is_blocked else "ok")),
+            "is_guest": is_guest,
+            "approved": is_approved,
+            "blocked": is_blocked,
+            "ip": host,
+            "mac": mac,
+            "device_name": (dev.name if dev else "") or "Guest Device",
+            "quota_gb": (dev.fixed_gb if dev and dev.fixed_gb else (user.fixed_gb if user else 0.0)),
+        }
+
+    @app.get("/guest/pending", response_class=FileResponse)
+    async def guest_pending_page() -> FileResponse:
+        """Captive portal page for guest devices awaiting administrator approval."""
+        page = WEB_DIR / "guest_pending.html"
+        return FileResponse(str(page))
+
+    @app.get("/generate_204")
+    @app.get("/gen_204")
+    async def captive_generate_204(request: Request):
+        host = request.client.host if request.client else ""
+        snapshot = holder.get() if holder else None
+        if snapshot and host in snapshot.pending_guests:
+            router_host = request.headers.get("host") or "192.168.2.1:8080"
+            return RedirectResponse(f"http://{router_host}/guest/pending", status_code=302)
+        return Response(status_code=204)
+
+    @app.get("/hotspot-detect.html")
+    async def captive_apple(request: Request):
+        host = request.client.host if request.client else ""
+        snapshot = holder.get() if holder else None
+        if snapshot and host in snapshot.pending_guests:
+            router_host = request.headers.get("host") or "192.168.2.1:8080"
+            return RedirectResponse(f"http://{router_host}/guest/pending", status_code=302)
+        return HTMLResponse("<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>")
+
+    @app.get("/connecttest.txt")
+    @app.get("/ncsi.txt")
+    async def captive_windows(request: Request):
+        host = request.client.host if request.client else ""
+        snapshot = holder.get() if holder else None
+        if snapshot and host in snapshot.pending_guests:
+            router_host = request.headers.get("host") or "192.168.2.1:8080"
+            return RedirectResponse(f"http://{router_host}/guest/pending", status_code=302)
+        return PlainTextResponse("Microsoft Connect Test")
+
+    @app.get("/canonical.html")
+    async def captive_firefox(request: Request):
+        host = request.client.host if request.client else ""
+        snapshot = holder.get() if holder else None
+        if snapshot and host in snapshot.pending_guests:
+            router_host = request.headers.get("host") or "192.168.2.1:8080"
+            return RedirectResponse(f"http://{router_host}/guest/pending", status_code=302)
+        return HTMLResponse("<HTML><BODY>Success</BODY></HTML>")
+
     # -- speed shaping (Network tab) ------------------------------------------
 
     @app.get("/api/network", dependencies=[Depends(_require_auth)])
@@ -2296,7 +2811,10 @@ def create_app(
             enabled=body.enabled,
             total_down_mbps=body.total_down_mbps,
             total_up_mbps=body.total_up_mbps,
-            lan_rate_mbps=body.lan_rate_mbps)
+            lan_rate_mbps=body.lan_rate_mbps,
+            vpn_pct=body.vpn_pct,
+            vpn_down_mbps=body.vpn_down_mbps,
+            vpn_up_mbps=body.vpn_up_mbps)
         # Apply to the kernel NOW — no 15 s wait for the maintenance tick, so a
         # saved Network-tab change is enforced immediately (no page refresh).
         _schedule_shaping_sync()
@@ -2406,6 +2924,7 @@ def create_app(
             raise HTTPException(400, msg)
         await database.add_event(f"VPN connected to node #{body.node_id}", "info")
         _schedule_vpn_apply()
+        _schedule_shaping_sync()
         return {"ok": True, "message": msg}
 
     @app.post("/api/vpn/disconnect", dependencies=[Depends(_require_auth)])
@@ -2413,6 +2932,7 @@ def create_app(
         await _vpn_manager.disconnect()
         await database.add_event("VPN disconnected", "info")
         _schedule_vpn_apply()
+        _schedule_shaping_sync()
         return {"ok": True}
 
     @app.get("/api/vpn/nodes", dependencies=[Depends(_require_auth)])
@@ -2662,14 +3182,17 @@ def create_app(
     @app.get("/api/vpn/settings", dependencies=[Depends(_require_auth)])
     async def get_vpn_settings() -> dict[str, Any]:
         allow_insecure = (await database.get_setting("vpn_allow_insecure", "0")) == "1"
-        return {"allow_insecure": allow_insecure}
+        return {
+            "allow_insecure": allow_insecure,
+        }
 
     @app.post("/api/vpn/settings", dependencies=[Depends(_require_auth)])
     async def update_vpn_settings(body: VpnSettingsUpdate) -> dict[str, Any]:
-        await database.set_setting("vpn_allow_insecure", "1" if body.allow_insecure else "0")
-        if _vpn_manager.state == "connected" and _vpn_manager.active_node:
-            await _vpn_manager.connect(_vpn_manager.active_node.id)
-        return {"allow_insecure": body.allow_insecure}
+        if body.allow_insecure is not None:
+            await database.set_setting("vpn_allow_insecure", "1" if body.allow_insecure else "0")
+            if _vpn_manager.state == "connected" and _vpn_manager.active_node:
+                await _vpn_manager.connect(_vpn_manager.active_node.id)
+        return await get_vpn_settings()
 
     # -- software updates (Admin tab) ------------------------------------------
 
@@ -2947,17 +3470,34 @@ def create_app(
         push_task = asyncio.get_running_loop().create_task(_push_loop())
         # Auto-restore persistent VPN tunnel if previously connected
         restore_task = asyncio.get_running_loop().create_task(_vpn_manager.auto_restore())
+
+        async def _share_cleanup_loop():
+            while True:
+                try:
+                    await asyncio.sleep(600)
+                    await local_share.cleanup_expired()
+                except asyncio.CancelledError:
+                    break
+                except Exception:
+                    pass
+
+        share_cleanup_task = asyncio.get_running_loop().create_task(_share_cleanup_loop())
         try:
             yield
         finally:
             push_task.cancel()
             restore_task.cancel()
+            share_cleanup_task.cancel()
             try:
                 await push_task
             except (asyncio.CancelledError, Exception):
                 pass
             try:
                 await restore_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            try:
+                await share_cleanup_task
             except (asyncio.CancelledError, Exception):
                 pass
             if _vpn_manager.state != "disconnected" or _vpn_manager._proc is not None:
@@ -2998,6 +3538,26 @@ def create_app(
         """
         response: Response | None = None
         try:
+            # Captive portal redirection for pending guests
+            host = request.client.host if request.client else ""
+            path = request.url.path
+            if host and holder:
+                snapshot = holder.get()
+                if snapshot and host in snapshot.pending_guests:
+                    is_allowed = (
+                        path.startswith("/guest/pending") or
+                        path.startswith("/api/guest/status") or
+                        path.startswith("/assets/") or
+                        path == "/favicon.ico"
+                    )
+                    if not is_allowed:
+                        router_host = request.headers.get("host") or "192.168.2.1:8080"
+                        orig_url = str(request.url)
+                        return RedirectResponse(
+                            f"http://{router_host}/guest/pending?continue={urllib.parse.quote(orig_url)}",
+                            status_code=302
+                        )
+
             waf_mode = _waf_mode()
             if waf_mode != "off":
                 blocked = await _waf_inspect(request, waf_mode)
@@ -3136,20 +3696,19 @@ def create_app(
         # response (API + the HTML pages) is marked no-store so the browser
         # never writes the payloads — MACs, usage, history, events, log lines —
         # to the HTTP cache, back/forward cache, or disk on a shared machine.
-        # Static assets (/assets/*) stay cacheable (public, no secrets).
-        if path.startswith(("/api", "/report", "/milestone")) or path == "/":
+        # response (API + HTML + assets) prevents stale assets from sticking in browser cache
+        if path.startswith(("/api", "/report", "/milestone", "/share", "/assets")) or path == "/":
             response.headers.setdefault("Cache-Control",
-                                        "no-store, no-cache, must-revalidate, "
-                                        "max-age=0")
+                                        "no-cache, must-revalidate, max-age=0")
             response.headers.setdefault("Pragma", "no-cache")
             response.headers.setdefault("Expires", "0")
-        # Strict CSP for the dashboard + API. /report and /milestone carry
+        # Strict CSP for the dashboard + API. /report, /milestone and /share carry
         # inline scripts, so they get the looser (still-useful) profile.
-        if path.startswith(("/report", "/milestone")):
+        if path.startswith(("/report", "/milestone", "/share")):
             response.headers.setdefault(
                 "Content-Security-Policy",
                 "default-src 'self'; style-src 'self' 'unsafe-inline'; "
-                "img-src 'self' data:; connect-src 'self' ws: wss:; "
+                "img-src 'self' data: blob:; connect-src 'self' ws: wss:; "
                 "script-src 'self' 'unsafe-inline'; base-uri 'self'; "
                 "frame-ancestors 'none'; form-action 'self'")
         else:

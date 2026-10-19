@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>بانتظار موافقة المسؤول · Awaiting Admin Approval</title>
+  <meta name="theme-color" content="#0b0f19">
+  <style>
+    :root {
+      --bg: #070a12;
+      --card-bg: rgba(17, 24, 39, 0.75);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+      --amber: #f59e0b;
+      --amber-glow: rgba(245, 158, 11, 0.25);
+      --green: #10b981;
+      --green-glow: rgba(16, 185, 129, 0.3);
+      --red: #ef4444;
+      --blue: #3b82f6;
+      --radius: 20px;
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans Arabic", sans-serif;
+    }
+    body {
+      background-color: var(--bg);
+      background-image: 
+        radial-gradient(at 0% 0%, rgba(37, 99, 235, 0.12) 0px, transparent 50%),
+        radial-gradient(at 100% 100%, rgba(245, 158, 11, 0.08) 0px, transparent 50%),
+        radial-gradient(at 50% 50%, rgba(17, 24, 39, 1) 0px, transparent 100%);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px 16px;
+      line-height: 1.5;
+    }
+    .portal-container {
+      width: 100%;
+      max-width: 480px;
+      text-align: center;
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 24px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      background: rgba(255, 255, 255, 0.04);
+      padding: 6px 14px;
+      border-radius: 999px;
+      border: 1px solid var(--card-border);
+      backdrop-filter: blur(8px);
+    }
+    .brand-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--amber);
+      box-shadow: 0 0 10px var(--amber);
+    }
+    .glass-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: var(--radius);
+      padding: 32px 24px;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5), 0 1px 0 rgba(255, 255, 255, 0.1) inset;
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+      position: relative;
+      overflow: hidden;
+    }
+    .icon-wrapper {
+      position: relative;
+      width: 90px;
+      height: 90px;
+      margin: 0 auto 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .icon-badge {
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      background: rgba(245, 158, 11, 0.12);
+      border: 2px solid var(--amber);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 2.4rem;
+      position: relative;
+      z-index: 2;
+      box-shadow: 0 0 25px var(--amber-glow);
+      transition: all 0.5s ease;
+    }
+    .pulse-ring {
+      position: absolute;
+      top: 5px;
+      left: 5px;
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      border: 2px solid var(--amber);
+      opacity: 0.8;
+      animation: pulse-ring 2.2s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+    }
+    @keyframes pulse-ring {
+      0% { transform: scale(0.95); opacity: 0.8; }
+      50% { transform: scale(1.35); opacity: 0; }
+      100% { transform: scale(1.4); opacity: 0; }
+    }
+    /* Approved State */
+    .glass-card.approved {
+      border-color: rgba(16, 185, 129, 0.35);
+      box-shadow: 0 20px 50px rgba(16, 185, 129, 0.15), 0 0 0 1px rgba(16, 185, 129, 0.2);
+    }
+    .glass-card.approved .icon-badge {
+      background: rgba(16, 185, 129, 0.15);
+      border-color: var(--green);
+      box-shadow: 0 0 35px var(--green-glow);
+    }
+    .glass-card.approved .pulse-ring {
+      border-color: var(--green);
+      animation: none;
+      display: none;
+    }
+    /* Rejected State */
+    .glass-card.rejected {
+      border-color: rgba(239, 68, 68, 0.35);
+    }
+    .glass-card.rejected .icon-badge {
+      background: rgba(239, 68, 68, 0.15);
+      border-color: var(--red);
+      box-shadow: 0 0 30px rgba(239, 68, 68, 0.25);
+    }
+
+    h1 {
+      font-size: 1.45rem;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 6px;
+    }
+    h2 {
+      font-size: 0.95rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      margin-bottom: 16px;
+      direction: ltr;
+    }
+    .message-ar {
+      font-size: 0.95rem;
+      color: #d1d5db;
+      margin-bottom: 6px;
+    }
+    .message-en {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      direction: ltr;
+      margin-bottom: 24px;
+    }
+
+    .info-box {
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 14px;
+      padding: 14px 16px;
+      margin-bottom: 22px;
+      text-align: right;
+    }
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 0;
+      font-size: 0.86rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    }
+    .info-row:last-child {
+      border-bottom: none;
+    }
+    .info-label {
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .info-val {
+      font-weight: 600;
+      color: #fff;
+      direction: ltr;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.84rem;
+    }
+    .badge {
+      padding: 3px 9px;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      display: inline-block;
+    }
+    .badge-amber {
+      background: rgba(245, 158, 11, 0.15);
+      color: #fbbf24;
+      border: 1px solid rgba(245, 158, 11, 0.3);
+    }
+    .badge-green {
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+    .badge-red {
+      background: rgba(239, 68, 68, 0.15);
+      color: #f87171;
+      border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+
+    .live-status {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      font-size: 0.82rem;
+      color: var(--amber);
+      margin-bottom: 20px;
+      font-weight: 500;
+    }
+    .live-indicator {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--amber);
+      animation: blink 1.2s infinite;
+    }
+    @keyframes blink {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.3; transform: scale(0.85); }
+    }
+
+    .btn {
+      width: 100%;
+      padding: 13px 20px;
+      border-radius: 12px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: all 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      text-decoration: none;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, #2563eb, #1d4ed8);
+      color: #fff;
+      box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
+    }
+    .btn-primary:hover {
+      background: linear-gradient(135deg, #3b82f6, #2563eb);
+      transform: translateY(-1px);
+    }
+    .btn-primary:active {
+      transform: translateY(0);
+    }
+    .btn-success {
+      background: linear-gradient(135deg, #10b981, #059669);
+      color: #fff;
+      box-shadow: 0 4px 16px rgba(16, 185, 129, 0.4);
+    }
+    .btn-success:hover {
+      background: linear-gradient(135deg, #34d399, #10b981);
+      transform: translateY(-1px);
+    }
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.06);
+      color: #e5e7eb;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      margin-top: 10px;
+    }
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    .notice {
+      margin-top: 20px;
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      line-height: 1.45;
+    }
+    .notice strong {
+      color: #e5e7eb;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="portal-container">
+    <div class="brand">
+      <span class="brand-dot" id="brand-dot"></span>
+      <span>Quota Manager · بوابة الضيوف</span>
+    </div>
+
+    <div class="glass-card" id="main-card">
+      <div class="icon-wrapper">
+        <div class="pulse-ring" id="pulse-ring"></div>
+        <div class="icon-badge" id="icon-badge">⏳</div>
+      </div>
+
+      <h1 id="headline-ar">بانتظار موافقة المسؤول</h1>
+      <h2 id="headline-en">Awaiting Administrator Approval</h2>
+
+      <p class="message-ar" id="msg-ar">
+        أهلاً بك! جهازك متصل بالشبكة كـ <strong>ضيف (Guest)</strong>.<br>
+        يُرجى الانتظار حتى يقوم مسؤول الشبكة بقبول طلبك لتفعيل الإنترنت.
+      </p>
+      <p class="message-en" id="msg-en">
+        Welcome! Your device is connected as a <strong>Guest</strong>.<br>
+        Please wait while the network administrator approves your connection.
+      </p>
+
+      <div class="info-box">
+        <div class="info-row">
+          <span class="info-label">📱 اسم الجهاز (Device):</span>
+          <span class="info-val" id="val-device">جاري الفحص...</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">🌐 عنوان الـ IP:</span>
+          <span class="info-val" id="val-ip">...</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">🏷️ عنوان الـ MAC:</span>
+          <span class="info-val" id="val-mac">...</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">⚡ الحالة (Status):</span>
+          <span class="badge badge-amber" id="val-status">بانتظار الموافقة</span>
+        </div>
+      </div>
+
+      <div class="live-status" id="live-status-box">
+        <span class="live-indicator" id="live-ind"></span>
+        <span id="live-text">يتم الفحص التلقائي للحالة كل 3 ثوانٍ...</span>
+      </div>
+
+      <div id="action-container">
+        <button class="btn btn-secondary" id="check-btn" onclick="checkStatus(true)">
+          🔄 تحقق من الحالة الآن (Check Now)
+        </button>
+      </div>
+
+      <p class="notice" id="notice-text">
+        💡 <strong>تنبيه:</strong> لا تغلق هذه الصفحة، سيتم تفعيل الإنترنت وتحويلك تلقائياً فور موافقة المسؤول.<br>
+        <span style="direction: ltr; display: inline-block; margin-top: 4px;">
+          Do not close this page. You will be redirected automatically once approved.
+        </span>
+      </p>
+    </div>
+  </div>
+
+  <script>
+    const urlParams = new URLSearchParams(window.location.search);
+    const continueUrl = urlParams.get('continue') || 'https://www.google.com';
+    let pollInterval = null;
+    let isApproved = false;
+
+    async function checkStatus(manual = false) {
+      const checkBtn = document.getElementById('check-btn');
+      if (manual && checkBtn) {
+        checkBtn.textContent = '⏳ جاري الفحص...';
+        checkBtn.disabled = true;
+      }
+
+      try {
+        const resp = await fetch('/api/guest/status?t=' + Date.now());
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        renderStatus(data);
+      } catch (err) {
+        console.error('Failed to check guest status:', err);
+        document.getElementById('live-text').textContent = 'تعذر الاتصال بالخادم، جاري إعادة المحاولة...';
+      } finally {
+        if (manual && checkBtn && !isApproved) {
+          checkBtn.textContent = '🔄 تحقق من الحالة الآن (Check Now)';
+          checkBtn.disabled = false;
+        }
+      }
+    }
+
+    function renderStatus(data) {
+      if (data.ip) document.getElementById('val-ip').textContent = data.ip;
+      if (data.mac) document.getElementById('val-mac').textContent = data.mac;
+      if (data.device_name) document.getElementById('val-device').textContent = data.device_name;
+
+      const card = document.getElementById('main-card');
+      const badge = document.getElementById('icon-badge');
+      const brandDot = document.getElementById('brand-dot');
+      const statusBadge = document.getElementById('val-status');
+      const headlineAr = document.getElementById('headline-ar');
+      const headlineEn = document.getElementById('headline-en');
+      const msgAr = document.getElementById('msg-ar');
+      const msgEn = document.getElementById('msg-en');
+      const liveBox = document.getElementById('live-status-box');
+      const actionBox = document.getElementById('action-container');
+
+      if (data.approved || (!data.blocked && data.is_guest) || (data.status === 'ok' && !data.is_guest)) {
+        // --- Approved State ---
+        isApproved = true;
+        clearInterval(pollInterval);
+        card.classList.remove('rejected');
+        card.classList.add('approved');
+
+        badge.textContent = '✅';
+        brandDot.style.background = 'var(--green)';
+        brandDot.style.boxShadow = '0 0 10px var(--green)';
+
+        statusBadge.className = 'badge badge-green';
+        statusBadge.textContent = 'تمت الموافقة (Approved)';
+
+        headlineAr.textContent = '🎉 تمت الموافقة بنجاح!';
+        headlineEn.textContent = 'Access Approved Successfully!';
+
+        const quotaText = data.quota_gb ? ` بسعة <strong>${data.quota_gb} GB</strong>` : '';
+        msgAr.innerHTML = `تم قبول اتصالك بالشبكة${quotaText}! تم تفعيل الإنترنت لجهازك الآن.<br>جاري تحويلك تلقائياً خلال <span id="countdown">3</span> ثوانٍ...`;
+        msgEn.innerHTML = `Your connection has been approved! Internet is now active.<br>Redirecting automatically in <span id="countdown-en">3</span>s...`;
+
+        liveBox.style.color = 'var(--green)';
+        liveBox.innerHTML = '<span class="live-indicator" style="background:var(--green)"></span> <span>الإنترنت نشط وجاهز للاستخدام</span>';
+
+        actionBox.innerHTML = `
+          <a href="${continueUrl}" class="btn btn-success" id="browse-btn">
+            🌐 تصفح الإنترنت الآن (Start Browsing)
+          </a>
+        `;
+
+        // Start countdown to redirect
+        let sec = 3;
+        const timer = setInterval(() => {
+          sec--;
+          const cd1 = document.getElementById('countdown');
+          const cd2 = document.getElementById('countdown-en');
+          if (cd1) cd1.textContent = sec;
+          if (cd2) cd2.textContent = sec;
+          if (sec <= 0) {
+            clearInterval(timer);
+            window.location.href = continueUrl;
+          }
+        }, 1000);
+
+      } else if (data.status === 'blocked' && !data.is_guest) {
+        // Regular user blocked (quota exceeded or admin blocked)
+        card.classList.add('rejected');
+        badge.textContent = '🚫';
+        statusBadge.className = 'badge badge-red';
+        statusBadge.textContent = 'محظور (Blocked)';
+        headlineAr.textContent = 'تم إيقاف الاتصال';
+        headlineEn.textContent = 'Connection Blocked';
+        msgAr.innerHTML = 'تم إيقاف اتصال هذا الجهاز بالإنترنت (ربما بسبب انتهاء باقة الرصيد أو حظر بواسطة المسؤول).';
+        msgEn.innerHTML = 'Internet access for this device is blocked (quota exceeded or manual block).';
+      } else {
+        // Pending State
+        statusBadge.className = 'badge badge-amber';
+        statusBadge.textContent = 'بانتظار الموافقة (Pending)';
+      }
+    }
+
+    // Initial check
+    checkStatus();
+    // Poll every 3 seconds
+    pollInterval = setInterval(() => checkStatus(), 3000);
+  </script>
+</body>
+</html>

@@ -74,6 +74,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import re
 from typing import Any, Callable
 
 from quota.nftables import resolve_local_networks
@@ -302,8 +303,21 @@ class TcShaper:
         self._last_signature: Any = None
         self._rate_map: list[dict[str, Any]] = []
         self._enabled = False
+        self._fair_sharing = False
         self._total_down = 0.0
         self._total_up = 0.0
+        # VPN-mode queue control (all inert while the tunnel is not active).
+        self._vpn_active = False
+        self._rates_measured = False
+        self._line_margin_pct = float(getattr(sc, "line_margin_pct", 93.0) or 0.0)
+        self._vpn_margin_pct = float(getattr(sc, "vpn_margin_pct", 85.0) or 0.0)
+        #: second ifb that polices the OUTER (encrypted) download arriving from
+        #: the VPN server, so the ISP-side queue never builds.
+        self.wan_ifb = "ifb1"
+        #: (ppp device, ifindex) when the box dials PPPoE itself (Strong/WAN
+        #: topology): the REAL bottleneck queue is on ppp0, not on the LAN NIC.
+        self._ppp: tuple[str, int] | None = None
+        self._ppp_dev_shaped = ""
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -374,7 +388,11 @@ class TcShaper:
 
     def update_state(self, rate_map: list[dict[str, Any]], enabled: bool,
                      total_down: float, total_up: float,
-                     lan_rate_mbps: float | None = None) -> None:
+                     lan_rate_mbps: float | None = None,
+                     fair_sharing: bool = False,
+                     vpn_active: bool = False,
+                     rates_measured: bool = False,
+                     vpn_pct: float = 0.0) -> None:
         """Reconcile the kernel's tc tree with the desired shaping state.
 
         The leaf queues are NOT configurable: every queue runs fq_codel, and
@@ -385,6 +403,11 @@ class TcShaper:
         """
         self._rate_map = sorted(rate_map or [], key=lambda e: str(e.get("ip", "")))
         self._enabled = bool(enabled)
+        self._fair_sharing = bool(fair_sharing)
+        self._vpn_active = bool(vpn_active)
+        self._ppp = self._detect_ppp() if self._vpn_active else None
+        self._rates_measured = bool(rates_measured)
+        self._vpn_pct = max(0.0, min(100.0, float(vpn_pct or 0.0)))
         self._total_down = max(0.0, float(total_down or 0.0))
         self._total_up = max(0.0, float(total_up or 0.0))
         if lan_rate_mbps is not None:
@@ -438,9 +461,198 @@ class TcShaper:
              round(float(e.get("user_down") or 0.0), 3),
              round(float(e.get("user_up") or 0.0), 3))
             for e in self._rate_map)
-        return (self._enabled, round(self._total_down, 3),
+        return (self._enabled, self._fair_sharing, self._vpn_active, self._ppp,
+                self._rates_measured, self._line_margin_pct,
+                getattr(self, "_vpn_pct", 0.0),
+                self._vpn_margin_pct, round(self._total_down, 3),
                 round(self._total_up, 3), self._lan_rate_mbps,
                 self.uplink_subnet, tuple(sorted(self.own_addresses)), entries)
+
+    #: WAN topology + VPN: the per-device LAN trees (eth0 download, ifb0
+    #: upload) run slightly BELOW the outer ppp0/ifb1 caps. Otherwise the
+    #: outer cake (one flow per tunneled TCP connection, so a device opening
+    #: hundreds of connections wins hundreds of shares) is the bottleneck and
+    #: starves everyone else's new connections; below it, the per-device
+    #: queues are the bottleneck and enforce per-device fairness.
+    LAN_TREE_HEADROOM = 0.92
+
+    def _lan_tree_factor(self) -> float:
+        if self._vpn_active and self._ppp is not None:
+            return self.LAN_TREE_HEADROOM
+        return 1.0
+
+    def _factor(self) -> float:
+        """Fraction of the configured WAN totals actually programmed.
+
+        1.0 unless the VPN tunnel carries the household. Then every WAN-facing
+        rate is scaled so the bottleneck queue forms HERE (where fq_codel/cake
+        keep it short) instead of in the ISP buffer or inside the proxy:
+        ``line_margin`` always, times ``vpn_margin`` (encryption overhead +
+        userspace buffering) unless the rates were MEASURED through the
+        tunnel. Root/LAN classes and explicit per-device caps are not scaled
+        beyond the clamp to the (scaled) direction total.
+        """
+        if not self._vpn_active:
+            return 1.0
+        pct = getattr(self, "_vpn_pct", 0.0)
+        if pct > 0 and not self._rates_measured:
+            # Panel "VPN speed %": one knob replacing both margins.
+            return pct / 100.0
+        f = 1.0
+        if 0 < self._line_margin_pct < 100:
+            f *= self._line_margin_pct / 100.0
+        if not self._rates_measured and 0 < self._vpn_margin_pct < 100:
+            f *= self._vpn_margin_pct / 100.0
+        return f
+
+    def _detect_ppp(self) -> tuple[str, int] | None:
+        """The box's real WAN link when it is NOT the LAN NIC (WAN/PPPoE
+        topology: the box dials ppp0 itself), as ``(name, ifindex)``.
+
+        Taken from the MAIN table's default route (sing-box's auto_route puts
+        its own default in table 2022, never main), so it is the physical
+        uplink whatever it is called. The ifindex rides the state signature so
+        a redial (new device, qdiscs gone) rebuilds the queues. None => LAN
+        mode (the router owns the line; the LAN NIC is the only egress).
+        """
+        code, out = self._run_command(["ip", "-o", "route", "show", "default"])
+        dev = ""
+        if code == 0:
+            m = re.search(r"\bdev\s+(\S+)", (out or "").splitlines()[0]
+                          if (out or "").strip() else "")
+            dev = m.group(1) if m else ""
+        if (not dev or dev == self.iface or dev in (self.ifb, self.wan_ifb)
+                or dev.startswith(("tun", "ifb", "lo", "quota-vpn"))):
+            dev = ""
+        if not dev:
+            code, out = self._run_command(
+                ["ip", "-o", "link", "show", "type", "ppp"])
+            if code == 0:
+                m = re.match(r"\s*\d+:\s*([^:@\s]+)", out or "")
+                dev = m.group(1) if m else ""
+        found: tuple[str, int] | None = None
+        if dev:
+            code, out = self._run_command(["ip", "-o", "link", "show", "dev", dev])
+            m = re.match(r"\s*(\d+):", out or "") if code == 0 else None
+            if m:
+                found = (dev, int(m.group(1)))
+        if found != getattr(self, "_ppp_logged", object()):
+            self._ppp_logged = found
+            if found:
+                log.info("vpn queue control: WAN link %s (ifindex %d) — "
+                         "shaping it directly", *found)
+            else:
+                log.info("vpn queue control: no separate WAN link (LAN mode) "
+                         "— shaping on %s only", self.iface)
+        return found
+
+    def _ppp_cmds(self, dev: str) -> list[list[str]]:
+        """Queue control on the real WAN link (ppp0): cake on egress at the
+        UPLOAD rate and a cake-ingress policer (via ifb1) at the DOWNLOAD
+        rate. Everything the box sends/receives upstream — the encrypted
+        tunnel AND direct-bypass flows — crosses here, so this is where the
+        ISP-side queue is prevented. Rates carry the VPN margins."""
+        f = self._factor()
+        cmds: list[list[str]] = []
+        # A fresh process (or a redialed ppp0 that kept a stale qdisc) must not
+        # fail the whole apply on "File exists": clear our two attach points.
+        for argv in (["tc", "qdisc", "del", "dev", dev, "root"],
+                     ["tc", "qdisc", "del", "dev", dev, "ingress"]):
+            self._run_best_effort(argv)
+        if self._total_up > 0:
+            cmds.append(["tc", "qdisc", "add", "dev", dev, "root", "cake",
+                         "bandwidth", _rate(max(0.256, self._total_up * f)),
+                         "besteffort", "ack-filter"])
+        if self._total_down > 0 and self._ensure_wan_ifb():
+            cmds += [
+                ["tc", "qdisc", "add", "dev", dev, "handle", "ffff:",
+                 "ingress"],
+                ["tc", "filter", "add", "dev", dev, "parent", "ffff:",
+                 "protocol", "all", "u32", "match", "u32", "0", "0",
+                 "action", "mirred", "egress", "redirect", "dev",
+                 self.wan_ifb],
+                ["tc", "qdisc", "add", "dev", self.wan_ifb, "root", "cake",
+                 "bandwidth", _rate(max(0.256, self._total_down * f)),
+                 "besteffort", "ingress"],
+            ]
+        return cmds
+
+    def _wan_ingress_ready(self) -> bool:
+        """True when the outer-download policer can be programmed: VPN active,
+        a down total, and the box has an address on the uplink subnet to match
+        (the encrypted tunnel flows are addressed to it)."""
+        return bool(self._vpn_active and self._ppp is None
+                    and self._total_down > 0
+                    and self._uplink_own_addresses())
+
+    def _uplink_own_addresses(self) -> list[str]:
+        """The box's own addresses that live on the uplink subnet."""
+        if not self.uplink_subnet or self.uplink_subnet == self.client_subnet:
+            return []
+        import ipaddress
+        try:
+            net = ipaddress.ip_network(self.uplink_subnet, strict=False)
+        except ValueError:
+            return []
+        out = []
+        for a in sorted(self.own_addresses):
+            try:
+                if ipaddress.ip_address(a) in net:
+                    out.append(a)
+            except ValueError:
+                continue
+        return out
+
+    def _ensure_wan_ifb(self) -> bool:
+        """Create/raise ifb1 (``ip link add`` works whatever ``numifbs`` the
+        module was loaded with, and never disturbs ifb0). Best-effort: False
+        just disables the outer-download policer, never the shaper."""
+        code, _ = self._run_command(["ip", "link", "show", "dev", self.wan_ifb])
+        if code != 0:
+            code, out = self._run_command(
+                ["ip", "link", "add", "name", self.wan_ifb, "type", "ifb"])
+            if code != 0:
+                log.warning("vpn queue control: cannot create %s (%s) — outer "
+                            "download policing off", self.wan_ifb,
+                            (out or "").strip())
+                return False
+        code, out = self._run_command(
+            ["ip", "link", "set", "dev", self.wan_ifb, "up"])
+        if code != 0:
+            log.warning("vpn queue control: %s up failed (%s)", self.wan_ifb,
+                        (out or "").strip())
+            return False
+        return True
+
+    def _wan_ingress_cmds(self) -> list[list[str]]:
+        """Police the OUTER tunnel download on the physical NIC ingress.
+
+        The ISP shapes the VPN's SNI at its own (deep) queue: if the box lets
+        the sing-box downloader pull at full speed, that queue fills and every
+        other connection's handshake/DNS waits seconds behind it — the
+        "one download kills everyone" symptom. Redirecting WAN-sourced packets
+        addressed to the box into ifb1 and running ``cake ingress`` there
+        (flow-fair, sparse-flow boost) keeps the arrival rate under the ISP
+        trigger, so the queue stays empty and new connections still start.
+        LAN hosts on the uplink subnet and all client-sourced traffic are
+        excluded (they match earlier/other rules).
+        """
+        rate = _rate(max(0.256, self._total_down * self._factor()))
+        iface, ifb = self.iface, self.wan_ifb
+        cmds: list[list[str]] = [
+            # uplink-subnet hosts (router admin, NAS, SSH from LAN) are LAN.
+            ["tc", "filter", "add", "dev", iface, "parent", "ffff:",
+             "protocol", "ip", "prio", "49000", "u32", "match", "ip", "src",
+             self.uplink_subnet, "action", "gact", "pass"],
+        ]
+        for addr in self._uplink_own_addresses():
+            cmds.append(["tc", "filter", "add", "dev", iface, "parent",
+                         "ffff:", "protocol", "ip", "prio", "50000", "u32",
+                         "match", "ip", "dst", addr, "action", "mirred",
+                         "egress", "redirect", "dev", ifb])
+        cmds.append(["tc", "qdisc", "add", "dev", ifb, "root", "cake",
+                     "bandwidth", rate, "besteffort", "ingress"])
+        return cmds
 
     def _aqm_args(self, upload: bool) -> list[str]:
         """Leaf-qdisc args for one tree's queues — ALWAYS on, no knob.
@@ -483,6 +695,24 @@ class TcShaper:
                         if a[-2:] == ["cake", "ack-filter"] else a
                         for a in cmds]
                 continue  # retry the SAME slot, now fq_codel
+            if "cake" in argv and "bandwidth" in argv:
+                # No sch_cake: fall back to an HTB policer + fq_codel on ifb1.
+                log.warning("tc rejected cake ingress (%s) — outer download "
+                            "policer falls back to htb+fq_codel",
+                            (out or "").strip())
+                rate = argv[argv.index("bandwidth") + 1]
+                dev = argv[argv.index("dev") + 1]
+                if "ingress" not in argv:
+                    log.warning("   (egress cake on %s -> htb+fq_codel)", dev)
+                cmds[idx:idx + 1] = [
+                    ["tc", "qdisc", "add", "dev", dev, "root", "handle", "1:",
+                     "htb", "default", "1"],
+                    ["tc", "class", "add", "dev", dev, "parent", "1:",
+                     "classid", "1:1", "htb", "rate", rate, "ceil", rate],
+                    ["tc", "qdisc", "add", "dev", dev, "parent", "1:1",
+                     "fq_codel"],
+                ]
+                continue
             self._fail(f"{argv[0]} failed: {(out or '').strip()}")
             self._teardown()
             return False
@@ -500,9 +730,10 @@ class TcShaper:
         # Download tree on $IF egress (post-NAT dst = client IP). Built only
         # when the down total is set — a 0 down total is "unlimited" (no tree,
         # no cap), and it must not take the upload shaping down with it.
+        wan_ingress = self._wan_ingress_ready() and self._ensure_wan_ifb()
         if self._total_down > 0:
             cmds += self._tree_cmds(self.iface, self._total_down, "dst")
-        if self._total_up > 0:
+        if self._total_up > 0 or wan_ingress:
             # Upload direction: redirect client-subnet ingress into ifb0
             # (pre-NAT src is still the client IP), then shape there by src.
             cmds += [
@@ -512,14 +743,29 @@ class TcShaper:
                  "protocol", "ip", "u32", "match", "ip", "src",
                  self.client_subnet, "action", "mirred", "egress", "redirect",
                  "dev", self.ifb],
-                *self._tree_cmds(self.ifb, self._total_up, "src"),
             ]
+            if self._total_up > 0:
+                cmds += self._tree_cmds(self.ifb, self._total_up, "src")
+            if wan_ingress:
+                cmds += self._wan_ingress_cmds()
+        if self._vpn_active and self._ppp is not None:
+            self._ppp_dev_shaped = self._ppp[0]
+            cmds += self._ppp_cmds(self._ppp[0])
         return cmds
 
     def _tree_cmds(self, dev: str, total: float, match_field: str) -> list[list[str]]:
         """HTB + fq_codel commands for one direction's tree."""
-        stotal = total
+        stotal = total * self._factor() * self._lan_tree_factor()
         base = _rate(stotal)
+        # VPN mode only: the box's own WAN-bound egress (the encrypted tunnel,
+        # NAT'd uploads) shares this NIC's egress tree with client downloads.
+        # It used to fall into the default class capped at the DOWNLOAD total,
+        # so the (much smaller) uplink was never protected and its modem queue
+        # filled. Give it its own class capped at the UPLOAD total.
+        wan_egress = bool(match_field == "dst" and self._vpn_active
+                          and self._ppp is None
+                          and self._total_up > 0 and self.client_subnet)
+        wan_up_rate = _rate(max(0.256, self._total_up * self._factor()))
         # The root caps at the LAN link rate so the pass-through class can
         # exceed the WAN line; every WAN class below stays capped at ``total``
         # so fq_codel keeps draining the internet queue at the line rate.
@@ -551,7 +797,7 @@ class TcShaper:
         aqm_args = self._aqm_args(match_field == "src")
         cmds: list[list[str]] = [
             ["tc", "qdisc", "add", "dev", dev, "root", "handle", "1:",
-             "htb", "default", "2"],
+             "htb", "default", "3" if wan_egress else "2"],
             ["tc", "class", "add", "dev", dev, "parent", "1:", "classid",
              "1:1", "htb", "rate", lan_rate, *_burst(lan)],
             # Default class: everything without a device leaf (unlimited
@@ -568,6 +814,18 @@ class TcShaper:
         if aqm_args:
             cmds.append(["tc", "qdisc", "add", "dev", dev, "parent", "1:2",
                          "handle", "2:", *aqm_args])
+        if wan_egress:
+            # 1:3 = default (WAN-bound). Client-bound leftovers (unlimited
+            # devices) are steered back to 1:2 by a prio-3 dst filter.
+            cmds.append(["tc", "class", "add", "dev", dev, "parent", "1:1",
+                         "classid", "1:3", "htb", "rate", wan_up_rate,
+                         "ceil", wan_up_rate,
+                         *_burst(max(0.256, self._total_up * self._factor()))])
+            cmds.append(["tc", "qdisc", "add", "dev", dev, "parent", "1:3",
+                         "handle", "3:", *self._aqm_args(True)])
+            cmds.append(["tc", "filter", "add", "dev", dev, "parent", "1:",
+                         "protocol", "ip", "prio", "3", "u32", "match", "ip",
+                         "dst", self.client_subnet, "flowid", "1:2"])
 
         # LAN pass-through: client<->uplink-subnet traffic (NAS, router admin,
         # LAN transfers) AND client<->the box itself (dashboard, SSH, file
@@ -626,36 +884,50 @@ class TcShaper:
                                  "1:", "protocol", "ip", "prio", "1", "u32",
                                  "match", "ip", "src", addr, "flowid", "1:99"])
 
+        total_dev_count = sum(len(grp["devs"]) for grp in by_user.values())
+        fair_base_rate = max(0.256, round(stotal / max(total_dev_count, 1), 3)) if total_dev_count > 0 else stotal
+
         for uid in sorted(by_user):
             grp = by_user[uid]
             cap = (grp["cap_down"] if match_field == "dst" else grp["cap_up"])
-            # A device belongs in THIS tree only if ITS cap in this direction
-            # (or its user's aggregate) is non-zero — the leaf's own cap must
-            # match the direction, or an up-only device (up>0, down=0) with no
-            # user upload aggregate was dropped from the upload tree and its
-            # upload limit silently ignored.
             dev_attr = "down" if match_field == "dst" else "up"
-            leaves = [e for e in grp["devs"]
-                      if _effective(float(e.get(dev_attr) or 0.0),
-                                    cap, stotal) is not None]
+            if self._fair_sharing:
+                leaves = list(grp["devs"])
+            else:
+                leaves = [e for e in grp["devs"]
+                          if _effective(float(e.get(dev_attr) or 0.0),
+                                        cap, stotal) is not None]
             if not leaves:
-                continue  # every one of this user's devices is unlimited
-            user_rate = min(cap, stotal) if cap > 0 else stotal
+                continue  # every one of this user's devices is unlimited (non-fair mode)
+
+            user_ceil = min(cap, stotal) if cap > 0 else stotal
+            if self._fair_sharing:
+                user_rate = min(user_ceil, max(0.256, round(fair_base_rate * len(leaves), 3)))
+            else:
+                user_rate = user_ceil
+
+            extra_quantum = ["quantum", "1514"] if self._fair_sharing else []
             user_cid = _user_class(uid)
             cmds.append(["tc", "class", "add", "dev", dev, "parent", "1:100",
                          "classid", user_cid, "htb", "rate", _rate(user_rate),
-                         "ceil", _rate(user_rate), *_burst(user_rate)])
+                         "ceil", _rate(user_ceil), *_burst(user_ceil), *extra_quantum])
             for e in sorted(leaves, key=lambda x: str(x.get("ip", ""))):
-                dev_cap = float(e.get("down") or 0.0) if match_field == "dst" \
-                    else float(e.get("up") or 0.0)
+                dev_cap = float(e.get(dev_attr) or 0.0)
                 eff = _effective(dev_cap, cap, stotal)
-                if eff is None:
-                    continue
+                if self._fair_sharing:
+                    dev_ceil = eff if eff is not None else user_ceil
+                    dev_rate = min(fair_base_rate, dev_ceil)
+                else:
+                    if eff is None:
+                        continue
+                    dev_ceil = eff
+                    dev_rate = eff
+
                 dev_cid = _device_class(int(e["device_id"]))
                 cmds.append(["tc", "class", "add", "dev", dev, "parent",
                              user_cid, "classid", dev_cid, "htb",
-                             "rate", _rate(eff), "ceil", _rate(eff),
-                             *_burst(eff)])
+                             "rate", _rate(dev_rate), "ceil", _rate(dev_ceil),
+                             *_burst(dev_ceil), *extra_quantum])
                 if aqm_args:
                     cmds.append(["tc", "qdisc", "add", "dev", dev, "parent",
                                  dev_cid, "handle", _device_qdisc(int(e["device_id"])),
@@ -671,8 +943,16 @@ class TcShaper:
             return
         for argv in ([["tc", "qdisc", "del", "dev", self.iface, "root"],
                       ["tc", "qdisc", "del", "dev", self.iface, "ingress"],
-                      ["tc", "qdisc", "del", "dev", self.ifb, "root"]]):
+                      ["tc", "qdisc", "del", "dev", self.ifb, "root"],
+                      ["tc", "qdisc", "del", "dev", self.wan_ifb, "root"]]):
             self._run_best_effort(argv)
+        if self._ppp_dev_shaped:
+            for argv in (["tc", "qdisc", "del", "dev", self._ppp_dev_shaped,
+                          "root"],
+                         ["tc", "qdisc", "del", "dev", self._ppp_dev_shaped,
+                          "ingress"]):
+                self._run_best_effort(argv)
+            self._ppp_dev_shaped = ""
 
     def _run(self, argv: list[str]) -> bool:
         """Run an apply command; a failure degrades the shaper."""

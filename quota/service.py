@@ -673,6 +673,7 @@ class QuotaService:
                 "used_gb": round(used_gb, 3),
                 "blocked": state != _db.BLOCK_OK,
                 "block_state": state,
+                "guest": bool(user.guest if user is not None else dev.guest),
             }
         # Second pass: deny-listed MACs with NO device row (the admin deleted
         # the device/user — the MAC was blacklisted and never auto-registers).
@@ -1059,6 +1060,18 @@ class QuotaService:
     SHAPING_DOWN_KEY = "shaping_total_down_mbps"
     SHAPING_UP_KEY = "shaping_total_up_mbps"
     SHAPING_LAN_RATE_KEY = "shaping_lan_rate_mbps"
+    #: VPN-mode speed (panel): % of the Network-tab totals programmed while
+    #: the tunnel is active (0 = built-in margins), and optional measured
+    #: through-VPN rates that replace the totals (both > 0).
+    SHAPING_VPN_PCT_KEY = "shaping_vpn_pct"
+    SHAPING_VPN_DOWN_KEY = "shaping_vpn_down_mbps"
+    SHAPING_VPN_UP_KEY = "shaping_vpn_up_mbps"
+
+    async def _num_setting(self, key: str) -> float:
+        try:
+            return max(0.0, float(await self.db.get_setting(key, "0") or 0))
+        except ValueError:
+            return 0.0
 
     async def get_shaping_config(self) -> dict[str, Any]:
         """Current shaping settings (the shaper reads these each maintenance
@@ -1081,7 +1094,12 @@ class QuotaService:
         except ValueError:
             lan_rate = 1000.0
         return {"enabled": enabled, "total_down_mbps": total_down,
-                "total_up_mbps": total_up, "lan_rate_mbps": lan_rate}
+                "total_up_mbps": total_up, "lan_rate_mbps": lan_rate,
+                "vpn_pct": await self._num_setting(self.SHAPING_VPN_PCT_KEY),
+                "vpn_down_mbps": await self._num_setting(
+                    self.SHAPING_VPN_DOWN_KEY),
+                "vpn_up_mbps": await self._num_setting(
+                    self.SHAPING_VPN_UP_KEY)}
 
     # -- VPN share (policy-routing the client subnet into the box's tunnel) ------
 
@@ -1183,7 +1201,10 @@ class QuotaService:
     async def set_shaping(self, enabled: bool | None = None,
                           total_down_mbps: float | None = None,
                           total_up_mbps: float | None = None,
-                          lan_rate_mbps: float | None = None) -> dict[str, Any]:
+                          lan_rate_mbps: float | None = None,
+                          vpn_pct: float | None = None,
+                          vpn_down_mbps: float | None = None,
+                          vpn_up_mbps: float | None = None) -> dict[str, Any]:
         """Persist a shaping change. Each non-None field is written; a ``warn``
         event records what changed. No engine call here — the maintenance loop
         consumes the settings next tick (same pattern as guest mode)."""
@@ -1205,6 +1226,16 @@ class QuotaService:
             await self.db.set_setting(self.SHAPING_LAN_RATE_KEY,
                                       str(lan_rate_mbps))
             changes.append(f"LAN rate {lan_rate_mbps:g} Mbps")
+        for val, key, label in (
+                (vpn_pct, self.SHAPING_VPN_PCT_KEY, "VPN speed %"),
+                (vpn_down_mbps, self.SHAPING_VPN_DOWN_KEY, "VPN down Mbps"),
+                (vpn_up_mbps, self.SHAPING_VPN_UP_KEY, "VPN up Mbps")):
+            if val is not None:
+                val = max(0.0, float(val))
+                if key == self.SHAPING_VPN_PCT_KEY:
+                    val = min(100.0, val)
+                await self.db.set_setting(key, str(val))
+                changes.append(f"{label} {val:g}")
         if changes:
             await self.db.add_event("Speed limits: " + ", ".join(changes), "warn")
         return await self.get_shaping_config()

@@ -1,0 +1,2701 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Local Share — Quota Manager</title>
+  <link rel="stylesheet" href="/assets/styles.css?v=49">
+  <style>
+    :root {
+      --share-accent: #0ea5e9;
+      --share-accent-glow: rgba(14, 165, 233, 0.25);
+      --card-bg: rgba(15, 23, 42, 0.85);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --radius-card: 14px;
+    }
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 12px;
+      margin: 0;
+      background: #090d16;
+      color: #f1f5f9;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .share-container {
+      width: 100%;
+      max-width: 680px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      margin-top: 4px;
+      margin-bottom: 40px;
+    }
+
+    /* HEADER */
+    .share-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 16px;
+      border-radius: var(--radius-card);
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      backdrop-filter: blur(12px);
+    }
+    .share-brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .share-logo {
+      width: 38px;
+      height: 38px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #0284c7, #38bdf8);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      flex-shrink: 0;
+    }
+    .share-title {
+      margin: 0;
+      font-size: 1.15rem;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+    }
+    .share-subtitle {
+      margin: 2px 0 0;
+      font-size: 0.76rem;
+      color: #94a3b8;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .badge-lan {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      font-weight: 600;
+      font-size: 0.72rem;
+    }
+    .badge-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #10b981;
+      animation: pulse-dot 2s infinite;
+    }
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.85); }
+    }
+    .header-actions {
+      display: flex;
+      gap: 8px;
+    }
+    .btn-icon {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.1);
+      color: #f1f5f9;
+      border-radius: 8px;
+      padding: 8px 12px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.8rem;
+      font-weight: 500;
+      transition: all 0.18s ease;
+    }
+    .btn-icon:hover {
+      background: rgba(255,255,255,0.12);
+      border-color: rgba(255,255,255,0.2);
+    }
+
+    /* DROP ZONE */
+    .drop-zone {
+      border: 2px dashed rgba(56, 189, 248, 0.35);
+      border-radius: var(--radius-card);
+      padding: 24px 16px;
+      text-align: center;
+      background: rgba(15, 23, 42, 0.5);
+      transition: all 0.22s ease;
+      position: relative;
+    }
+    .drop-zone:hover, .drop-zone.dragover {
+      border-color: var(--share-accent);
+      background: rgba(14, 165, 233, 0.08);
+      box-shadow: 0 0 20px var(--share-accent-glow);
+    }
+    .drop-icon {
+      width: 44px;
+      height: 44px;
+      margin: 0 auto 10px;
+      border-radius: 50%;
+      background: rgba(14, 165, 233, 0.12);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #38bdf8;
+    }
+    .drop-title {
+      font-size: 0.98rem;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .drop-hint {
+      font-size: 0.78rem;
+      color: #94a3b8;
+      margin-bottom: 14px;
+    }
+    .upload-btn-row {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .btn-upload-choice {
+      background: rgba(14, 165, 233, 0.15);
+      border: 1px solid rgba(14, 165, 233, 0.35);
+      color: #38bdf8;
+      font-weight: 600;
+      font-size: 0.82rem;
+      padding: 8px 16px;
+      border-radius: 8px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.16s ease;
+    }
+    .btn-upload-choice:hover {
+      background: rgba(14, 165, 233, 0.25);
+      border-color: #38bdf8;
+    }
+    .btn-upload-choice.folder {
+      background: rgba(245, 158, 11, 0.12);
+      border-color: rgba(245, 158, 11, 0.35);
+      color: #fbbf24;
+    }
+    .btn-upload-choice.folder:hover {
+      background: rgba(245, 158, 11, 0.22);
+      border-color: #fbbf24;
+    }
+    #file-input, #folder-input { display: none; }
+
+    /* UPLOAD PROGRESS */
+    .upload-progress-card {
+      margin-top: 14px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: rgba(0,0,0,0.4);
+      border: 1px solid rgba(255,255,255,0.08);
+      text-align: left;
+    }
+    .upload-prog-header {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.78rem;
+      margin-bottom: 8px;
+      gap: 8px;
+    }
+    .upload-prog-header span:first-child {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+    }
+    .prog-bar-wrap {
+      width: 100%;
+      height: 7px;
+      border-radius: 4px;
+      background: rgba(255,255,255,0.08);
+      overflow: hidden;
+    }
+    .prog-bar-fill {
+      height: 100%;
+      width: 0%;
+      border-radius: 4px;
+      background: linear-gradient(90deg, #0284c7, #38bdf8);
+      transition: width 0.1s linear;
+    }
+
+    /* CARD SECTIONS */
+    .card-section {
+      border-radius: var(--radius-card);
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      backdrop-filter: blur(12px);
+      padding: 16px;
+    }
+    .section-title {
+      font-size: 0.95rem;
+      font-weight: 700;
+      margin: 0 0 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .section-count {
+      font-size: 0.75rem;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.08);
+      color: #94a3b8;
+    }
+
+    /* TEXT CLIPBOARD */
+    .text-form {
+      display: flex;
+      gap: 8px;
+    }
+    .text-input {
+      flex: 1;
+      padding: 10px 14px;
+      border-radius: 8px;
+      background: rgba(0,0,0,0.35);
+      border: 1px solid rgba(255,255,255,0.12);
+      color: #fff;
+      font-size: 0.86rem;
+      outline: none;
+      transition: border 0.18s ease;
+      min-width: 0;
+    }
+    .text-input:focus {
+      border-color: var(--share-accent);
+    }
+    .btn-primary {
+      background: #0284c7;
+      border: none;
+      color: #fff;
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.84rem;
+      cursor: pointer;
+      transition: background 0.18s ease;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .btn-primary:hover {
+      background: #0369a1;
+    }
+
+    /* BATCH SELECTION TOOLBAR */
+    .batch-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+      border-radius: 10px;
+      background: rgba(14, 165, 233, 0.12);
+      border: 1px solid rgba(14, 165, 233, 0.3);
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .batch-actions-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .btn-batch {
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.14);
+      color: #fff;
+      font-size: 0.76rem;
+      padding: 5px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.15s ease;
+    }
+    .btn-batch.download {
+      background: rgba(14, 165, 233, 0.25);
+      border-color: #38bdf8;
+      color: #38bdf8;
+      font-weight: 600;
+    }
+    .btn-batch.del {
+      background: rgba(239, 68, 68, 0.2);
+      border-color: rgba(239, 68, 68, 0.4);
+      color: #f87171;
+    }
+
+    /* SELECT ALL ROW */
+    .select-all-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 4px 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      margin-bottom: 10px;
+      font-size: 0.8rem;
+      color: #94a3b8;
+    }
+    .custom-cb-wrap {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .custom-cb-wrap input[type="checkbox"] {
+      width: 17px;
+      height: 17px;
+      accent-color: #0ea5e9;
+      cursor: pointer;
+      margin: 0;
+    }
+
+    /* REVOLUTIONIZED RESPONSIVE FILE CARD */
+    .items-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .file-item {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.025);
+      border: 1px solid rgba(255,255,255,0.06);
+      transition: all 0.16s ease;
+    }
+    .file-item:hover {
+      background: rgba(255,255,255,0.05);
+      border-color: rgba(255,255,255,0.12);
+    }
+    .file-item.selected {
+      background: rgba(14, 165, 233, 0.08);
+      border-color: rgba(14, 165, 233, 0.4);
+    }
+
+    /* CARD ROW 1: HEADER & FULL NAME */
+    .file-main-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+    }
+    .file-type-icon {
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      background: rgba(56, 189, 248, 0.12);
+      color: #38bdf8;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .file-type-icon.folder {
+      background: rgba(245, 158, 11, 0.15);
+      color: #fbbf24;
+    }
+    .file-title-wrap {
+      min-width: 0;
+      flex: 1;
+    }
+    .file-name {
+      font-size: 0.88rem;
+      font-weight: 600;
+      color: #f8fafc;
+      word-break: break-all;
+      line-height: 1.35;
+      display: block;
+    }
+
+    /* CARD ROW 2: INFO PILLS & ACTIONS (NEVER OVERLAP) */
+    .file-footer-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding-top: 6px;
+      border-top: 1px solid rgba(255,255,255,0.04);
+      flex-wrap: wrap;
+    }
+    .file-info-tags {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.72rem;
+      color: #94a3b8;
+      flex-wrap: wrap;
+    }
+    .tag-size {
+      font-weight: 600;
+      color: #cbd5e1;
+    }
+    .tag-dot { opacity: 0.4; }
+    .tag-expiry { color: #f59e0b; }
+
+    .file-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+      margin-left: auto;
+    }
+    .btn-action {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.1);
+      color: #f1f5f9;
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 0.76rem;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.15s ease;
+      text-decoration: none;
+    }
+    .btn-action.download {
+      background: rgba(14, 165, 233, 0.18);
+      border-color: rgba(14, 165, 233, 0.4);
+      color: #38bdf8;
+      font-weight: 600;
+    }
+    .btn-action.download:hover {
+      background: rgba(14, 165, 233, 0.3);
+    }
+    .btn-action.del:hover {
+      background: rgba(239, 68, 68, 0.2);
+      border-color: rgba(239, 68, 68, 0.4);
+      color: #f87171;
+    }
+
+    /* TEXT ITEMS */
+    .text-item {
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+    }
+    .text-content {
+      font-size: 0.85rem;
+      line-height: 1.45;
+      word-break: break-word;
+      color: #e2e8f0;
+      flex: 1;
+      white-space: pre-wrap;
+    }
+    .text-meta {
+      font-size: 0.72rem;
+      color: #64748b;
+      margin-top: 4px;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 24px 16px;
+      color: #64748b;
+      font-size: 0.82rem;
+    }
+
+    /* MODAL */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      backdrop-filter: blur(6px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      z-index: 1000;
+    }
+    .modal-box {
+      background: #111827;
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 16px;
+      padding: 24px;
+      max-width: 360px;
+      width: 100%;
+      text-align: center;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.6);
+    }
+    .qr-container {
+      background: #fff;
+      padding: 12px;
+      border-radius: 12px;
+      margin: 16px auto;
+      width: 200px;
+      height: 200px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-url {
+      font-family: monospace;
+      font-size: 0.82rem;
+      background: rgba(0,0,0,0.4);
+      padding: 8px 12px;
+      border-radius: 6px;
+      color: #38bdf8;
+      word-break: break-all;
+      margin-bottom: 16px;
+    }
+
+    /* TOAST */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(20px);
+      opacity: 0;
+      background: rgba(15, 23, 42, 0.95);
+      border: 1px solid rgba(56, 189, 248, 0.4);
+      color: #fff;
+      padding: 10px 18px;
+      border-radius: 999px;
+      font-size: 0.82rem;
+      pointer-events: none;
+      transition: all 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+      z-index: 9999;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+    }
+    .toast.show {
+      transform: translateX(-50%) translateY(0);
+      opacity: 1;
+    }
+    /* LIVE PEERS STYLES */
+    .live-peers-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 10px;
+    }
+    .live-empty-peers {
+      grid-column: 1 / -1;
+      text-align: center;
+      padding: 22px 14px;
+      border: 1px dashed rgba(255,255,255,0.08);
+      border-radius: 12px;
+      background: rgba(255,255,255,0.015);
+    }
+    .radar-pulse {
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      background: rgba(56, 189, 248, 0.2);
+      border: 2px solid #38bdf8;
+      margin: 0 auto;
+      animation: radar-anim 2s infinite ease-out;
+    }
+    @keyframes radar-anim {
+      0% { transform: scale(0.8); opacity: 0.8; box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.6); }
+      70% { transform: scale(1.1); opacity: 1; box-shadow: 0 0 0 12px rgba(56, 189, 248, 0); }
+      100% { transform: scale(0.8); opacity: 0.8; }
+    }
+    .peer-card {
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 12px;
+      padding: 12px 10px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      transition: all 0.2s ease;
+      cursor: pointer;
+    }
+    .peer-card:hover {
+      background: rgba(14, 165, 233, 0.08);
+      border-color: rgba(56, 189, 248, 0.4);
+      transform: translateY(-2px);
+    }
+    .peer-avatar {
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      background: rgba(14, 165, 233, 0.15);
+      color: #38bdf8;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.35rem;
+      margin-bottom: 6px;
+    }
+    .peer-name {
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: #f1f5f9;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 100%;
+    }
+    .peer-ip {
+      font-size: 0.7rem;
+      color: #94a3b8;
+      margin: 2px 0 8px;
+    }
+    .peer-actions-btn-group {
+      display: flex;
+      gap: 6px;
+      width: 100%;
+    }
+    .peer-send-btn {
+      flex: 1;
+      background: rgba(14, 165, 233, 0.2);
+      border: 1px solid rgba(14, 165, 233, 0.4);
+      color: #38bdf8;
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 6px 4px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+    }
+    .peer-send-btn:hover {
+      background: #0284c7;
+      color: #fff;
+    }
+    .peer-send-btn.folder {
+      background: rgba(245, 158, 11, 0.15);
+      border-color: rgba(245, 158, 11, 0.35);
+      color: #fbbf24;
+    }
+    .peer-send-btn.folder:hover {
+      background: #d97706;
+      color: #fff;
+    }
+    .peer-send-btn.multi {
+      width: 100%;
+      background: rgba(168, 85, 247, 0.15);
+      border-color: rgba(168, 85, 247, 0.35);
+      color: #c084fc;
+    }
+    .peer-send-btn.multi:hover {
+      background: #9333ea;
+      color: #fff;
+    }
+    .peer-card.dragover {
+      background: rgba(14, 165, 233, 0.25);
+      border-color: #38bdf8;
+      transform: scale(1.03);
+    }
+    .btn-upload-choice.multi {
+      background: rgba(168, 85, 247, 0.12);
+      border-color: rgba(168, 85, 247, 0.35);
+      color: #c084fc;
+    }
+    .btn-upload-choice.multi:hover {
+      background: rgba(168, 85, 247, 0.22);
+      border-color: #c084fc;
+    }
+    .mf-folder-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 0.8rem;
+      color: #f1f5f9;
+    }
+    .mf-folder-info {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+    }
+    .mf-del-btn {
+      background: transparent;
+      border: none;
+      color: #ef4444;
+      cursor: pointer;
+      padding: 2px 6px;
+      font-size: 0.85rem;
+      border-radius: 4px;
+      transition: background 0.15s;
+    }
+    .mf-del-btn:hover {
+      background: rgba(239, 68, 68, 0.2);
+    }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+
+  <div class="share-container">
+
+    <!-- HEADER -->
+    <header class="share-header">
+      <div class="share-brand">
+        <div class="share-logo">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="16 16 12 12 8 16"></polyline>
+            <line x1="12" y1="12" x2="12" y2="21"></line>
+            <path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"></path>
+            <polyline points="16 16 12 12 8 16"></polyline>
+          </svg>
+        </div>
+        <div>
+          <h1 class="share-title">Local Share</h1>
+          <div class="share-subtitle">
+            <span class="badge-lan"><span class="badge-dot"></span> LAN Direct</span>
+            <span id="client-ip-text">Connected</span>
+          </div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button class="btn-icon" id="qr-btn" title="Open on Mobile / QR Code">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="7" height="7"></rect>
+            <rect x="14" y="3" width="7" height="7"></rect>
+            <rect x="14" y="14" width="7" height="7"></rect>
+            <rect x="3" y="14" width="7" height="7"></rect>
+          </svg>
+          QR Code
+        </button>
+      </div>
+    </header>
+
+    <!-- DROP ZONE -->
+    <section class="drop-zone" id="drop-zone">
+      <input type="file" id="file-input" multiple>
+      <input type="file" id="folder-input" webkitdirectory directory multiple>
+
+      <div class="drop-icon">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+          <polyline points="17 8 12 3 7 8"></polyline>
+          <line x1="12" y1="3" x2="12" y2="15"></line>
+        </svg>
+      </div>
+      <div class="drop-title">Drop files or folder here</div>
+      <div class="drop-hint">Instant high-speed local transfer across all devices on Wi-Fi</div>
+
+      <div class="upload-btn-row">
+        <button type="button" class="btn-upload-choice" id="btn-choose-files" title="Select one or multiple files">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+          Upload Files
+        </button>
+        <button type="button" class="btn-upload-choice folder" id="btn-choose-folder" title="Select one or multiple folders">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+          Upload Folders
+        </button>
+      </div>
+
+      <!-- PROGRESS BAR -->
+      <div class="upload-progress-card hidden" id="upload-progress-card">
+        <div class="upload-prog-header">
+          <span id="upload-filename">Uploading...</span>
+          <span id="upload-stats">0%</span>
+        </div>
+        <div class="prog-bar-wrap">
+          <div class="prog-bar-fill" id="upload-bar-fill"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- LIVE DIRECT TRANSFER (ZERO DISK STREAM RELAY) -->
+    <section class="card-section" id="live-share-section">
+      <input type="file" id="live-peer-file-input" multiple style="display: none;">
+      <input type="file" id="live-peer-folder-input" webkitdirectory directory multiple style="display: none;">
+      <div class="section-title">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span>Live Direct Transfer</span>
+          <span class="badge-lan" style="background: rgba(56, 189, 248, 0.15); color: #38bdf8;">
+            <span class="badge-dot" style="background: #38bdf8;"></span> Direct Wi-Fi
+          </span>
+        </div>
+        <span class="section-count" id="live-peers-count">0 online</span>
+      </div>
+      <p style="font-size: 0.76rem; color: #94a3b8; margin: 0 0 12px;">Instant transfer from device to device over your local Wi-Fi at maximum speed.</p>
+      
+      <div id="live-peers-list" class="live-peers-grid">
+        <div class="live-empty-peers">
+          <div class="radar-pulse"></div>
+          <div style="font-size: 0.82rem; font-weight: 500; color: #cbd5e1; margin-top: 10px;">Looking for nearby devices...</div>
+          <div style="font-size: 0.72rem; color: #64748b; margin-top: 2px;">Open Local Share on your phone, laptop, or tablet to stream directly.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CLIPBOARD & TEXT SHARING -->
+    <section class="card-section">
+      <h2 class="section-title">
+        <span>Quick Text & Links</span>
+      </h2>
+      <form class="text-form" id="text-form">
+        <input type="text" class="text-input" id="text-input" placeholder="Paste link, note, Wi-Fi password or text to share..." autocomplete="off">
+        <button type="submit" class="btn-primary">Share</button>
+      </form>
+      <div class="items-list" id="texts-list" style="margin-top: 10px;"></div>
+    </section>
+
+    <!-- SHARED FILES -->
+    <section class="card-section">
+      <div class="section-title">
+        <span>Shared Files</span>
+        <span class="section-count" id="files-count">0 files</span>
+      </div>
+
+      <!-- BATCH ACTION BAR (Hidden until >= 1 file selected) -->
+      <div class="batch-toolbar hidden" id="batch-toolbar">
+        <div style="font-size: 0.82rem; font-weight: 600; color: #38bdf8;">
+          <span id="batch-count-text">0 selected</span>
+        </div>
+        <div class="batch-actions-group">
+          <button type="button" class="btn-batch download" id="btn-batch-download">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+            Download ZIP
+          </button>
+          <button type="button" class="btn-batch del" id="btn-batch-delete">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+            Delete
+          </button>
+          <button type="button" class="btn-batch" id="btn-batch-cancel">✕</button>
+        </div>
+      </div>
+
+      <!-- SELECT ALL HEADER ROW -->
+      <div class="select-all-row" id="select-all-row">
+        <label class="custom-cb-wrap">
+          <input type="checkbox" id="select-all-cb">
+          <span>Select All Files</span>
+        </label>
+        <span id="select-all-hint" style="font-size: 0.74rem;">0 of 0</span>
+      </div>
+
+      <div class="items-list" id="files-list"></div>
+    </section>
+
+  </div>
+
+  <!-- QR CODE MODAL -->
+  <div class="modal-backdrop hidden" id="qr-modal">
+    <div class="modal-box">
+      <h3 style="margin: 0 0 8px; font-size: 1.1rem;">Scan to Open on Mobile</h3>
+      <p style="margin: 0 0 12px; font-size: 0.78rem; color: #94a3b8;">Point your phone camera to open Local Share instantly</p>
+      <div class="qr-container" id="qr-code-target"></div>
+      <div class="modal-url" id="modal-url-display"></div>
+      <button class="btn-primary" style="width: 100%;" id="qr-modal-close">Close</button>
+    </div>
+  </div>
+
+  <!-- LIVE INCOMING PROMPT MODAL -->
+  <div class="modal-backdrop hidden" id="live-incoming-modal">
+    <div class="modal-box">
+      <div style="width: 48px; height: 48px; border-radius: 50%; background: rgba(56, 189, 248, 0.15); color: #38bdf8; display: flex; align-items: center; justify-content: center; margin: 0 auto 12px; font-size: 1.5rem;">
+        ⚡
+      </div>
+      <h3 style="margin: 0 0 4px; font-size: 1.05rem;">Direct Live Stream Request</h3>
+      <p style="font-size: 0.78rem; color: #94a3b8; margin: 0 0 14px;" id="incoming-sender-text">A device wants to send you a file directly</p>
+      
+      <div style="background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 10px 12px; margin-bottom: 16px; text-align: left;">
+        <div style="font-weight: 600; font-size: 0.85rem; color: #f8fafc; word-break: break-all;" id="incoming-file-name">filename</div>
+        <div style="font-size: 0.74rem; color: #94a3b8; margin-top: 4px;" id="incoming-file-size">0 MB</div>
+      </div>
+
+      <div style="display: flex; gap: 8px; justify-content: center;">
+        <button type="button" class="btn-action download" id="btn-accept-transfer" style="padding: 9px 18px; font-size: 0.82rem;">Accept & Save</button>
+        <button type="button" class="btn-action del" id="btn-decline-transfer" style="padding: 9px 16px; font-size: 0.82rem;">Decline</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- LIVE ACTIVE TRANSFER MODAL -->
+  <div class="modal-backdrop hidden" id="live-transfer-modal">
+    <div class="modal-box">
+      <h3 style="margin: 0 0 4px; font-size: 1.05rem;" id="live-modal-title">Direct Transfer...</h3>
+      <p style="font-size: 0.76rem; color: #38bdf8; margin: 0 0 10px;">● Direct Wi-Fi Transfer (نقل مباشر فائق السرعة)</p>
+
+      <div id="live-modal-screen-warning" style="font-size: 0.72rem; color: #fbbf24; background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.25); border-radius: 6px; padding: 6px 10px; margin-bottom: 12px; display: flex; align-items: center; gap: 6px; text-align: left;">
+        <span>💡</span>
+        <span>Keep screen on & browser open during transfer (يرجى إبقاء الشاشة مفتوحة)</span>
+      </div>
+
+      <div style="font-size: 0.84rem; font-weight: 600; color: #f8fafc; word-break: break-all; margin-bottom: 6px;" id="live-modal-filename">filename</div>
+      <div style="display: flex; justify-content: space-between; font-size: 0.76rem; color: #94a3b8; margin-bottom: 6px;">
+        <span id="live-modal-stats">0%</span>
+        <span id="live-modal-speed">0 MB/s</span>
+      </div>
+
+      <div class="prog-bar-wrap" style="height: 8px; margin-bottom: 16px; background: rgba(255,255,255,0.08); border-radius: 4px; overflow: hidden;">
+        <div class="prog-bar-fill" id="live-modal-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #0284c7, #38bdf8); transition: width 0.1s linear;"></div>
+      </div>
+
+      <div id="live-modal-actions" style="display: flex; gap: 8px; justify-content: center; flex-wrap: wrap;">
+        <button type="button" class="btn-action del" id="btn-cancel-transfer" style="padding: 8px 18px; font-size: 0.8rem;">Cancel Transfer</button>
+        <button type="button" class="btn-action ok hidden" id="btn-live-save-download" style="padding: 8px 18px; font-size: 0.82rem; background: #0284c7; color: #fff; font-weight: 600;">💾 Save / Download</button>
+        <button type="button" class="btn-action hidden" id="btn-live-close-done" style="padding: 8px 18px; font-size: 0.82rem; background: #334155; color: #fff;">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MULTI-FOLDER STAGING MODAL -->
+  <div class="modal-backdrop hidden" id="multi-folder-modal">
+    <div class="modal-box" style="max-width: 440px; text-align: left;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+        <h3 style="margin: 0; font-size: 1.05rem; display: flex; align-items: center; gap: 8px;">
+          <span>📂</span> <span id="mf-modal-title">Selected Folders</span>
+        </h3>
+        <span class="badge-lan" id="mf-modal-target-badge" style="display: none; background: rgba(56, 189, 248, 0.15); color: #38bdf8;">To: Device</span>
+      </div>
+      <p style="font-size: 0.77rem; color: #94a3b8; margin: 0 0 12px;" id="mf-modal-hint">
+        You can add more folders to bundle and transfer them together:
+      </p>
+
+      <div id="mf-folder-list" style="max-height: 180px; overflow-y: auto; margin-bottom: 12px; display: flex; flex-direction: column; gap: 6px;"></div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.78rem; color: #cbd5e1; margin-bottom: 16px; padding: 7px 12px; background: rgba(255,255,255,0.04); border-radius: 8px; border: 1px solid rgba(255,255,255,0.06);">
+        <span id="mf-total-count">0 folders, 0 files</span>
+        <span id="mf-total-size" style="font-weight: 600; color: #38bdf8;">0 B</span>
+      </div>
+
+      <div style="display: flex; gap: 8px; justify-content: flex-end;">
+        <button type="button" class="btn-action" id="mf-btn-add-more" style="background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.35); color: #fbbf24; padding: 8px 12px; font-size: 0.78rem; font-weight: 600; border-radius: 6px; cursor: pointer;">
+          + Add Another Folder
+        </button>
+        <button type="button" class="btn-primary" id="mf-btn-confirm" style="padding: 8px 16px; font-size: 0.8rem; font-weight: 600;">
+          Send All ⚡
+        </button>
+        <button type="button" class="btn-action del" id="mf-btn-cancel" style="padding: 8px 12px; font-size: 0.78rem;">
+          Cancel
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOAST NOTIFICATION -->
+  <div class="toast" id="toast"></div>
+
+  <script src="/assets/qrcode.min.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    function showToast(msg) {
+      const t = $("toast");
+      t.textContent = msg;
+      t.classList.add("show");
+      setTimeout(() => t.classList.remove("show"), 2400);
+    }
+
+    function formatBytes(bytes) {
+      if (!bytes || bytes === 0) return "0 B";
+      const k = 1024;
+      const sizes = ["B", "KB", "MB", "GB", "TB"];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+    }
+
+    function formatTimeAgo(epochSec) {
+      const diff = Math.max(0, Math.floor(Date.now() / 1000 - epochSec));
+      if (diff < 60) return "just now";
+      if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+      if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+      return `${Math.floor(diff / 86400)}d ago`;
+    }
+
+    function formatExpiry(epochSec) {
+      const left = Math.max(0, Math.floor(epochSec - Date.now() / 1000));
+      if (left <= 0) return "expired";
+      if (left < 60) return `${left}s left`;
+      if (left < 3600) return `${Math.floor(left / 60)}m left`;
+      return `${Math.floor(left / 3600)}h ${Math.floor((left % 3600) / 60)}m left`;
+    }
+
+    function isZipOrFolder(filename) {
+      return filename.toLowerCase().endsWith(".zip");
+    }
+
+    function getFileIcon(filename) {
+      const ext = filename.split(".").pop().toLowerCase();
+      if (["zip", "rar", "7z", "tar", "gz"].includes(ext)) {
+        return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`;
+      }
+      if (["jpg", "jpeg", "png", "gif", "webp", "svg"].includes(ext)) {
+        return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`;
+      }
+      if (["mp4", "mkv", "mov", "avi", "webm"].includes(ext)) {
+        return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="2.18"></rect><polygon points="10 8 16 12 10 16 10 8"></polygon></svg>`;
+      }
+      if (["pdf", "doc", "docx", "txt", "md"].includes(ext)) {
+        return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>`;
+      }
+      return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>`;
+    }
+
+    // STATE
+    let currentShareData = null;
+    let selectedFileIds = new Set();
+
+    async function fetchShareData() {
+      try {
+        const res = await fetch("/api/share/list");
+        if (!res.ok) return;
+        const data = await res.json();
+        currentShareData = data;
+        renderShareData(data);
+      } catch (err) {
+        console.warn("Share poll error:", err);
+      }
+    }
+
+    function renderShareData(data) {
+      if (data.client_ip) {
+        $("client-ip-text").textContent = `IP: ${data.client_ip}`;
+      }
+
+      // Render Files
+      const filesList = $("files-list");
+      const files = data.files || [];
+      $("files-count").textContent = `${files.length} file${files.length === 1 ? "" : "s"} (${formatBytes(data.total_size || 0)})`;
+
+      // Clean selections of deleted files
+      const existingIds = new Set(files.map((f) => f.id));
+      for (const id of selectedFileIds) {
+        if (!existingIds.has(id)) selectedFileIds.delete(id);
+      }
+      updateBatchToolbar();
+
+      const selectAllRow = $("select-all-row");
+      if (files.length === 0) {
+        selectAllRow.classList.add("hidden");
+        filesList.innerHTML = `<div class="empty-state">No files shared yet. Drop any files or folders above!</div>`;
+      } else {
+        selectAllRow.classList.remove("hidden");
+        $("select-all-hint").textContent = `${selectedFileIds.size} of ${files.length}`;
+        $("select-all-cb").checked = files.length > 0 && selectedFileIds.size === files.length;
+
+        filesList.innerHTML = files.map((f) => {
+          const isSelected = selectedFileIds.has(f.id);
+          const isFolder = isZipOrFolder(f.name);
+          return `
+            <div class="file-item ${isSelected ? "selected" : ""}" data-id="${f.id}">
+              <div class="file-main-row">
+                <label class="custom-cb-wrap" onclick="event.stopPropagation()">
+                  <input type="checkbox" class="file-cb" data-id="${f.id}" ${isSelected ? "checked" : ""}>
+                </label>
+                <div class="file-type-icon ${isFolder ? "folder" : ""}">${getFileIcon(f.name)}</div>
+                <div class="file-title-wrap">
+                  <span class="file-name" dir="auto" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
+                </div>
+              </div>
+
+              <div class="file-footer-row">
+                <div class="file-info-tags">
+                  <span class="tag-size">${formatBytes(f.size)}</span>
+                  <span class="tag-dot">•</span>
+                  <span class="tag-time">${formatTimeAgo(f.uploaded_at)}</span>
+                  <span class="tag-dot">•</span>
+                  <span class="tag-expiry">⏳ ${formatExpiry(f.expires_at)}</span>
+                </div>
+                <div class="file-actions">
+                  <a href="/api/share/download/${f.id}" class="btn-action download" download="${escapeHtml(f.name)}">
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                    Download
+                  </a>
+                  <button type="button" class="btn-action" onclick="copyFileLink('${f.id}')" title="Copy Link">
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
+                  </button>
+                  <button type="button" class="btn-action del" onclick="deleteFile('${f.id}')" title="Delete">
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+          `;
+        }).join("");
+      }
+
+      // Render Texts
+      const textsList = $("texts-list");
+      const texts = data.texts || [];
+      if (texts.length === 0) {
+        textsList.innerHTML = `<div class="empty-state" style="padding: 12px 0;">No text or notes shared yet.</div>`;
+      } else {
+        textsList.innerHTML = texts.map((t) => `
+          <div class="text-item">
+            <div style="flex: 1; min-width: 0;">
+              <div class="text-content">${renderTextContent(t.text)}</div>
+              <div class="text-meta">From ${t.sender_ip} • ${formatTimeAgo(t.created_at)}</div>
+            </div>
+            <div style="display: flex; gap: 6px;">
+              <button class="btn-action" onclick="copyTextDirect(this, ${JSON.stringify(t.text)})" title="Copy Text">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                Copy
+              </button>
+              <button class="btn-action del" onclick="deleteText('${t.id}')" title="Delete">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+              </button>
+            </div>
+          </div>
+        `).join("");
+      }
+    }
+
+    function escapeHtml(str) {
+      return (str || "").replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[m]);
+    }
+
+    function renderTextContent(text) {
+      const escaped = escapeHtml(text);
+      const urlRegex = /(https?:\/\/[^\s]+)/g;
+      return escaped.replace(urlRegex, (url) => `<a href="${url}" target="_blank" rel="noopener noreferrer" style="color: #38bdf8; text-decoration: underline;">${url}</a>`);
+    }
+
+    // MULTI-SELECTION LOGIC
+    function updateBatchToolbar() {
+      const toolbar = $("batch-toolbar");
+      const count = selectedFileIds.size;
+      if (count > 0) {
+        toolbar.classList.remove("hidden");
+        $("batch-count-text").textContent = `${count} selected`;
+      } else {
+        toolbar.classList.add("hidden");
+      }
+      const files = (currentShareData && currentShareData.files) || [];
+      $("select-all-cb").checked = files.length > 0 && count === files.length;
+      $("select-all-hint").textContent = `${count} of ${files.length}`;
+    }
+
+    $("files-list").addEventListener("change", (e) => {
+      if (e.target.classList.contains("file-cb")) {
+        const id = e.target.dataset.id;
+        if (e.target.checked) selectedFileIds.add(id);
+        else selectedFileIds.delete(id);
+        const card = e.target.closest(".file-item");
+        if (card) card.classList.toggle("selected", e.target.checked);
+        updateBatchToolbar();
+      }
+    });
+
+    $("select-all-cb").addEventListener("change", (e) => {
+      const checked = e.target.checked;
+      const files = (currentShareData && currentShareData.files) || [];
+      if (checked) {
+        files.forEach((f) => selectedFileIds.add(f.id));
+      } else {
+        selectedFileIds.clear();
+      }
+      document.querySelectorAll(".file-cb").forEach((cb) => (cb.checked = checked));
+      document.querySelectorAll(".file-item").forEach((it) => it.classList.toggle("selected", checked));
+      updateBatchToolbar();
+    });
+
+    $("btn-batch-cancel").addEventListener("click", () => {
+      selectedFileIds.clear();
+      document.querySelectorAll(".file-cb").forEach((cb) => (cb.checked = false));
+      document.querySelectorAll(".file-item").forEach((it) => it.classList.remove("selected"));
+      updateBatchToolbar();
+    });
+
+    $("btn-batch-download").addEventListener("click", () => {
+      if (selectedFileIds.size === 0) return;
+      const idsParam = Array.from(selectedFileIds).join(",");
+      const url = `/api/share/download-zip?ids=${idsParam}`;
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "LocalShare_Bundle.zip";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    });
+
+    $("btn-batch-delete").addEventListener("click", async () => {
+      const count = selectedFileIds.size;
+      if (count === 0) return;
+      if (!confirm(`Delete ${count} selected file(s) from the router?`)) return;
+      try {
+        const res = await fetch("/api/share/delete-batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-QM-CSRF": "1" },
+          body: JSON.stringify({ ids: Array.from(selectedFileIds) })
+        });
+        if (res.ok) {
+          showToast(`Deleted ${count} file(s)`);
+          selectedFileIds.clear();
+          fetchShareData();
+        } else {
+          showToast("Failed to delete selected files");
+        }
+      } catch (err) {
+        showToast("Error deleting files");
+      }
+    });
+
+    // UPLOAD REGULAR FILES
+    function uploadFiles(files) {
+      if (!files || files.length === 0) return;
+      const progressCard = $("upload-progress-card");
+      const nameEl = $("upload-filename");
+      const statsEl = $("upload-stats");
+      const barEl = $("upload-bar-fill");
+
+      progressCard.classList.remove("hidden");
+      let currentFileIndex = 0;
+
+      function uploadNext() {
+        if (currentFileIndex >= files.length) {
+          setTimeout(() => progressCard.classList.add("hidden"), 1200);
+          showToast(`Successfully shared ${files.length} file(s)!`);
+          fetchShareData();
+          return;
+        }
+
+        const file = files[currentFileIndex];
+        nameEl.textContent = `Uploading (${currentFileIndex + 1}/${files.length}): ${file.name}`;
+        barEl.style.width = "0%";
+        statsEl.textContent = "0%";
+
+        const xhr = new XMLHttpRequest();
+        let startTime = Date.now();
+
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            const percent = Math.round((e.loaded / e.total) * 100);
+            barEl.style.width = `${percent}%`;
+            const elapsedSec = (Date.now() - startTime) / 1000;
+            const speedBytesSec = elapsedSec > 0 ? e.loaded / elapsedSec : 0;
+            statsEl.textContent = `${percent}% (${formatBytes(e.loaded)} / ${formatBytes(e.total)}) • ${formatBytes(speedBytesSec)}/s`;
+          }
+        };
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            currentFileIndex++;
+            uploadNext();
+          } else {
+            showToast(`Upload failed: ${xhr.statusText || xhr.status}`);
+            progressCard.classList.add("hidden");
+          }
+        };
+
+        xhr.onerror = () => {
+          showToast("Network error during upload");
+          progressCard.classList.add("hidden");
+        };
+
+        xhr.open("POST", "/api/share/upload");
+        xhr.setRequestHeader("X-Filename", encodeURIComponent(file.name));
+        xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+        xhr.setRequestHeader("X-QM-CSRF", "1");
+        xhr.send(file);
+      }
+
+      uploadNext();
+    }
+
+    // UPLOAD FOLDER (ZIP ARCHIVE BUNDLE)
+    async function uploadFolder(files) {
+      if (!files || files.length === 0) return;
+      const progressCard = $("upload-progress-card");
+      const nameEl = $("upload-filename");
+      const statsEl = $("upload-stats");
+      const barEl = $("upload-bar-fill");
+
+      progressCard.classList.remove("hidden");
+
+      // Extract top folder name(s)
+      const folderSet = new Set();
+      for (const f of files) {
+        if (f.webkitRelativePath && f.webkitRelativePath.includes("/")) {
+          folderSet.add(f.webkitRelativePath.split("/")[0]);
+        }
+      }
+      const folderNames = Array.from(folderSet);
+      let folderName = "Folder";
+      if (folderNames.length === 1) folderName = folderNames[0];
+      else if (folderNames.length === 2) folderName = `${folderNames[0]}_and_${folderNames[1]}`;
+      else if (folderNames.length > 2) folderName = `${folderNames[0]}_${folderNames[1]}_and_${folderNames.length - 2}_more`;
+
+      nameEl.textContent = `Creating folder bundle: "${folderName}.zip"...`;
+      barEl.style.width = "5%";
+      statsEl.textContent = "Initializing...";
+
+      try {
+        const initRes = await fetch("/api/share/folder/init", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-QM-CSRF": "1" },
+          body: JSON.stringify({ folder_name: folderName, ttl: 7200 })
+        });
+        if (!initRes.ok) throw new Error("Could not initialize folder archive");
+        const { folder_id } = await initRes.json();
+
+        // Stream each file into the folder ZIP
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          const relPath = file.webkitRelativePath || file.name;
+          nameEl.textContent = `Archiving folder "${folderName}" (${i + 1}/${files.length}): ${file.name}`;
+
+          await new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            let startTime = Date.now();
+            xhr.upload.onprogress = (e) => {
+              if (e.lengthComputable) {
+                const percent = Math.round(((i + (e.loaded / e.total)) / files.length) * 100);
+                barEl.style.width = `${percent}%`;
+                const elapsedSec = (Date.now() - startTime) / 1000;
+                const speed = elapsedSec > 0 ? e.loaded / elapsedSec : 0;
+                statsEl.textContent = `${percent}% • ${formatBytes(speed)}/s`;
+              }
+            };
+            xhr.onload = () => {
+              if (xhr.status >= 200 && xhr.status < 300) resolve();
+              else reject(new Error(xhr.statusText));
+            };
+            xhr.onerror = () => reject(new Error("Network error during file archive"));
+            xhr.open("POST", `/api/share/folder/file?folder_id=${encodeURIComponent(folder_id)}&path=${encodeURIComponent(relPath)}`);
+            xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+            xhr.setRequestHeader("X-QM-CSRF", "1");
+            xhr.send(file);
+          });
+        }
+
+        // Finalize
+        nameEl.textContent = `Finalizing "${folderName}.zip"...`;
+        const finRes = await fetch("/api/share/folder/finalize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-QM-CSRF": "1" },
+          body: JSON.stringify({ folder_id: folder_id })
+        });
+        if (!finRes.ok) throw new Error("Could not finalize folder archive");
+
+        barEl.style.width = "100%";
+        statsEl.textContent = "100% Complete";
+        setTimeout(() => progressCard.classList.add("hidden"), 1200);
+        showToast(`Folder "${folderName}" uploaded successfully as a single package!`);
+        fetchShareData();
+
+      } catch (err) {
+        showToast(`Folder upload error: ${err.message}`);
+        progressCard.classList.add("hidden");
+      }
+    }
+
+    // ACTIONS
+    window.copyFileLink = function(fileId) {
+      const link = `${window.location.origin}/api/share/download/${fileId}`;
+      navigator.clipboard.writeText(link).then(() => {
+        showToast("Download link copied!");
+      }).catch(() => {
+        prompt("Copy link:", link);
+      });
+    };
+
+    window.copyTextDirect = function(btn, text) {
+      navigator.clipboard.writeText(text).then(() => {
+        showToast("Copied to clipboard!");
+      }).catch(() => {
+        prompt("Copy text:", text);
+      });
+    };
+
+    window.deleteFile = async function(fileId) {
+      if (!confirm("Delete this shared file from the router?")) return;
+      try {
+        const res = await fetch(`/api/share/files/${fileId}`, {
+          method: "DELETE",
+          headers: { "X-QM-CSRF": "1" }
+        });
+        if (res.ok) {
+          showToast("File deleted");
+          selectedFileIds.delete(fileId);
+          fetchShareData();
+        } else {
+          showToast("Could not delete file");
+        }
+      } catch (err) {
+        showToast("Error deleting file");
+      }
+    };
+
+    window.deleteText = async function(textId) {
+      try {
+        const res = await fetch(`/api/share/texts/${textId}`, {
+          method: "DELETE",
+          headers: { "X-QM-CSRF": "1" }
+        });
+        if (res.ok) {
+          showToast("Note deleted");
+          fetchShareData();
+        }
+      } catch (err) {
+        showToast("Error deleting note");
+      }
+    };
+
+    // EVENT LISTENERS
+    const dropZone = $("drop-zone");
+    const fileInput = $("file-input");
+    const folderInput = $("folder-input");
+
+    $("btn-choose-files").addEventListener("click", (e) => {
+      e.stopPropagation();
+      fileInput.click();
+    });
+
+    // ==========================================
+    // MULTI-FOLDER STAGING ENGINE & FILE EXTRACTOR
+    // ==========================================
+    let multiFolderStaging = {
+      active: false,
+      mode: "upload", // "upload" or "direct"
+      targetPeerId: null,
+      targetPeerName: "",
+      targetPeerIp: "",
+      folders: [] // array of { name: string, files: File[] }
+    };
+
+    function startMultiFolderStaging(mode, targetPeerId = null, targetPeerName = "", targetPeerIp = "") {
+      multiFolderStaging.active = true;
+      multiFolderStaging.mode = mode;
+      multiFolderStaging.targetPeerId = targetPeerId;
+      multiFolderStaging.targetPeerName = targetPeerName;
+      multiFolderStaging.targetPeerIp = targetPeerIp || targetPeerForUploadIp || "";
+      multiFolderStaging.folders = [];
+      requestScreenWakeLock();
+      if (mode === "direct") {
+        $("live-peer-folder-input").click();
+      } else {
+        $("folder-input").click();
+      }
+    }
+
+    function addFilesToMultiFolderStaging(filesList) {
+      if (!filesList || filesList.length === 0) return;
+      const files = Array.from(filesList);
+
+      const groups = new Map();
+      for (const file of files) {
+        let fName = "Folder";
+        if (file.webkitRelativePath && file.webkitRelativePath.includes("/")) {
+          fName = file.webkitRelativePath.split("/")[0];
+        } else {
+          fName = file.name;
+        }
+        if (!groups.has(fName)) groups.set(fName, []);
+        groups.get(fName).push(file);
+      }
+
+      for (const [name, gFiles] of groups.entries()) {
+        for (const f of gFiles) {
+          f._folderName = name;
+        }
+        multiFolderStaging.folders.push({
+          name: name,
+          files: gFiles
+        });
+      }
+
+      renderMultiFolderModal();
+    }
+
+    function renderMultiFolderModal() {
+      const modal = $("multi-folder-modal");
+      const listEl = $("mf-folder-list");
+      const titleEl = $("mf-modal-title");
+      const hintEl = $("mf-modal-hint");
+      const badgeEl = $("mf-modal-target-badge");
+      const countEl = $("mf-total-count");
+      const sizeEl = $("mf-total-size");
+      const confirmBtn = $("mf-btn-confirm");
+
+      if (!modal || !listEl) return;
+
+      if (multiFolderStaging.folders.length === 0) {
+        modal.classList.add("hidden");
+        multiFolderStaging.active = false;
+        return;
+      }
+
+      if (multiFolderStaging.mode === "direct") {
+        titleEl.textContent = "Send Folders Directly";
+        hintEl.textContent = `Bundle and send to "${multiFolderStaging.targetPeerName || "device"}" without storing on router:`;
+        badgeEl.textContent = `To: ${multiFolderStaging.targetPeerName || "Device"}`;
+        badgeEl.style.display = "inline-block";
+        confirmBtn.textContent = `Send Direct ⚡`;
+      } else {
+        titleEl.textContent = "Upload Folders Bundle";
+        hintEl.textContent = "Bundle multiple folders and upload them to Local Share together:";
+        badgeEl.style.display = "none";
+        confirmBtn.textContent = `Upload All 🚀`;
+      }
+
+      let totalFiles = 0;
+      let totalBytes = 0;
+
+      listEl.innerHTML = multiFolderStaging.folders.map((f, idx) => {
+        const fSize = f.files.reduce((acc, curr) => acc + curr.size, 0);
+        totalFiles += f.files.length;
+        totalBytes += fSize;
+        return `
+          <div class="mf-folder-item">
+            <div class="mf-folder-info">
+              <span style="font-size: 1.15rem;">📁</span>
+              <div style="overflow: hidden; text-overflow: ellipsis;">
+                <div style="font-weight: 600; color: #f8fafc; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(f.name)}</div>
+                <div style="font-size: 0.72rem; color: #94a3b8;">${f.files.length} files • ${formatBytes(fSize)}</div>
+              </div>
+            </div>
+            <button type="button" class="mf-del-btn" data-del-idx="${idx}" title="Remove folder">✕</button>
+          </div>
+        `;
+      }).join("");
+
+      countEl.textContent = `${multiFolderStaging.folders.length} folder(s), ${totalFiles} file(s)`;
+      sizeEl.textContent = formatBytes(totalBytes);
+      modal.classList.remove("hidden");
+    }
+
+    $("mf-btn-add-more").addEventListener("click", () => {
+      if (multiFolderStaging.mode === "direct") {
+        $("live-peer-folder-input").click();
+      } else {
+        $("folder-input").click();
+      }
+    });
+
+    $("mf-folder-list").addEventListener("click", (e) => {
+      const delBtn = e.target.closest(".mf-del-btn");
+      if (delBtn) {
+        const idx = parseInt(delBtn.dataset.delIdx, 10);
+        if (!isNaN(idx)) {
+          multiFolderStaging.folders.splice(idx, 1);
+          renderMultiFolderModal();
+        }
+      }
+    });
+
+    $("mf-btn-confirm").addEventListener("click", () => {
+      if (multiFolderStaging.folders.length === 0) return;
+      const allFiles = multiFolderStaging.folders.flatMap(f => f.files);
+      const isDirect = multiFolderStaging.mode === "direct";
+      const targetId = multiFolderStaging.targetPeerId;
+      const targetIp = multiFolderStaging.targetPeerIp;
+
+      $("multi-folder-modal").classList.add("hidden");
+      multiFolderStaging.active = false;
+      multiFolderStaging.folders = [];
+
+      if (isDirect && targetId) {
+        const totalBytes = allFiles.reduce((acc, f) => acc + f.size, 0);
+        if (totalBytes > 50 * 1024 * 1024) {
+          showToast("حجم المجلدات يتجاوز 50 ميجا! يرجى استخدام الرفع العادي للملفات الكبيرة. / Direct Transfer limit is 50 MB.");
+          return;
+        }
+        initiateSendDirect(targetId, allFiles, targetIp);
+      } else {
+        uploadFolder(allFiles);
+      }
+    });
+
+    $("mf-btn-cancel").addEventListener("click", () => {
+      $("multi-folder-modal").classList.add("hidden");
+      multiFolderStaging.active = false;
+      multiFolderStaging.folders = [];
+    });
+
+    async function readEntriesAll(reader) {
+      let all = [];
+      while (true) {
+        const batch = await new Promise(res => reader.readEntries(res, () => res([])));
+        if (!batch || batch.length === 0) break;
+        all = all.concat(batch);
+      }
+      return all;
+    }
+
+    async function extractFilesFromDataTransfer(dataTransfer) {
+      const items = dataTransfer.items;
+      const files = [];
+      let hasDirectory = false;
+      const folderSet = new Set();
+
+      async function readDir(dirEntry, path = "") {
+        const reader = dirEntry.createReader();
+        const entries = await readEntriesAll(reader);
+        for (const ent of entries) {
+          if (ent.isFile) {
+            const file = await new Promise(res => ent.file(res));
+            Object.defineProperty(file, "webkitRelativePath", {
+              value: `${path}${dirEntry.name}/${file.name}`
+            });
+            files.push(file);
+          } else if (ent.isDirectory) {
+            await readDir(ent, `${path}${dirEntry.name}/`);
+          }
+        }
+      }
+
+      if (items && items.length > 0 && items[0].webkitGetAsEntry) {
+        for (let i = 0; i < items.length; i++) {
+          const entry = items[i].webkitGetAsEntry ? items[i].webkitGetAsEntry() : null;
+          if (entry) {
+            if (entry.isDirectory) {
+              hasDirectory = true;
+              folderSet.add(entry.name);
+              await readDir(entry, "");
+            } else if (entry.isFile) {
+              const file = await new Promise(res => entry.file(res));
+              files.push(file);
+            }
+          }
+        }
+      } else if (dataTransfer.files && dataTransfer.files.length > 0) {
+        files.push(...Array.from(dataTransfer.files));
+      }
+      return { files, hasDirectory, folderCount: folderSet.size };
+    }
+
+    $("btn-choose-folder").addEventListener("click", (e) => {
+      e.stopPropagation();
+      startMultiFolderStaging("upload");
+    });
+
+    dropZone.addEventListener("click", (e) => {
+      if (e.target.closest("#upload-progress-card") || e.target.closest(".btn-upload-choice")) return;
+      fileInput.click();
+    });
+
+    fileInput.addEventListener("change", (e) => {
+      if (e.target.files && e.target.files.length > 0) {
+        uploadFiles(Array.from(e.target.files));
+        fileInput.value = "";
+      }
+    });
+
+    folderInput.addEventListener("change", (e) => {
+      if (e.target.files && e.target.files.length > 0) {
+        if (multiFolderStaging.active) {
+          addFilesToMultiFolderStaging(e.target.files);
+        } else {
+          uploadFolder(Array.from(e.target.files));
+        }
+        folderInput.value = "";
+      }
+    });
+
+    dropZone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      dropZone.classList.add("dragover");
+    });
+
+    dropZone.addEventListener("dragleave", (e) => {
+      e.preventDefault();
+      dropZone.classList.remove("dragover");
+    });
+
+    dropZone.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      dropZone.classList.remove("dragover");
+
+      const { files, hasDirectory, folderCount } = await extractFilesFromDataTransfer(e.dataTransfer);
+      if (files.length === 0) return;
+
+      if (hasDirectory) {
+        if (folderCount > 1) {
+          multiFolderStaging.active = true;
+          multiFolderStaging.mode = "upload";
+          multiFolderStaging.folders = [];
+          addFilesToMultiFolderStaging(files);
+        } else {
+          uploadFolder(files);
+        }
+      } else {
+        uploadFiles(files);
+      }
+    });
+
+    $("text-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const input = $("text-input");
+      const val = input.value.trim();
+      if (!val) return;
+      try {
+        const res = await fetch("/api/share/text", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-QM-CSRF": "1" },
+          body: JSON.stringify({ text: val })
+        });
+        if (res.ok) {
+          input.value = "";
+          showToast("Shared to all devices!");
+          fetchShareData();
+        } else {
+          showToast("Failed to share text");
+        }
+      } catch (err) {
+        showToast("Network error");
+      }
+    });
+
+    // QR MODAL
+    $("qr-btn").addEventListener("click", () => {
+      const shareUrl = window.location.origin + "/share";
+      $("modal-url-display").textContent = shareUrl;
+      const target = $("qr-code-target");
+      target.innerHTML = "";
+      if (typeof QRCode !== "undefined") {
+        new QRCode(target, {
+          text: shareUrl,
+          width: 176,
+          height: 176,
+          colorDark: "#0f172a",
+          colorLight: "#ffffff",
+          correctLevel: QRCode.CorrectLevel.M
+        });
+      }
+      $("qr-modal").classList.remove("hidden");
+    });
+
+    $("qr-modal-close").addEventListener("click", () => {
+      $("qr-modal").classList.add("hidden");
+    });
+
+    // ==========================================
+    // LIVE DIRECT STREAM ENGINE (ZERO DISK RELAY)
+    // ==========================================
+    let liveWs = null;
+    let liveSelfId = null;
+    let livePeers = [];
+    let activeTransfer = null;
+    let targetPeerForUpload = null;
+    let targetPeerForUploadIp = "";
+    let pendingIncomingRequest = null;
+    let acceptTimeoutTimer = null;
+    let liveWsPingInterval = null;
+    let liveWakeLock = null;
+    let activeDownloadUrl = null;
+    let activeDownloadName = "";
+    const myDeviceName = localStorage.getItem("qm_live_dev_name") || "";
+
+    async function requestScreenWakeLock() {
+      if ("wakeLock" in navigator) {
+        try {
+          if (!liveWakeLock) {
+            liveWakeLock = await navigator.wakeLock.request("screen");
+            liveWakeLock.addEventListener("release", () => {
+              liveWakeLock = null;
+            });
+          }
+        } catch (e) {
+          // May fail if tab invisible or power saver enforced
+        }
+      }
+    }
+
+    function releaseScreenWakeLock() {
+      if (liveWakeLock) {
+        try {
+          liveWakeLock.release();
+        } catch (e) {}
+        liveWakeLock = null;
+      }
+    }
+
+    document.addEventListener("visibilitychange", async () => {
+      if (document.visibilityState === "visible") {
+        if (activeTransfer) {
+          await requestScreenWakeLock();
+        }
+        if (!liveWs || liveWs.readyState === WebSocket.CLOSED || liveWs.readyState === WebSocket.CLOSING) {
+          initLiveShare();
+        }
+      }
+    });
+
+    window.addEventListener("focus", () => {
+      if (activeTransfer) {
+        requestScreenWakeLock();
+      }
+      if (!liveWs || liveWs.readyState === WebSocket.CLOSED || liveWs.readyState === WebSocket.CLOSING) {
+        initLiveShare();
+      }
+    });
+
+    document.addEventListener("click", () => {
+      requestScreenWakeLock();
+    }, { once: true });
+
+    function clearTransferAcceptTimeout() {
+      if (acceptTimeoutTimer) {
+        clearTimeout(acceptTimeoutTimer);
+        acceptTimeoutTimer = null;
+      }
+    }
+
+    function startTransferAcceptTimeout(transferId) {
+      clearTransferAcceptTimeout();
+      acceptTimeoutTimer = setTimeout(() => {
+        if (activeTransfer && activeTransfer.id === transferId && activeTransfer.role === "sender") {
+          finishLiveTransfer("Transfer timed out: Receiver did not respond in time.");
+          if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+            liveWs.send(JSON.stringify({
+              type: "transfer-cancel",
+              transfer_id: transferId,
+              target_id: activeTransfer.targetId,
+              target_ip: activeTransfer.targetIp
+            }));
+          }
+        }
+      }, 45000);
+    }
+
+    function initLiveShare() {
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const devParam = myDeviceName ? `?name=${encodeURIComponent(myDeviceName)}` : "";
+      const wsUrl = `${proto}//${window.location.host}/api/share/live/ws${devParam}`;
+
+      try {
+        liveWs = new WebSocket(wsUrl);
+      } catch (e) {
+        console.warn("WebSocket init error:", e);
+        return;
+      }
+
+      liveWs.binaryType = "arraybuffer";
+
+      liveWs.onopen = () => {
+        if (myDeviceName) {
+          liveWs.send(JSON.stringify({ type: "join", name: myDeviceName }));
+        }
+        if (liveWsPingInterval) clearInterval(liveWsPingInterval);
+        liveWsPingInterval = setInterval(() => {
+          if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+            liveWs.send(JSON.stringify({ type: "ping" }));
+          }
+        }, 3000); // 3s ping keeps mobile connection warm and avoids Wi-Fi sleep
+      };
+
+      liveWs.onmessage = async (event) => {
+        let data = event.data;
+        if (data instanceof Blob) {
+          data = await data.arrayBuffer();
+        }
+        if (data instanceof ArrayBuffer) {
+          handleBinaryChunk(data);
+          return;
+        }
+
+        try {
+          const msg = JSON.parse(data);
+          handleLiveMessage(msg);
+        } catch (e) {
+          // ignore
+        }
+      };
+
+      liveWs.onclose = () => {
+        clearTransferAcceptTimeout();
+        if (activeTransfer && activeTransfer.role === "sender" && !activeTransfer.cancelled) {
+          finishLiveTransfer("Live connection interrupted. Reconnecting...");
+        }
+        setTimeout(initLiveShare, 2000);
+      };
+    }
+
+    // Ultra-fast slicing-by-8 incremental CRC32 calculator (>700 MB/s line rate)
+    const liveCrcTables = [];
+    for (let i = 0; i < 8; i++) liveCrcTables.push(new Uint32Array(256));
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      liveCrcTables[0][i] = c >>> 0;
+    }
+    for (let i = 0; i < 256; i++) {
+      for (let k = 1; k < 8; k++) {
+        liveCrcTables[k][i] = (liveCrcTables[k - 1][i] >>> 8) ^ liveCrcTables[0][liveCrcTables[k - 1][i] & 0xFF];
+      }
+    }
+    const [lcT0, lcT1, lcT2, lcT3, lcT4, lcT5, lcT6, lcT7] = liveCrcTables;
+
+    function updateLiveCrc32(runningCrc, uint8) {
+      let crc = runningCrc >>> 0;
+      let len = uint8.length;
+      let pos = 0;
+      while (len >= 8) {
+        const one = (uint8[pos] ^ (crc & 0xFF));
+        const two = (uint8[pos + 1] ^ ((crc >>> 8) & 0xFF));
+        const three = (uint8[pos + 2] ^ ((crc >>> 16) & 0xFF));
+        const four = (uint8[pos + 3] ^ (crc >>> 24));
+        crc = lcT7[one] ^ lcT6[two] ^ lcT5[three] ^ lcT4[four] ^
+              lcT3[uint8[pos + 4]] ^ lcT2[uint8[pos + 5]] ^ lcT1[uint8[pos + 6]] ^ lcT0[uint8[pos + 7]];
+        pos += 8;
+        len -= 8;
+      }
+      while (len > 0) {
+        crc = (crc >>> 8) ^ lcT0[(crc ^ uint8[pos]) & 0xFF];
+        pos++;
+        len--;
+      }
+      return crc >>> 0;
+    }
+
+    function handleLiveMessage(msg) {
+      if (msg.type === "peers") {
+        liveSelfId = msg.self_id || liveSelfId;
+        const myIp = msg.self_ip || (currentShareData && currentShareData.client_ip) || "";
+        const rawPeers = (msg.peers || []).filter(p => p.id !== liveSelfId && (!myIp || p.ip !== myIp));
+        const seenIps = new Set();
+        livePeers = [];
+        for (const p of rawPeers) {
+          if (!seenIps.has(p.ip)) {
+            seenIps.add(p.ip);
+            livePeers.push(p);
+          }
+        }
+        renderLivePeers();
+      } else if (msg.type === "transfer-request") {
+        pendingIncomingRequest = msg;
+        requestScreenWakeLock();
+        try {
+          if (navigator.vibrate) navigator.vibrate([150, 80, 150]);
+        } catch (e) {}
+        $("incoming-sender-text").textContent = `"${msg.sender_name}" (${msg.sender_ip}) wants to send:`;
+        $("incoming-file-name").textContent = msg.file_name;
+        $("incoming-file-size").textContent = formatBytes(msg.file_size);
+        $("live-incoming-modal").classList.remove("hidden");
+      } else if (msg.type === "transfer-response") {
+        if (activeTransfer && activeTransfer.id === msg.transfer_id && activeTransfer.role === "sender") {
+          clearTransferAcceptTimeout();
+          if (msg.accepted) {
+            startLiveSenderStream();
+          } else {
+            finishLiveTransfer("Transfer declined by receiver");
+          }
+        }
+      } else if (msg.type === "transfer-progress") {
+        if (activeTransfer && activeTransfer.id === msg.transfer_id && activeTransfer.role === "receiver") {
+          activeTransfer.currentBytes = msg.loaded;
+          updateLiveProgressThrottled(msg.loaded, msg.total, activeTransfer.startTime);
+        }
+      } else if (msg.type === "transfer-error") {
+        clearTransferAcceptTimeout();
+        finishLiveTransfer(msg.message || "Target device is offline or unavailable.");
+      } else if (msg.type === "transfer-done") {
+        if (activeTransfer && activeTransfer.id === msg.transfer_id && activeTransfer.role === "receiver") {
+          finishLiveReceiver();
+        }
+      } else if (msg.type === "transfer-cancel") {
+        if (activeTransfer && activeTransfer.id === msg.transfer_id) {
+          clearTransferAcceptTimeout();
+          finishLiveTransfer("Transfer cancelled by other device");
+        }
+      }
+    }
+
+    function renderLivePeers() {
+      const container = $("live-peers-list");
+      const countEl = $("live-peers-count");
+      if (!container) return;
+      if (countEl) countEl.textContent = `${livePeers.length} online`;
+
+      if (livePeers.length === 0) {
+        container.innerHTML = `
+          <div class="live-empty-peers">
+            <div class="radar-pulse"></div>
+            <div style="font-size: 0.84rem; font-weight: 500; color: #cbd5e1; margin-top: 10px;">Waiting for other devices on your Wi-Fi...</div>
+            <div style="font-size: 0.73rem; color: #64748b; margin-top: 2px;">Open Local Share on your other phone or PC to transfer directly over Wi-Fi.</div>
+          </div>
+        `;
+        return;
+      }
+
+      container.innerHTML = livePeers.map(p => {
+        const icon = getDeviceIcon(p.name);
+        return `
+          <div class="peer-card" data-peer-id="${escapeHtml(p.id)}">
+            <div class="peer-avatar">${icon}</div>
+            <div class="peer-name" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</div>
+            <div class="peer-ip">${escapeHtml(p.ip)}</div>
+            <div class="peer-actions-btn-group">
+              <button type="button" class="peer-send-btn peer-send-files" data-peer-id="${escapeHtml(p.id)}" title="Send one or multiple files directly">
+                Files 📁
+              </button>
+              <button type="button" class="peer-send-btn folder peer-send-folder" data-peer-id="${escapeHtml(p.id)}" title="Send one or multiple folders directly">
+                Folders 📂
+              </button>
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function getDeviceIcon(name) {
+      const n = (name || "").toLowerCase();
+      if (n.includes("phone") || n.includes("iphone") || n.includes("android")) return "📱";
+      if (n.includes("pc") || n.includes("windows") || n.includes("laptop") || n.includes("mac") || n.includes("linux")) return "💻";
+      if (n.includes("tv")) return "📺";
+      if (n.includes("pad") || n.includes("tablet")) return "📱";
+      return "💻";
+    }
+
+    // Start sending direct (Instant request + on-the-fly streaming)
+    async function initiateSendDirect(targetPeerId, filesList, fallbackTargetIp = "") {
+      if (!filesList || filesList.length === 0 || !targetPeerId) return;
+      const files = Array.from(filesList);
+
+      requestScreenWakeLock();
+
+      const isSingle = files.length === 1 && (!files[0].webkitRelativePath || !files[0].webkitRelativePath.includes("/"));
+      let sendName = "Shared_Files.zip";
+      let sendType = "application/zip";
+      const totalSize = files.reduce((acc, f) => acc + f.size, 0);
+      const MAX_LIVE_DIRECT_BYTES = 50 * 1024 * 1024; // 50 MB
+      if (totalSize > MAX_LIVE_DIRECT_BYTES) {
+        showToast("حجم الملفات يتجاوز 50 ميجا! يرجى استخدام الرفع العادي للملفات الكبيرة. / Direct Transfer limit is 50 MB. Use standard upload for larger files.");
+        return;
+      }
+
+      if (isSingle) {
+        sendName = files[0].name;
+        sendType = files[0].type || "application/octet-stream";
+      } else {
+        if (files.some(f => (f.webkitRelativePath && f.webkitRelativePath.includes("/")) || f._folderName)) {
+          const folderSet = new Set();
+          for (const f of files) {
+            if (f.webkitRelativePath && f.webkitRelativePath.includes("/")) {
+              folderSet.add(f.webkitRelativePath.split("/")[0]);
+            } else if (f._folderName) {
+              folderSet.add(f._folderName);
+            }
+          }
+          const folderNames = Array.from(folderSet);
+          if (folderNames.length === 1) sendName = `${folderNames[0]}.zip`;
+          else if (folderNames.length === 2) sendName = `${folderNames[0]}_and_${folderNames[1]}.zip`;
+          else if (folderNames.length > 2) sendName = `${folderNames[0]}_${folderNames[1]}_and_${folderNames.length - 2}_more.zip`;
+          else sendName = "Folders.zip";
+        } else {
+          const now = new Date();
+          const dStr = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}`;
+          sendName = `Files_${dStr}.zip`;
+        }
+      }
+
+      let peer = livePeers.find(p => p.id === targetPeerId);
+      const targetIp = peer ? peer.ip : (fallbackTargetIp || targetPeerForUploadIp || "");
+      if (!peer && targetIp) {
+        peer = livePeers.find(p => p.ip === targetIp);
+      }
+      const finalTargetId = peer ? peer.id : targetPeerId;
+
+      const transferId = "t_" + Math.random().toString(36).slice(2, 10);
+      const tidBytes = new Uint8Array(16).fill(32);
+      tidBytes.set(new TextEncoder().encode(transferId).subarray(0, 16));
+
+      activeTransfer = {
+        id: transferId,
+        idBytes: tidBytes,
+        role: "sender",
+        targetId: finalTargetId,
+        targetIp: targetIp,
+        files: files,
+        name: sendName,
+        size: totalSize,
+        type: sendType,
+        isBundle: !isSingle,
+        currentBytes: 0,
+        startTime: Date.now(),
+        cancelled: false,
+      };
+
+      setLiveModalState("Waiting for receiver to accept...", sendName, totalSize);
+      $("live-transfer-modal").classList.remove("hidden");
+
+      startTransferAcceptTimeout(transferId);
+
+      // If WS is not open, connect and wait up to 3 seconds
+      if (!liveWs || liveWs.readyState !== WebSocket.OPEN) {
+        initLiveShare();
+        for (let i = 0; i < 30; i++) {
+          if (liveWs && liveWs.readyState === WebSocket.OPEN) break;
+          await new Promise(r => setTimeout(r, 100));
+        }
+      }
+
+      if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+        liveWs.send(JSON.stringify({
+          type: "transfer-request",
+          target_id: finalTargetId,
+          target_ip: targetIp,
+          transfer_id: transferId,
+          file_name: sendName,
+          file_size: totalSize,
+          file_type: sendType
+        }));
+      } else {
+        clearTransferAcceptTimeout();
+        finishLiveTransfer("Live connection not ready. Reconnecting...");
+      }
+    }
+
+    let lastLiveProgressTime = 0;
+    function updateLiveProgressThrottled(loaded, total, startTime, force = false) {
+      const now = Date.now();
+      if (!force && now - lastLiveProgressTime < 100) return;
+      lastLiveProgressTime = now;
+      updateLiveProgress(loaded, total, startTime);
+    }
+
+    async function startLiveSenderStream() {
+      if (!activeTransfer || !activeTransfer.files || activeTransfer.files.length === 0) return;
+      const transferId = activeTransfer.id;
+      const CHUNK_SIZE = 512 * 1024; // 512 KB high-throughput chunks
+      const headerBuf = activeTransfer.idBytes || (new Uint8Array(16).fill(32));
+      if (!activeTransfer.idBytes) {
+        headerBuf.set(new TextEncoder().encode(transferId).subarray(0, 16));
+      }
+
+      setLiveModalState("Transferring directly over Wi-Fi...", activeTransfer.name, activeTransfer.size);
+
+      async function sendLiveChunk(buf) {
+        if (!activeTransfer || activeTransfer.id !== transferId || activeTransfer.cancelled) return false;
+        // High-watermark 4 MB, Low-watermark 1 MB hysteresis avoids unnecessary timer sleep thrashing
+        if (liveWs && liveWs.bufferedAmount > 4 * 1024 * 1024) {
+          while (liveWs && liveWs.bufferedAmount > 1024 * 1024) {
+            await new Promise(r => setTimeout(r, 4));
+          }
+        }
+        if (!liveWs || liveWs.readyState !== WebSocket.OPEN) return false;
+        const packet = new Uint8Array(16 + buf.byteLength);
+        packet.set(headerBuf, 0);
+        packet.set(new Uint8Array(buf), 16);
+        liveWs.send(packet.buffer);
+        return true;
+      }
+
+      if (!activeTransfer.isBundle) {
+        const file = activeTransfer.files[0];
+        let offset = 0;
+        while (offset < file.size) {
+          if (!activeTransfer || activeTransfer.id !== transferId || activeTransfer.cancelled) break;
+          const slice = file.slice(offset, offset + CHUNK_SIZE);
+          const buf = await slice.arrayBuffer();
+          if (!await sendLiveChunk(buf)) break;
+          offset += buf.byteLength;
+          activeTransfer.currentBytes = offset;
+          updateLiveProgressThrottled(offset, file.size, activeTransfer.startTime);
+        }
+      } else {
+        // High-performance zero-RAM streaming ZIP bundle
+        let localOffset = 0;
+        const entries = [];
+        let totalSentBytes = 0;
+
+        for (const file of activeTransfer.files) {
+          if (!activeTransfer || activeTransfer.id !== transferId || activeTransfer.cancelled) break;
+          const rawPath = file.webkitRelativePath || (file._folderName ? `${file._folderName}/${file.name}` : file.name);
+          const relPath = rawPath.replace(/\\/g, "/").replace(/^\/+/, "");
+          const nameBytes = new TextEncoder().encode(relPath);
+
+          // 1. Local Header (flag 0x0808: UTF-8 + Data Descriptor)
+          const lHdr = new Uint8Array(30 + nameBytes.length);
+          const lDv = new DataView(lHdr.buffer);
+          lDv.setUint32(0, 0x04034b50, true);
+          lDv.setUint16(4, 20, true);
+          lDv.setUint16(6, 0x0808, true); // STORE + streaming data descriptor
+          lDv.setUint16(8, 0, true);
+          lDv.setUint16(10, 0, true);
+          lDv.setUint16(12, 0, true);
+          lDv.setUint32(14, 0, true);
+          lDv.setUint32(18, 0, true);
+          lDv.setUint32(22, 0, true);
+          lDv.setUint16(26, nameBytes.length, true);
+          lDv.setUint16(28, 0, true);
+          lHdr.set(nameBytes, 30);
+
+          const entryOffset = localOffset;
+          if (!await sendLiveChunk(lHdr.buffer)) break;
+          localOffset += lHdr.byteLength;
+
+          // 2. Stream file data with slicing-by-8 CRC32 (>700 MB/s)
+          let fOffset = 0;
+          let fCrcState = 0xFFFFFFFF;
+          while (fOffset < file.size) {
+            if (!activeTransfer || activeTransfer.id !== transferId || activeTransfer.cancelled) break;
+            const slice = file.slice(fOffset, fOffset + CHUNK_SIZE);
+            const sBuf = await slice.arrayBuffer();
+            fCrcState = updateLiveCrc32(fCrcState, new Uint8Array(sBuf));
+            if (!await sendLiveChunk(sBuf)) break;
+            fOffset += sBuf.byteLength;
+            localOffset += sBuf.byteLength;
+            totalSentBytes += sBuf.byteLength;
+            updateLiveProgressThrottled(totalSentBytes, activeTransfer.size, activeTransfer.startTime);
+          }
+          const fCrc = (fCrcState ^ 0xFFFFFFFF) >>> 0;
+
+          // 3. Data Descriptor
+          const desc = new Uint8Array(16);
+          const dDv = new DataView(desc.buffer);
+          dDv.setUint32(0, 0x08074b50, true);
+          dDv.setUint32(4, fCrc, true);
+          dDv.setUint32(8, file.size, true);
+          dDv.setUint32(12, file.size, true);
+          if (!await sendLiveChunk(desc.buffer)) break;
+          localOffset += desc.byteLength;
+
+          entries.push({ nameBytes, crc: fCrc, size: file.size, offset: entryOffset });
+        }
+
+        if (activeTransfer && activeTransfer.id === transferId && !activeTransfer.cancelled) {
+          // 4. Central Directory
+          const cdOffset = localOffset;
+          let cdSize = 0;
+          for (const ent of entries) {
+            const cd = new Uint8Array(46 + ent.nameBytes.length);
+            const cdDv = new DataView(cd.buffer);
+            cdDv.setUint32(0, 0x02014b50, true);
+            cdDv.setUint16(4, 20, true);
+            cdDv.setUint16(6, 20, true);
+            cdDv.setUint16(8, 0x0808, true);
+            cdDv.setUint16(10, 0, true);
+            cdDv.setUint16(12, 0, true);
+            cdDv.setUint16(14, 0, true);
+            cdDv.setUint32(16, ent.crc, true);
+            cdDv.setUint32(20, ent.size, true);
+            cdDv.setUint32(24, ent.size, true);
+            cdDv.setUint16(28, ent.nameBytes.length, true);
+            cdDv.setUint16(30, 0, true);
+            cdDv.setUint16(32, 0, true);
+            cdDv.setUint16(34, 0, true);
+            cdDv.setUint16(36, 0, true);
+            cdDv.setUint32(38, 0, true);
+            cdDv.setUint32(42, ent.offset, true);
+            cd.set(ent.nameBytes, 46);
+
+            if (!await sendLiveChunk(cd.buffer)) break;
+            localOffset += cd.byteLength;
+            cdSize += cd.byteLength;
+          }
+
+          // 5. End of Central Directory
+          const eocd = new Uint8Array(22);
+          const eocdDv = new DataView(eocd.buffer);
+          eocdDv.setUint32(0, 0x06054b50, true);
+          eocdDv.setUint16(4, 0, true);
+          eocdDv.setUint16(6, 0, true);
+          eocdDv.setUint16(8, entries.length, true);
+          eocdDv.setUint16(10, entries.length, true);
+          eocdDv.setUint32(12, cdSize, true);
+          eocdDv.setUint32(16, cdOffset, true);
+          eocdDv.setUint16(20, 0, true);
+          await sendLiveChunk(eocd.buffer);
+        }
+      }
+
+      if (activeTransfer && activeTransfer.id === transferId && !activeTransfer.cancelled) {
+        if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+          liveWs.send(JSON.stringify({
+            type: "transfer-done",
+            transfer_id: transferId,
+            target_id: activeTransfer.targetId,
+            target_ip: activeTransfer.targetIp
+          }));
+        }
+        updateLiveProgressThrottled(activeTransfer.size, activeTransfer.size, activeTransfer.startTime, true);
+        $("live-modal-title").textContent = "Transfer Complete! 🎉";
+        $("live-modal-bar").style.background = "#10b981";
+        await new Promise(r => setTimeout(r, 600));
+        finishLiveTransfer(`File "${activeTransfer.name}" sent directly!`);
+      }
+    }
+
+    function handleBinaryChunk(buf) {
+      if (buf.byteLength < 16) return;
+      if (!activeTransfer || activeTransfer.role !== "receiver") return;
+      if (activeTransfer.useHttpStream) return; // Zero JS RAM: streamed via HTTP directly to storage!
+
+      if (activeTransfer.idBytes) {
+        const u8 = new Uint8Array(buf, 0, 16);
+        let match = true;
+        for (let i = 0; i < 16; i++) {
+          if (u8[i] !== activeTransfer.idBytes[i]) {
+            match = false;
+            break;
+          }
+        }
+        if (!match) return;
+      }
+
+      // Zero-copy view into payload memory (eliminates ArrayBuffer duplication)
+      const chunkView = new Uint8Array(buf, 16);
+      activeTransfer.chunks.push(chunkView);
+      activeTransfer.currentBytes += chunkView.byteLength;
+      updateLiveProgressThrottled(activeTransfer.currentBytes, activeTransfer.size, activeTransfer.startTime);
+    }
+
+    function finishLiveReceiver() {
+      if (!activeTransfer || activeTransfer.role !== "receiver") return;
+      if (activeTransfer.useHttpStream) {
+        updateLiveProgressThrottled(activeTransfer.size, activeTransfer.size, activeTransfer.startTime, true);
+        try { if (navigator.vibrate) navigator.vibrate([200, 100, 200]); } catch (e) {}
+        $("live-modal-title").textContent = "Transfer Complete! 🎉";
+        const warnEl = $("live-modal-screen-warning");
+        if (warnEl) warnEl.style.display = "none";
+        $("live-modal-bar").style.width = "100%";
+        $("live-modal-bar").style.background = "#10b981";
+        $("live-modal-stats").textContent = `100% (${formatBytes(activeTransfer.size)})`;
+        $("live-modal-speed").textContent = "Saved to Downloads ⚡";
+        const cancelBtn = $("btn-cancel-transfer");
+        const saveBtn = $("btn-live-save-download");
+        const doneBtn = $("btn-live-close-done");
+        if (cancelBtn) cancelBtn.classList.add("hidden");
+        if (saveBtn) saveBtn.classList.add("hidden");
+        if (doneBtn) doneBtn.classList.remove("hidden");
+        showToast(`File "${activeTransfer.name}" saved directly to your Downloads!`);
+        return;
+      }
+      if (!activeTransfer.chunks || activeTransfer.chunks.length === 0) {
+        finishLiveTransfer("Transfer finished but received 0 bytes.");
+        return;
+      }
+      updateLiveProgressThrottled(activeTransfer.currentBytes, activeTransfer.size, activeTransfer.startTime, true);
+      const mimeType = activeTransfer.type || "application/octet-stream";
+      const blob = new Blob(activeTransfer.chunks, { type: mimeType });
+      if (blob.size === 0) {
+        finishLiveTransfer("Received empty file (0 bytes).");
+        return;
+      }
+
+      try {
+        if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+      } catch (e) {}
+
+      const fileName = activeTransfer.name || "downloaded_file";
+      const downloadUrl = URL.createObjectURL(blob);
+
+      // Attempt automatic download
+      try {
+        const a = document.createElement("a");
+        a.href = downloadUrl;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      } catch (err) {
+        console.warn("Auto click download error:", err);
+      }
+
+      requestScreenWakeLock();
+      clearTransferAcceptTimeout();
+
+      $("live-modal-title").textContent = "Transfer Complete! 🎉";
+      const warnEl = $("live-modal-screen-warning");
+      if (warnEl) warnEl.style.display = "none";
+      $("live-modal-bar").style.width = "100%";
+      $("live-modal-bar").style.background = "#10b981";
+      $("live-modal-stats").textContent = `100% (${formatBytes(blob.size)})`;
+      $("live-modal-speed").textContent = "Done ⚡";
+
+      activeDownloadUrl = downloadUrl;
+      activeDownloadName = fileName;
+
+      const cancelBtn = $("btn-cancel-transfer");
+      const saveBtn = $("btn-live-save-download");
+      const doneBtn = $("btn-live-close-done");
+
+      if (cancelBtn) cancelBtn.classList.add("hidden");
+      if (saveBtn) {
+        saveBtn.classList.remove("hidden");
+        saveBtn.textContent = `💾 Save / Download (${formatBytes(blob.size)})`;
+      }
+      if (doneBtn) {
+        doneBtn.classList.remove("hidden");
+      }
+
+      showToast(`Received "${fileName}" (${formatBytes(blob.size)})!`);
+    }
+
+    function setLiveModalState(title, filename, size, isReceiver = false) {
+      $("live-modal-title").textContent = title;
+      $("live-modal-filename").textContent = filename;
+      $("live-modal-bar").style.width = "0%";
+      $("live-modal-bar").style.background = "linear-gradient(90deg, #0284c7, #38bdf8)";
+      $("live-modal-stats").textContent = `0% (0 B / ${formatBytes(size)})`;
+      $("live-modal-speed").textContent = "0 B/s";
+      const warnEl = $("live-modal-screen-warning");
+      if (warnEl) {
+        warnEl.style.display = "flex";
+        if (isReceiver) {
+          warnEl.innerHTML = `<span>💡</span><div><b>تنبيه للمستلم:</b> إذا ظهر شريط <b>Save...</b> أو <b>تنزيل</b> أسفل شاشة المتصفح، اضغط عليه فوراً لمتابعة الحفظ. مع إبقاء الشاشة مفتوحة.</div>`;
+        } else {
+          warnEl.innerHTML = `<span>💡</span><span>Keep screen on & browser open during transfer (يرجى إبقاء الشاشة مفتوحة وعدم إغلاق المتصفح)</span>`;
+        }
+      }
+      const cancelBtn = $("btn-cancel-transfer");
+      const saveBtn = $("btn-live-save-download");
+      const doneBtn = $("btn-live-close-done");
+      if (cancelBtn) cancelBtn.classList.remove("hidden");
+      if (saveBtn) saveBtn.classList.add("hidden");
+      if (doneBtn) doneBtn.classList.add("hidden");
+    }
+
+    function updateLiveProgress(loaded, total, startTime) {
+      const pct = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+      $("live-modal-bar").style.width = `${pct}%`;
+      const elapsedSec = (Date.now() - startTime) / 1000;
+      const speed = elapsedSec > 0.1 ? loaded / elapsedSec : 0;
+      $("live-modal-stats").textContent = `${pct}% (${formatBytes(loaded)} / ${formatBytes(total)})`;
+      $("live-modal-speed").textContent = `${formatBytes(speed)}/s`;
+    }
+
+    function finishLiveTransfer(msg) {
+      clearTransferAcceptTimeout();
+      releaseScreenWakeLock();
+      $("live-transfer-modal").classList.add("hidden");
+      $("live-incoming-modal").classList.add("hidden");
+      const cancelBtn = $("btn-cancel-transfer");
+      const saveBtn = $("btn-live-save-download");
+      const doneBtn = $("btn-live-close-done");
+      if (cancelBtn) cancelBtn.classList.remove("hidden");
+      if (saveBtn) saveBtn.classList.add("hidden");
+      if (doneBtn) doneBtn.classList.add("hidden");
+      if (activeDownloadUrl) {
+        try { URL.revokeObjectURL(activeDownloadUrl); } catch (e) {}
+        activeDownloadUrl = null;
+        activeDownloadName = "";
+      }
+      activeTransfer = null;
+      pendingIncomingRequest = null;
+      if (msg) showToast(msg);
+    }
+
+    $("live-peers-list").addEventListener("click", (e) => {
+      const filesBtn = e.target.closest(".peer-send-files");
+      if (filesBtn) {
+        targetPeerForUpload = filesBtn.dataset.peerId;
+        const card = filesBtn.closest(".peer-card");
+        targetPeerForUploadIp = card && card.querySelector(".peer-ip") ? card.querySelector(".peer-ip").textContent.trim() : "";
+        multiFolderStaging.active = false;
+        $("live-peer-file-input").click();
+        return;
+      }
+      const folderBtn = e.target.closest(".peer-send-folder");
+      if (folderBtn) {
+        targetPeerForUpload = folderBtn.dataset.peerId;
+        const card = folderBtn.closest(".peer-card");
+        const peerName = card && card.querySelector(".peer-name") ? card.querySelector(".peer-name").textContent : "";
+        targetPeerForUploadIp = card && card.querySelector(".peer-ip") ? card.querySelector(".peer-ip").textContent.trim() : "";
+        startMultiFolderStaging("direct", targetPeerForUpload, peerName, targetPeerForUploadIp);
+        return;
+      }
+      const card = e.target.closest(".peer-card");
+      if (card) {
+        targetPeerForUpload = card.dataset.peerId;
+        targetPeerForUploadIp = card.querySelector(".peer-ip") ? card.querySelector(".peer-ip").textContent.trim() : "";
+        multiFolderStaging.active = false;
+        $("live-peer-file-input").click();
+      }
+    });
+
+    $("live-peer-file-input").addEventListener("change", (e) => {
+      if (e.target.files && e.target.files.length > 0 && targetPeerForUpload) {
+        initiateSendDirect(targetPeerForUpload, e.target.files, targetPeerForUploadIp);
+        e.target.value = "";
+      }
+    });
+
+    $("live-peer-folder-input").addEventListener("change", (e) => {
+      if (e.target.files && e.target.files.length > 0) {
+        if (multiFolderStaging.active) {
+          addFilesToMultiFolderStaging(e.target.files);
+        } else if (targetPeerForUpload) {
+          initiateSendDirect(targetPeerForUpload, e.target.files, targetPeerForUploadIp);
+        }
+        e.target.value = "";
+      }
+    });
+
+    // Drag and drop onto peer cards
+    const peersContainer = $("live-peers-list");
+    peersContainer.addEventListener("dragover", (e) => {
+      const card = e.target.closest(".peer-card");
+      if (card) {
+        e.preventDefault();
+        card.classList.add("dragover");
+      }
+    });
+    peersContainer.addEventListener("dragleave", (e) => {
+      const card = e.target.closest(".peer-card");
+      if (card) {
+        card.classList.remove("dragover");
+      }
+    });
+    peersContainer.addEventListener("drop", async (e) => {
+      const card = e.target.closest(".peer-card");
+      if (!card) return;
+      e.preventDefault();
+      card.classList.remove("dragover");
+      const peerId = card.dataset.peerId;
+      if (!peerId) return;
+      const peerName = card.querySelector(".peer-name") ? card.querySelector(".peer-name").textContent : "";
+      const peerIp = card.querySelector(".peer-ip") ? card.querySelector(".peer-ip").textContent.trim() : "";
+
+      const { files, hasDirectory, folderCount } = await extractFilesFromDataTransfer(e.dataTransfer);
+      if (files.length === 0) return;
+
+      if (hasDirectory && folderCount > 1) {
+        multiFolderStaging.active = true;
+        multiFolderStaging.mode = "direct";
+        multiFolderStaging.targetPeerId = peerId;
+        multiFolderStaging.targetPeerName = peerName;
+        multiFolderStaging.targetPeerIp = peerIp;
+        multiFolderStaging.folders = [];
+        addFilesToMultiFolderStaging(files);
+      } else {
+        initiateSendDirect(peerId, files, peerIp);
+      }
+    });
+
+    $("btn-accept-transfer").addEventListener("click", () => {
+      if (!pendingIncomingRequest) return;
+      const req = pendingIncomingRequest;
+      $("live-incoming-modal").classList.add("hidden");
+      requestScreenWakeLock();
+
+      const tidBytes = new Uint8Array(16).fill(32);
+      tidBytes.set(new TextEncoder().encode(req.transfer_id).subarray(0, 16));
+
+      const downloadUrl = `/api/share/live/download/${encodeURIComponent(req.transfer_id)}`;
+      activeDownloadUrl = downloadUrl;
+      activeDownloadName = req.file_name;
+
+      activeTransfer = {
+        id: req.transfer_id,
+        idBytes: tidBytes,
+        role: "receiver",
+        targetId: req.sender_id,
+        targetIp: req.sender_ip,
+        name: req.file_name,
+        size: req.file_size,
+        type: req.file_type,
+        currentBytes: 0,
+        chunks: [],
+        startTime: Date.now(),
+        cancelled: false,
+        useHttpStream: true,
+      };
+
+      setLiveModalState(`Receiving from "${req.sender_name}"...`, req.file_name, req.file_size, true);
+      $("live-transfer-modal").classList.remove("hidden");
+
+      // Trigger native browser streaming download directly to storage (0 JS heap RAM!)
+      try {
+        const a = document.createElement("a");
+        a.href = downloadUrl;
+        a.download = req.file_name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      } catch (err) {
+        console.warn("Direct stream download trigger error:", err);
+      }
+
+      liveWs.send(JSON.stringify({
+        type: "transfer-response",
+        transfer_id: req.transfer_id,
+        target_id: req.sender_id,
+        target_ip: req.sender_ip,
+        accepted: true,
+        http_stream: true
+      }));
+    });
+
+    $("btn-decline-transfer").addEventListener("click", () => {
+      if (!pendingIncomingRequest) return;
+      const req = pendingIncomingRequest;
+      $("live-incoming-modal").classList.add("hidden");
+      liveWs.send(JSON.stringify({
+        type: "transfer-response",
+        transfer_id: req.transfer_id,
+        target_id: req.sender_id,
+        target_ip: req.sender_ip,
+        accepted: false
+      }));
+      pendingIncomingRequest = null;
+      showToast("Transfer declined");
+    });
+
+    $("btn-cancel-transfer").addEventListener("click", () => {
+      if (!activeTransfer) return;
+      activeTransfer.cancelled = true;
+      if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+        liveWs.send(JSON.stringify({
+          type: "transfer-cancel",
+          transfer_id: activeTransfer.id,
+          target_id: activeTransfer.targetId,
+          target_ip: activeTransfer.targetIp
+        }));
+      }
+      finishLiveTransfer("Transfer cancelled");
+    });
+
+    const saveLiveBtn = $("btn-live-save-download");
+    if (saveLiveBtn) {
+      saveLiveBtn.addEventListener("click", () => {
+        if (!activeDownloadUrl) return;
+        const a = document.createElement("a");
+        a.href = activeDownloadUrl;
+        a.download = activeDownloadName || "downloaded_file";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        showToast(`Saving ${activeDownloadName}...`);
+      });
+    }
+
+    const doneLiveBtn = $("btn-live-close-done");
+    if (doneLiveBtn) {
+      doneLiveBtn.addEventListener("click", () => {
+        if (activeDownloadUrl) {
+          try { URL.revokeObjectURL(activeDownloadUrl); } catch (e) {}
+          activeDownloadUrl = null;
+        }
+        finishLiveTransfer();
+      });
+    }
+
+    // START LIVE WEBSOCKET
+    initLiveShare();
+
+    // AUTO POLL
+    fetchShareData();
+    setInterval(() => {
+      if (document.visibilityState === "visible") {
+        fetchShareData();
+      }
+    }, 3000);
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        fetchShareData();
+      }
+    });
+  </script>
+</body>
+</html>

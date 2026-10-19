@@ -198,6 +198,7 @@ def test_network_and_user_speed_caps(client):
     n = c.get("/api/network").json()
     assert n == {"enabled": False, "total_down_mbps": 0.0,
                  "total_up_mbps": 0.0, "lan_rate_mbps": 1000.0,
+                 "vpn_pct": 0.0, "vpn_down_mbps": 0.0, "vpn_up_mbps": 0.0,
                  "vpn_share": {"enabled": False, "interface": ""},
                  "decline_random_macs": False}
 
@@ -1019,6 +1020,53 @@ def test_reset_month_deletes_guests(client):
     assert dash["total_users"] == 2
     assert next(u for u in dash["users"] if not u["protected"])["name"] == "Dad"
     assert all(not u["guest"] for u in dash["users"])
+
+
+def test_guest_to_regular_user_conversion(client):
+    """A guest user can be converted to a regular user via POST /api/users/{id}/make-regular
+    or PATCH /api/users/{id} with guest=false. After conversion, guest constraints are lifted
+    and reset-month does not wipe them."""
+    c, db, service = client
+    _login(c)
+    async def _seed():
+        g1 = await db.create_user(name="Guest One", quota_mode=_db.QUOTA_FIXED,
+                                  fixed_gb=1.0, guest=True)
+        await db.upsert_device("aa:bb:cc:dd:ee:a1", name="Guest Device 1", user_id=g1.id)
+        g2 = await db.create_user(name="Guest Two", quota_mode=_db.QUOTA_FIXED,
+                                  fixed_gb=2.0, guest=True)
+        await db.upsert_device("aa:bb:cc:dd:ee:a2", name="Guest Device 2", user_id=g2.id)
+        return g1.id, g2.id
+    g1_id, g2_id = _get_loop().run_until_complete(_seed())
+
+    # 1. Convert g1 via POST /api/users/{g1_id}/make-regular
+    r1 = c.post(f"/api/users/{g1_id}/make-regular")
+    assert r1.status_code == 200
+    assert r1.json()["guest"] is False
+    assert r1.json()["status"] == "converted"
+
+    # 2. Convert g2 via PATCH /api/users/{g2_id}
+    r2 = c.patch(f"/api/users/{g2_id}", json={"guest": False, "limit_down_mbps": 50})
+    assert r2.status_code == 200
+
+    dash = c.get("/api/dashboard").json()
+    u1 = next(u for u in dash["users"] if u["id"] == g1_id)
+    u2 = next(u for u in dash["users"] if u["id"] == g2_id)
+    assert u1["guest"] is False
+    assert u2["guest"] is False
+    assert u2["limit_down_mbps"] == 50.0
+
+    dev1 = next(d for d in dash["devices"] if d["mac"] == "aa:bb:cc:dd:ee:a1")
+    dev2 = next(d for d in dash["devices"] if d["mac"] == "aa:bb:cc:dd:ee:a2")
+    assert dev1["guest"] is False
+    assert dev2["guest"] is False
+
+    # Reset month should NOT delete u1 or u2 now because they are regular users
+    r_reset = c.post("/api/reset-month")
+    assert r_reset.status_code == 200
+    dash_after = c.get("/api/dashboard").json()
+    remaining_ids = {u["id"] for u in dash_after["users"]}
+    assert g1_id in remaining_ids
+    assert g2_id in remaining_ids
 
 
 def test_rogue_endpoint_returns_list(client):
@@ -2280,6 +2328,37 @@ def test_history_device_0_is_all(client):
     assert data["total_queries"] == 3
 
 
+def test_live_traffic_analytics_endpoint(client):
+    c, database, service = client
+    # 401 when unauthorized
+    assert c.get("/api/history/live").status_code == 401
+
+    _login(c)
+    dev_id = _seed_history_device(database, service, "streamer-pc", "192.168.2.110")
+    now_minute = _now_str()
+    run = _get_loop().run_until_complete
+    run(database.batch_add_dns_history([
+        (dev_id, now_minute, "rr1---sn-4g5edn6s.googlevideo.com", 25),
+        (dev_id, now_minute, "www.youtube.com", 10),
+    ]))
+
+    # Call /api/history/live
+    r = c.get("/api/history/live")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert "devices" in data
+    assert "total_down_bps" in data
+    assert "top_consumer" in data
+
+    # Filter by device_id
+    r_dev = c.get(f"/api/history/live?device_id={dev_id}")
+    assert r_dev.status_code == 200
+    data_dev = r_dev.json()
+    assert len(data_dev["devices"]) == 1
+    assert data_dev["devices"][0]["id"] == dev_id
+    assert data_dev["devices"][0]["active_app"]["name"] == "YouTube"
+
+
 # -- software updates (Admin tab) ----------------------------------------------
 
 def test_updates_unwired_404_and_snapshot_none(client):
@@ -2634,3 +2713,15 @@ def test_bundle_recharges_api_crud_and_dashboard(client):
 
 
 
+
+
+def test_network_vpn_speed_fields_roundtrip(client):
+    c, _, _ = client
+    _login(c)
+    r = c.post("/api/network", json={"vpn_pct": 90, "vpn_down_mbps": 14,
+                                     "vpn_up_mbps": 1.2})
+    assert r.status_code == 200
+    n = c.get("/api/network").json()
+    assert (n["vpn_pct"], n["vpn_down_mbps"], n["vpn_up_mbps"]) == (90.0, 14.0, 1.2)
+    c.post("/api/network", json={"vpn_pct": 500})
+    assert c.get("/api/network").json()["vpn_pct"] == 100.0

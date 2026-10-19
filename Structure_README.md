@@ -23,6 +23,8 @@ the project layout, tests, and the release process.
 - [Native VPN Subsystem (sing-box Core & Clash API)](#native-vpn-subsystem-sing-box-core--clash-api)
 - [Ultra Ad-Blocker & History Analytics Engine](#ultra-ad-blocker--history-analytics-engine)
 - [Speedometer Gauge & Frontend Subsystems (Themes, Particles, Navigation)](#speedometer-gauge--frontend-subsystems-themes-particles-navigation)
+- [Local Share Subsystem (LAN Direct Transfer & In-Memory/Disk Streaming Engine)](#local-share-subsystem-lan-direct-transfer--in-memorydisk-streaming-engine)
+- [Guest Captive Portal & Search Interception Engine](#guest-captive-portal--search-interception-engine)
 - [Software updates](#software-updates)
 - [Key design decisions](#key-design-decisions)
 - [Known bottlenecks & technical debt](#known-bottlenecks--technical-debt)
@@ -456,16 +458,41 @@ into the user term: `_sync_shaping` caps every guest user's aggregate at
 applies `min(dev, user)`, so only the stricter cap wins) — one field caps the
 whole household's guest allowance set without per-device edits.
 
+**Guest to Regular User Promotion**:
+A guest account can be promoted to a regular permanent user account either via
+`POST /api/users/{user_id}/make-regular` or `PATCH /api/users/{user_id}` with `{"guest": false}`.
+Promoting a guest sets `users.guest = 0`, which immediately lifts the `guest_speed_limit_mbps`
+cap and permits full custom `limit_down_mbps`/`limit_up_mbps` speeds, exempts all associated devices
+from `delete_guest_users()` monthly purge, and triggers `_schedule_shaping_sync()` so the Linux
+kernel tc qdisc classes update without delay.
+
 Two engine-side details worth knowing:
 
 - The tree is rebuilt only when a **signature** of (enabled, totals, aqm,
-  sorted caps, lan rate, uplink subnet) changes — the same idempotent-reconcile
+  sorted caps, lan rate, uplink subnet, fair_sharing) changes — the same idempotent-reconcile
   pattern as the nftables `_last_blocked_ips` cache.
 - `ifb0` (the fake-bridge device uploads are redirected into) is brought up
   once in `start()` and verified to exist; if the module was already loaded
   without creating it, `start()` unloads + reloads with the right `numifbs`.
   The apply itself never re-modprobes — a no-op `modprobe ifb numifbs=1` at
   apply time silently killed shaping on a live box.
+
+### Fair Bandwidth Sharing & VPN Anti-Starvation (HTB Dynamic Per-Device Allocation)
+
+- **The Problem on Throttled Links / VPN**:
+  When a metered ISP package runs out (e.g., in Egypt) and the user connects through an external or built-in sing-box VPN, the available uplink/downlink is constricted to the VPN or throttled speed (e.g. 1–10 Mbps).
+  Without active shaping at that lower rate, the link bottleneck sits upstream (inside the ISP throttler FIFO or the VPN server's buffer). A single device initiating multi-connection downloads (IDM, app store updates, video streaming) fills the upstream buffer, creating massive bufferbloat (~2000ms latency) and dropping ~100% of packets for all other devices, completely freezing web access and disconnecting background sessions.
+
+- **Definitive Anti-Starvation & Fair Sharing Architecture (`fair_sharing=True`)**:
+  When Fair Sharing is enabled (automatic whenever VPN connects):
+  1. **Robust VPN State Detection**: In `run.py`, `_sync_shaping` evaluates `vpn_manager.state == "connected"`, `vpn_manager.is_connected`, `vpn_share.applied`, and `vpn_share_enabled` DB setting. When active, it automatically enables shaping with `fair_sharing=True`.
+  2. **Every active device receives an individual HTB leaf class**: Each device IP maps to `1:<0x8000+devid>` with a dedicated `tc filter` matching `ip dst` (download) and `ip src` (upload).
+  3. **Guaranteed Base Rate**: `fair_base_rate = max(0.256, round(direction_total / total_active_devices, 3))`. This guarantees each device its fair $1/N$ share of the bandwidth (minimum 256 Kbps floor for instant DNS/ACK exchange).
+  4. **Dynamic Borrowing (Ceiling = 100%)**: `ceil = eff if eff is not None else user_ceil` (where `eff` defaults to `direction_total`). When only one device is transmitting or receiving, it is permitted to borrow 100% of the link speed. As soon as another device begins transmitting, HTB deficit round-robin immediately clamps each device to its fair share.
+  5. **Deficit Round-Robin MTU Quantum (`quantum 1514`)**: Explicitly sets `quantum 1514` on leaf and user classes. This prevents HTB quantum collapse where low guaranteed rates (e.g. < 1 Mbps) produce quantums smaller than the 1500-byte MTU, ensuring every competing device gets to dequeue full packets per round without being locked out.
+  6. **TUN MTU Optimization & Native Stack**: In `quota/vpn_parser.py`, `sing-tun` uses `mtu: 1400` and `stack: "system"` on Linux (falling back to `"gvisor"` on Windows). This avoids outer VLESS/TLS/TCP packet fragmentation on physical WAN interfaces and eliminates Go user-space queue lockups.
+  7. **Kernel TCP MSS Clamping**: In `quota/nftables.py`, `tcp flags syn tcp option maxseg size set rt mtu` is programmed on the forward chain, clamping TCP SYN segments to the path MTU so no client device transmits segments that require fragmentation.
+  8. **Fallback Bandwidth Baseline**: If line speed is unset (`total_down = 0`), VPN mode automatically engages a 30 Mbps down / 10 Mbps up baseline so the HTB tree and fair queuing are never torn down.
 
 ---
 
@@ -894,7 +921,8 @@ desktop or mobile VPN clients on end-user devices.
   - **Stack: `gvisor`**: The network stack is explicitly configured to `gvisor` with MTU `1500`.
     This userspace TCP/IP stack eliminates kernel TUN fragmentation bugs, MTU clipping,
     and connection freezes on high-bandwidth links.
-  - `auto_route: true`, `strict_route: true`.
+  - `auto_route: true`, `strict_route: false`.
+    Enabling `auto_route: true` ensures that local sockets originating on the gateway box itself are routed through the VPN tunnel, while `strict_route: false` prevents restrictive reverse path filtering from clipping forwarded packets. Outbound tunnel sockets are marked via sing-box's routing mark to bypass recursive routing loops.
 - **Preventing Network Blackholing & Route Loops**:
   - Local LAN and management subnets (`192.168.1.0/24`, `192.168.2.0/24`, `127.0.0.0/8`)
     are prioritized in the router rules and assigned to `outbound: "direct"`. This ensures
@@ -905,8 +933,15 @@ desktop or mobile VPN clients on end-user devices.
     gateway packets traversing nftables do not have local Linux socket owners, disabling
     process search eliminates thousands of `router: failed to search process: process not found`
     log warnings per hour.
+  - **Local DNS & Content Filter Preservation (Tunnel Upstream Resolution)**:
+    - `sing-box` DNS server array explicitly targets `local-dnsmasq` at `127.0.0.1:53` with `direct-dns` fallback.
+    - Local private IP ranges (`127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) are routed to `outbound: "direct"` in `route.rules`. This ensures client queries to `192.168.2.1:53` or `127.0.0.1:53` are intercepted and filtered locally by `dnsmasq` (applying Ultra Ad-Blocker, parental control lists, custom DNS rewrites, and DNS history logging) before any traffic is encrypted or tunneled over the VPN.
+    - Public upstream DNS queries (e.g. `dnsmasq` forwarding uncached lookups to `8.8.8.8` or `1.1.1.1`) fall through to `"final": "proxy-out"` so they traverse the encrypted VPN tunnel. This eliminates the fatal "DNS freeze during heavy download / expired bundle" bug where ISP-expired physical WAN connections drop direct port 53 packets, which previously caused all browsing on the downloading PC and other LAN devices to fail while active TCP download streams kept running.
+    - In `setup_gateway_kali.sh`, `all-servers` is configured in `/etc/dnsmasq.d/quota-gateway.conf` to query upstream resolvers concurrently, ensuring the fastest valid response wins and eliminating single-resolver stalls.
+    - In `quota/shaping.py`, `_aqm_args` pairs HTB class-based fair queueing (`quantum 1514`) with `cake ack-filter` on upload queues to suppress redundant TCP ACKs generated during high-throughput downloads, protecting upstream line buffers from bufferbloat and ACK-induced starvation.
+    - In `quota/nftables.py`, TCP MSS clamping (`tcp flags syn tcp option maxseg size set rt mtu`) dynamically matches the tunnel MTU (1400) to eliminate packet fragmentation and ICMP blackholing.
   - Modern sing-box 1.14+ DNS format: Uses top-level `dns.servers` array with standard
-    `address` fields instead of deprecated outbound syntax.
+    `server` / `server_port` fields instead of deprecated outbound syntax.
 - **Global Certificate Insecurity Switch**:
   - `vpn_allow_insecure` setting: When enabled, `generate_sing_box_config` sets
     `tls.insecure: true` across all generated outbounds, permitting connections to
@@ -986,6 +1021,21 @@ filtering running directly on top of `dnsmasq`:
     - Top 10 identified web services with usage percentages.
     - Top 10 base domains.
 
+### Live Traffic Radar & Real-Time Throughput Engine (`GET /api/history/live`)
+
+- **High-Frequency In-Memory Telemetry**:
+  - `LiveThroughputTracker` maintains 60 data points (2-minute sliding window at 2-second sampling interval).
+  - Captures total downlink/uplink line rates, peak bandwidth rates, and per-device active throughput.
+  - Automatically identifies the household's top bandwidth consumer device, its active speed in Kbps/Mbps, percentage share of total consumption, and active streaming platform/app.
+- **Frontend Catmull-Rom Bezier Spline Generation**:
+  - Discrete throughput samples are interpolated into fluid continuous curves via `buildCatmullRomSpline(points, baselineY)` with tension $T = 0.2$.
+  - Uses cubic Bezier segment computation:
+    $$P(t) = (1-t)^3 P_0 + 3(1-t)^2 t P_1 + 3(1-t)t^2 P_2 + t^3 P_3$$
+  - Avoids SVG text squishing and glyph distortion by removing rigid static aspect ratios (`preserveAspectRatio="none"`), measuring `svg.getBoundingClientRect().width` dynamically, and rendering coordinates 1:1 with screen pixels.
+  - Accompanied by a glowing drop-shadow filter (`#histGlow`) and translucent gradient area fill.
+- **Side-by-Side Ergonomic Layout**:
+  - The live throughput graph and hero top-consumer radar are structured in a 2-column responsive CSS grid (`.hist-live-top-row`, `1fr 340px`), maximizing screen space utilization while keeping live speed telemetry immediately visible.
+
 ---
 
 ## Speedometer Gauge & Frontend Subsystems (Themes, Particles, Navigation)
@@ -1037,6 +1087,146 @@ The management plane provides two distinct disconnection modes:
 - **Block & Blacklist (`POST /api/devices/{id}/block-blacklist`, `POST /api/users/{id}/block-blacklist` or `DELETE ?blacklist=true`)**:
   - Permanently writes the MAC to `mac_lists` (`deny`).
   - Instantly drops all active and future traffic at line-rate in nftables until an admin explicitly removes the MAC from the blacklist.
+
+---
+
+## Local Share Subsystem (LAN Direct Transfer & In-Memory/Disk Streaming Engine)
+
+The Local Share subsystem (`quota/local_share.py`, `web/share.html`, `web/index.html`, and `web/assets/app.js`) provides a high-speed, private, zero-configuration local file and text/clipboard sharing portal across any client device (smartphones, PCs, laptops, tablets, and smart TVs) connected to the local home network.
+
+### 1. Architectural Highlights & Zero-Dependency Streaming
+
+- **Elimination of `python-multipart` Overhead**:
+  Unlike standard form-data endpoints which require third-party C/Rust parsers or external libraries, file uploads leverage pure raw HTTP streaming via Starlette's `request.stream()`:
+  - Network bytes flow in 64 KB chunks directly from the incoming socket to disk (`data/local_share/<id>/<safe_name>`).
+  - Total process RAM usage remains $< 1\,\text{MB}$ regardless of whether transferring a small document or a 20 GB multi-file ISO/video.
+  - Raw client requests set the sanitized URI-encoded filename via `X-Filename: <encoded_name>` and standard `Content-Type`.
+- **Atomic Index Persistence**:
+  - Metadata is persisted in `data/local_share/index.json`.
+  - Mutating operations (`save_file_stream`, `delete_file`, `save_text`, `cleanup_expired`) are synchronized behind an `asyncio.Lock()`.
+  - Disk saves write to a temporary file (`index.json.tmp`) before calling atomic filesystem `replace()`.
+- **Automatic TTL & Cleanup Engine**:
+  - Each item defaults to a 2-hour Time-to-Live (`DEFAULT_TTL_SECONDS = 7200`).
+  - On application boot and upon every listing call (`list_all()`), expired files are pruned from disk via `shutil.rmtree()`.
+  - In addition, the FastAPI application lifespan supervisor runs a detached periodic background loop `_share_cleanup_loop()` every 10 minutes to guarantee storage space is perpetually recycled even when no browser tabs are open.
+
+### 2. Network Security Model (`_require_local_share_access`)
+
+- **Strict Source-IP Network Validation**:
+  - Evaluates `ipaddress.ip_address(host).is_private` and `ipaddress.ip_address(host).is_loopback` (RFC 1918 subnets: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.1/8`).
+  - Household devices connected to the router's Wi-Fi or Ethernet LAN can freely upload, download, and share notes without requiring administrative credentials or session tokens.
+  - Requesters arriving from external WAN addresses (in Strong WAN mode) are automatically denied with `403 Forbidden` unless possessing a cryptographically signed HMAC admin session cookie (`COOKIE_NAME`).
+- **CSRF & WAF Immunity on LAN**:
+  - LAN requests bypass strict WAN WAF body-size caps, enabling full-bandwidth gigabit file transfers without triggering false-positive rate-limit bans.
+
+### 3. Client Experience & Standalone Web Portal
+
+- **Admin Dashboard Integration (`#panel-share`)**:
+  - Accessible via the **Local Share** nav-tab in the sidebar.
+  - Real-time drag-and-drop dropzone with dynamic upload progress bar, transferred byte counters, and upload speed meter ($MB/s$).
+  - Tabular view of active shared files with file-type badges, countdown expiration timers, direct download links, 1-click clipboard link copy, and deletion triggers.
+  - Quick text/clipboard notes console supporting automatic URL hyperlinking.
+  - Instant mobile QR Code modal rendering via client-side `QRCode` (`/assets/qrcode.min.js`).
+- **Standalone Mobile/Guest Portal (`/share`)**:
+  - Lightweight, responsive HTML5 portal (`web/share.html`) designed specifically for mobile touchscreens, guests, and smart TVs.
+  - Periodic 3-second live sync polling (active only when `document.visibilityState === "visible"` to conserve mobile battery).
+
+### 4. REST & WebSocket API Contract
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/share` | Returns the mobile-friendly standalone Local Share web application (`web/share.html`). |
+| `GET` | `/api/share/list` | Returns active files, text notes, total byte volume, and client IP. |
+| `POST` | `/api/share/upload` | Streams raw binary payload into temp storage cache. Sets `X-Filename` header. |
+| `GET` | `/api/share/download/{file_id}` | Serves file with `FileResponse` and RFC 6266 `Content-Disposition: attachment`. |
+| `DELETE`| `/api/share/files/{file_id}` | Removes file directory from disk and updates index. |
+| `GET` | `/api/share/download-zip?ids=...` | On-the-fly bundling of multiple selected files into a single ZIP archive. |
+| `POST` | `/api/share/delete-batch` | Deletes an array of file IDs in a single atomic transaction. |
+| `POST` | `/api/share/folder/init` | Initializes an on-the-fly streaming ZIP archive session for directory uploads. |
+| `POST` | `/api/share/folder/file` | Streams a single file chunk directly into the in-progress folder ZIP archive. |
+| `POST` | `/api/share/folder/finalize` | Closes the folder ZIP archive and registers it as a shared item. |
+| `WS` | `/api/share/live/ws` | Live Direct Stream & WebRTC signaling WebSocket hub: zero-disk device-to-device streaming relay. |
+| `GET` | `/api/share/live/download/{transfer_id}` | Direct HTTP streaming download to device storage with zero browser JavaScript heap RAM. |
+| `POST` | `/api/share/text` | Creates a shared text snippet or URL for instant clipboard beam. |
+| `DELETE`| `/api/share/texts/{text_id}` | Removes a shared text note. |
+| `POST` | `/api/share/clear` | Purges all shared files and notes immediately. |
+
+### 5. Live Direct Stream & Zero-Disk Relay Engine (`LiveShareHub`)
+
+- **Zero Storage Footprint on Router**:
+  Transfers are streamed in real time through WebSocket memory buffers via `LiveShareHub.route_binary_chunk()`. Not a single byte is written to the router's flash or local filesystem, allowing unlimited file size transfers even when disk capacity is 100% full.
+- **Direct HTTP Streaming Download (Zero-RAM Receiver Pipeline)**:
+  When a receiving device accepts a Live Direct transfer, the browser automatically connects to `/api/share/live/download/{transfer_id}`. `LiveShareHub` routes streaming chunks directly through an internal memory queue (`asyncio.Queue(maxsize=16)`, max 8 MB memory footprint on host) into a native HTTP `StreamingResponse`. The receiving operating system (Android Download Manager, iOS Safari, or desktop Chrome/Edge) streams and writes bytes directly to the physical storage drive (`/Downloads/`). JavaScript heap RAM on the receiving device remains at virtually $0\,\text{MB}$ regardless of payload size (preventing mobile OOM tab crashes on multi-hundred megabyte transfers), while the WebSocket connection transmits throttled real-time progress updates.
+- **512 KB High-Throughput Chunks & Hysteresis Backpressure Pacing**:
+  Streaming frames use $512\,\text{KB}$ (`524,288` bytes) binary chunks, cutting WebSocket frame overhead, async microtasks, and allocation counts by 75%. Network backpressure uses a smart hysteresis watermark (high-watermark $4\,\text{MB}$, low-watermark $1\,\text{MB}$) to eliminate timer thrashing and achieve full Wi-Fi/Gigabit physical line rates ($150\text{--}500+\,\text{Mbps}$).
+- **Binary Header Framing & Fast Raw Key Routing**:
+  Each streaming packet prepends a fixed 16-byte ASCII `transfer_id` header padded with spaces (`0x20`). `LiveShareHub` caches pre-computed raw bytes keys (`_transfers_by_header[chunk[:16]]`), routing packets with nanosecond-level dictionary lookups and zero ASCII string decoding overhead per frame.
+- **In-Browser Slicing-by-8 CRC-32 & Zero-Copy Streaming**:
+  When users stream multiple files or folder hierarchies, browsers build a streaming uncompressed STORE ZIP archive on the fly. CRC-32 checksums are computed incrementally using Intel's 8-way parallel Slicing-by-8 algorithm (`updateLiveCrc32`), processing 8 bytes per iteration at $>700\,\text{MB/s}$ without pegging mobile CPU cores. On receiving devices, binary payloads are referenced directly via zero-copy `Uint8Array` memory views into `Blob`, completely eliminating redundant memory duplication and layout thrashing.
+- **Multi-Folder Sequential Staging & Direct Device-to-Device Streaming**:
+  Both the dashboard (`#panel-share`) and standalone portal (`/share`) integrate multi-folder staging directly into the unified `Folders 📂` action trigger. The staging workflow overcomes OS picker restrictions (which typically prohibit multi-folder selection in a single native dialog) by allowing users to queue multiple directories sequentially using `+ Add Folder`, remove unwanted folders with `✕`, or drag-and-drop multiple directories directly onto target peer cards or dropzones. All folders are bundled and streamed with zero storage overhead on the host router.
+- **Self-Peer, Multi-Tab Discovery Isolation & IP Deduplication**:
+  `LiveShareHub.broadcast_peer_list()` broadcasts `self_id` and `self_ip` metadata alongside the active peer table. Both the dashboard client (`#panel-share`) and mobile portal (`/share`) deduplicate peer tables by unique `p.ip` and filter out self-IP (`(!myIp || p.ip !== myIp)`). This prevents devices running multiple browser tabs (such as the management dashboard alongside `/share`) from appearing multiple times on remote device radars, ensuring exactly one card per physical device.
+- **50 MB Live Direct Transfer Safety Clamp**:
+  To protect low-memory mobile browser engines from memory pressure or prolonged connection hangs during live Wi-Fi streaming, a strict $50\,\text{MB}$ payload limit is enforced. Both frontend interfaces (`initiateDashSendDirect`, `initiateSendDirect`, and multi-folder staging confirm) calculate total payload size upfront and immediately warn users via friendly toast notices if exceeded. The backend WebSocket relay endpoint (`/api/share/live/ws`) additionally enforces this ceiling on `transfer-request` messages, rejecting payloads $> 50\,\text{MB}$ with a descriptive `transfer-error` response. Larger files and folders are routed to standard Local Share upload.
+
+---
+
+## Guest Captive Portal & Search Interception Engine
+
+When a new device connects to the network as a guest before administrative approval, it must be prevented from accessing general internet traffic while providing immediate visual feedback when the guest attempts any search query or web browsing.
+
+### 1. Packet Path & NAT Redirection
+- **Kernel nftables Set (`@pending_guests`)**:
+  - In `quota/nftables.py`, table `inet quota_gateway` (or `inet quota_nat`) defines an IPv4 set:
+    ```nft
+    set pending_guests {
+        type ipv4_addr;
+        flags interval;
+    }
+    ```
+  - Port 80 HTTP traffic from any client whose IP is currently in `@pending_guests` is redirected at line rate in `prerouting`:
+    ```nft
+    ip saddr @pending_guests tcp dport 80 redirect to :<web_port>
+    ```
+  - The destination rewrite diverts the flow from the forward path into local input, directing requests straight to the FastAPI gateway server.
+- **State Synchronization (`run.py` & `EngineSnapshot`)**:
+  - The maintenance loop identifies pending guests:
+    ```python
+    pending_guests = {
+        v["ip"] for mac, v in state.items()
+        if v.get("ip") and v.get("guest") and v.get("blocked")
+    }
+    ```
+  - Synchronized via `engine.update_state(ip_to_mac, blocked, list(pending_guests))` and surfaced in `EngineSnapshot.pending_guests`.
+
+### 2. HTTP Interception Middleware & Probe Handlers (`api/app.py`)
+- **OS Captive Network Probes**:
+  Mobile operating systems automatically emit HTTP probes when associating with a Wi-Fi network:
+  - Android / ChromeOS: `GET /generate_204`, `/gen_204`
+  - Apple iOS / iPadOS / macOS: `GET /hotspot-detect.html`
+  - Microsoft Windows: `GET /connecttest.txt`, `GET /ncsi.txt`
+  - Mozilla Firefox: `GET /canonical.html`
+  When a pending guest triggers any probe, the server returns a `302 Redirect` to `/guest/pending`. When approved or non-guest, standard captive probe success codes (e.g. `204 No Content` or `Microsoft NCSI`) are returned immediately.
+- **Search & Browsing Interception (`_security_middleware`)**:
+  - If incoming `client.host` is present in `snapshot.pending_guests`:
+  - Static assets (`/assets/*`, `/favicon.ico`) and status checks (`/api/guest/status`, `/guest/pending`) pass through unhindered.
+  - All other HTTP requests (search engine queries, direct domain browsing, etc.) are intercepted with `302 Found` redirecting to:
+    ```
+    /guest/pending?continue=<original_url>
+    ```
+
+### 3. Reactive UI & Auto-Redirect Lifecycle (`web/guest_pending.html`)
+- **Interface Structure**:
+  - Dark-themed, RTL-native glassmorphic page displaying detected device hostname/name, IP, MAC address, and live approval status badge.
+  - Includes a pulsing radar indicator indicating pending status (amber ⏳).
+- **Polling Loop & Zero-Click Reconnection**:
+  - The browser queries `GET /api/guest/status` every 3 seconds.
+  - As soon as the network administrator clicks "Accept" in the Quota Manager dashboard:
+    1. The device state transitions from blocked guest to active approved user.
+    2. `@pending_guests` removes the client IP in kernel nftables.
+    3. `/api/guest/status` returns `{"status": "approved", "quota_gb": ...}`.
+    4. The page instantly switches to emerald green (✅), plays a success animation, displays the granted quota slice, and initiates a 3-second countdown redirect to the guest's original requested URL or Google search.
 
 ---
 
@@ -1521,6 +1711,7 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | GET | `/api/events?limit=30` | audit events |
 | GET | `/api/logs?limit=300` | tail of the rotating log (newest first) |
 | GET | `/api/history/{device_id}?window=24&limit=100` | a device's DNS browsing history — `top_domains`, `activity` (minute buckets), `recent` (latest queries), `total_queries`. Auth-gated; `window` hours clamped 1–336, `limit` capped. Bandwidth is NOT duplicated here — the History tab reads live/per-period bytes from the dashboard payload. Every `top_domains`/`recent` row also carries a `status` (`blocked`/`allowed`/`redirected`/`none`) from `dns_rules.resolve_domain_status`, powering the History tab's filter badges + quick-action buttons |
+| GET | `/api/history/live?device_id=` | real-time live traffic ranking and bandwidth monitoring: ranks connected devices by active download/upload bps (derived from `EngineSnapshot`), resolves active platform/application via DNS classification (e.g. YouTube, TikTok, Netflix, Zoom, Steam, Shahid VIP), calculates bandwidth share %, spotlights the `top_consumer` hero card, and feeds the rolling SVG throughput graph. Auth-gated. |
 | GET/POST/PATCH/DELETE | `/api/dns/rules` | domain-filtering rules: list (optionally `?scope=&scope_id=`) / create (`{"scope","scope_id","action":"block"\|"allow"\|"redirect","domain","target_ip"}`) / enable-disable via PATCH / delete |
 | POST | `/api/dns/rules/quick` | one-click block/allow from a History-tab domain row: `{"domain","action":"block"\|"allow","scope":"global"\|"device","device_id"}` |
 | POST | `/api/dns/import` | paste raw hosts-format or AdBlock-Plus-format blocklist text (`{"text","format":"auto"\|"hosts"\|"adblock","scope","scope_id","action"}`) → bulk-creates domain rules in one transaction |
@@ -1586,7 +1777,7 @@ QuotaManager/
 │   ├── postinst              # venv + setup script + start the gateway service
 │   └── prerm                 # stop + disable the gateway service on remove/upgrade
 ├── config.yaml               # Linux gateway settings (dnsmasq + nftables)
-├── run.py                    # gateway wiring: engine + maintenance + shaper + uvicorn
+├── run.py                    # gateway wiring: fast core boot (startup_core) + concurrent subsystems + uvicorn
 ├── requirements-linux.txt    # Linux deps (fastapi, uvicorn, aiosqlite, PyYAML + test deps)
 ├── scripts/
 │   ├── setup_gateway_kali.sh # Linux: sysctl, client-subnet NAT, dnsmasq, ifb,
@@ -1635,7 +1826,8 @@ QuotaManager/
 │   │                         #   monitor-capable spare card
 │   ├── dnslog.py             # DNS browsing history: dnsmasq query-log parser +
 │   │                         #   DnslogTailer thread (bounded queue) -> dns_history
-│   ├── history_analytics.py  # DNS query analytics, timeline, and domain aggregation
+│   ├── history_analytics.py  # DNS query analytics, timeline, and domain aggregation;
+│   │                         #   live traffic engine (bandwidth ranking, app detection)
 │   ├── dns_rules.py          # DnsRuleManager: domain blacklist/allow/redirect rules,
 │   │                         #   blocklist presets, per-client DNS-server overrides,
 │   │                         #   resolve_domain_status (History-tab filter badges) —
@@ -1748,7 +1940,9 @@ The suite covers:
 - **MAC vendor lookup** — vs the bundled IEEE registry.
 - **`run.py` wiring** — config → DB bundle reconcile, dnsmasq lease sync,
   live-counter regression, the topology override, the DNS-history drain /
-  persist / prune / disabled paths, the VPN-share pin + relay-suspension path.
+  persist / prune / disabled paths, the VPN-share pin + relay-suspension path,
+  and the non-blocking two-phase startup (`startup_core()` in <20 ms for instant
+  uvicorn port 8080 binding followed by background `startup_subsystems()`).
 - **The DNS-history pipeline** — `quota/dnslog.py` parser (extra-mode shapes
   including the client ip/port between serial and `query[` — the live-box shape
   — and the bare shape, PTR filtering, non-query lines rejected), the tailer

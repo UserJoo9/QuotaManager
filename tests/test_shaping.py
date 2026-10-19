@@ -812,3 +812,249 @@ def test_missing_cake_falls_back_to_fq_codel():
                     "handle", "2:", "fq_codel")
     assert fake.has("tc", "qdisc", "add", "dev", "ifb0", "parent",
                     "1:0x8001", "handle", "0x8001:", "fq_codel")
+
+
+def test_fair_sharing_allocates_per_device_classes_with_borrowing():
+    """In fair_sharing mode, even unlimited devices (down=0, up=0) get individual HTB
+    classes where rate = fair guaranteed share and ceil = total bandwidth.
+    If 1 device requests traffic, HTB allows it to borrow up to ceil (100% speed).
+    If multiple devices request traffic, each gets its fair share."""
+    fake = FakeTc()
+    cfg = make_cfg()
+    shaper = TcShaper(cfg, run_command=fake)
+    shaper.start()
+    # 2 unlimited devices on a 10 Mbps line (e.g. throttled / VPN line)
+    shaper.update_state(
+        [
+            entry("192.168.2.101", device_id=1, user_id=1, down=0, up=0),
+            entry("192.168.2.102", device_id=2, user_id=1, down=0, up=0),
+        ],
+        enabled=True,
+        total_down=10.0,
+        total_up=4.0,
+        fair_sharing=True,
+    )
+
+    # User class on download (eth0): rate 10mbit, ceil 10mbit
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:100",
+                    "classid", "1:0x301", "htb", "rate", "10mbit", "ceil", "10mbit")
+    # Each device gets fair rate = 5mbit (10 / 2) and ceil = 10mbit (borrowing up to 100%)
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:0x301",
+                    "classid", "1:0x8001", "htb", "rate", "5mbit", "ceil", "10mbit")
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:0x301",
+                    "classid", "1:0x8002", "htb", "rate", "5mbit", "ceil", "10mbit")
+    # Both devices have individual filters mapping their IP to their class
+    assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
+                    "protocol", "ip", "prio", "2", "u32", "match", "ip", "dst",
+                    "192.168.2.101", "flowid", "1:0x8001")
+    assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
+                    "protocol", "ip", "prio", "2", "u32", "match", "ip", "dst",
+                    "192.168.2.102", "flowid", "1:0x8002")
+    # On upload (ifb0): total is 4mbit, so each gets fair rate = 2mbit and ceil = 4mbit
+    assert fake.has("tc", "class", "add", "dev", "ifb0", "parent", "1:0x301",
+                    "classid", "1:0x8001", "htb", "rate", "2mbit", "ceil", "4mbit")
+    assert fake.has("tc", "class", "add", "dev", "ifb0", "parent", "1:0x301",
+                    "classid", "1:0x8002", "htb", "rate", "2mbit", "ceil", "4mbit")
+
+
+
+# ---------------------------------------------------------------------------
+# VPN-active queue control (one downloader must not freeze the household)
+# ---------------------------------------------------------------------------
+
+class FakeTcWithAddrs(FakeTc):
+    """FakeTc whose ``ip -o -4 addr show`` reports the box's real addresses."""
+
+    def __call__(self, argv: list[str]) -> tuple[int, str]:
+        if argv[:4] == ["ip", "-o", "-4", "addr"]:
+            self.calls.append(argv)
+            return 0, ("2: eth0    inet 192.168.1.110/24 brd 192.168.1.255 "
+                       "scope global eth0\n"
+                       "2: eth0    inet 192.168.2.1/24 brd 192.168.2.255 "
+                       "scope global eth0\n")
+        if argv[:4] == ["ip", "link", "show", "dev"] and argv[4] == "ifb1":
+            self.calls.append(argv)
+            return 1, "Cannot find device ifb1"
+        return super().__call__(argv)
+
+
+def _vpn_shaper(fake=None, **kw):
+    cfg = make_cfg()
+    cfg.dhcp.router_ip = "192.168.1.1"
+    fake = fake or FakeTcWithAddrs()
+    shaper = TcShaper(cfg, run_command=fake)
+    shaper.start()
+    fake.calls.clear()
+    state = dict(lan_rate_mbps=1000, fair_sharing=True, vpn_active=True)
+    state.update(kw)
+    shaper.update_state([entry("192.168.2.100", 1, 1)], True, 100, 20, **state)
+    return fake, shaper
+
+
+def test_vpn_off_programs_exact_rates_and_no_extras():
+    fake = FakeTcWithAddrs()
+    cfg = make_cfg()
+    cfg.dhcp.router_ip = "192.168.1.1"
+    shaper = TcShaper(cfg, run_command=fake)
+    shaper.start()
+    fake.calls.clear()
+    shaper.update_state([entry("192.168.2.100", 1, 1)], True, 100, 20,
+                        lan_rate_mbps=1000)
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
+                    "classid", "1:100", "htb", "rate", "100mbit")
+    assert not fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
+                        "classid", "1:3")
+    assert not fake.has("ip", "link", "add", "name", "ifb1", "type", "ifb")
+    assert not fake.has("tc", "qdisc", "add", "dev", "ifb1")
+
+
+def test_vpn_active_scales_rates_by_line_and_vpn_margin():
+    fake, _ = _vpn_shaper()
+    # 100 * 0.93 * 0.85 = 79.05 ; 20 * 0.7905 = 15.81
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
+                    "classid", "1:100", "htb", "rate", "79.05mbit")
+    assert fake.has("tc", "class", "add", "dev", "ifb0", "parent", "1:1",
+                    "classid", "1:100", "htb", "rate", "15.81mbit")
+
+
+def test_vpn_measured_rates_skip_the_composite_margin():
+    fake, _ = _vpn_shaper(rates_measured=True)
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
+                    "classid", "1:100", "htb", "rate", "93mbit")
+
+
+def test_vpn_wan_egress_is_capped_at_the_uplink_not_the_downlink():
+    """The box's own WAN-bound egress (the encrypted tunnel) used to fall into
+    the default class capped at the DOWNLOAD total — the uplink queue filled.
+    """
+    fake, _ = _vpn_shaper()
+    assert fake.has("tc", "qdisc", "add", "dev", "eth0", "root", "handle",
+                    "1:", "htb", "default", "3")
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
+                    "classid", "1:3", "htb", "rate", "15.81mbit",
+                    "ceil", "15.81mbit")
+    # client-bound leftovers (unlimited/untracked devices) stay on 1:2
+    assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
+                    "protocol", "ip", "prio", "3", "u32", "match", "ip", "dst",
+                    "192.168.2.0/24", "flowid", "1:2")
+
+
+def test_vpn_outer_download_is_policed_on_ifb1_with_cake_ingress():
+    fake, _ = _vpn_shaper()
+    assert fake.has("ip", "link", "add", "name", "ifb1", "type", "ifb")
+    assert fake.has("ip", "link", "set", "dev", "ifb1", "up")
+    # LAN hosts on the uplink subnet are never policed
+    assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "ffff:",
+                    "protocol", "ip", "prio", "49000", "u32", "match", "ip",
+                    "src", "192.168.1.0/24", "action", "gact", "pass")
+    # tunnel packets addressed to the box's UPLINK address go to ifb1; the
+    # client-subnet alias (192.168.2.1) is not matched
+    assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "ffff:",
+                    "protocol", "ip", "prio", "50000", "u32", "match", "ip",
+                    "dst", "192.168.1.110", "action", "mirred", "egress",
+                    "redirect", "dev", "ifb1")
+    assert not any("192.168.2.1" in a and "50000" in a for a in fake.calls)
+    assert fake.has("tc", "qdisc", "add", "dev", "ifb1", "root", "cake",
+                    "bandwidth", "79.05mbit", "besteffort", "ingress")
+
+
+def test_vpn_outer_policer_falls_back_to_htb_without_sch_cake():
+    class NoCakeIngress(FakeTcWithAddrs):
+        def __call__(self, argv):
+            if "cake" in argv and "ingress" in argv:
+                self.calls.append(argv)
+                return 2, "Unknown qdisc cake"
+            return super().__call__(argv)
+
+    fake, shaper = _vpn_shaper(NoCakeIngress())
+    assert shaper.available
+    assert fake.has("tc", "class", "add", "dev", "ifb1", "parent", "1:",
+                    "classid", "1:1", "htb", "rate", "79.05mbit",
+                    "ceil", "79.05mbit")
+    assert fake.has("tc", "qdisc", "add", "dev", "ifb1", "parent", "1:1",
+                    "fq_codel")
+
+
+def test_vpn_toggle_rebuilds_and_teardown_clears_ifb1():
+    fake, shaper = _vpn_shaper()
+    fake.calls.clear()
+    shaper.update_state([entry("192.168.2.100", 1, 1)], True, 100, 20,
+                        lan_rate_mbps=1000, fair_sharing=True,
+                        vpn_active=False)
+    assert fake.has("tc", "qdisc", "del", "dev", "ifb1", "root")
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
+                    "classid", "1:100", "htb", "rate", "100mbit")
+    assert not fake.has("tc", "qdisc", "add", "dev", "ifb1")
+
+
+class FakeTcPpp(FakeTcWithAddrs):
+    """Box in WAN topology: it dials PPPoE itself, so ppp0 is the real WAN."""
+
+    def __call__(self, argv):
+        if argv[:5] == ["ip", "-o", "route", "show", "default"]:
+            self.calls.append(argv)
+            return 0, "default via 10.0.0.1 dev ppp0 proto static\n"
+        if argv[:5] == ["ip", "-o", "link", "show", "dev"] and argv[5:6] == ["ppp0"]:
+            self.calls.append(argv)
+            return 0, ("14: ppp0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> "
+                       "mtu 1492 qdisc fq_codel state UNKNOWN\n")
+        if argv[:5] == ["ip", "-o", "link", "show", "type"]:
+            self.calls.append(argv)
+            return 0, ("14: ppp0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> "
+                       "mtu 1492 qdisc fq_codel state UNKNOWN\n")
+        return super().__call__(argv)
+
+
+def test_wan_topology_shapes_ppp0_both_directions():
+    """Live-box finding: with the box dialing PPPoE the bottleneck queue is on
+    ppp0 — the LAN-NIC trees never saw the outer tunnel traffic."""
+    fake, _ = _vpn_shaper(FakeTcPpp())
+    # egress at the (margin-scaled) UPLOAD rate, ingress policed via ifb1
+    assert fake.has("tc", "qdisc", "add", "dev", "ppp0", "root", "cake",
+                    "bandwidth", "15.81mbit", "besteffort", "ack-filter")
+    assert fake.has("tc", "qdisc", "add", "dev", "ppp0", "handle", "ffff:",
+                    "ingress")
+    assert fake.has("tc", "filter", "add", "dev", "ppp0", "parent", "ffff:",
+                    "protocol", "all", "u32", "match", "u32", "0", "0",
+                    "action", "mirred", "egress", "redirect", "dev", "ifb1")
+    assert fake.has("tc", "qdisc", "add", "dev", "ifb1", "root", "cake",
+                    "bandwidth", "79.05mbit", "besteffort", "ingress")
+    # the LAN-NIC variants are NOT also programmed
+    assert not fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
+                        "classid", "1:3")
+    assert not any("50000" in a for a in fake.calls)
+    # stale ppp0 qdiscs are cleared first so a restart never hits "File exists"
+    assert fake.has("tc", "qdisc", "del", "dev", "ppp0", "root")
+
+
+def test_ppp_redial_rebuilds_queues():
+    fake, shaper = _vpn_shaper(FakeTcPpp())
+    fake.calls.clear()
+    shaper.update_state([entry("192.168.2.100", 1, 1)], True, 100, 20,
+                        lan_rate_mbps=1000, fair_sharing=True, vpn_active=True)
+    assert not fake.has("tc", "qdisc", "add", "dev", "ppp0")  # unchanged
+    fake.__class__ = type("Redialed", (FakeTcPpp,), {
+        "__call__": lambda self, argv: (
+            (0, "15: ppp0: <POINTOPOINT,UP,LOWER_UP> mtu 1492\\n")
+            if argv[:5] == ["ip", "-o", "link", "show", "type"]
+            or argv[:6] == ["ip", "-o", "link", "show", "dev", "ppp0"]
+            else (0, "default via 10.0.0.1 dev ppp0\n")
+            if argv[:5] == ["ip", "-o", "route", "show", "default"]
+            else FakeTcWithAddrs.__call__(self, argv))})
+    shaper.update_state([entry("192.168.2.100", 1, 1)], True, 100, 20,
+                        lan_rate_mbps=1000, fair_sharing=True, vpn_active=True)
+    assert fake.has("tc", "qdisc", "add", "dev", "ppp0", "root", "cake",
+                    "bandwidth", "15.81mbit", "besteffort", "ack-filter")
+
+
+def test_wan_topology_lan_trees_run_below_the_outer_caps():
+    """Per-device LAN trees sit at 92% of the outer ppp0/ifb1 caps so the
+    per-device queues (not the flow-fair outer cake) are the bottleneck."""
+    fake, _ = _vpn_shaper(FakeTcPpp())
+    assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
+                    "classid", "1:100", "htb", "rate", "72.726mbit")
+    assert fake.has("tc", "class", "add", "dev", "ifb0", "parent", "1:1",
+                    "classid", "1:100", "htb", "rate", "14.5452mbit")
+    # the outer caps themselves are unchanged
+    assert fake.has("tc", "qdisc", "add", "dev", "ifb1", "root", "cake",
+                    "bandwidth", "79.05mbit", "besteffort", "ingress")

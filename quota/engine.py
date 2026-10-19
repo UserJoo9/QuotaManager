@@ -76,6 +76,8 @@ class EngineSnapshot:
     #: blocked in that state, so the dashboard must say so instead of implying
     #: enforcement is live.
     engine_available: bool = True
+    #: IPs of guest devices currently awaiting admin approval (for captive portal)
+    pending_guests: set[str] = field(default_factory=set)
     ts: float = field(default_factory=time.time)
 
     def counters_for(self, mac: str) -> EngineCounters:

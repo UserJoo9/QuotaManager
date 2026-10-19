@@ -180,6 +180,20 @@ class ShapingConfig:
     #: ``engine.uplink_subnet`` wins, else derived from the dhcp block). ``0``
     #: falls back to the direction total (no LAN headroom).
     lan_rate_mbps: float = 1000.0
+    #: Latency safety margin (% of the configured line rate) applied ONLY while
+    #: the VPN share is active: the bottleneck queue must form inside the
+    #: gateway's AQM, not in the ISP/modem buffer. 0/100 = exact rates.
+    line_margin_pct: float = 93.0
+    #: Extra margin (%) on top of ``line_margin_pct`` while the VPN tunnel
+    #: carries the household: encryption overhead + the proxy's userspace
+    #: buffers put the tunnel's real capacity below the raw line. 0/100 = off.
+    vpn_margin_pct: float = 85.0
+    #: MEASURED through-VPN speeds (Mbps; speed-test with the VPN on). When
+    #: BOTH are > 0 they replace the Network-tab WAN totals while the tunnel
+    #: is active and the composite VPN margin is skipped (only
+    #: ``line_margin_pct`` applies). 0 = off.
+    vpn_down_mbps: float = 0.0
+    vpn_up_mbps: float = 0.0
 
 
 @dataclass
