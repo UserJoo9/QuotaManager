@@ -622,7 +622,7 @@ def test_live_share_50mb_size_limit(share_client):
 
     with client.websocket_connect("/api/share/live/ws") as ws1:
         msg1 = ws1.receive_json()
-        self_id1 = msg1["self_id"]
+        assert "self_id" in msg1
 
         with client.websocket_connect("/api/share/live/ws") as ws2:
             msg2 = ws2.receive_json()

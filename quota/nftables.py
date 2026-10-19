@@ -376,7 +376,7 @@ class NftablesEngine:
 
     def update_state(self, ip_to_mac: dict[str, str],
                      blocked: dict[str, bool],
-                     pending_guests: Optional[list[str]] = None) -> None:
+                     pending_guests: list[str] | None = None) -> None:
         """Reconcile per-device counters + the blocked set with the service."""
         self._ip_to_mac = dict(ip_to_mac)
         self._blocked = dict(blocked)
