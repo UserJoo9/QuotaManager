@@ -548,6 +548,11 @@ class Gateway:
                         getattr(wprobe_cfg, "poll_interval", 5.0) or 5.0),
                     sighted_ttl=float(
                         getattr(wprobe_cfg, "sighted_ttl", 600.0) or 600.0))
+            except Exception as e:
+                log.warning("wifi probe init notice: %s", e)
+
+        if self.wifi_probe is not None:
+            try:
                 self.wifi_probe.start()
                 log.info("WiFi probe started (interface %r)",
                          getattr(wprobe_cfg, "interface", "") or "auto")

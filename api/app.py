@@ -3696,10 +3696,10 @@ def create_app(
         # response (API + the HTML pages) is marked no-store so the browser
         # never writes the payloads — MACs, usage, history, events, log lines —
         # to the HTTP cache, back/forward cache, or disk on a shared machine.
-        # response (API + HTML + assets) prevents stale assets from sticking in browser cache
-        if path.startswith(("/api", "/report", "/milestone", "/share", "/assets")) or path == "/":
+        # Static assets (/assets/*) stay cacheable (public, no secrets).
+        if path.startswith(("/api", "/report", "/milestone", "/share", "/guest-pending")) or path == "/":
             response.headers.setdefault("Cache-Control",
-                                        "no-cache, must-revalidate, max-age=0")
+                                        "no-store, no-cache, must-revalidate, max-age=0")
             response.headers.setdefault("Pragma", "no-cache")
             response.headers.setdefault("Expires", "0")
         # Strict CSP for the dashboard + API. /report, /milestone and /share carry
