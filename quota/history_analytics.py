@@ -300,16 +300,20 @@ async def get_live_traffic_analytics(
         total_bps = down_bps + up_bps
 
         # Determine what this device is currently accessing ("ساحبه ف ايه")
+        # Strict time-decay filter: only consider DNS queries within the last 5 minutes
+        now_dt = _dt.datetime.now().astimezone()
+        live_cutoff = (now_dt - _dt.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")
+
         recent_rows = await db.conn.execute_fetchall(
             """
             SELECT domain, SUM(count) as hits, MAX(bucket_minute) as last_seen
             FROM dns_history
-            WHERE device_id = ?
+            WHERE device_id = ? AND bucket_minute >= ?
             GROUP BY domain
-            ORDER BY last_seen DESC, hits DESC
+            ORDER BY hits DESC, last_seen DESC
             LIMIT 10
             """,
-            (dev.id,)
+            (dev.id, live_cutoff)
         )
 
         active_app = None
@@ -338,11 +342,19 @@ async def get_live_traffic_analytics(
                     "icon": "globe",
                     "domain": recent_domains[0],
                 }
+            elif total_bps > 100_000:
+                active_app = {
+                    "name": "Direct Download / Stream",
+                    "category": "High-Speed Transfer",
+                    "color": "#38BDF8",
+                    "icon": "download",
+                    "domain": "direct stream / tcp connection",
+                }
             else:
                 active_app = {
-                    "name": "General Traffic",
+                    "name": "Idle / Background",
                     "category": "Network Traffic",
-                    "color": "#94A3B8",
+                    "color": "#64748B",
                     "icon": "activity",
                     "domain": ip or "direct",
                 }
