@@ -332,7 +332,7 @@ def test_sensitive_responses_never_cached(client):
         assert "no-store" in r.headers.get("cache-control", ""), path
         assert "no-cache" in r.headers.get("cache-control", ""), path
     # static assets are public and secret-free — caching them is fine
-    for path in ("/assets/app.js", "/assets/styles.css"):
+    for path in ("/js/main.js", "/css/base.css", "/assets/pub.css"):
         r = c.get(path)
         assert "no-store" not in r.headers.get("cache-control", ""), path
 

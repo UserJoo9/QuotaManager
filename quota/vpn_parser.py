@@ -11,6 +11,8 @@ Supports parsing:
 from __future__ import annotations
 
 import base64
+import ipaddress
+import socket
 import json
 import logging
 import os
@@ -380,17 +382,22 @@ def generate_sing_box_config(outbound_or_config: dict[str, Any],
                     "tag": "direct-dns",
                 },
             ],
+            # The proxy server's own hostname (and everything sing-box resolves
+            # itself) goes through the SYSTEM resolver. dnsmasq on the box does
+            # not listen on 127.0.0.1 (it binds the LAN NIC only), so pointing
+            # these at 127.0.0.1:53 made the lookup of the VPN server's name fail
+            # (REFUSED / connection refused) and the whole share had no internet.
             "rules": [
                 {
                     "outbound": "any",
-                    "server": "local-dnsmasq",
+                    "server": "direct-dns",
                 },
                 {
                     "clash_mode": "Direct",
-                    "server": "local-dnsmasq",
+                    "server": "direct-dns",
                 },
             ],
-            "final": "local-dnsmasq",
+            "final": "direct-dns",
             "strategy": "ipv4_only",
         },
         "inbounds": [
@@ -542,3 +549,60 @@ def validate_sing_box_config(config_dict: dict[str, Any],
             Path(tf_path).unlink(missing_ok=True)
         except Exception:
             pass
+
+
+_NON_PROXY_TYPES = {"direct", "block", "dns", "selector", "urltest"}
+
+
+def _resolve_ipv4(host: str) -> str | None:
+    try:
+        infos = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+    except OSError:
+        return None
+    return infos[0][4][0] if infos else None
+
+
+def pin_server_hostnames(config: dict[str, Any], resolver=None) -> dict[str, Any]:
+    """Replace a proxy outbound's hostname by its IPv4 address, resolved NOW.
+
+    sing-box's TUN captures every packet of the box — including its own DNS
+    lookup of the VPN server's name. With a DDNS name the lookup goes into the
+    tunnel it is needed to build and fails (``lookup <name>: REFUSED``), so the
+    share shows "Connected" with no internet. Resolving before sing-box starts
+    avoids the circle. The original name is kept as TLS SNI / WebSocket Host, so
+    certificates and Reality/CDN setups still match. A failed lookup leaves the
+    config untouched. Returns ``config`` (modified in place).
+    """
+    resolver = resolver or _resolve_ipv4
+    for ob in config.get("outbounds", []):
+        if not isinstance(ob, dict) or ob.get("type") in _NON_PROXY_TYPES:
+            continue
+        host = ob.get("server")
+        if not isinstance(host, str) or not host:
+            continue
+        try:
+            ipaddress.ip_address(host)
+            continue                      # already an IP
+        except ValueError:
+            pass
+        ip = resolver(host)
+        if not ip:
+            log.warning("could not pre-resolve VPN server %r — leaving the hostname", host)
+            continue
+        ob["server"] = ip
+        tls = ob.get("tls")
+        if isinstance(tls, dict):
+            tls.setdefault("server_name", host)
+        tr = ob.get("transport")
+        if isinstance(tr, dict):
+            kind = tr.get("type")
+            if kind == "ws":
+                headers = tr.setdefault("headers", {})
+                if isinstance(headers, dict):
+                    headers.setdefault("Host", host)
+            elif kind == "httpupgrade":
+                tr.setdefault("host", host)
+            elif kind == "http":
+                tr.setdefault("host", [host])
+        log.info("VPN server %s pinned to %s (avoids a DNS loop through the tunnel)", host, ip)
+    return config

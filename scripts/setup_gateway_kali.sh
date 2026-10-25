@@ -58,6 +58,12 @@ POOL_START="${POOL_START:-192.168.2.100}"      # first address handed to devices
 POOL_END="${POOL_END:-192.168.2.200}"          # last address handed to devices
 UPSTREAM_DNS="${UPSTREAM_DNS:-8.8.8.8}"        # DNS the laptop forwards to
 LEASE_HOURS="${LEASE_HOURS:-24}"               # DHCP lease length, hours (fallback-recovery tuning)
+# IPv6 dual-stack: a private ULA /64 (RFC 4193) for the clients. Must match
+# dhcp.ipv6_prefix / dhcp.ipv6_gateway in config.yaml. Clients NAT66 out via the
+# box once the ISP delivers IPv6 (the app opens/closes that path automatically).
+ULA_NET="${ULA_NET:-fd00:da7a:2::}"            # 64-bit prefix, ends with "::"
+ULA_PREFIX="${ULA_NET}/64"
+ULA_GW="${ULA_NET}1"                           # the box, on the client LAN
 # Deployment topology. lan (default): the box sits behind the router (clients on
 # their own subnet, router keeps WiFi + NAT). wan ("strong" mode): the box dials
 # PPPoE itself (public IP on ppp0) and the router is a pure bridge/AP, so a
@@ -187,30 +193,22 @@ Set CLIENT_IP and CLIENT_NET to a different /24 and re-run." ;;
 fi
 
 # --- 1. kernel forwarding + IPv6 off ----------------------------------------
-log "[1/8] enabling ip_forward, disabling IPv6"
+log "[1/8] enabling IPv4 and IPv6 forwarding (Dual-Stack)"
 mkdir -p /etc/sysctl.d
 cat > /etc/sysctl.d/99-quota-gateway.conf <<EOF
-# Quota Manager gateway
+# Quota Manager gateway — Dual-Stack IPv4 + IPv6 & Flow Accounting
 net.ipv4.ip_forward = 1
-# IPv6 off on THIS gateway NIC only. This does NOT stop the ROUTER from
-# sending Router Advertisements to WiFi clients — their IPv6 then routes
-# through the router and bypasses this box entirely (uncounted, unblockable).
-# You MUST also disable IPv6/RA on the router itself; see the NEXT STEPS
-# report below. Quota Manager is IPv4-only.
-net.ipv6.conf.all.disable_ipv6 = 1
-net.ipv6.conf.default.disable_ipv6 = 1
-net.ipv6.conf.$LAN_IF.disable_ipv6 = 1
+net.netfilter.nf_conntrack_acct = 1
+net.ipv6.conf.all.disable_ipv6 = 0
+net.ipv6.conf.default.disable_ipv6 = 0
+net.ipv6.conf.all.forwarding = 1
+net.ipv6.conf.default.forwarding = 1
+net.ipv6.conf.$LAN_IF.disable_ipv6 = 0
+net.ipv6.conf.$LAN_IF.accept_ra = 2
 EOF
 sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-quota-gateway.conf >/dev/null
 
-# IPv6 on the GATEWAY is disabled above, but clients take IPv6 (RA/DHCPv6)
-# directly from the ROUTER when it is dual-stack — that traffic never crosses
-# this laptop, so it is UNCOUNTED and UNBLOCKABLE. Nothing in the gateway can
-# stop it; the ROUTER's IPv6 (or at least its RA) must be disabled too.
-warn "IPv6 note: this gateway only manages IPv4. If your router/ISP is dual-stack,"
-warn "clients receive IPv6 straight from the router and that traffic BYPASSES this"
-warn "gateway — uncounted and unblockable. On the router, turn off IPv6/DHCPv6/RA"
-warn "for the LAN (or accept that only IPv4 traffic is quota-managed)."
+log "   IPv4 + IPv6 dual-stack kernel forwarding active"
 
 # --- 2. install dnsmasq + nftables + iproute2 ---------------------------------
 # The QUOTA_NO_APT=1 guard: when this script runs from the package's postinst,
@@ -391,9 +389,62 @@ setup failed. Check the NetworkManager connection for $LAN_IF, set the address \
 done
 fi
 
+# --- 3b. gateway ULA IPv6 address (BOTH topologies, persistent) ---------------
+# dnsmasq only sends Router Advertisements on an interface that carries an
+# address in the advertised prefix, so the ULA gateway address must exist — and
+# survive a reboot (a bare `ip -6 addr add` is lost). NetworkManager keeps it as
+# an extra address next to the automatic (RA) ones; ifupdown gets its own file.
+if command -v nmcli >/dev/null 2>&1 && nmcli general status >/dev/null 2>&1; then
+    profile6="$(nmcli -t -f GENERAL.DEVICE,NAME con show 2>/dev/null \
+               | awk -F: -v want="$LAN_IF" '$1 == want {print $2; exit}')" || true
+    if [ -z "$profile6" ]; then
+        profile6="$(nmcli -t -f NAME,DEVICE con show 2>/dev/null \
+                   | awk -F: -v want="$LAN_IF" '$2 == want {print $1; exit}')" || true
+    fi
+    if [ -n "$profile6" ]; then
+        nmcli con mod "$profile6" ipv6.method auto >/dev/null 2>&1 || true
+        # The box must not adopt its own gateway ULA (advertised as RDNSS) as ITS
+        # resolver — the VPN client on the box would then query [ula]:53 and stall.
+        nmcli con mod "$profile6" ipv6.ignore-auto-dns yes >/dev/null 2>&1 || true
+        nmcli con mod "$profile6" -ipv6.addresses "$ULA_GW/64" >/dev/null 2>&1 || true
+        nmcli con mod "$profile6" +ipv6.addresses "$ULA_GW/64" >/dev/null 2>&1 \
+            || warn "nmcli could not persist the IPv6 gateway address $ULA_GW/64"
+        nmcli con up "$profile6" >/dev/null 2>&1 || true
+    fi
+else
+    cat > /etc/network/interfaces.d/quota-gateway-ipv6 <<EOF
+iface $LAN_IF inet6 manual
+    up ip -6 addr add $ULA_GW/64 dev $LAN_IF
+    down ip -6 addr del $ULA_GW/64 dev $LAN_IF
+EOF
+fi
+ip -6 addr show "$LAN_IF" 2>/dev/null | grep -q "$ULA_GW/" \
+    || ip -6 addr add "$ULA_GW/64" dev "$LAN_IF" 2>/dev/null \
+    || warn "could not add $ULA_GW/64 on $LAN_IF — clients will not get IPv6 (IPv4 is unaffected)"
+
 # --- 4. dnsmasq: DHCP + DNS forwarder ----------------------------------------
 log "[4/8] writing dnsmasq config (DHCP pool + DNS forwarder)"
 mkdir -p "$CONF_DIR"
+mkdir -p /etc/dnsmasq.d
+# IPv6 Router Advertisements live in their OWN fragment (same content the app
+# writes at startup — quota/ipv6_setup.py — so install and update converge).
+cat > /etc/dnsmasq.d/quota-ipv6.conf <<EOF
+# Quota Manager — IPv6 dual-stack (generated, do not edit by hand).
+enable-ra
+dhcp-range=${ULA_NET}100,${ULA_NET}ffff,slaac,ra-names,12h
+dhcp-option=option6:dns-server,[$ULA_GW]
+EOF
+cat > /etc/sysctl.d/99-zz-quota-ipv6.conf <<EOF
+# Quota Manager — IPv6 dual-stack (generated, do not edit by hand).
+net.ipv6.conf.all.disable_ipv6 = 0
+net.ipv6.conf.default.disable_ipv6 = 0
+net.ipv6.conf.all.forwarding = 1
+net.ipv6.conf.default.forwarding = 1
+net.ipv6.conf.$LAN_IF.disable_ipv6 = 0
+net.ipv6.conf.$LAN_IF.accept_ra = 2
+EOF
+sysctl -p /etc/sysctl.d/99-zz-quota-ipv6.conf >/dev/null 2>&1 || true
+
 # dnsmasq only reads /etc/dnsmasq.d if the main config includes it
 # (conf-dir=...). Debian/Kali ship it uncommented, but a stripped or hand-edited
 # /etc/dnsmasq.conf may have it commented or missing — and then dnsmasq silently
@@ -568,6 +619,8 @@ table inet quota_nat {
         # so domain filtering, adblocking, and browsing history always apply
         ip saddr $CLIENT_NET udp dport 53 redirect to :53
         ip saddr $CLIENT_NET tcp dport 53 redirect to :53
+        ip6 saddr $ULA_PREFIX udp dport 53 redirect to :53
+        ip6 saddr $ULA_PREFIX tcp dport 53 redirect to :53
         # Direct gateway access on HTTP port 80 -> redirect to panel port 8080
         ip daddr $CLIENT_IP tcp dport 80 redirect to :8080
     }
@@ -576,6 +629,8 @@ table inet quota_nat {
         # Clients (192.168.2.0/24) exit through this box -> masquerade as the
         # uplink IP so the router answers them.
         ip saddr $CLIENT_NET masquerade
+        # NAT66: Masquerade local IPv6 ($ULA_PREFIX) out the WAN uplink
+        ip6 saddr $ULA_PREFIX masquerade
         # PPPoE (MTU 1492): clamp TCP MSS to Path MTU on ppp0 so clients sending
         # 1500-byte packets never get silently dropped by DF (Don't Fragment).
         oifname "ppp0" tcp flags syn tcp option maxseg size set rt mtu
@@ -768,6 +823,15 @@ else
     CFG_ARP_LOCK="true"
     CFG_TOPOLOGY="lan"
 fi
+# Keep the admin's settings across a re-run: the file below is regenerated from the
+# setup variables, so a previous config.yaml is backed up and every top-level section
+# the script does NOT write (firewall, dns_filter, vpn_share, network, updates, waf,
+# report, ...) is carried over verbatim afterwards. Nothing the admin tuned is lost.
+_CFG_BACKUP=""
+if [ -f "$CONF_DIR/config.yaml" ]; then
+    _CFG_BACKUP="$CONF_DIR/config.yaml.prev"
+    cp -p "$CONF_DIR/config.yaml" "$_CFG_BACKUP" 2>/dev/null || _CFG_BACKUP=""
+fi
 cat > "$CONF_DIR/config.yaml" <<EOF
 bundle:
   total_gb: $BUNDLE_TOTAL_GB
@@ -835,6 +899,46 @@ web:
   port: 8080
 EOF
 echo "  example config written to $CONF_DIR/config.yaml"
+if [ -n "$_CFG_BACKUP" ] && command -v python3 >/dev/null 2>&1; then
+    if python3 - "$_CFG_BACKUP" "$CONF_DIR/config.yaml" <<'MERGEPY'
+import re, sys
+old_path, new_path = sys.argv[1], sys.argv[2]
+key_re = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):")
+
+def sections(text):
+    """top-level key -> verbatim block (its comment header + body)."""
+    out, order, cur, pend = {}, [], None, []
+    for line in text.splitlines():
+        m = key_re.match(line)
+        if m:
+            cur = m.group(1)
+            out[cur] = pend + [line]
+            order.append(cur)
+            pend = []
+        elif cur is not None and (line.startswith((" ", "\t")) or not line.strip()):
+            out[cur].append(line)
+        elif line.startswith("#"):
+            pend.append(line)
+            cur = None
+        else:
+            pend = []
+    return out, order
+
+old, old_order = sections(open(old_path, encoding="utf-8").read())
+new, _ = sections(open(new_path, encoding="utf-8").read())
+extra = [k for k in old_order if k not in new]
+if extra:
+    with open(new_path, "a", encoding="utf-8") as f:
+        f.write("\n# --- carried over from the previous config.yaml ---\n")
+        for k in extra:
+            f.write("\n".join(old[k]).rstrip() + "\n")
+MERGEPY
+    then
+        log "   kept your existing settings sections from the previous config.yaml"
+    else
+        warn "could not merge the previous config.yaml (backup kept at $_CFG_BACKUP)"
+    fi
+fi
 # Security hardening: the config holds PPPoE credentials — root-only read,
 # never world-readable. The DB holds password hashes + settings; same story.
 chmod 600 "$CONF_DIR/config.yaml"

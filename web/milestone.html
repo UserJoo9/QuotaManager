@@ -4,7 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>My quota — Quota Manager</title>
- <link rel="stylesheet" href="/assets/styles.css?v=49">
+<link rel="stylesheet" href="/css/tokens.css">
+<link rel="stylesheet" href="/assets/pub.css?v=1">
+<script src="/assets/pub-theme.js"></script>
 <style>
   /* Milestone page: a lightweight, public view — no admin session. */
   body { display: flex; align-items: center; justify-content: center; padding: 24px; }
@@ -23,7 +25,7 @@
   .ms-devices { list-style: none; margin-top: 16px; }
   .ms-device { display: flex; align-items: center; justify-content: space-between;
                gap: 12px; padding: 10px 12px; border-radius: var(--radius-md);
-               background: rgba(255,255,255,0.03); border: 1px solid var(--glass-border); }
+               background: color-mix(in srgb, var(--text) 3%, transparent); border: 1px solid var(--glass-border); }
   .ms-device + .ms-device { margin-top: 8px; }
   .ms-name { font-weight: 600; }
   .ms-mac { color: var(--text-dim); font-size: 0.75rem; font-family: ui-monospace, monospace; }
@@ -32,9 +34,9 @@
   .ms-milestones { display: flex; gap: 10px; margin-top: 18px; }
   .ms-pill { flex: 1; text-align: center; padding: 10px 8px; border-radius: var(--radius-md);
             border: 1px solid var(--glass-border); background: var(--glass-bg); font-size: 0.8rem; }
-  .ms-pill.reached { border-color: rgba(52, 211, 153, 0.45); color: var(--ok); }
-  .ms-pill.warn { border-color: rgba(251, 191, 36, 0.5); color: var(--warn); }
-  .ms-pill.done { border-color: rgba(196, 181, 253, 0.35); color: var(--text-dim); }
+  .ms-pill.reached { border-color: color-mix(in srgb, var(--ok) 45%, transparent); color: var(--ok); }
+  .ms-pill.warn { border-color: color-mix(in srgb, var(--warn) 50%, transparent); color: var(--warn); }
+  .ms-pill.done { border-color: color-mix(in srgb, var(--accent-2) 35%, transparent); color: var(--text-dim); }
   .ms-note { margin-top: 14px; font-size: 0.78rem; color: var(--text-dim); line-height: 1.5; }
   .ms-actions { margin-top: 18px; display: flex; gap: 10px; }
   @media (max-width: 480px) {

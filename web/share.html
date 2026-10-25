@@ -4,747 +4,32 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Local Share — Quota Manager</title>
-  <link rel="stylesheet" href="/assets/styles.css?v=49">
-  <style>
-    :root {
-      --share-accent: #0ea5e9;
-      --share-accent-glow: rgba(14, 165, 233, 0.25);
-      --card-bg: rgba(15, 23, 42, 0.85);
-      --card-border: rgba(255, 255, 255, 0.08);
-      --radius-card: 14px;
-    }
-    body {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      min-height: 100vh;
-      padding: 12px;
-      margin: 0;
-      background: #090d16;
-      color: #f1f5f9;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      box-sizing: border-box;
-      -webkit-tap-highlight-color: transparent;
-    }
-    .share-container {
-      width: 100%;
-      max-width: 680px;
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-      margin-top: 4px;
-      margin-bottom: 40px;
-    }
-
-    /* HEADER */
-    .share-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 14px 16px;
-      border-radius: var(--radius-card);
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      backdrop-filter: blur(12px);
-    }
-    .share-brand {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    .share-logo {
-      width: 38px;
-      height: 38px;
-      border-radius: 10px;
-      background: linear-gradient(135deg, #0284c7, #38bdf8);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: #fff;
-      flex-shrink: 0;
-    }
-    .share-title {
-      margin: 0;
-      font-size: 1.15rem;
-      font-weight: 700;
-      letter-spacing: -0.3px;
-    }
-    .share-subtitle {
-      margin: 2px 0 0;
-      font-size: 0.76rem;
-      color: #94a3b8;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      flex-wrap: wrap;
-    }
-    .badge-lan {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      padding: 2px 8px;
-      border-radius: 999px;
-      background: rgba(16, 185, 129, 0.15);
-      color: #34d399;
-      font-weight: 600;
-      font-size: 0.72rem;
-    }
-    .badge-dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: #10b981;
-      animation: pulse-dot 2s infinite;
-    }
-    @keyframes pulse-dot {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.5; transform: scale(0.85); }
-    }
-    .header-actions {
-      display: flex;
-      gap: 8px;
-    }
-    .btn-icon {
-      background: rgba(255,255,255,0.06);
-      border: 1px solid rgba(255,255,255,0.1);
-      color: #f1f5f9;
-      border-radius: 8px;
-      padding: 8px 12px;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 0.8rem;
-      font-weight: 500;
-      transition: all 0.18s ease;
-    }
-    .btn-icon:hover {
-      background: rgba(255,255,255,0.12);
-      border-color: rgba(255,255,255,0.2);
-    }
-
-    /* DROP ZONE */
-    .drop-zone {
-      border: 2px dashed rgba(56, 189, 248, 0.35);
-      border-radius: var(--radius-card);
-      padding: 24px 16px;
-      text-align: center;
-      background: rgba(15, 23, 42, 0.5);
-      transition: all 0.22s ease;
-      position: relative;
-    }
-    .drop-zone:hover, .drop-zone.dragover {
-      border-color: var(--share-accent);
-      background: rgba(14, 165, 233, 0.08);
-      box-shadow: 0 0 20px var(--share-accent-glow);
-    }
-    .drop-icon {
-      width: 44px;
-      height: 44px;
-      margin: 0 auto 10px;
-      border-radius: 50%;
-      background: rgba(14, 165, 233, 0.12);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: #38bdf8;
-    }
-    .drop-title {
-      font-size: 0.98rem;
-      font-weight: 600;
-      margin-bottom: 4px;
-    }
-    .drop-hint {
-      font-size: 0.78rem;
-      color: #94a3b8;
-      margin-bottom: 14px;
-    }
-    .upload-btn-row {
-      display: flex;
-      gap: 10px;
-      justify-content: center;
-      flex-wrap: wrap;
-    }
-    .btn-upload-choice {
-      background: rgba(14, 165, 233, 0.15);
-      border: 1px solid rgba(14, 165, 233, 0.35);
-      color: #38bdf8;
-      font-weight: 600;
-      font-size: 0.82rem;
-      padding: 8px 16px;
-      border-radius: 8px;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      transition: all 0.16s ease;
-    }
-    .btn-upload-choice:hover {
-      background: rgba(14, 165, 233, 0.25);
-      border-color: #38bdf8;
-    }
-    .btn-upload-choice.folder {
-      background: rgba(245, 158, 11, 0.12);
-      border-color: rgba(245, 158, 11, 0.35);
-      color: #fbbf24;
-    }
-    .btn-upload-choice.folder:hover {
-      background: rgba(245, 158, 11, 0.22);
-      border-color: #fbbf24;
-    }
-    #file-input, #folder-input { display: none; }
-
-    /* UPLOAD PROGRESS */
-    .upload-progress-card {
-      margin-top: 14px;
-      padding: 12px 14px;
-      border-radius: 10px;
-      background: rgba(0,0,0,0.4);
-      border: 1px solid rgba(255,255,255,0.08);
-      text-align: left;
-    }
-    .upload-prog-header {
-      display: flex;
-      justify-content: space-between;
-      font-size: 0.78rem;
-      margin-bottom: 8px;
-      gap: 8px;
-    }
-    .upload-prog-header span:first-child {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      flex: 1;
-    }
-    .prog-bar-wrap {
-      width: 100%;
-      height: 7px;
-      border-radius: 4px;
-      background: rgba(255,255,255,0.08);
-      overflow: hidden;
-    }
-    .prog-bar-fill {
-      height: 100%;
-      width: 0%;
-      border-radius: 4px;
-      background: linear-gradient(90deg, #0284c7, #38bdf8);
-      transition: width 0.1s linear;
-    }
-
-    /* CARD SECTIONS */
-    .card-section {
-      border-radius: var(--radius-card);
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      backdrop-filter: blur(12px);
-      padding: 16px;
-    }
-    .section-title {
-      font-size: 0.95rem;
-      font-weight: 700;
-      margin: 0 0 12px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-    .section-count {
-      font-size: 0.75rem;
-      padding: 2px 8px;
-      border-radius: 999px;
-      background: rgba(255,255,255,0.08);
-      color: #94a3b8;
-    }
-
-    /* TEXT CLIPBOARD */
-    .text-form {
-      display: flex;
-      gap: 8px;
-    }
-    .text-input {
-      flex: 1;
-      padding: 10px 14px;
-      border-radius: 8px;
-      background: rgba(0,0,0,0.35);
-      border: 1px solid rgba(255,255,255,0.12);
-      color: #fff;
-      font-size: 0.86rem;
-      outline: none;
-      transition: border 0.18s ease;
-      min-width: 0;
-    }
-    .text-input:focus {
-      border-color: var(--share-accent);
-    }
-    .btn-primary {
-      background: #0284c7;
-      border: none;
-      color: #fff;
-      padding: 10px 16px;
-      border-radius: 8px;
-      font-weight: 600;
-      font-size: 0.84rem;
-      cursor: pointer;
-      transition: background 0.18s ease;
-      white-space: nowrap;
-      flex-shrink: 0;
-    }
-    .btn-primary:hover {
-      background: #0369a1;
-    }
-
-    /* BATCH SELECTION TOOLBAR */
-    .batch-toolbar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 10px 12px;
-      margin-bottom: 12px;
-      border-radius: 10px;
-      background: rgba(14, 165, 233, 0.12);
-      border: 1px solid rgba(14, 165, 233, 0.3);
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-    .batch-actions-group {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      flex-wrap: wrap;
-    }
-    .btn-batch {
-      background: rgba(255,255,255,0.08);
-      border: 1px solid rgba(255,255,255,0.14);
-      color: #fff;
-      font-size: 0.76rem;
-      padding: 5px 10px;
-      border-radius: 6px;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      transition: all 0.15s ease;
-    }
-    .btn-batch.download {
-      background: rgba(14, 165, 233, 0.25);
-      border-color: #38bdf8;
-      color: #38bdf8;
-      font-weight: 600;
-    }
-    .btn-batch.del {
-      background: rgba(239, 68, 68, 0.2);
-      border-color: rgba(239, 68, 68, 0.4);
-      color: #f87171;
-    }
-
-    /* SELECT ALL ROW */
-    .select-all-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 6px 4px 10px;
-      border-bottom: 1px solid rgba(255,255,255,0.06);
-      margin-bottom: 10px;
-      font-size: 0.8rem;
-      color: #94a3b8;
-    }
-    .custom-cb-wrap {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      cursor: pointer;
-      user-select: none;
-    }
-    .custom-cb-wrap input[type="checkbox"] {
-      width: 17px;
-      height: 17px;
-      accent-color: #0ea5e9;
-      cursor: pointer;
-      margin: 0;
-    }
-
-    /* REVOLUTIONIZED RESPONSIVE FILE CARD */
-    .items-list {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-    .file-item {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      padding: 12px 14px;
-      border-radius: 12px;
-      background: rgba(255,255,255,0.025);
-      border: 1px solid rgba(255,255,255,0.06);
-      transition: all 0.16s ease;
-    }
-    .file-item:hover {
-      background: rgba(255,255,255,0.05);
-      border-color: rgba(255,255,255,0.12);
-    }
-    .file-item.selected {
-      background: rgba(14, 165, 233, 0.08);
-      border-color: rgba(14, 165, 233, 0.4);
-    }
-
-    /* CARD ROW 1: HEADER & FULL NAME */
-    .file-main-row {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      width: 100%;
-    }
-    .file-type-icon {
-      width: 34px;
-      height: 34px;
-      border-radius: 8px;
-      background: rgba(56, 189, 248, 0.12);
-      color: #38bdf8;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex-shrink: 0;
-    }
-    .file-type-icon.folder {
-      background: rgba(245, 158, 11, 0.15);
-      color: #fbbf24;
-    }
-    .file-title-wrap {
-      min-width: 0;
-      flex: 1;
-    }
-    .file-name {
-      font-size: 0.88rem;
-      font-weight: 600;
-      color: #f8fafc;
-      word-break: break-all;
-      line-height: 1.35;
-      display: block;
-    }
-
-    /* CARD ROW 2: INFO PILLS & ACTIONS (NEVER OVERLAP) */
-    .file-footer-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      padding-top: 6px;
-      border-top: 1px solid rgba(255,255,255,0.04);
-      flex-wrap: wrap;
-    }
-    .file-info-tags {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 0.72rem;
-      color: #94a3b8;
-      flex-wrap: wrap;
-    }
-    .tag-size {
-      font-weight: 600;
-      color: #cbd5e1;
-    }
-    .tag-dot { opacity: 0.4; }
-    .tag-expiry { color: #f59e0b; }
-
-    .file-actions {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      flex-shrink: 0;
-      margin-left: auto;
-    }
-    .btn-action {
-      background: rgba(255,255,255,0.06);
-      border: 1px solid rgba(255,255,255,0.1);
-      color: #f1f5f9;
-      border-radius: 6px;
-      padding: 6px 10px;
-      font-size: 0.76rem;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      transition: all 0.15s ease;
-      text-decoration: none;
-    }
-    .btn-action.download {
-      background: rgba(14, 165, 233, 0.18);
-      border-color: rgba(14, 165, 233, 0.4);
-      color: #38bdf8;
-      font-weight: 600;
-    }
-    .btn-action.download:hover {
-      background: rgba(14, 165, 233, 0.3);
-    }
-    .btn-action.del:hover {
-      background: rgba(239, 68, 68, 0.2);
-      border-color: rgba(239, 68, 68, 0.4);
-      color: #f87171;
-    }
-
-    /* TEXT ITEMS */
-    .text-item {
-      padding: 12px 14px;
-      border-radius: 10px;
-      background: rgba(255,255,255,0.03);
-      border: 1px solid rgba(255,255,255,0.06);
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      gap: 12px;
-    }
-    .text-content {
-      font-size: 0.85rem;
-      line-height: 1.45;
-      word-break: break-word;
-      color: #e2e8f0;
-      flex: 1;
-      white-space: pre-wrap;
-    }
-    .text-meta {
-      font-size: 0.72rem;
-      color: #64748b;
-      margin-top: 4px;
-    }
-
-    .empty-state {
-      text-align: center;
-      padding: 24px 16px;
-      color: #64748b;
-      font-size: 0.82rem;
-    }
-
-    /* MODAL */
-    .modal-backdrop {
-      position: fixed;
-      inset: 0;
-      background: rgba(0,0,0,0.7);
-      backdrop-filter: blur(6px);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 16px;
-      z-index: 1000;
-    }
-    .modal-box {
-      background: #111827;
-      border: 1px solid rgba(255,255,255,0.12);
-      border-radius: 16px;
-      padding: 24px;
-      max-width: 360px;
-      width: 100%;
-      text-align: center;
-      box-shadow: 0 20px 40px rgba(0,0,0,0.6);
-    }
-    .qr-container {
-      background: #fff;
-      padding: 12px;
-      border-radius: 12px;
-      margin: 16px auto;
-      width: 200px;
-      height: 200px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .modal-url {
-      font-family: monospace;
-      font-size: 0.82rem;
-      background: rgba(0,0,0,0.4);
-      padding: 8px 12px;
-      border-radius: 6px;
-      color: #38bdf8;
-      word-break: break-all;
-      margin-bottom: 16px;
-    }
-
-    /* TOAST */
-    .toast {
-      position: fixed;
-      bottom: 24px;
-      left: 50%;
-      transform: translateX(-50%) translateY(20px);
-      opacity: 0;
-      background: rgba(15, 23, 42, 0.95);
-      border: 1px solid rgba(56, 189, 248, 0.4);
-      color: #fff;
-      padding: 10px 18px;
-      border-radius: 999px;
-      font-size: 0.82rem;
-      pointer-events: none;
-      transition: all 0.24s cubic-bezier(0.16, 1, 0.3, 1);
-      z-index: 9999;
-      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
-    }
-    .toast.show {
-      transform: translateX(-50%) translateY(0);
-      opacity: 1;
-    }
-    /* LIVE PEERS STYLES */
-    .live-peers-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-      gap: 10px;
-    }
-    .live-empty-peers {
-      grid-column: 1 / -1;
-      text-align: center;
-      padding: 22px 14px;
-      border: 1px dashed rgba(255,255,255,0.08);
-      border-radius: 12px;
-      background: rgba(255,255,255,0.015);
-    }
-    .radar-pulse {
-      width: 34px;
-      height: 34px;
-      border-radius: 50%;
-      background: rgba(56, 189, 248, 0.2);
-      border: 2px solid #38bdf8;
-      margin: 0 auto;
-      animation: radar-anim 2s infinite ease-out;
-    }
-    @keyframes radar-anim {
-      0% { transform: scale(0.8); opacity: 0.8; box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.6); }
-      70% { transform: scale(1.1); opacity: 1; box-shadow: 0 0 0 12px rgba(56, 189, 248, 0); }
-      100% { transform: scale(0.8); opacity: 0.8; }
-    }
-    .peer-card {
-      background: rgba(255,255,255,0.03);
-      border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 12px;
-      padding: 12px 10px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      text-align: center;
-      transition: all 0.2s ease;
-      cursor: pointer;
-    }
-    .peer-card:hover {
-      background: rgba(14, 165, 233, 0.08);
-      border-color: rgba(56, 189, 248, 0.4);
-      transform: translateY(-2px);
-    }
-    .peer-avatar {
-      width: 42px;
-      height: 42px;
-      border-radius: 50%;
-      background: rgba(14, 165, 233, 0.15);
-      color: #38bdf8;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 1.35rem;
-      margin-bottom: 6px;
-    }
-    .peer-name {
-      font-size: 0.82rem;
-      font-weight: 600;
-      color: #f1f5f9;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      max-width: 100%;
-    }
-    .peer-ip {
-      font-size: 0.7rem;
-      color: #94a3b8;
-      margin: 2px 0 8px;
-    }
-    .peer-actions-btn-group {
-      display: flex;
-      gap: 6px;
-      width: 100%;
-    }
-    .peer-send-btn {
-      flex: 1;
-      background: rgba(14, 165, 233, 0.2);
-      border: 1px solid rgba(14, 165, 233, 0.4);
-      color: #38bdf8;
-      font-size: 0.72rem;
-      font-weight: 600;
-      padding: 6px 4px;
-      border-radius: 6px;
-      cursor: pointer;
-      transition: all 0.15s ease;
-      white-space: nowrap;
-    }
-    .peer-send-btn:hover {
-      background: #0284c7;
-      color: #fff;
-    }
-    .peer-send-btn.folder {
-      background: rgba(245, 158, 11, 0.15);
-      border-color: rgba(245, 158, 11, 0.35);
-      color: #fbbf24;
-    }
-    .peer-send-btn.folder:hover {
-      background: #d97706;
-      color: #fff;
-    }
-    .peer-send-btn.multi {
-      width: 100%;
-      background: rgba(168, 85, 247, 0.15);
-      border-color: rgba(168, 85, 247, 0.35);
-      color: #c084fc;
-    }
-    .peer-send-btn.multi:hover {
-      background: #9333ea;
-      color: #fff;
-    }
-    .peer-card.dragover {
-      background: rgba(14, 165, 233, 0.25);
-      border-color: #38bdf8;
-      transform: scale(1.03);
-    }
-    .btn-upload-choice.multi {
-      background: rgba(168, 85, 247, 0.12);
-      border-color: rgba(168, 85, 247, 0.35);
-      color: #c084fc;
-    }
-    .btn-upload-choice.multi:hover {
-      background: rgba(168, 85, 247, 0.22);
-      border-color: #c084fc;
-    }
-    .mf-folder-item {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      background: rgba(255, 255, 255, 0.04);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 8px;
-      padding: 8px 12px;
-      font-size: 0.8rem;
-      color: #f1f5f9;
-    }
-    .mf-folder-info {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      flex: 1;
-    }
-    .mf-del-btn {
-      background: transparent;
-      border: none;
-      color: #ef4444;
-      cursor: pointer;
-      padding: 2px 6px;
-      font-size: 0.85rem;
-      border-radius: 4px;
-      transition: background 0.15s;
-    }
-    .mf-del-btn:hover {
-      background: rgba(239, 68, 68, 0.2);
-    }
-
-    .hidden { display: none !important; }
-  </style>
+  <link rel="stylesheet" href="/css/tokens.css">
+  <link rel="stylesheet" href="/assets/share.css?v=1">
+  <script>
+    /* Follow the dashboard's per-browser look (theme + accent); same origin => same localStorage. */
+    (function () {
+      var A = {azure:["#5B8CFF","#06101F","#5EEAD4","#3B63F0","#FFFFFF","#0EA5C6"],violet:["#A58BFF","#0E0820","#F0A6FF","#6D4AE0","#FFFFFF","#C04AE0"],
+               emerald:["#34D6A0","#03130C","#B7F34D","#0A7F58","#FFFFFF","#5BAA12"],coral:["#FF8A73","#1F0904","#FFC857","#C93A25","#FFFFFF","#E58A00"],
+               amber:["#F5B544","#1A1000","#FFE08A","#8A5A00","#FFFFFF","#C98A00"]};
+      var p = {};
+      try { p = JSON.parse(localStorage.getItem("qm.ui.prefs.v2") || "{}") || {}; } catch (e) {}
+      var th = p.theme === "light" ? "light" : p.theme === "auto" ? (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark") : "dark";
+      try { var own = localStorage.getItem("qm.share.theme"); if (own === "light" || own === "dark") th = own; } catch (e) {}
+      var r = document.documentElement; r.dataset.theme = th;
+      var c = A[p.accent] || A.azure, o = th === "light" ? 3 : 0;
+      r.style.setProperty("--accent", c[o]); r.style.setProperty("--accent-ink", c[o + 1]); r.style.setProperty("--accent-2", c[o + 2]);
+      document.addEventListener("DOMContentLoaded", function () {
+        var b = document.getElementById("theme-btn"); if (!b) return;
+        b.addEventListener("click", function () {
+          var n = r.dataset.theme === "light" ? "dark" : "light"; r.dataset.theme = n;
+          var k = A[p.accent] || A.azure, q = n === "light" ? 3 : 0;
+          r.style.setProperty("--accent", k[q]); r.style.setProperty("--accent-ink", k[q + 1]); r.style.setProperty("--accent-2", k[q + 2]);
+          try { localStorage.setItem("qm.share.theme", n); } catch (e) {}
+        });
+      });
+    })();
+  </script>
 </head>
 <body>
 
@@ -770,6 +55,9 @@
         </div>
       </div>
       <div class="header-actions">
+        <button class="btn-icon" id="theme-btn" type="button" title="Light / Dark" aria-label="Light / Dark">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path></svg>
+        </button>
         <button class="btn-icon" id="qr-btn" title="Open on Mobile / QR Code">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
             <rect x="3" y="3" width="7" height="7"></rect>
@@ -827,19 +115,19 @@
       <div class="section-title">
         <div style="display: flex; align-items: center; gap: 8px;">
           <span>Live Direct Transfer</span>
-          <span class="badge-lan" style="background: rgba(56, 189, 248, 0.15); color: #38bdf8;">
-            <span class="badge-dot" style="background: #38bdf8;"></span> Direct Wi-Fi
+          <span class="badge-lan" style="background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent);">
+            <span class="badge-dot" style="background: var(--accent);"></span> Direct Wi-Fi
           </span>
         </div>
         <span class="section-count" id="live-peers-count">0 online</span>
       </div>
-      <p style="font-size: 0.76rem; color: #94a3b8; margin: 0 0 12px;">Instant transfer from device to device over your local Wi-Fi at maximum speed.</p>
+      <p style="font-size: 0.76rem; color: var(--text-2); margin: 0 0 12px;">Instant transfer from device to device over your local Wi-Fi at maximum speed.</p>
       
       <div id="live-peers-list" class="live-peers-grid">
         <div class="live-empty-peers">
           <div class="radar-pulse"></div>
-          <div style="font-size: 0.82rem; font-weight: 500; color: #cbd5e1; margin-top: 10px;">Looking for nearby devices...</div>
-          <div style="font-size: 0.72rem; color: #64748b; margin-top: 2px;">Open Local Share on your phone, laptop, or tablet to stream directly.</div>
+          <div style="font-size: 0.82rem; font-weight: 500; color: var(--text-2); margin-top: 10px;">Looking for nearby devices...</div>
+          <div style="font-size: 0.72rem; color: var(--text-3); margin-top: 2px;">Open Local Share on your phone, laptop, or tablet to stream directly.</div>
         </div>
       </div>
     </section>
@@ -865,7 +153,7 @@
 
       <!-- BATCH ACTION BAR (Hidden until >= 1 file selected) -->
       <div class="batch-toolbar hidden" id="batch-toolbar">
-        <div style="font-size: 0.82rem; font-weight: 600; color: #38bdf8;">
+        <div style="font-size: 0.82rem; font-weight: 600; color: var(--accent);">
           <span id="batch-count-text">0 selected</span>
         </div>
         <div class="batch-actions-group">
@@ -899,7 +187,7 @@
   <div class="modal-backdrop hidden" id="qr-modal">
     <div class="modal-box">
       <h3 style="margin: 0 0 8px; font-size: 1.1rem;">Scan to Open on Mobile</h3>
-      <p style="margin: 0 0 12px; font-size: 0.78rem; color: #94a3b8;">Point your phone camera to open Local Share instantly</p>
+      <p style="margin: 0 0 12px; font-size: 0.78rem; color: var(--text-2);">Point your phone camera to open Local Share instantly</p>
       <div class="qr-container" id="qr-code-target"></div>
       <div class="modal-url" id="modal-url-display"></div>
       <button class="btn-primary" style="width: 100%;" id="qr-modal-close">Close</button>
@@ -909,15 +197,15 @@
   <!-- LIVE INCOMING PROMPT MODAL -->
   <div class="modal-backdrop hidden" id="live-incoming-modal">
     <div class="modal-box">
-      <div style="width: 48px; height: 48px; border-radius: 50%; background: rgba(56, 189, 248, 0.15); color: #38bdf8; display: flex; align-items: center; justify-content: center; margin: 0 auto 12px; font-size: 1.5rem;">
+      <div style="width: 48px; height: 48px; border-radius: 50%; background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); display: flex; align-items: center; justify-content: center; margin: 0 auto 12px; font-size: 1.5rem;">
         ⚡
       </div>
       <h3 style="margin: 0 0 4px; font-size: 1.05rem;">Direct Live Stream Request</h3>
-      <p style="font-size: 0.78rem; color: #94a3b8; margin: 0 0 14px;" id="incoming-sender-text">A device wants to send you a file directly</p>
+      <p style="font-size: 0.78rem; color: var(--text-2); margin: 0 0 14px;" id="incoming-sender-text">A device wants to send you a file directly</p>
       
-      <div style="background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 10px 12px; margin-bottom: 16px; text-align: left;">
-        <div style="font-weight: 600; font-size: 0.85rem; color: #f8fafc; word-break: break-all;" id="incoming-file-name">filename</div>
-        <div style="font-size: 0.74rem; color: #94a3b8; margin-top: 4px;" id="incoming-file-size">0 MB</div>
+      <div style="background: color-mix(in srgb, var(--text) 4%, transparent); border: 1px solid color-mix(in srgb, var(--text) 8%, transparent); border-radius: 8px; padding: 10px 12px; margin-bottom: 16px; text-align: left;">
+        <div style="font-weight: 600; font-size: 0.85rem; color: var(--text); word-break: break-all;" id="incoming-file-name">filename</div>
+        <div style="font-size: 0.74rem; color: var(--text-2); margin-top: 4px;" id="incoming-file-size">0 MB</div>
       </div>
 
       <div style="display: flex; gap: 8px; justify-content: center;">
@@ -931,27 +219,27 @@
   <div class="modal-backdrop hidden" id="live-transfer-modal">
     <div class="modal-box">
       <h3 style="margin: 0 0 4px; font-size: 1.05rem;" id="live-modal-title">Direct Transfer...</h3>
-      <p style="font-size: 0.76rem; color: #38bdf8; margin: 0 0 10px;">● Direct Wi-Fi Transfer (نقل مباشر فائق السرعة)</p>
+      <p style="font-size: 0.76rem; color: var(--accent); margin: 0 0 10px;">● Direct Wi-Fi Transfer (نقل مباشر فائق السرعة)</p>
 
-      <div id="live-modal-screen-warning" style="font-size: 0.72rem; color: #fbbf24; background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.25); border-radius: 6px; padding: 6px 10px; margin-bottom: 12px; display: flex; align-items: center; gap: 6px; text-align: left;">
+      <div id="live-modal-screen-warning" style="font-size: 0.72rem; color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 25%, transparent); border-radius: 6px; padding: 6px 10px; margin-bottom: 12px; display: flex; align-items: center; gap: 6px; text-align: left;">
         <span>💡</span>
         <span>Keep screen on & browser open during transfer (يرجى إبقاء الشاشة مفتوحة)</span>
       </div>
 
-      <div style="font-size: 0.84rem; font-weight: 600; color: #f8fafc; word-break: break-all; margin-bottom: 6px;" id="live-modal-filename">filename</div>
-      <div style="display: flex; justify-content: space-between; font-size: 0.76rem; color: #94a3b8; margin-bottom: 6px;">
+      <div style="font-size: 0.84rem; font-weight: 600; color: var(--text); word-break: break-all; margin-bottom: 6px;" id="live-modal-filename">filename</div>
+      <div style="display: flex; justify-content: space-between; font-size: 0.76rem; color: var(--text-2); margin-bottom: 6px;">
         <span id="live-modal-stats">0%</span>
         <span id="live-modal-speed">0 MB/s</span>
       </div>
 
-      <div class="prog-bar-wrap" style="height: 8px; margin-bottom: 16px; background: rgba(255,255,255,0.08); border-radius: 4px; overflow: hidden;">
-        <div class="prog-bar-fill" id="live-modal-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #0284c7, #38bdf8); transition: width 0.1s linear;"></div>
+      <div class="prog-bar-wrap" style="height: 8px; margin-bottom: 16px; background: color-mix(in srgb, var(--text) 8%, transparent); border-radius: 4px; overflow: hidden;">
+        <div class="prog-bar-fill" id="live-modal-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width 0.1s linear;"></div>
       </div>
 
       <div id="live-modal-actions" style="display: flex; gap: 8px; justify-content: center; flex-wrap: wrap;">
         <button type="button" class="btn-action del" id="btn-cancel-transfer" style="padding: 8px 18px; font-size: 0.8rem;">Cancel Transfer</button>
-        <button type="button" class="btn-action ok hidden" id="btn-live-save-download" style="padding: 8px 18px; font-size: 0.82rem; background: #0284c7; color: #fff; font-weight: 600;">💾 Save / Download</button>
-        <button type="button" class="btn-action hidden" id="btn-live-close-done" style="padding: 8px 18px; font-size: 0.82rem; background: #334155; color: #fff;">Done</button>
+        <button type="button" class="btn-action ok hidden" id="btn-live-save-download" style="padding: 8px 18px; font-size: 0.82rem; background: var(--accent); color: var(--accent-ink); font-weight: 600;">💾 Save / Download</button>
+        <button type="button" class="btn-action hidden" id="btn-live-close-done" style="padding: 8px 18px; font-size: 0.82rem; background: var(--surface-3); color: var(--text);">Done</button>
       </div>
     </div>
   </div>
@@ -963,21 +251,21 @@
         <h3 style="margin: 0; font-size: 1.05rem; display: flex; align-items: center; gap: 8px;">
           <span>📂</span> <span id="mf-modal-title">Selected Folders</span>
         </h3>
-        <span class="badge-lan" id="mf-modal-target-badge" style="display: none; background: rgba(56, 189, 248, 0.15); color: #38bdf8;">To: Device</span>
+        <span class="badge-lan" id="mf-modal-target-badge" style="display: none; background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent);">To: Device</span>
       </div>
-      <p style="font-size: 0.77rem; color: #94a3b8; margin: 0 0 12px;" id="mf-modal-hint">
+      <p style="font-size: 0.77rem; color: var(--text-2); margin: 0 0 12px;" id="mf-modal-hint">
         You can add more folders to bundle and transfer them together:
       </p>
 
       <div id="mf-folder-list" style="max-height: 180px; overflow-y: auto; margin-bottom: 12px; display: flex; flex-direction: column; gap: 6px;"></div>
 
-      <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.78rem; color: #cbd5e1; margin-bottom: 16px; padding: 7px 12px; background: rgba(255,255,255,0.04); border-radius: 8px; border: 1px solid rgba(255,255,255,0.06);">
+      <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.78rem; color: var(--text-2); margin-bottom: 16px; padding: 7px 12px; background: color-mix(in srgb, var(--text) 4%, transparent); border-radius: 8px; border: 1px solid color-mix(in srgb, var(--text) 6%, transparent);">
         <span id="mf-total-count">0 folders, 0 files</span>
-        <span id="mf-total-size" style="font-weight: 600; color: #38bdf8;">0 B</span>
+        <span id="mf-total-size" style="font-weight: 600; color: var(--accent);">0 B</span>
       </div>
 
       <div style="display: flex; gap: 8px; justify-content: flex-end;">
-        <button type="button" class="btn-action" id="mf-btn-add-more" style="background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.35); color: #fbbf24; padding: 8px 12px; font-size: 0.78rem; font-weight: 600; border-radius: 6px; cursor: pointer;">
+        <button type="button" class="btn-action" id="mf-btn-add-more" style="background: color-mix(in srgb, var(--warn) 15%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent); color: var(--warn); padding: 8px 12px; font-size: 0.78rem; font-weight: 600; border-radius: 6px; cursor: pointer;">
           + Add Another Folder
         </button>
         <button type="button" class="btn-primary" id="mf-btn-confirm" style="padding: 8px 16px; font-size: 0.8rem; font-weight: 600;">
@@ -1165,7 +453,7 @@
     function renderTextContent(text) {
       const escaped = escapeHtml(text);
       const urlRegex = /(https?:\/\/[^\s]+)/g;
-      return escaped.replace(urlRegex, (url) => `<a href="${url}" target="_blank" rel="noopener noreferrer" style="color: #38bdf8; text-decoration: underline;">${url}</a>`);
+      return escaped.replace(urlRegex, (url) => `<a href="${url}" target="_blank" rel="noopener noreferrer" style="color: var(--accent); text-decoration: underline;">${url}</a>`);
     }
 
     // MULTI-SELECTION LOGIC
@@ -1558,8 +846,8 @@
             <div class="mf-folder-info">
               <span style="font-size: 1.15rem;">📁</span>
               <div style="overflow: hidden; text-overflow: ellipsis;">
-                <div style="font-weight: 600; color: #f8fafc; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(f.name)}</div>
-                <div style="font-size: 0.72rem; color: #94a3b8;">${f.files.length} files • ${formatBytes(fSize)}</div>
+                <div style="font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis;">${escapeHtml(f.name)}</div>
+                <div style="font-size: 0.72rem; color: var(--text-2);">${f.files.length} files • ${formatBytes(fSize)}</div>
               </div>
             </div>
             <button type="button" class="mf-del-btn" data-del-idx="${idx}" title="Remove folder">✕</button>
@@ -2019,8 +1307,8 @@
         container.innerHTML = `
           <div class="live-empty-peers">
             <div class="radar-pulse"></div>
-            <div style="font-size: 0.84rem; font-weight: 500; color: #cbd5e1; margin-top: 10px;">Waiting for other devices on your Wi-Fi...</div>
-            <div style="font-size: 0.73rem; color: #64748b; margin-top: 2px;">Open Local Share on your other phone or PC to transfer directly over Wi-Fi.</div>
+            <div style="font-size: 0.84rem; font-weight: 500; color: var(--text-2); margin-top: 10px;">Waiting for other devices on your Wi-Fi...</div>
+            <div style="font-size: 0.73rem; color: var(--text-3); margin-top: 2px;">Open Local Share on your other phone or PC to transfer directly over Wi-Fi.</div>
           </div>
         `;
         return;
@@ -2319,7 +1607,7 @@
         }
         updateLiveProgressThrottled(activeTransfer.size, activeTransfer.size, activeTransfer.startTime, true);
         $("live-modal-title").textContent = "Transfer Complete! 🎉";
-        $("live-modal-bar").style.background = "#10b981";
+        $("live-modal-bar").style.background = "var(--ok)";
         await new Promise(r => setTimeout(r, 600));
         finishLiveTransfer(`File "${activeTransfer.name}" sent directly!`);
       }
@@ -2358,7 +1646,7 @@
         const warnEl = $("live-modal-screen-warning");
         if (warnEl) warnEl.style.display = "none";
         $("live-modal-bar").style.width = "100%";
-        $("live-modal-bar").style.background = "#10b981";
+        $("live-modal-bar").style.background = "var(--ok)";
         $("live-modal-stats").textContent = `100% (${formatBytes(activeTransfer.size)})`;
         $("live-modal-speed").textContent = "Saved to Downloads ⚡";
         const cancelBtn = $("btn-cancel-transfer");
@@ -2408,7 +1696,7 @@
       const warnEl = $("live-modal-screen-warning");
       if (warnEl) warnEl.style.display = "none";
       $("live-modal-bar").style.width = "100%";
-      $("live-modal-bar").style.background = "#10b981";
+      $("live-modal-bar").style.background = "var(--ok)";
       $("live-modal-stats").textContent = `100% (${formatBytes(blob.size)})`;
       $("live-modal-speed").textContent = "Done ⚡";
 
@@ -2435,7 +1723,7 @@
       $("live-modal-title").textContent = title;
       $("live-modal-filename").textContent = filename;
       $("live-modal-bar").style.width = "0%";
-      $("live-modal-bar").style.background = "linear-gradient(90deg, #0284c7, #38bdf8)";
+      $("live-modal-bar").style.background = "linear-gradient(90deg, var(--accent), var(--accent-2))";
       $("live-modal-stats").textContent = `0% (0 B / ${formatBytes(size)})`;
       $("live-modal-speed").textContent = "0 B/s";
       const warnEl = $("live-modal-screen-warning");

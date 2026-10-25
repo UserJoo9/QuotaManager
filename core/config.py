@@ -66,6 +66,17 @@ class DhcpConfig:
     #: The box's static uplink IP + prefix on the router's LAN (e.g. 192.168.1.110/24).
     uplink_ip: str = ""
     lan_cidr: int = 24
+    #: IPv6 Dual-Stack settings
+    ipv6_enable: bool = True
+    ipv6_prefix: str = "fd00:da7a:2::/64"
+    ipv6_gateway: str = "fd00:da7a:2::1"
+    ipv6_pool_start: str = "::100"
+    ipv6_pool_end: str = "::ffff"
+    ipv6_enable_ra: bool = True
+    #: How often the ISP-IPv6 reachability probe runs (seconds). Short on
+    #: purpose: it is one TCP connect, and the verdict opens/closes the IPv6
+    #: WAN gate — a day-long gap would leave clients stalled on a dead route.
+    ipv6_probe_interval_s: float = 600.0
 
 
 @dataclass
@@ -243,6 +254,10 @@ class HistoryConfig:
     #: overrides; NULL = this value). History older than the cutoff is pruned
     #: hourly, so the DB stays bounded.
     retention_days: int = 7
+    #: Ask the public IP registry (RDAP) who owns a destination IP that has no
+    #: DNS / reverse-DNS name, so Live traffic shows e.g. "Telegram Messenger"
+    #: instead of a bare address. Only the destination IP leaves the box.
+    ip_owner_lookup: bool = True
 
 
 @dataclass

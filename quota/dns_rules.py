@@ -403,23 +403,34 @@ def device_tag(device_id: int) -> str:
 
 
 def render_tags(devices: Iterable[Any],
-                static_leases: Optional[dict[str, str]] = None) -> str:
+                static_leases: Optional[dict[str, Any]] = None) -> str:
     """Bind every known MAC to its own DHCP tag (``qmdev<id>``), and assign
-    static IP reservations when configured.
+    static IP reservations (IPv4 and optional IPv6) when configured.
 
     This is what makes per-device rules possible at all: dnsmasq selects
     config lines by tag, and a tag is assigned per-MAC via ``dhcp-host``.
-    If a static IP is reserved for that MAC (from ``static_leases``: mac->ip),
-    dnsmasq allows specifying the tag and IP together:
-    ``dhcp-host=<mac>,set:qmdev<id>,<ip>``.
+    If a static IP is reserved for that MAC (from ``static_leases``: mac->ip or mac->(ip, ip6)),
+    dnsmasq allows specifying the tag and IPs together:
+    ``dhcp-host=<mac>,set:qmdev<id>,<ip>,[<ip6>]``.
     Static leases for arbitrary MACs not yet in ``devices`` are also rendered
-    as ``dhcp-host=<mac>,<ip>``.
+    as ``dhcp-host=<mac>,<ip>,[<ip6>]``.
     """
     lines = [
         "# Quota Manager — generated, do not edit by hand.",
         "# Binds every known device MAC to its own dnsmasq tag and optional static IP reservation.",
     ]
-    static_map = {m.lower(): ip for m, ip in (static_leases or {}).items()}
+    # static_leases can be {mac: ip} or {mac: {"ip": ip, "ip6": ip6}} or {mac: (ip, ip6)}
+    static_map: dict[str, tuple[str, str]] = {}
+    if static_leases:
+        for m, val in static_leases.items():
+            if isinstance(val, dict):
+                static_map[m.lower()] = (str(val.get("ip") or "").strip(), str(val.get("ip6") or "").strip())
+            elif isinstance(val, (tuple, list)):
+                static_map[m.lower()] = (str(val[0] if len(val) > 0 else "").strip(),
+                                         str(val[1] if len(val) > 1 else "").strip())
+            else:
+                static_map[m.lower()] = (str(val or "").strip(), "")
+
     seen_macs: set[str] = set()
 
     for dev in devices:
@@ -429,16 +440,32 @@ def render_tags(devices: Iterable[Any],
             continue
         mac_lower = mac.lower()
         seen_macs.add(mac_lower)
-        static_ip = static_map.get(mac_lower)
-        if static_ip and _is_safe_config_token(static_ip):
-            lines.append(f"dhcp-host={mac},set:{device_tag(dev_id)},{static_ip}")
+        static_entry = static_map.get(mac_lower)
+        ip_parts = []
+        if static_entry:
+            ip4, ip6 = static_entry
+            if ip4 and _is_safe_config_token(ip4):
+                ip_parts.append(ip4)
+            if ip6 and _is_safe_config_token(ip6):
+                clean_ip6 = ip6 if (ip6.startswith("[") and ip6.endswith("]")) else f"[{ip6}]"
+                ip_parts.append(clean_ip6)
+
+        if ip_parts:
+            lines.append(f"dhcp-host={mac},set:{device_tag(dev_id)},{','.join(ip_parts)}")
         else:
             lines.append(f"dhcp-host={mac},set:{device_tag(dev_id)}")
 
     # Unmanaged or standalone static leases (MACs not registered as quota devices)
-    for mac_lower, ip in sorted(static_map.items()):
-        if mac_lower not in seen_macs and _is_safe_config_token(mac_lower) and _is_safe_config_token(ip):
-            lines.append(f"dhcp-host={mac_lower},{ip}")
+    for mac_lower, (ip4, ip6) in sorted(static_map.items()):
+        if mac_lower not in seen_macs and _is_safe_config_token(mac_lower):
+            ip_parts = []
+            if ip4 and _is_safe_config_token(ip4):
+                ip_parts.append(ip4)
+            if ip6 and _is_safe_config_token(ip6):
+                clean_ip6 = ip6 if (ip6.startswith("[") and ip6.endswith("]")) else f"[{ip6}]"
+                ip_parts.append(clean_ip6)
+            if ip_parts:
+                lines.append(f"dhcp-host={mac_lower},{','.join(ip_parts)}")
 
     return "\n".join(lines) + "\n"
 

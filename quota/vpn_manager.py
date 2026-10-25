@@ -34,6 +34,7 @@ from quota.db import Database, VpnNode
 from quota.vpn_parser import (
     find_sing_box_binary,
     generate_sing_box_config,
+    pin_server_hostnames,
     validate_sing_box_config,
 )
 
@@ -207,6 +208,8 @@ class VpnManager:
                     mixed_port=getattr(self, "mixed_port", 2081),
                     allow_insecure=allow_insecure,
                 )
+            # Resolve the server's hostname BEFORE the TUN exists (see the helper).
+            config_dict = await asyncio.to_thread(pin_server_hostnames, config_dict)
         except Exception as e:
             msg = f"Failed to assemble sing-box config: {e}"
             self.state = STATE_ERROR

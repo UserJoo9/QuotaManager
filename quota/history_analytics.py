@@ -15,6 +15,27 @@ from typing import Any
 
 from quota.db import Database
 
+#: Below this combined LAN throughput the whole network is "idle": a lone
+#: device at 40 Kbps would otherwise show a misleading ~98 % "share" simply
+#: because it is the only one making noise. The share is a *relative* figure
+#: (device ÷ everyone's current traffic) — it is only meaningful when there is
+#: real traffic to divide.
+LIVE_IDLE_NET_BPS = 100_000
+
+#: How many recently-contacted sites each Live-traffic row/hero lists.
+LIVE_TOP_SITES = 4
+
+
+def _is_displayable_site(name: str) -> bool:
+    """A real, user-meaningful site: has a dot, is not reverse-DNS / local noise
+    / an IP literal (e.g. a bare ``direct`` or ``1.0.168.192.in-addr.arpa``)."""
+    n = (name or "").strip().lower().rstrip(".")
+    if "." not in n:
+        return False
+    if n.endswith((".arpa", ".local", ".lan", ".localdomain", ".internal", ".home.arpa")):
+        return False
+    return not n.replace(".", "").isdigit()
+
 # Service definitions: (Pattern list, Display Name, Category, Brand Color, Icon identifier)
 KNOWN_SERVICES: list[tuple[list[str], str, str, str, str]] = [
     (
@@ -276,10 +297,20 @@ async def get_live_traffic_analytics(
     live: Any,
     users: dict[int, str] | None = None,
     selected_device_id: int | None = None,
+    ip6_by_mac: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Compile real-time bandwidth consumption ranking, top consumer, and active apps per device."""
     now_ts = time.time()
     users_map = users or {}
+
+    # The counters in ``live`` are the bytes moved since the PREVIOUS flush, so
+    # the speed is bytes / the real window between flushes (not a fixed 15 s).
+    # A snapshot older than a few windows is stale (maintenance loop stuck) —
+    # report zero rather than a frozen, made-up speed.
+    window_s = float(getattr(live, "interval_s", 15.0) or 15.0)
+    window_s = min(120.0, max(1.0, window_s))
+    live_ts = float(getattr(live, "ts", 0.0) or 0.0)
+    snapshot_stale = bool(live_ts) and (now_ts - live_ts) > max(45.0, 3 * window_s)
 
     target_devices = [
         d for d in devices
@@ -293,10 +324,24 @@ async def get_live_traffic_analytics(
         live_c = getattr(live, "by_ip", {}).get(ip) if ip else None
         live_up = getattr(live_c, "up", 0) if live_c else 0
         live_down = getattr(live_c, "down", 0) if live_c else 0
+        # dual-stack: add the device's IPv6 counters (snapshot keys by address)
+        for ip6, mac6 in (getattr(live, "ip_to_mac", None) or {}).items():
+            if ":" in ip6 and mac6 == dev.mac:
+                c6 = getattr(live, "by_ip", {}).get(ip6)
+                if c6:
+                    live_up += getattr(c6, "up", 0)
+                    live_down += getattr(c6, "down", 0)
+        # LOCAL (LAN) traffic of this device in the same window (monitoring only)
+        lan_c = (getattr(live, "lan_by_ip", None) or {}).get(ip) if ip else None
+        lan_up = getattr(lan_c, "up", 0) if lan_c else 0
+        lan_down = getattr(lan_c, "down", 0) if lan_c else 0
+        if snapshot_stale:
+            live_up = live_down = 0
+            lan_up = lan_down = 0
 
-        # Estimated instantaneous speed based on 15s maintenance flush delta
-        down_bps = int((live_down * 8) / 15.0) if live_down else 0
-        up_bps = int((live_up * 8) / 15.0) if live_up else 0
+        # Average speed over the real flush window
+        down_bps = int((live_down * 8) / window_s) if live_down else 0
+        up_bps = int((live_up * 8) / window_s) if live_up else 0
         total_bps = down_bps + up_bps
 
         # Determine what this device is currently accessing ("ساحبه ف ايه")
@@ -311,58 +356,31 @@ async def get_live_traffic_analytics(
             WHERE device_id = ? AND bucket_minute >= ?
             GROUP BY domain
             ORDER BY hits DESC, last_seen DESC
-            LIMIT 10
+            LIMIT 40
             """,
             (dev.id, live_cutoff)
         )
 
-        active_app = None
-        recent_domains = []
+        # Sites this device RECENTLY looked up (DNS, last 5 min): collapsed to the
+        # base domain, hits summed, most-queried first, top LIVE_TOP_SITES kept.
+        # Deliberately NOT presented as "the app using the bandwidth": DNS shows
+        # what was contacted, not where the bytes went, so no app name is guessed
+        # and the UI shows several sites (a device often runs more than one service).
+        site_hits: dict[str, int] = {}
         for r in recent_rows:
-            d_name = r["domain"]
-            recent_domains.append(d_name)
-            if not active_app:
-                svc = classify_domain(d_name)
-                if svc:
-                    active_app = {
-                        "name": svc[0],
-                        "category": svc[1],
-                        "color": svc[2],
-                        "icon": svc[3],
-                        "domain": d_name,
-                    }
-
-        if not active_app:
-            if recent_domains:
-                base = get_base_domain(recent_domains[0])
-                active_app = {
-                    "name": base,
-                    "category": "Web Browsing",
-                    "color": "#38BDF8",
-                    "icon": "globe",
-                    "domain": recent_domains[0],
-                }
-            elif total_bps > 100_000:
-                active_app = {
-                    "name": "Direct Download / Stream",
-                    "category": "High-Speed Transfer",
-                    "color": "#38BDF8",
-                    "icon": "download",
-                    "domain": "direct stream / tcp connection",
-                }
-            else:
-                active_app = {
-                    "name": "Idle / Background",
-                    "category": "Network Traffic",
-                    "color": "#64748B",
-                    "icon": "activity",
-                    "domain": ip or "direct",
-                }
+            base = get_base_domain(r["domain"]) or r["domain"]
+            if not _is_displayable_site(base):
+                continue
+            site_hits[base] = site_hits.get(base, 0) + int(r["hits"] or 0)
+        ranked_sites = sorted(site_hits.items(), key=lambda kv: kv[1], reverse=True)
+        recent_sites = [{"domain": d, "hits": n} for d, n in ranked_sites[:LIVE_TOP_SITES]]
+        recent_domains = [x["domain"] for x in recent_sites]
 
         device_results.append({
             "id": dev.id,
             "name": dev.name,
             "ip": ip,
+            "ip6": (ip6_by_mac or {}).get((dev.mac or "").lower(), ""),
             "mac": dev.mac,
             "user_id": dev.user_id,
             "user_name": users_map.get(dev.user_id, ""),
@@ -371,8 +389,14 @@ async def get_live_traffic_analytics(
             "down_bps": down_bps,
             "up_bps": up_bps,
             "total_bps": total_bps,
-            "active_app": active_app,
-            "recent_domains": recent_domains[:4],
+            "lan_down_bps": int((lan_down * 8) / window_s) if lan_down else 0,
+            "lan_up_bps": int((lan_up * 8) / window_s) if lan_up else 0,
+            "recent_domains": recent_domains,
+            "recent_sites": recent_sites,
+            # where the bytes actually went in the last window (conntrack); [] when
+            # unavailable or the device is quiet — the UI then falls back to DNS sites
+            "top_destinations": ([] if snapshot_stale else list(
+                (getattr(live, "flows_by_mac", None) or {}).get(dev.mac, []))),
         })
 
     # Sort devices by total bandwidth descending
@@ -384,14 +408,17 @@ async def get_live_traffic_analytics(
     total_down_bps = sum(d["down_bps"] for d in device_results)
     total_up_bps = sum(d["up_bps"] for d in device_results)
     net_total_bps = total_down_bps + total_up_bps
+    is_idle = net_total_bps < LIVE_IDLE_NET_BPS
 
-    # Compute bandwidth share %
+    # Bandwidth share % — a RELATIVE figure (this device ÷ all devices right
+    # now). On an idle line it is noise, so it is reported as 0 and flagged.
     for d in device_results:
         d["share_pct"] = (
             round((d["total_bps"] / max(1, net_total_bps)) * 100, 1)
-            if net_total_bps > 0
+            if (net_total_bps > 0 and not is_idle)
             else 0.0
         )
+        d["is_idle"] = is_idle
 
     # Top consumer is the #1 active device
     top_consumer = (
@@ -404,7 +431,12 @@ async def get_live_traffic_analytics(
         "timestamp": now_ts,
         "total_down_bps": total_down_bps,
         "total_up_bps": total_up_bps,
+        "total_lan_down_bps": sum(d["lan_down_bps"] for d in device_results),
+        "total_lan_up_bps": sum(d["lan_up_bps"] for d in device_results),
         "net_total_bps": net_total_bps,
+        "is_idle": is_idle,
+        "idle_threshold_bps": LIVE_IDLE_NET_BPS,
+        "window_s": window_s,
         "top_consumer": top_consumer,
         "devices": device_results,
     }

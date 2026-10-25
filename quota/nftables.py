@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from ipaddress import ip_address, ip_network
 from typing import Any, Callable
@@ -89,8 +90,13 @@ def _default_run_command(argv: list[str]) -> tuple[int, str]:
 
 
 def _counter_name(ip: str, direction: str) -> str:
-    """nft identifier for a device's counter (dots are not allowed)."""
-    return f"q_{direction}_{ip.replace('.', '_')}"
+    """nft identifier for a device's counter (dots and colons are not allowed)."""
+    return f"q_{direction}_{ip.replace('.', '_').replace(':', '_')}"
+
+
+def _lan_counter_name(ip: str, direction: str) -> str:
+    """Counter for a device's LOCAL (LAN) traffic: ``q_lup_<ip>`` / ``q_ldn_<ip>``."""
+    return f"q_l{direction}_{ip.replace('.', '_')}"
 
 
 def _cidr(value: str) -> str | None:
@@ -204,6 +210,9 @@ def _which_network(networks: list[str], host: str) -> str | None:
     return None
 
 
+_MAC_RE = re.compile(r"^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$")
+
+
 class NftablesEngine:
     """Linux (nftables) accounting + hard-block engine.
 
@@ -262,12 +271,27 @@ class NftablesEngine:
         self._blocked: dict[str, bool] = {}
         #: IPs most recently programmed into the kernel `blocked` set.
         self._last_blocked_ips: list[str] = []
+        ipv6_pfx = (getattr(dhcp_cfg, "ipv6_prefix", "fd00:da7a:2::/64") or "fd00:da7a:2::/64").strip()
+        self._ipv6_prefix = ipv6_pfx
+        self._local_networks6 = sorted({"fe80::/10", "fd00::/8", "ff00::/8", ipv6_pfx})
+        self._last_blocked6_ips: list[str] = []
+        #: Is the ISP's IPv6 reachable (probe verdict)? None = never programmed.
+        #: While False the ``v6gate`` chain answers every client IPv6 packet
+        #: bound for the internet with ICMPv6 "no route", so apps fall back to
+        #: IPv4 instantly instead of stalling on a black-holed default route.
+        self._ipv6_wan_active: bool | None = None
         #: MACs most recently programmed into the kernel `blocked_macs` set
         #: (lease-less / static-IP devices are cut by ethernet address — see
         #: :meth:`_sync_blocked_macs`).
         self._last_blocked_macs: list[str] = []
         #: IPs whose counter rules exist in the kernel.
         self._installed: set[str] = set()
+        #: IPs whose LAN-monitoring counters exist; ``_last_lan`` is their
+        #: delta baseline; ``_lan_carried`` = counters that survived a restart
+        #: (their first reading is a baseline, not new usage).
+        self._lan_installed: set[str] = set()
+        self._lan_carried: set[str] = set()
+        self._last_lan: dict[str, EngineCounters] = {}
         #: last-seen kernel byte totals per IP (for delta computation).
         self._last: dict[str, EngineCounters] = {}
         #: Account the box's OWN internet (input/output hooks, q_gw_up/q_gw_down)
@@ -299,14 +323,21 @@ class NftablesEngine:
         # device rules or a stale blocked set from a previous process.
         self._installed = set()
         self._last = {}
+        self._lan_installed = set()
+        self._lan_carried = set()
+        self._last_lan = {}
         self._last_blocked_ips = []
+        self._last_blocked6_ips = []
         self._last_blocked_macs = []
+        self._ipv6_wan_active = None
         self._run(["add", "table", f"{FAMILY} {self.table}"])
         self._run(["flush", "table", f"{FAMILY} {self.table}"])
         self._run(["add", "chain", f"{FAMILY} {self.table} forward",
                    "{ type filter hook forward priority 0; policy accept; }"])
         self._run(["add", "set", f"{FAMILY} {self.table} blocked",
                    "{ type ipv4_addr; }"])
+        self._run(["add", "set", f"{FAMILY} {self.table} blocked6",
+                   "{ type ipv6_addr; }"])
         # MAC-keyed blocked set: drops devices whose IP is not in the lease
         # file (static-IP / lease-less quota-blocked devices). Matched by
         # ethernet address on both directions; LAN-excluded like the IP set.
@@ -316,6 +347,22 @@ class NftablesEngine:
         # forward chain, before the blocked drops + counters, so an intercepted
         # bypasser's packets are dropped before any counter can see them.
         self._program_gateway_lock()
+        # IPv6 WAN gate: every client IPv6 packet leaving for the internet jumps
+        # through ``v6gate``. Closed (default, until the probe says the ISP has
+        # IPv6) it rejects with ICMPv6 no-route => instant IPv4 fallback.
+        # Box protection: enabling IPv6 gives the box itself a global address
+        # from the ISP router, and the (IPv4-only) firewall never sees it. Drop
+        # NEW inbound tcp/udp from outside the LAN so ssh & co. are not exposed
+        # over IPv6. ICMPv6 (ND/RA) and DHCPv6 come from link-local and stay open.
+        self._run(["add", "chain", f"{FAMILY} {self.table} in6guard",
+                   "{ type filter hook input priority -10; policy accept; }"])
+        self._run(["add", "rule", f"{FAMILY} {self.table} in6guard",
+                   "meta nfproto ipv6 meta l4proto { tcp, udp } ct state new "
+                   "ip6 saddr != { ::1, fd00::/8, fe80::/10 } drop"])
+        self._run(["add", "chain", f"{FAMILY} {self.table} v6gate"])
+        self._run(["add", "rule", f"{FAMILY} {self.table} forward",
+                   "meta nfproto ipv6 jump v6gate"])
+        self.set_ipv6_wan(False)
         # A blocked device is cut from the INTERNET. The drop rules carry the
         # same local-net exclusions as the counters, so its LAN traffic (printer,
         # NAS, router admin) still flows — the quota gates the internet, not the
@@ -326,6 +373,13 @@ class NftablesEngine:
                             self._local_networks) + " drop"
         self._run(["add", "rule", f"{FAMILY} {self.table} forward", saddr_drop])
         self._run(["add", "rule", f"{FAMILY} {self.table} forward", daddr_drop])
+        # IPv6 drops: cut internet while preserving local LAN/ULA/link-local IPv6 access
+        saddr6_drop = _match("ip6 saddr @blocked6", "ip6 daddr",
+                             self._local_networks6) + " drop"
+        daddr6_drop = _match("ip6 daddr @blocked6", "ip6 saddr",
+                             self._local_networks6) + " drop"
+        self._run(["add", "rule", f"{FAMILY} {self.table} forward", saddr6_drop])
+        self._run(["add", "rule", f"{FAMILY} {self.table} forward", daddr6_drop])
         # MAC-based drops: the same cut for devices the IP set cannot see
         # (lease-less / static-IP). LAN traffic stays excluded both ways, so a
         # MAC-cut device keeps its LAN access (printer, NAS) exactly like an
@@ -338,6 +392,14 @@ class NftablesEngine:
                    mac_saddr_drop])
         self._run(["add", "rule", f"{FAMILY} {self.table} forward",
                    mac_daddr_drop])
+        mac6_saddr_drop = _match("ether saddr @blocked_macs", "ip6 daddr",
+                                 self._local_networks6) + " drop"
+        mac6_daddr_drop = _match("ether daddr @blocked_macs", "ip6 saddr",
+                                 self._local_networks6) + " drop"
+        self._run(["add", "rule", f"{FAMILY} {self.table} forward",
+                   mac6_saddr_drop])
+        self._run(["add", "rule", f"{FAMILY} {self.table} forward",
+                   mac6_daddr_drop])
         # Clamp TCP MSS to Path MTU on forwarded traffic (prevents VPN/PPPoE packet fragmentation)
         self._run_best_effort(["add", "rule", f"{FAMILY} {self.table} forward",
                                "tcp flags syn tcp option maxseg size set rt mtu"])
@@ -407,7 +469,10 @@ class NftablesEngine:
         # authoritative.
         blocked_ips = sorted(
             ip for ip, mac in ip_to_mac.items() if blocked.get(mac))
-        self._sync_blocked_ips(blocked_ips)
+        blocked_v4 = [ip for ip in blocked_ips if ":" not in ip]
+        blocked_v6 = [ip for ip in blocked_ips if ":" in ip]
+        self._sync_blocked_ips(blocked_v4)
+        self._sync_blocked6_ips(blocked_v6)
         # MAC-based drops are the SECOND enforcement channel, keyed by the
         # device's ethernet address instead of its lease: they cut devices
         # whose IP never entered ``ip_to_mac`` — a lease-less quota-blocked
@@ -452,6 +517,50 @@ class NftablesEngine:
             if ok:
                 self._last_blocked_ips = blocked_ips
 
+    def set_ipv6_wan(self, active: bool) -> None:
+        """Open (ISP IPv6 works) or close (it does not) the IPv6 WAN gate.
+
+        Cache-gated like the other setters: an unchanged verdict costs nothing,
+        and a failed program leaves the cache unset so the next tick retries.
+        """
+        if not self.available:
+            return
+        active = bool(active)
+        if active == self._ipv6_wan_active:
+            return
+        self._ipv6_wan_active = None
+        if not self._run(["flush", "chain", f"{FAMILY} {self.table} v6gate"]):
+            return
+        if not active:
+            local = ", ".join(self._local_networks6)
+            rule = (f"ip6 saddr {self._ipv6_prefix} ip6 daddr != {{ {local} }} "
+                    "reject with icmpv6 type no-route")
+            if not self._run(["add", "rule", f"{FAMILY} {self.table} v6gate", rule]):
+                return
+        self._ipv6_wan_active = active
+        log.info("nftables: IPv6 WAN gate %s", "open" if active else "closed (no-route)")
+
+    @property
+    def ipv6_wan_active(self) -> bool | None:
+        """Last IPv6-WAN verdict pushed to the kernel (None = never)."""
+        return self._ipv6_wan_active
+
+    def _sync_blocked6_ips(self, blocked6_ips: list[str]) -> None:
+        """Program the kernel ``blocked6`` set for leased, quota-blocked IPv6s."""
+        if blocked6_ips and blocked6_ips == self._last_blocked6_ips:
+            return
+        self._last_blocked6_ips = None
+        if self._run(["flush", "set", f"{FAMILY} {self.table} blocked6"]):
+            ok = True
+            for ip in blocked6_ips:
+                if not self._run(["add", "element",
+                                  f"{FAMILY} {self.table} blocked6",
+                                  f"{{ {ip} }}"]):
+                    ok = False
+                    break
+            if ok:
+                self._last_blocked6_ips = blocked6_ips
+
     def _sync_blocked_macs(self, blocked: dict[str, bool]) -> None:
         """Program the kernel ``blocked_macs`` set for every blocked device.
 
@@ -461,8 +570,10 @@ class NftablesEngine:
         cross the forward chain). Cache-gated exactly like the IP set: a
         same-set re-flush every tick would open a short unblock window.
         """
+        # Only real MACs: one malformed entry makes `nft add element` fail with
+        # "Invalid LL address", which used to switch the whole engine off.
         blocked_macs = sorted(m for m, b in blocked.items()
-                              if b and m != GATEWAY_MAC)
+                              if b and m != GATEWAY_MAC and _MAC_RE.match(m))
         if blocked_macs and blocked_macs == self._last_blocked_macs:
             return
         self._last_blocked_macs = None  # not yet committed; retry next tick
@@ -764,11 +875,27 @@ class NftablesEngine:
         )
         self._last_gateway = EngineCounters(up=gw_up, down=gw_down)
 
+        # LOCAL (LAN) monitoring counters: same delta logic, kept apart from the
+        # metered counters above (never part of quota math).
+        lan_by_ip: dict[str, EngineCounters] = {}
+        for ip in self._lan_installed:
+            lu = raw.get(_lan_counter_name(ip, "up"), 0)
+            ld = raw.get(_lan_counter_name(ip, "dn"), 0)
+            if ip in self._lan_carried and ip not in self._last_lan:
+                self._last_lan[ip] = EngineCounters(up=lu, down=ld)
+                continue
+            prev = self._last_lan.get(ip, EngineCounters())
+            cur = EngineCounters(up=max(0, lu - prev.up), down=max(0, ld - prev.down))
+            if cur.up or cur.down:
+                lan_by_ip[ip] = cur
+            self._last_lan[ip] = EngineCounters(up=lu, down=ld)
+
         return EngineSnapshot(
             by_ip=by_ip,
             ip_to_mac=dict(self._ip_to_mac),
             blocked=dict(self._blocked),
             gateway=gateway,
+            lan_by_ip=lan_by_ip,
             ts=now,
         )
 
@@ -837,8 +964,12 @@ class NftablesEngine:
             return False
         # Count only INTERNET-bound traffic: a packet to/from a local LAN
         # network must not match (and so must not consume the metered bundle).
-        up_match = _match(f"ip saddr {ip}", "ip daddr", self._local_networks)
-        down_match = _match(f"ip daddr {ip}", "ip saddr", self._local_networks)
+        if ":" in ip:
+            up_match = _match(f"ip6 saddr {ip}", "ip6 daddr", self._local_networks6)
+            down_match = _match(f"ip6 daddr {ip}", "ip6 saddr", self._local_networks6)
+        else:
+            up_match = _match(f"ip saddr {ip}", "ip daddr", self._local_networks)
+            down_match = _match(f"ip daddr {ip}", "ip saddr", self._local_networks)
         ok = self._run(["add", "rule", f"{FAMILY} {self.table} forward",
                         f"{up_match} counter name {up_name}"])
         ok &= self._run(["add", "rule", f"{FAMILY} {self.table} forward",
@@ -847,6 +978,48 @@ class NftablesEngine:
             return False
         self._installed.add(ip)
         log.info("nftables: watching device %s", ip)
+        if self._add_lan_counters(ip):
+            self._lan_carried.add(ip)
+        return carried
+
+    def _add_lan_counters(self, ip: str) -> bool:
+        """Best-effort LAN monitoring counters for one IPv4 device.
+
+        Counts the device's LOCAL traffic separately from the metered internet:
+        forward hook for client<->uplink-subnet hosts (router, NAS...), and the
+        input/output hooks for client<->box traffic (dashboard, share portal,
+        live transfer). These rules NEVER drop and are disjoint from the
+        internet counters (those exclude the local nets, these require them),
+        so a failure here only logs - it never disables the engine or the
+        quota accounting. Returns True when the counters already existed
+        (carried over a restart) so the caller can re-seed their baseline.
+        """
+        if ":" in ip or not self._local_networks or not self.available:
+            return False
+        up, down = (_lan_counter_name(ip, "up"), _lan_counter_name(ip, "dn"))
+        carried = False
+        for name in (up, down):
+            code, out = self._run_command(["nft", "add", "counter",
+                                           f"{FAMILY} {self.table}", name])
+            if code == 0:
+                continue
+            if any(s in out for s in ("File exists", "already exists")):
+                carried = True
+                continue
+            log.warning("nftables: LAN counter %s failed (monitoring off for "
+                        "%s): %s", name, ip, out.strip())
+            return False
+        nets = "{ " + ", ".join(self._local_networks) + " }"
+        rules = (
+            ("forward", f"ip saddr {ip} ip daddr {nets} counter name {up}"),
+            ("forward", f"ip daddr {ip} ip saddr {nets} counter name {down}"),
+            ("input", f"ip saddr {ip} counter name {up}"),
+            ("output", f"ip daddr {ip} counter name {down}"),
+        )
+        for chain, rule in rules:
+            self._run_best_effort(["add", "rule",
+                                   f"{FAMILY} {self.table} {chain}", rule])
+        self._lan_installed.add(ip)
         return carried
 
     def _reseed_baselines(self, ips: list[str]) -> None:

@@ -304,3 +304,68 @@ class TestEnsureNftablesConf:
         monkeypatch.setattr(mod, "_CONF_SYMLINK", symlink)
         monkeypatch.setattr(mod, "_CONF_TARGET", target)
         assert ensure_nftables_conf() is True
+
+
+class TestDualStackSelfHeal:
+    def test_nat66_rule_added_when_missing(self) -> None:
+        nft = FakeNftNat()
+        nft.tables.add(NFT_TABLE)
+        nft.rules[NFT_TABLE] = ["ip saddr 192.168.2.0/24 masquerade",
+                                "ip6 saddr fd00:da7a:2::/64 udp dport 53 redirect to :53",
+                                "ip6 saddr fd00:da7a:2::/64 tcp dport 53 redirect to :53"]
+        assert ensure_nat_table("192.168.2.0/24", ipv6_prefix="fd00:da7a:2::/64",
+                                run=nft) is True
+        added = [c[-1] for c in nft.calls if c[0:3] == ["nft", "add", "rule"]]
+        assert added == ["ip6 saddr fd00:da7a:2::/64 masquerade"]  # v4 rule untouched
+
+    def test_healthy_dual_stack_table_is_left_alone(self) -> None:
+        nft = FakeNftNat()
+        nft.tables.add(NFT_TABLE)
+        nft.rules[NFT_TABLE] = ["ip saddr 192.168.2.0/24 masquerade",
+                                "ip6 saddr fd00:da7a:2::/64 masquerade",
+                                "ip6 saddr fd00:da7a:2::/64 udp dport 53 redirect to :53",
+                                "ip6 saddr fd00:da7a:2::/64 tcp dport 53 redirect to :53"]
+        assert ensure_nat_table("192.168.2.0/24", ipv6_prefix="fd00:da7a:2::/64",
+                                run=nft) is True
+        assert [c for c in nft.calls if c[0:2] == ["nft", "add"]] == []
+
+    def test_readds_missing_ula_gateway_address(self, tmp_path: Path) -> None:
+        net = make_net(("eth0", "1", "1"))
+        line = "2: eth0    inet 192.168.2.1/24 brd x scope global eth0\n"
+        ip = FakeIp({ADDR_SHOW: (0, line), ADDR_SHOW_DEV: (0, line)})
+        ensure_network_infrastructure(
+            ipv6_gateway="fd00:da7a:2::1", gateway_ip="192.168.2.1", run=ip,
+            proc_ipforward=_fwd_on(tmp_path), sysfs_net=net)
+        assert ["ip", "-6", "addr", "add", "fd00:da7a:2::1/64", "dev", "eth0"] in ip.calls
+
+    def test_ula_gateway_present_is_not_readded(self, tmp_path: Path) -> None:
+        net = make_net(("eth0", "1", "1"))
+        line = "2: eth0    inet 192.168.2.1/24 brd x scope global eth0\n"
+        ip = FakeIp({
+            ADDR_SHOW: (0, line),
+            ADDR_SHOW_DEV: (0, line),
+            ("ip", "-o", "-6", "addr", "show", "dev", "eth0"):
+                (0, "2: eth0    inet6 fd00:da7a:2::1/64 scope global\n"),
+        })
+        ensure_network_infrastructure(
+            ipv6_gateway="fd00:da7a:2::1", gateway_ip="192.168.2.1", run=ip,
+            proc_ipforward=_fwd_on(tmp_path), sysfs_net=net)
+        assert not [c for c in ip.calls if c[:3] == ["ip", "-6", "addr"] and c[3] == "add"]
+
+    def test_ipv6_dns_redirect_added_to_old_prerouting_chain(self) -> None:
+        """An install from before IPv6 has a prerouting chain without the
+        IPv6 DNS redirect — it is added so IPv6 DNS can't bypass filtering."""
+        nft = FakeNftNat()
+        nft.tables.add(NFT_TABLE)
+        nft.rules[NFT_TABLE] = ["ip saddr 192.168.2.0/24 masquerade",
+                                "ip6 saddr fd00:da7a:2::/64 masquerade",
+                                "ip saddr 192.168.2.0/24 udp dport 53 redirect to :53"]
+        assert ensure_nat_table("192.168.2.0/24", ipv6_prefix="fd00:da7a:2::/64",
+                                run=nft) is True
+        added = [c[-1] for c in nft.calls if c[0:3] == ["nft", "add", "rule"]]
+        assert added == ["ip6 saddr fd00:da7a:2::/64 udp dport 53 redirect to :53",
+                         "ip6 saddr fd00:da7a:2::/64 tcp dport 53 redirect to :53"]
+        nft.calls.clear()
+        nft.rules[NFT_TABLE] += added                  # now healthy -> no re-add
+        ensure_nat_table("192.168.2.0/24", ipv6_prefix="fd00:da7a:2::/64", run=nft)
+        assert [c for c in nft.calls if c[0:3] == ["nft", "add", "rule"]] == []

@@ -2106,7 +2106,7 @@ def test_milestone_page_is_public(tmp_path):
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
     assert b"Quota" in r.content
-    assert "assets/styles.css?v=49" in r.text
+    assert "assets/pub.css" in r.text
     _get_loop().run_until_complete(database.close())
 
 
@@ -2155,7 +2155,7 @@ def test_report_page_respects_gate(tmp_path):
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
     assert b"Consumption report" in r.content
-    assert "assets/styles.css?v=49" in r.text
+    assert "assets/pub.css" in r.text
     assert _client_from(app, "8.8.8.8").get("/report").status_code == 403
     _get_loop().run_until_complete(database.close())
 
@@ -2349,6 +2349,11 @@ def test_live_traffic_analytics_endpoint(client):
     assert "devices" in data
     assert "total_down_bps" in data
     assert "top_consumer" in data
+    assert "is_idle" in data
+    assert data["is_idle"] is True  # with no heavy traffic, line is reported as idle
+    # the gateway remembers recent speed so a page refresh redraws the chart at once
+    assert isinstance(data["history"], list) and data["history"]
+    assert {"t", "down", "up", "lan_down", "lan_up"} <= set(data["history"][-1])
 
     # Filter by device_id
     r_dev = c.get(f"/api/history/live?device_id={dev_id}")
@@ -2356,7 +2361,45 @@ def test_live_traffic_analytics_endpoint(client):
     data_dev = r_dev.json()
     assert len(data_dev["devices"]) == 1
     assert data_dev["devices"][0]["id"] == dev_id
-    assert data_dev["devices"][0]["active_app"]["name"] == "YouTube"
+    # no guessed app name any more — only the recently looked-up (base) domains
+    assert "active_app" not in data_dev["devices"][0]
+    assert data_dev["devices"][0]["recent_domains"][:2] == ["googlevideo.com", "youtube.com"]
+    assert data_dev["devices"][0]["recent_sites"][0] == {"domain": "googlevideo.com", "hits": 25}
+    assert data_dev["devices"][0]["is_idle"] is True
+
+
+def test_device_ip6_in_dashboard_and_list(client):
+    """Devices in /api/dashboard and /api/devices expose ip6 address from static leases or dynamic ND."""
+    c, database, _ = client
+    _login(c)
+    run = _get_loop().run_until_complete
+
+    # Create a device
+    r = c.post("/api/devices", json={"mac": "11:22:33:44:55:66", "name": "DualStackPhone"})
+    assert r.status_code == 201
+
+    # Reserve static IPv4 + IPv6 for it
+    r_sl = c.post("/api/network/static-leases", json={
+        "mac": "11:22:33:44:55:66",
+        "ip": "192.168.2.77",
+        "ip6": "fd00:1234::77",
+        "hostname": "dualstack-phone"
+    })
+    assert r_sl.status_code == 200
+
+    # Also register lease in db so it's connected
+    run(database.set_lease("11:22:33:44:55:66", "192.168.2.77"))
+
+    # Fetch dashboard
+    dash = c.get("/api/dashboard").json()
+    target_dev = next(d for d in dash["devices"] if d["mac"] == "11:22:33:44:55:66")
+    assert target_dev["ip"] == "192.168.2.77"
+    assert target_dev["ip6"] == "fd00:1234::77"
+
+    # Fetch devices list
+    devs = c.get("/api/devices").json()
+    target_dev2 = next(d for d in devs if d["mac"] == "11:22:33:44:55:66")
+    assert target_dev2["ip6"] == "fd00:1234::77"
 
 
 # -- software updates (Admin tab) ----------------------------------------------
@@ -2725,3 +2768,152 @@ def test_network_vpn_speed_fields_roundtrip(client):
     assert (n["vpn_pct"], n["vpn_down_mbps"], n["vpn_up_mbps"]) == (90.0, 14.0, 1.2)
     c.post("/api/network", json={"vpn_pct": 500})
     assert c.get("/api/network").json()["vpn_pct"] == 100.0
+
+
+def test_static_leases_ipv6_roundtrip(client):
+    c, _, _ = client
+    _login(c)
+
+    # 1. Add static lease with both IPv4 and IPv6
+    res = c.post("/api/network/static-leases", json={
+        "mac": "aa:bb:cc:dd:ee:88",
+        "ip": "192.168.2.88",
+        "ip6": "fd00:da7a:2::88",
+        "hostname": "DualStackDevice",
+    })
+    assert res.status_code == 200
+    data = res.json()
+    assert data["mac"] == "aa:bb:cc:dd:ee:88"
+    assert data["ip"] == "192.168.2.88"
+    assert data["ip6"] == "fd00:da7a:2::88"
+
+    # 2. Check get_static_leases includes ip6
+    leases = c.get("/api/network/static-leases").json()
+    matched = [l for l in leases if l["mac"] == "aa:bb:cc:dd:ee:88"]
+    assert len(matched) == 1
+    assert matched[0]["ip6"] == "fd00:da7a:2::88"
+
+    # 3. Reject duplicate IPv6
+    res_dup = c.post("/api/network/static-leases", json={
+        "mac": "aa:bb:cc:dd:ee:99",
+        "ip": "192.168.2.99",
+        "ip6": "fd00:da7a:2::88",
+    })
+    assert res_dup.status_code == 400
+    assert "IPv6" in res_dup.json()["detail"]
+
+
+def test_ipv6_status_and_probe_endpoints(tmp_path):
+    class FakeIpv6Probe:
+        def __init__(self):
+            self.probed = False
+
+        def get_status(self):
+            return {
+                "lan_ipv6_enabled": True,
+                "lan_prefix": "fd00:da7a:2::/64",
+                "lan_gateway": "fd00:da7a:2::1",
+                "wan_ipv6_active": self.probed,
+                "wan_ipv6_address": "2600:1700::1" if self.probed else "",
+                "last_probe_status": "active" if self.probed else "not_checked",
+            }
+
+        async def probe_now(self):
+            self.probed = True
+            return self.get_status()
+
+    probe = FakeIpv6Probe()
+    database = _db.Database(tmp_path / "ipv6-api.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    _get_loop().run_until_complete(database.connect())
+    app = create_app(database, service, holder, ipv6_probe=probe)
+
+    with TestClient(app) as c:
+        _login(c)
+        # 1. Initial status
+        st1 = c.get("/api/network/ipv6/status").json()
+        assert st1["lan_ipv6_enabled"] is True
+        assert st1["wan_ipv6_active"] is False
+
+        # 2. Trigger probe
+        pr = c.post("/api/network/ipv6/probe").json()
+        assert pr["wan_ipv6_active"] is True
+        assert pr["wan_ipv6_address"] == "2600:1700::1"
+
+        # 3. Subsequent status check
+        st2 = c.get("/api/network/ipv6/status").json()
+        assert st2["wan_ipv6_active"] is True
+    _get_loop().run_until_complete(database.close())
+
+
+def test_ipv6_probe_can_be_supplied_late_through_a_getter(tmp_path):
+    """The gateway builds its IPv6 probe in the background startup, AFTER the app
+    exists — run.py therefore hands over a getter. It must resolve at request time
+    (not capture ``None`` at app-build time, which left the card on "not
+    initialized" and the Check button on 503)."""
+    holder_probe = {"p": None}
+
+    class LateProbe:
+        def get_status(self):
+            return {"lan_ipv6_enabled": True, "wan_ipv6_active": False, "last_probe_status": "isp_no_ipv6"}
+
+        async def probe_now(self):
+            return self.get_status()
+
+    database = _db.Database(tmp_path / "ipv6-late.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    _get_loop().run_until_complete(database.connect())
+    app = create_app(database, service, holder, ipv6_probe=lambda: holder_probe["p"])
+    with TestClient(app) as c:
+        _login(c)
+        assert c.post("/api/network/ipv6/probe").status_code == 503      # not started yet
+        holder_probe["p"] = LateProbe()                                  # background startup finished
+        assert c.post("/api/network/ipv6/probe").json()["last_probe_status"] == "isp_no_ipv6"
+        assert c.get("/api/network/ipv6/status").json()["last_probe_status"] == "isp_no_ipv6"
+    _get_loop().run_until_complete(database.close())
+
+
+
+def test_lan_usage_is_reported_but_never_counted_against_the_bundle(client):
+    """LOCAL (LAN) traffic is monitoring only: it shows per device / per user and
+    per day, but never raises ``used_gb`` (the metered internet)."""
+    c, db, _ = client
+    _login(c)
+    r = c.post("/api/devices", json={"mac": "aa:bb:cc:dd:ee:09", "quota_mode": "auto"})
+    dev_id = r.json()["id"]
+
+    async def _add():
+        await db.add_usage(dev_id, "2026-08-14", int(2 * GB), 0)
+        await db.add_lan_usage_batch([(dev_id, "2026-08-14", int(3 * GB), int(1 * GB))])
+        await db.add_lan_usage_batch([(dev_id, "2026-08-14", int(1 * GB), 0)])  # accumulates
+    _get_loop().run_until_complete(_add())
+
+    d = c.get("/api/dashboard").json()
+    dev = next(x for x in d["devices"] if x["id"] == dev_id)
+    assert dev["lan_up_gb"] == 4.0 and dev["lan_down_gb"] == 1.0 and dev["lan_used_gb"] == 5.0
+    assert dev["device_used_gb"] == 2.0                      # internet untouched
+    user = next(u for u in d["users"] if u["id"] == dev["user_id"])
+    assert user["lan_used_gb"] == 5.0 and user["used_gb"] == 2.0
+    assert d["bundle"]["used_gb"] == 2.0
+
+    daily = c.get("/api/usage/daily?days=366").json()
+    assert any(x["date"] == "2026-08-14" for x in daily["lan_rows"])
+    lan_day = next(x for x in daily["lan_rows"] if x["date"] == "2026-08-14")
+    assert lan_day["up_bytes"] == int(4 * GB) and lan_day["down_bytes"] == int(1 * GB)
+    wan_day = next(x for x in daily["rows"] if x["date"] == "2026-08-14")
+    assert wan_day["up_bytes"] == int(2 * GB)
+
+
+def test_attack_alert_stays_until_acknowledged(client):
+    """The "suspicious activity" alert is not timed out: it stays until the admin acknowledges it."""
+    c, database, service = client
+    assert c.post("/api/security/ack-attack", headers={"X-QM-CSRF": "1"}).status_code == 401
+    _login(c)
+    run = _get_loop().run_until_complete
+    for i in range(7):
+        run(database.add_event(f"Failed login attempt from 10.0.0.{i}", "warn"))
+    assert c.get("/api/dashboard").json()["security"]["attack_new"] >= 7
+    assert c.post("/api/security/ack-attack", headers={"X-QM-CSRF": "1"}).json() == {"ok": True}
+    assert c.get("/api/dashboard").json()["security"]["attack_new"] == 0

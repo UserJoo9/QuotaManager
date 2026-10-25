@@ -374,19 +374,10 @@ class WanRenewConfig(BaseModel):
     minutes: int
 
 
-class WanTelegramUpdate(BaseModel):
-    """Configuration for WAN public-IP Telegram change trigger."""
+class TailscaleDisconnect(BaseModel):
+    """Disconnect from the tailnet; ``logout`` also signs this box out."""
 
-    enabled: bool = False
-    bot_token: Optional[str] = None
-    chat_id: str = Field("", max_length=128)
-
-
-class WanTelegramTest(BaseModel):
-    """Payload to test Telegram bot credentials."""
-
-    bot_token: Optional[str] = None
-    chat_id: Optional[str] = None
+    logout: bool = False
 
 
 class FirewallRule(BaseModel):
@@ -512,6 +503,7 @@ class StaticLeaseCreate(BaseModel):
 
     mac: str = Field(..., description="Device MAC address")
     ip: str = Field(..., description="Static IP address to assign")
+    ip6: Optional[str] = Field("", description="Optional static IPv6 address to assign")
     hostname: Optional[str] = Field("", description="Optional device name or comment")
 
     @field_validator("mac")
@@ -533,6 +525,20 @@ class StaticLeaseCreate(BaseModel):
                 raise ValueError("IP address must be a usable unicast IPv4 host address")
         except ipaddress.AddressValueError:
             raise ValueError("Invalid IPv4 address") from None
+        return clean
+
+    @field_validator("ip6")
+    @classmethod
+    def validate_ip6(cls, v: Optional[str]) -> str:
+        if not v:
+            return ""
+        clean = v.strip().lower().lstrip("[").rstrip("]")
+        try:
+            addr = ipaddress.IPv6Address(clean)
+            if addr.is_loopback or addr.is_multicast:
+                raise ValueError("IPv6 address must be a usable unicast IPv6 host address")
+        except ipaddress.AddressValueError:
+            raise ValueError("Invalid IPv6 address") from None
         return clean
 
 

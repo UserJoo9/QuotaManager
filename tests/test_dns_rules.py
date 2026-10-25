@@ -363,3 +363,21 @@ def test_api_accepts_empty_dns_server_as_clear():
 
     assert DnsServerUpdate(dns_server="").dns_server == ""
     assert DnsServerUpdate(dns_server="9.9.9.9").dns_server == "9.9.9.9"
+
+
+def test_render_tags_static_ipv6_reservation():
+    """dhcp-host carries the optional IPv6 reservation in dnsmasq's [addr]
+    syntax, for known devices and for standalone reservations."""
+    from types import SimpleNamespace
+
+    from quota.dns_rules import render_tags
+
+    dev = SimpleNamespace(id=7, mac="aa:bb:cc:dd:ee:07")
+    out = render_tags([dev], {
+        "aa:bb:cc:dd:ee:07": ("192.168.2.50", "fd00:da7a:2::50"),
+        "aa:bb:cc:dd:ee:09": {"ip": "192.168.2.51", "ip6": "fd00:da7a:2::51"},
+        "aa:bb:cc:dd:ee:0a": "192.168.2.52",          # legacy mac -> ip form
+    })
+    assert "dhcp-host=aa:bb:cc:dd:ee:07,set:qmdev7,192.168.2.50,[fd00:da7a:2::50]" in out
+    assert "dhcp-host=aa:bb:cc:dd:ee:09,192.168.2.51,[fd00:da7a:2::51]" in out
+    assert "dhcp-host=aa:bb:cc:dd:ee:0a,192.168.2.52\n" in out

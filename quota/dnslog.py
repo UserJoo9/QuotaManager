@@ -44,6 +44,8 @@ import re
 import threading
 from typing import Callable, NamedTuple
 
+from quota.flows import record_dns_reply
+
 log = logging.getLogger("quota.dnslog")
 
 #: Local minute bucket (lexicographic == chronological, so the TTL prune and
@@ -225,6 +227,7 @@ class DnslogTailer:
         lines = self._partial.split("\n")
         self._partial = lines.pop()  # trailing partial line, kept for next pass
         for line in lines:
+            record_dns_reply(line)   # IP -> name cache for the Live-traffic destinations
             ev = parse_dnslog_line(line, self._now_fn)
             if ev is None:
                 continue

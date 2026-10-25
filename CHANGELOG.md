@@ -6,7 +6,65 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
-## [Unreleased]
+## [0.5.0] — 2026-10-25
+
+### Added — the new dashboard
+- **One new dashboard for everything.** It opens at the usual address (`/`) and replaces the old one completely — the old dashboard was removed. Old bookmarks to the preview address (`/ui/`) forward automatically.
+- **Look & feel**: dark by default with a light mode, full **Arabic (right-to-left) and English**, accent colours, six ready-made **system themes** (Cobalt, Emerald, Violet, Crimson, Amber, Nord), animated background effects (Mesh, Dust, Rain, Orbs — or off), adjustable density, and a **privacy eye** that hides names and device addresses before you share your screen. A short welcome guide appears on first run.
+- **Overview**: live bundle ring, remaining GB, days left, daily average and projected usage; live traffic chart (live speed / usage by day / top devices right now); status tiles for internet, devices, VPN and security; top consumers; and a "needs attention" list.
+- **People & devices**: add and edit people and devices, top up, move a device to another person, kick, block or blacklist, approve new guests, set speed limits, unlimited usage, VPN bypass and custom DNS. Opening a person or a device opens just that one. Your gateway stays pinned at the top: you can cut its internet if you need to, but it is protected from being deleted or blacklisted.
+- **Quota**: bundle size, renewal day, top-up and recharge packs.
+- **Network**: line speed limits, VPN sharing, random-MAC gate, MAC whitelist/blacklist, fixed IP reservations, and guest / new-device rules including *stop new connections*.
+- **Internet**: line status, public IP renewal and schedule, IPv6 status and check, **remote access with Tailscale**, and the **WAN / PPPoE card** — test your connection, apply or revert with a two-step confirmation.
+- **Security**: firewall with apply / revert and a rollback timer, rules, port forwards, bans, HTTPS, and the DNS ad-blocking shield with categories, custom rules and list import.
+- **VPN**: connect / disconnect, add, edit, test and delete servers, choose who goes through the VPN, live speed and logs.
+- **Insights**: usage reports and top consumers per device and period.
+- **Share**: file, folder and text sharing, plus **live device-to-device transfer** (files, multiple files or whole folders, with accept / decline and progress).
+- **Public pages** (`/share`, `/milestone`, `/report`, the guest approval portal and the calibration page) redesigned to match the new dashboard: same colours and fonts, light / dark following your dashboard choice, better on phones. Behaviour is unchanged.
+- **Share page (`/share`)** redesigned to match the new dashboard: same colours and fonts, light / dark following your dashboard choice (plus a quick toggle), cleaner file and device cards, better on phones. Upload, download and live-transfer behaviour is unchanged.
+- **System**: appearance, password, two-factor sign-in, updates and logs.
+- Every feature of the old dashboard has a home in the new one, except the old speedometer gauge styles, which are replaced by the new bundle ring and system themes.
+
+### Added — LAN monitoring
+- **Local network (LAN) traffic is now tracked next to the internet**: per person, per device and per day. A **WAN | LAN** switch above the Overview chart gives you the same three views (live speed, usage by day, top devices) for each, and every person and device shows its internet and local usage side by side. LAN is for monitoring only — it never counts against the bundle.
+- What the gateway can see: traffic between a device and the router, a NAS or other hosts on the router's network, and between a device and the gateway itself (dashboard, sharing, direct transfer). Devices talking to each other on the same Wi-Fi go through the router directly and cannot be seen by the gateway.
+- **Smart bundle tips** on the Overview: when the bundle runs out you get quick top-up buttons, when it will not last until renewal you get a daily-usage target, and otherwise a projection of what will be left. (Only record top-ups you have actually bought and activated with your provider.)
+
+### Added — network
+- **Live traffic names every destination**: when a server has no website name, the page shows who owns it instead of a bare number, and remembers it. Only the destination address is looked up; turn it off with `history.ip_owner_lookup: false`.
+- **IPv6 for every device (dual-stack)**: each device gets an IPv6 address next to its IPv4 one. IPv6 traffic counts against the allowance, is cut together with IPv4 when a device is blocked or over quota, and obeys speed limits.
+- **Smart IPv6 fallback**: if your provider has no IPv6, apps switch to IPv4 instantly instead of hanging. The system re-checks every 10 minutes and turns IPv6 on by itself when it becomes available.
+- **Static IPv6 reservation** (optional) next to the static IPv4 one.
+- **Bypass warning**: a device that takes IPv6 straight from your router shows an "IPv6 bypass" tag — turn off IPv6 / Router Advertisement on the router to fix it.
+- **Reach your dashboard from anywhere with Tailscale**: Internet page → *Remote access*. Install, sign in once and get a private, encrypted address for the dashboard that works from any network, with nothing to open on your public IP. Many internet lines block or drop connections coming from outside, and this works around that.
+- **Installing Tailscale no longer cuts the internet**: the gateway now re-checks forwarding, the NAT table and its packet engine right after the install and every few seconds, and restores whatever a package install removed - no service restart needed. Install progress shows four simple steps instead of the installer's raw output, and the card lists your other Tailscale devices (online, direct or relayed).
+- **Alerts stay until you dismiss them**: the "suspicious activity" card on Overview (failed logins + firewall blocks) no longer disappears after an hour - it stays until you press *Mark as seen*, and comes back only for new activity. The live speed chart also survives a page refresh now: the gateway remembers the last few minutes.
+- **First sign-in no longer looks stuck**: when the quick-setup dialog opened right after signing in, the dashboard behind it was not drawn until the dialog was closed. It is drawn immediately now.
+
+### Changed
+- **Telegram alerts for IP changes were removed**: they are no longer needed because the Tailscale address does not change when your public IP does.
+- **Live traffic shows real destinations**: next to a device uploading a video you now see the sites receiving it (for example `facebook.com ⬆ 2.1 Mbps`), taken from the real connections. The guessed app labels ("TikTok", "Idle / Background") are gone because they could be wrong.
+- **Settings survive re-running setup**: Firewall, DNS and VPN settings are kept (the previous `config.yaml` is backed up as `config.yaml.prev`) instead of silently going back to defaults.
+- The setup script no longer disables IPv6. **Updating needs no manual step** — the new version turns IPv6 on by itself.
+- **Firewall snapshots** moved out of the project folder, so replacing the folder cannot remove them.
+
+### Fixed
+- **Guest approval portal**: its status polling, automatic redirect and "Check now" button were blocked by an over-strict browser security policy; they now work.
+- **Dashboard reachable from the internet with remote access off**: when the box sits behind the ISP router, anyone who reached your public IP on the dashboard port (through a router port-forward, DMZ or UPnP) could open the login page even though the firewall switch was off. The switch is now **"Allow dashboard access from the internet"** and, while off (the default), new connections to the dashboard from outside your home networks are refused by the gateway itself. Turn it on only if you want remote access.
+- **Firewall no longer switches itself off after an update**: if its rules disappear they are restored within seconds (failed attempts retry every minute), and your firewall settings are backed up next to the database.
+- **Old look after an update**: browsers kept an old copy of the page scripts; they are now re-checked on every load, so no more Ctrl+F5.
+- **Phantom "Guest" devices** after enabling IPv6 (named "0" or a long number) are ignored now.
+- **VPN share "Connected" but no internet**: the VPN client now resolves its server through the system DNS, and the server address is resolved before the tunnel starts.
+- **VPN sharing stopped the internet when IPv6 was on**: fixed automatically on update. `dhcp.ipv6_enable: false` now fully switches IPv6 off again.
+- **Phantom "online" lights**: a device that left or was switched off no longer stays green for hours.
+- **Misleading "98%" in Live traffic**: a quiet network now says "idle" instead of showing a fake share.
+- **More accurate live speeds**: calculated over the real measuring period, and stale readings are no longer shown.
+- **Firewall "Revert" did nothing** after a single Apply since boot, and later Applies kept reverting to the very first one. Revert now goes back exactly one step and the result survives a restart.
+- **IPv6 "Check" button** showed "not initialized" (HTTP 503); it works now.
+- **Live transfer to another device**: a multi-file / folder send (ZIP) was reported as a cancelled download by the browser, and on some runs the first bytes of a file were lost when the receiver's download started a moment late. Both fixed.
+- **Share page**: after sharing a text it stayed out of the list (and in the text box) until you left the page; dropping files in the drop zone now falls back to a plain file drop when the browser gives no folder entries.
+- **System → Logs**: the ERROR filter no longer shows warnings that merely contain the word "error".
+- **Small polish**: enabling HTTPS and removing a MAC from the allow/deny list now ask for a second tap; DNS category names and common error messages (wrong password, wrong 2FA code, update check refused) show in Arabic; a note on the firewall rules card explains that LAN-mode rules from the local network have no effect.
 
 ## [0.4.3] — 2026-10-19
 

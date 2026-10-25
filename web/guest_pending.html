@@ -4,21 +4,28 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>بانتظار موافقة المسؤول · Awaiting Admin Approval</title>
-  <meta name="theme-color" content="#0b0f19">
+  <meta name="theme-color" content="#07090E">
+  <script src="/assets/pub-theme.js"></script>
   <style>
     :root {
-      --bg: #070a12;
-      --card-bg: rgba(17, 24, 39, 0.75);
-      --card-border: rgba(255, 255, 255, 0.08);
-      --text: #f3f4f6;
-      --text-muted: #9ca3af;
-      --amber: #f59e0b;
-      --amber-glow: rgba(245, 158, 11, 0.25);
-      --green: #10b981;
-      --green-glow: rgba(16, 185, 129, 0.3);
-      --red: #ef4444;
-      --blue: #3b82f6;
+      --bg: #07090E; --surface: #0D1017; --surface-2: #131723;
+      --line: color-mix(in srgb, var(--text) 7%, transparent); --line-2: color-mix(in srgb, var(--text) 14%, transparent);
+      --text: #EEF1F8; --text-2: #A5ADC0;
+      --ok: #3DDC97; --warn: #F5B544; --danger: #FF6B7A;
+      --accent: #5B8CFF; --accent-ink: #06101F; --accent-2: #5EEAD4;
+      --card-bg: var(--surface); --card-border: var(--line); --text-muted: var(--text-2);
+      --amber: var(--warn); --amber-glow: color-mix(in srgb, var(--warn) 25%, transparent);
+      --green: var(--ok); --green-glow: color-mix(in srgb, var(--ok) 30%, transparent);
+      --red: var(--danger); --blue: var(--accent);
       --radius: 20px;
+      color-scheme: dark;
+    }
+    :root[data-theme=light] {
+      --bg: #F2F3F8; --surface: #FFFFFF; --surface-2: #F5F6FA;
+      --line: rgba(15,20,40,.08); --line-2: rgba(15,20,40,.17);
+      --text: #0F1424; --text-2: #4A5266;
+      --ok: #0A7F58; --warn: #9A5B00; --danger: #C42B45;
+      color-scheme: light;
     }
     * {
       box-sizing: border-box;
@@ -29,9 +36,9 @@
     body {
       background-color: var(--bg);
       background-image: 
-        radial-gradient(at 0% 0%, rgba(37, 99, 235, 0.12) 0px, transparent 50%),
-        radial-gradient(at 100% 100%, rgba(245, 158, 11, 0.08) 0px, transparent 50%),
-        radial-gradient(at 50% 50%, rgba(17, 24, 39, 1) 0px, transparent 100%);
+        radial-gradient(at 0% 0%, color-mix(in srgb, var(--accent) 12%, transparent) 0px, transparent 50%),
+        radial-gradient(at 100% 100%, color-mix(in srgb, var(--warn) 8%, transparent) 0px, transparent 50%),
+        radial-gradient(at 50% 50%, var(--surface) 0px, transparent 100%);
       color: var(--text);
       min-height: 100vh;
       display: flex;
@@ -55,7 +62,7 @@
       font-weight: 600;
       letter-spacing: 0.5px;
       color: var(--text-muted);
-      background: rgba(255, 255, 255, 0.04);
+      background: color-mix(in srgb, var(--text) 4%, transparent);
       padding: 6px 14px;
       border-radius: 999px;
       border: 1px solid var(--card-border);
@@ -73,7 +80,7 @@
       border: 1px solid var(--card-border);
       border-radius: var(--radius);
       padding: 32px 24px;
-      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5), 0 1px 0 rgba(255, 255, 255, 0.1) inset;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5), 0 1px 0 color-mix(in srgb, var(--text) 10%, transparent) inset;
       backdrop-filter: blur(16px);
       -webkit-backdrop-filter: blur(16px);
       transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
@@ -93,7 +100,7 @@
       width: 80px;
       height: 80px;
       border-radius: 50%;
-      background: rgba(245, 158, 11, 0.12);
+      background: color-mix(in srgb, var(--warn) 12%, transparent);
       border: 2px solid var(--amber);
       display: flex;
       align-items: center;
@@ -122,11 +129,11 @@
     }
     /* Approved State */
     .glass-card.approved {
-      border-color: rgba(16, 185, 129, 0.35);
-      box-shadow: 0 20px 50px rgba(16, 185, 129, 0.15), 0 0 0 1px rgba(16, 185, 129, 0.2);
+      border-color: color-mix(in srgb, var(--ok) 35%, transparent);
+      box-shadow: 0 20px 50px color-mix(in srgb, var(--ok) 15%, transparent), 0 0 0 1px color-mix(in srgb, var(--ok) 20%, transparent);
     }
     .glass-card.approved .icon-badge {
-      background: rgba(16, 185, 129, 0.15);
+      background: color-mix(in srgb, var(--ok) 15%, transparent);
       border-color: var(--green);
       box-shadow: 0 0 35px var(--green-glow);
     }
@@ -137,18 +144,18 @@
     }
     /* Rejected State */
     .glass-card.rejected {
-      border-color: rgba(239, 68, 68, 0.35);
+      border-color: color-mix(in srgb, var(--danger) 35%, transparent);
     }
     .glass-card.rejected .icon-badge {
-      background: rgba(239, 68, 68, 0.15);
+      background: color-mix(in srgb, var(--danger) 15%, transparent);
       border-color: var(--red);
-      box-shadow: 0 0 30px rgba(239, 68, 68, 0.25);
+      box-shadow: 0 0 30px color-mix(in srgb, var(--danger) 25%, transparent);
     }
 
     h1 {
       font-size: 1.45rem;
       font-weight: 700;
-      color: #fff;
+      color: var(--text);
       margin-bottom: 6px;
     }
     h2 {
@@ -160,7 +167,7 @@
     }
     .message-ar {
       font-size: 0.95rem;
-      color: #d1d5db;
+      color: var(--text-2);
       margin-bottom: 6px;
     }
     .message-en {
@@ -171,8 +178,8 @@
     }
 
     .info-box {
-      background: rgba(0, 0, 0, 0.3);
-      border: 1px solid rgba(255, 255, 255, 0.05);
+      background: color-mix(in srgb, var(--bg) 55%, transparent);
+      border: 1px solid color-mix(in srgb, var(--text) 5%, transparent);
       border-radius: 14px;
       padding: 14px 16px;
       margin-bottom: 22px;
@@ -184,7 +191,7 @@
       align-items: center;
       padding: 6px 0;
       font-size: 0.86rem;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      border-bottom: 1px solid color-mix(in srgb, var(--text) 4%, transparent);
     }
     .info-row:last-child {
       border-bottom: none;
@@ -197,7 +204,7 @@
     }
     .info-val {
       font-weight: 600;
-      color: #fff;
+      color: var(--text);
       direction: ltr;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 0.84rem;
@@ -210,19 +217,19 @@
       display: inline-block;
     }
     .badge-amber {
-      background: rgba(245, 158, 11, 0.15);
-      color: #fbbf24;
-      border: 1px solid rgba(245, 158, 11, 0.3);
+      background: color-mix(in srgb, var(--warn) 15%, transparent);
+      color: var(--warn);
+      border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
     }
     .badge-green {
-      background: rgba(16, 185, 129, 0.15);
-      color: #34d399;
-      border: 1px solid rgba(16, 185, 129, 0.3);
+      background: color-mix(in srgb, var(--ok) 15%, transparent);
+      color: var(--ok);
+      border: 1px solid color-mix(in srgb, var(--ok) 30%, transparent);
     }
     .badge-red {
-      background: rgba(239, 68, 68, 0.15);
-      color: #f87171;
-      border: 1px solid rgba(239, 68, 68, 0.3);
+      background: color-mix(in srgb, var(--danger) 15%, transparent);
+      color: var(--danger);
+      border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
     }
 
     .live-status {
@@ -263,34 +270,34 @@
       text-decoration: none;
     }
     .btn-primary {
-      background: linear-gradient(135deg, #2563eb, #1d4ed8);
-      color: #fff;
-      box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
+      background: var(--accent);
+      color: var(--accent-ink);
+      box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 35%, transparent);
     }
     .btn-primary:hover {
-      background: linear-gradient(135deg, #3b82f6, #2563eb);
+      background: var(--accent);
       transform: translateY(-1px);
     }
     .btn-primary:active {
       transform: translateY(0);
     }
     .btn-success {
-      background: linear-gradient(135deg, #10b981, #059669);
-      color: #fff;
-      box-shadow: 0 4px 16px rgba(16, 185, 129, 0.4);
+      background: var(--ok);
+      color: var(--surface);
+      box-shadow: 0 4px 16px color-mix(in srgb, var(--ok) 40%, transparent);
     }
     .btn-success:hover {
-      background: linear-gradient(135deg, #34d399, #10b981);
+      background: var(--ok);
       transform: translateY(-1px);
     }
     .btn-secondary {
-      background: rgba(255, 255, 255, 0.06);
-      color: #e5e7eb;
-      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: color-mix(in srgb, var(--text) 6%, transparent);
+      color: var(--text);
+      border: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
       margin-top: 10px;
     }
     .btn-secondary:hover {
-      background: rgba(255, 255, 255, 0.1);
+      background: color-mix(in srgb, var(--text) 10%, transparent);
     }
 
     .notice {
@@ -300,7 +307,7 @@
       line-height: 1.45;
     }
     .notice strong {
-      color: #e5e7eb;
+      color: var(--text);
     }
   </style>
 </head>

@@ -1,0 +1,82 @@
+.shell{position:relative;z-index:1;display:flex;flex-wrap:nowrap;min-height:100vh}
+/* sidebar */
+.side{flex:0 0 264px;width:264px;display:flex;flex-direction:column;gap:22px;padding:22px 16px;border-inline-end:1px solid var(--line);background:color-mix(in srgb,var(--surface) 70%,transparent);-webkit-backdrop-filter:blur(22px) saturate(1.2);backdrop-filter:blur(22px) saturate(1.2);position:sticky;top:0;height:100vh;overflow-y:auto;overflow-x:hidden;transition:flex-basis .22s cubic-bezier(.2,.8,.2,1),width .22s cubic-bezier(.2,.8,.2,1),padding .22s}
+.brand{display:flex;align-items:center;gap:12px;padding:2px 8px}
+.logo{width:34px;height:34px;flex:none}
+.wm{font-size:18px;font-weight:600;letter-spacing:-.02em;direction:ltr;flex:1;white-space:nowrap}
+.wm b{font-weight:700;color:var(--accent)}
+.collapse-btn{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;color:var(--text-3);flex:none}
+.collapse-btn:hover{background:var(--surface-2);color:var(--text)}
+.collapse-btn .ic{transform:scaleX(var(--dir));transition:transform .2s}
+.nav{display:flex;flex-direction:column;gap:18px;flex:1}
+.nav-group{display:flex;flex-direction:column;gap:2px}
+.nav-glabel{padding:0 12px 6px;font-size:11px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--text-3);white-space:nowrap}
+:root[dir=rtl] .nav-glabel{letter-spacing:0;text-transform:none;font-size:12px}
+.nav-i{position:relative;display:flex;align-items:center;gap:12px;height:var(--navh);padding:0 12px;border-radius:11px;color:var(--text-2);font-weight:500;transition:background .15s,color .15s;width:100%;white-space:nowrap}
+.nav-i:hover{background:var(--surface-2);color:var(--text)}
+.nav-i.on{background:var(--accent-soft);color:var(--text);font-weight:600}
+.nav-i.on .ic{color:var(--accent)}
+.nav-i.on::before{content:"";position:absolute;inset-inline-start:-16px;top:9px;bottom:9px;width:3px;border-radius:0 3px 3px 0;background:var(--accent)}
+:root[dir=rtl] .nav-i.on::before{border-radius:3px 0 0 3px}
+:root[data-fx=rich] .nav-i.on::before{box-shadow:0 0 14px var(--accent)}
+.nav-t{flex:1;overflow:hidden;text-overflow:ellipsis}
+.nav-badge{min-width:20px;height:20px;padding:0 6px;border-radius:999px;background:var(--accent);color:var(--accent-ink);font-size:11px;font-weight:700;display:grid;place-items:center}
+.side-meter{padding:14px;border-radius:14px;background:var(--surface-2);border:1px solid var(--line);display:flex;flex-direction:column;gap:9px}
+.sm-top{display:flex;justify-content:space-between;align-items:baseline;font-size:12px;color:var(--text-2);font-weight:500}
+.sm-top b{font-size:13px;color:var(--text)}
+.sm-sub{font-size:12px;color:var(--text-3)}
+.side-foot{display:flex;align-items:center;gap:10px;padding:2px 6px}
+.side-foot .who{flex:1;line-height:1.25;min-width:0}
+.side-foot .who b{display:block;font-size:13px}
+.side-foot .who span{font-size:11.5px;color:var(--text-3);display:flex;align-items:center;gap:6px}
+.side-foot .icon-btn{width:34px;height:34px;border-radius:10px}
+
+/* collapsed rail (desktop) */
+.shell.rail .side{flex-basis:76px;width:76px;padding-inline:12px}
+.shell.rail .wm,.shell.rail .nav-t,.shell.rail .nav-glabel,.shell.rail .side-meter,.shell.rail .side-foot .who,.shell.rail .shell.rail .brand{flex-direction:column;gap:10px;padding:2px 0}
+.shell.rail .nav-i{justify-content:center;padding:0}
+.shell.rail .nav-i.on::before{inset-inline-start:-12px}
+.shell.rail .nav-badge{position:absolute;top:4px;inset-inline-end:4px;min-width:8px;width:8px;height:8px;padding:0;font-size:0}
+.shell.rail .nav{gap:10px}
+.shell.rail .nav-group+.nav-group{border-top:1px solid var(--line);padding-top:10px}
+.shell.rail .side-foot{flex-direction:column}
+.shell.rail .collapse-btn .ic{transform:scaleX(calc(var(--dir)*-1))}
+
+/* main */
+.main{flex:1;min-width:0;padding:22px 32px 56px;display:flex;flex-direction:column;gap:24px}
+.top{display:flex;align-items:center;gap:16px;flex-wrap:wrap;justify-content:space-between}
+.top-l{display:flex;align-items:center;gap:12px;min-width:0}
+.top h1{font-size:26px;line-height:1.2;font-weight:700;letter-spacing:-.02em}
+:root[dir=rtl] .top h1{letter-spacing:0}
+.top p{margin-top:4px;color:var(--text-2);font-size:13.5px}
+.top-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.menu-btn{display:none}
+.page{display:flex;flex-direction:column;gap:var(--gap);min-width:0}
+.page.enter{animation:rise .35s cubic-bezier(.2,.8,.2,1)}
+@keyframes rise{from{opacity:0;transform:translateY(8px)}}
+.grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:var(--gap)}
+.c5{grid-column:span 5}.c7{grid-column:span 7}.c12{grid-column:span 12}.c6{grid-column:span 6}.c4{grid-column:span 4}
+@media (max-width:1180px){.c5,.c7,.c6,.c4{grid-column:span 12}}
+.card{position:relative;background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:var(--pad);box-shadow:var(--shadow);min-width:0}
+:root[data-fx=rich][data-theme=dark] .card::before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(180deg,rgba(255,255,255,.04),transparent 38%)}
+.card-h{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+.card-h h3{font-size:14.5px;font-weight:600}
+.h-with{display:flex;align-items:center;gap:10px}
+.toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.spacer{flex:1}
+
+/* mobile: sidebar becomes an off-canvas panel */
+@media (max-width:900px){
+  .shell{display:block}
+  .side{position:fixed;inset-block:0;inset-inline-start:0;width:min(86vw,300px);flex:none;z-index:45;transform:translateX(calc(-105%*var(--dir)*-1));transition:transform .24s cubic-bezier(.2,.8,.2,1);box-shadow:0 0 60px rgba(0,0,0,.5);background:var(--surface)}
+  :root[dir=rtl] .side{transform:translateX(105%)}
+  :root[dir=ltr] .side{transform:translateX(-105%)}
+  .shell.nav-open .side{transform:none}
+  .collapse-btn{display:none}
+  .shell.rail .side{width:min(86vw,300px)}
+  .shell.rail .wm,.shell.rail .nav-t,.shell.rail .nav-glabel,.shell.rail .side-meter,.shell.rail .side-foot .who{display:revert}
+  .shell.rail .nav-i{justify-content:flex-start;padding:0 12px}
+  .menu-btn{display:grid}
+  .main{padding:18px 16px 40px}
+  .top h1{font-size:21px}
+}

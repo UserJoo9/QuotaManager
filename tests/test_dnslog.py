@@ -383,3 +383,55 @@ def test_dns_history_device_delete_cleans_rows(database):
     run(d.delete_device(dev))
     hist = run(d.get_dns_history(dev, "2026-01-01 00:00"))
     assert hist["total"] == 0
+
+
+def test_live_traffic_idle_line_has_no_fake_share_and_uses_real_window(tmp_path):
+    """Regression: a lone device at ~40 Kbps used to show '98%' because the
+    share is relative to everyone else's traffic. On an idle line the share is
+    now 0 + is_idle, and speeds divide by the real flush window."""
+    import time
+    from types import SimpleNamespace
+
+    from quota.engine import EngineCounters, EngineSnapshot
+    from quota.history_analytics import get_live_traffic_analytics
+
+    async def go():
+        db = _db.Database(str(tmp_path / "live.db"))
+        await db.connect()
+        try:
+            dev = SimpleNamespace(id=1, mac="aa:bb:cc:dd:ee:01", name="PC", user_id=1)
+            # 30 s window, 150 KB down => 40 Kbps
+            live = EngineSnapshot(by_ip={"192.168.2.5": EngineCounters(up=0, down=150_000)},
+                                  interval_s=30.0)
+            res = await get_live_traffic_analytics(
+                db, [dev], {dev.mac: "192.168.2.5"}, live, {1: "Youssef"})
+            d = res["devices"][0]
+            assert d["down_bps"] == 40_000
+            assert res["is_idle"] is True and d["share_pct"] == 0.0
+
+            busy = EngineSnapshot(by_ip={"192.168.2.5": EngineCounters(up=0, down=3_000_000)},
+                                  interval_s=15.0)
+            res = await get_live_traffic_analytics(
+                db, [dev], {dev.mac: "192.168.2.5"}, busy, {1: "Youssef"})
+            assert res["is_idle"] is False
+            assert res["devices"][0]["share_pct"] == 100.0
+
+            old = EngineSnapshot(by_ip={"192.168.2.5": EngineCounters(up=0, down=3_000_000)},
+                                 ts=time.time() - 600)
+            res = await get_live_traffic_analytics(
+                db, [dev], {dev.mac: "192.168.2.5"}, old, {1: "Youssef"})
+            assert res["devices"][0]["total_bps"] == 0  # stale snapshot -> no frozen speed
+        finally:
+            await db.close()
+
+    asyncio.run(go())
+
+
+def test_live_sites_are_top4_base_domains_without_noise():
+    """The Live-traffic box lists at most 4 real sites: base domains, hits summed,
+    no bare labels (`direct`), reverse-DNS or `.local` noise."""
+    from quota.history_analytics import LIVE_TOP_SITES, _is_displayable_site
+    assert LIVE_TOP_SITES == 4
+    assert _is_displayable_site("tiktok.com")
+    for bad in ("direct", "1.0.168.192.in-addr.arpa", "printer.local", "192.168.1.1", ""):
+        assert not _is_displayable_site(bad)

@@ -185,7 +185,7 @@ class FakeIpRunner:
 
 def test_collect_neigh_active_text_fallback(tmp_path):
     """`ip neigh` plain-text fallback (older iproute2) feeds the same LED
-    reinforcement set: active states kept, FAILED/IPv6/non-lease rows
+    reinforcement set: only REACHABLE kept; STALE/FAILED/IPv6/non-lease rows
     dropped."""
     cfg = _cfg(tmp_path)
     gw = Gateway(cfg)
@@ -378,7 +378,7 @@ def test_full_server_boot(tmp_path):
 
         # UI served
         assert c.get("/").status_code == 200
-        assert c.get("/assets/app.js").status_code == 200
+        assert c.get("/js/main.js").status_code == 200
 
     loop.run_until_complete(gw.shutdown())
     loop.close()
@@ -1017,6 +1017,51 @@ def test_sync_dnsmasq_leases_registers_devices(tmp_path):
         assert ip44 == "192.168.1.112"
     finally:
         _get_loop().run_until_complete(gw.shutdown())
+
+
+def test_sync_dnsmasq_leases_ignores_dhcpv6_lines(tmp_path):
+    """DHCPv6 lines (`expiry iaid ipv6 host duid`) are not devices: the IAID must
+    never be registered as a MAC (it created phantom "Guest 0" / "Guest 4155...")."""
+    cfg = _cfg(tmp_path)
+    lease_file = tmp_path / "dnsmasq.leases"
+    lease_file.write_text(
+        "1730000000 aa:bb:cc:dd:ee:33 192.168.1.111 phone1 *\n"
+        "1730000000 0 fd00:da7a:2::101 host1 00:01:00:01:aa:bb\n"
+        "1730000000 415503221 fd00:da7a:2::102 * 00:02:00:00:aa\n"
+        "duid 00:01:00:01:12:34\n",
+        encoding="utf-8")
+    cfg.dhcp.lease_file = str(lease_file)
+    gw = Gateway(cfg)
+    _get_loop().run_until_complete(gw.startup())
+    try:
+        _get_loop().run_until_complete(gw._sync_dnsmasq_leases())
+        db = gw.database
+        assert _get_loop().run_until_complete(db.get_device(mac="aa:bb:cc:dd:ee:33"))
+        for bogus in ("0", "415503221"):
+            assert _get_loop().run_until_complete(db.get_device(mac=bogus)) is None
+    finally:
+        _get_loop().run_until_complete(gw.shutdown())
+
+
+def test_phantom_non_mac_devices_are_purged(tmp_path):
+    """Devices registered from DHCPv6 IAIDs by an earlier version ("0",
+    "415503221") are removed; real devices and the gateway sentinel survive."""
+    cfg = _cfg(tmp_path)
+    cfg.dhcp.lease_file = str(tmp_path / "none.leases")
+    gw = Gateway(cfg)
+    loop = _get_loop()
+    loop.run_until_complete(gw.startup())
+    try:
+        db = gw.database
+        for mac in ("0", "415503221", "aa:bb:cc:dd:ee:55"):
+            loop.run_until_complete(db.upsert_lease(mac, "192.168.1.5", 1))
+            loop.run_until_complete(db.upsert_device(mac))
+        loop.run_until_complete(gw._purge_phantom_devices())
+        macs = {d.mac for d in loop.run_until_complete(db.list_devices())}
+        assert "0" not in macs and "415503221" not in macs
+        assert not {l.mac for l in loop.run_until_complete(db.list_leases())} & {"0", "415503221"}
+    finally:
+        loop.run_until_complete(gw.shutdown())
 
 
 def test_sync_dnsmasq_leases_schedules_immediate_sweep_on_new_device(tmp_path):
@@ -2911,3 +2956,60 @@ def test_dns_history_disabled_does_nothing(tmp_path):
         assert state == "{}", "no read cursor is persisted when disabled"
     finally:
         _get_loop().run_until_complete(gw.shutdown())
+
+
+def test_collect_neigh_ipv6_maps_ula_and_flags_router_global(tmp_path):
+    """IPv6 neighbor rows: ULA addresses map to the client's MAC (STALE is fine
+    for bookkeeping), link-local/FAILED rows are ignored, and a GLOBAL address
+    means the device took IPv6 straight from the ISP router (bypass)."""
+    import json as _json
+
+    cfg = _cfg(tmp_path)
+    gw = Gateway(cfg)
+    gw._ip_run = FakeIpRunner(json_out=_json.dumps([
+        {"dst": "fd00:da7a:2::a1", "lladdr": "aa:bb:cc:dd:ee:01", "state": ["STALE"]},
+        {"dst": "fe80::1", "lladdr": "aa:bb:cc:dd:ee:01", "state": ["REACHABLE"]},
+        {"dst": "fd00:da7a:2::a2", "lladdr": "aa:bb:cc:dd:ee:02", "state": ["FAILED"]},
+        {"dst": "2001:db8::55", "lladdr": "aa:bb:cc:dd:ee:03", "state": ["REACHABLE"]},
+        {"dst": "fd99::1", "lladdr": "aa:bb:cc:dd:ee:04", "state": ["REACHABLE"]},  # foreign ULA
+    ]))
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(gw.database.connect())
+        loop.run_until_complete(gw._collect_neigh_active())
+        assert gw._ipv6_neigh == {"fd00:da7a:2::a1": "aa:bb:cc:dd:ee:01"}
+        assert gw._ipv6_direct_macs == {"aa:bb:cc:dd:ee:03"}
+        assert gw._device_ipv6_map() == {"aa:bb:cc:dd:ee:01": "fd00:da7a:2::a1"}
+    finally:
+        loop.run_until_complete(gw.database.close())
+        loop.close()
+
+
+def test_tracked_ipv6_is_capped_and_known_devices_only(tmp_path):
+    """A client spraying random source addresses must not grow the kernel
+    rule set without bound: at most IPV6_MAX_PER_MAC per device, and only for
+    devices the gateway knows."""
+    from run import IPV6_MAX_PER_MAC
+
+    gw = Gateway(_cfg(tmp_path))
+    known, stranger = "aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:99"
+    for i in range(IPV6_MAX_PER_MAC + 5):
+        gw._ipv6_neigh[f"fd00:da7a:2::{i + 1:x}"] = known
+    gw._ipv6_neigh["fd00:da7a:2::beef"] = stranger
+    tracked = gw._tracked_ipv6({known})
+    assert len(tracked) == IPV6_MAX_PER_MAC
+    assert set(tracked.values()) == {known}
+
+
+def test_ipv6_wan_closed_while_vpn_share_is_on(tmp_path):
+    """VPN share routes only the IPv4 client subnet through the tunnel, so
+    IPv6 must stay shut while it is on — otherwise devices leak around the VPN."""
+    gw = Gateway(_cfg(tmp_path))
+    gw.ipv6_probe = type("P", (), {"wan_ipv6_active": True})()
+    gw._last_vpn_status = {"state": "off"}
+    assert gw._ipv6_wan_wanted() is True
+    gw._last_vpn_status = {"state": "on"}
+    assert gw._ipv6_wan_wanted() is False
+    gw._last_vpn_status = {"state": "off"}
+    gw.ipv6_probe.wan_ipv6_active = False
+    assert gw._ipv6_wan_wanted() is False

@@ -29,10 +29,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime as _dt
+import ipaddress
 import json
 import logging
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -51,10 +53,13 @@ from quota import dns_rules as _dns_rules
 from quota.arp_scan import ArpScanner
 from quota.dnslog import DnslogTailer
 from quota.engine import GATEWAY_MAC, EngineSnapshot, SnapshotHolder
+from quota.flows import (FlowSampler, enable_conntrack_accounting,
+                         seed_dns_names_from_log)
 from quota.firewall import FirewallManager
 from quota.latency_probe import ArpRttProbe
 from quota.netmgr import TopologyManager
 from quota.nftables import NftablesEngine
+from quota.tailscale import TailscaleManager
 from quota.service import QuotaService
 from quota.topology import (check_internet, check_internet_dns, detect_ppp,
                             restart_pppoe)
@@ -75,6 +80,17 @@ def _default_run_command(argv: list[str]) -> tuple[int, str]:
         return proc.returncode, proc.stdout
     except Exception:  # noqa: BLE001  (subprocess + timeout failures -> "" )
         return 1, ""
+
+
+#: neighbor states that prove a client answered recently (see
+#: ``Gateway._collect_neigh_active`` — STALE/PERMANENT deliberately excluded).
+_LEASE_MAC_RE = re.compile(r"^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$")
+_NEIGH_PRESENT_STATES = frozenset({"REACHABLE"})
+#: Max IPv6 addresses tracked (counted + cut) per device. SLAAC privacy
+#: extensions rotate addresses; a hostile client could also spray random source
+#: addresses — each tracked address costs two nft counters + rules, so the
+#: number is capped (newest-seen wins is not knowable here; ULA first, stable).
+IPV6_MAX_PER_MAC = 8
 
 
 def _iter_json_neigh(out: str):
@@ -418,11 +434,29 @@ class Gateway:
         #: Reinforces the ARP probe: a device that missed the probe burst but
         #: is generating traffic still has a valid ARP mapping in the kernel.
         self._neigh_active_ips: set[str] = set()
+        #: True once ``ip neigh`` was read successfully at least once — only
+        #: then is the neighbor table a trustworthy presence source.
+        self._neigh_collected = False
+        #: IPv6 ISP probe + (ULA/global IPv6 address -> MAC) from `ip -6 neigh`
+        self.ipv6_probe: object | None = None
+        self._ipv6_neigh: dict[str, str] = {}
+        #: MACs seen using a router-assigned GLOBAL IPv6 address (they route
+        #: around this box — uncounted and uncuttable until the router's RA is off)
+        self._ipv6_direct_macs: set[str] = set()
+        #: consecutive ARP sweeps that found nobody (see _maybe_latency_tick).
+        self._empty_sweeps = 0
+        #: monotonic time of the previous counter flush (live-speed window).
+        self._last_flush_mono: float | None = None
         #: set when _persist_lease creates a new device — _sync_dnsmasq_leases
         #: resets _last_latency_sweep so the ARP probe runs in the same tick,
         #: turning the new device's LED blue immediately instead of waiting up
         #: to a full sweep interval (30 s).
         self._new_devices_detected = False
+        #: per-destination traffic (conntrack byte deltas) for the Live-traffic view
+        _hist = getattr(cfg, "history", None)
+        self.flows = FlowSampler(
+            owner_lookup=bool(getattr(_hist, "ip_owner_lookup", True)),
+            owner_cache=Path(cfg.db_path).parent / "ip-owners.json")
 
     # ------------------------------------------------------------- startup
 
@@ -480,6 +514,7 @@ class Gateway:
             try:
                 await asyncio.to_thread(self.engine.start)
                 log.info("packet engine started (%s)", getattr(self.engine, "name", "?"))
+                self._net_watch = True      # arm the per-tick network self-heal
             except Exception as e:
                 log.warning("packet engine start notice: %s", e)
 
@@ -559,6 +594,31 @@ class Gateway:
             except Exception as e:
                 log.warning("wifi probe start notice: %s", e)
 
+        # -- ISP IPv6 probe (quota.ipv6_probe) ------------------------------
+        dhcp_cfg = getattr(self.cfg, "dhcp", None)
+        if self.ipv6_probe is None and getattr(dhcp_cfg, "ipv6_enable", True):
+            try:
+                from quota.ipv6_probe import Ipv6Probe
+
+                async def _on_ipv6_change(active: bool, details: dict[str, Any]) -> None:
+                    _set6 = getattr(self.engine, "set_ipv6_wan", None)
+                    if _set6 is not None:
+                        await asyncio.to_thread(_set6, active)
+                    await self.database.add_event(
+                        "IPv6: ISP IPv6 is now "
+                        + ("online — dual-stack active" if active
+                           else "offline — clients use IPv4"),
+                        "info" if active else "warn")
+
+                self.ipv6_probe = Ipv6Probe(
+                    cfg=self.cfg,
+                    check_interval_sec=float(
+                        getattr(dhcp_cfg, "ipv6_probe_interval_s", 600.0) or 600.0),
+                    on_status_change=_on_ipv6_change)
+                await self.ipv6_probe.start()
+            except Exception as e:  # noqa: BLE001
+                log.warning("ipv6 probe start notice: %s", e)
+
         log.info("DHCP + DNS via dnsmasq on the client subnet — Python "
                  "DHCP/DNS/ARP stack not used")
 
@@ -600,6 +660,58 @@ class Gateway:
         log.info("bundle synced from config.yaml: %.1f GB, reset day %d",
                  b.total_gb, b.reset_day)
 
+    def _net_problems(self) -> list[str]:
+        """Cheap check of the kernel pieces the gateway relies on but a package
+        install / service restart elsewhere can silently remove: forwarding,
+        the masquerade NAT table, and the packet engine's table."""
+        from quota import startup_health as sh
+        if not shutil.which("nft"):
+            return []
+        problems: list[str] = []
+        try:
+            if sh._PROC_IPFORWARD.read_text(encoding="utf-8").strip() == "0":
+                problems.append("ip_forward")
+        except OSError:
+            pass
+        run = sh._default_run
+        if not (sh._table_exists(run) and sh._has_masquerade(run)):
+            problems.append("nat")
+        eng = self.engine
+        if eng is not None and getattr(eng, "available", False):
+            code, _ = run(["nft", "list", "set", "inet", eng.table, "blocked"])
+            if code != 0:
+                problems.append("engine")
+        return problems
+
+    def _network_heal(self, reason: str = "") -> list[str]:
+        """Repair whatever :meth:`_net_problems` finds (idempotent, never raises).
+
+        Installing a package (Tailscale) or bringing up a tunnel can reset
+        forwarding / wipe nft tables; clients then lose internet until the
+        service restarts. This restores them in place. Returns what it fixed.
+        """
+        try:
+            eng = self.engine
+            if eng is None or not getattr(eng, "available", False):
+                return []          # no kernel rules in play (tests, non-Linux)
+            if reason == "tick" and not getattr(self, "_net_watch", False):
+                return []          # only after the real startup has built the rules
+            now = time.monotonic()
+            if reason == "tick" and now - getattr(self, "_last_heal_mono", -999.0) < 60.0:
+                return []          # back off after a repair attempt
+            problems = self._net_problems()
+            if not problems:
+                return []
+            self._last_heal_mono = now
+            log.warning("network self-heal (%s): restoring %s", reason or "tick", ", ".join(problems))
+            self._startup_self_heal()
+            if "engine" in problems and self.engine is not None:
+                self.engine.start()
+            return problems
+        except Exception:  # noqa: BLE001
+            log.exception("network self-heal failed")
+            return []
+
     def _startup_self_heal(self) -> None:
         """Verify / recreate infrastructure the app depends on but doesn't own.
 
@@ -610,6 +722,13 @@ class Gateway:
         """
         from quota.startup_health import (  # lazy: subprocess + /proc
             ensure_nat_table, ensure_network_infrastructure)
+
+        # -- conntrack byte counters (Live traffic: where the bytes go) -----
+        enable_conntrack_accounting()
+        try:   # name connections that were already open before this start
+            seed_dns_names_from_log(self.cfg.history.dnsmasq_log_file)
+        except Exception:  # noqa: BLE001 — cosmetic only
+            log.debug("dns name seeding skipped", exc_info=True)
 
         # -- NAT table ----------------------------------------------------
         # Derive the client subnet from config (same logic as the engine).
@@ -624,7 +743,10 @@ class Gateway:
                 except ValueError:
                     pass
         if client_subnet:
-            ensure_nat_table(client_subnet)
+            ensure_nat_table(
+                client_subnet,
+                ipv6_prefix=(getattr(self.cfg.dhcp, "ipv6_prefix", "")
+                             if getattr(self.cfg.dhcp, "ipv6_enable", False) else ""))
         else:
             log.warning("startup self-heal: cannot derive client_subnet — "
                         "skipping NAT table check")
@@ -637,7 +759,46 @@ class Gateway:
             gateway_ip=gateway_ip,
             uplink_ip=uplink_ip,
             lan_cidr=int(lan_cidr),
+            ipv6_gateway=(getattr(self.cfg.dhcp, "ipv6_gateway", "")
+                          if getattr(self.cfg.dhcp, "ipv6_enable", False) else ""),
         )
+
+        # -- IPv6 host config (dnsmasq RA + sysctl) -------------------------
+        # Applied by the app itself so an update never needs a manual
+        # re-run of the setup script.
+        if not getattr(self.cfg.dhcp, "ipv6_enable", False):
+            # Off switch: undo our own fragments (no-op if never enabled).
+            try:
+                from quota.ipv6_setup import (disable_ipv6_host_config,
+                                              ensure_box_ignores_ula_dns)
+                from quota.startup_health import _find_lan_interface, _SYS_NET, _default_run
+                ensure_box_ignores_ula_dns(
+                    prefix=getattr(self.cfg.dhcp, "ipv6_prefix", "") or "fd00:da7a:2::/64",
+                    iface=_find_lan_interface(_default_run, _SYS_NET) or "",
+                    fallback_dns=list(getattr(self.cfg.dhcp, "dns_servers", []) or []))
+                if disable_ipv6_host_config()["dnsmasq_changed"]:
+                    _reload_dnsmasq()
+            except Exception:  # noqa: BLE001
+                log.exception("startup self-heal: IPv6 disable failed")
+        else:
+            try:
+                from quota.ipv6_setup import ensure_ipv6_host_config
+                from quota.startup_health import _find_lan_interface, _SYS_NET, _default_run
+                res = ensure_ipv6_host_config(
+                    prefix=getattr(self.cfg.dhcp, "ipv6_prefix", "") or "fd00:da7a:2::/64",
+                    gateway=getattr(self.cfg.dhcp, "ipv6_gateway", "") or "fd00:da7a:2::1",
+                    iface=_find_lan_interface(_default_run, _SYS_NET) or "")
+                from quota.ipv6_setup import ensure_box_ignores_ula_dns
+                ensure_box_ignores_ula_dns(
+                    prefix=getattr(self.cfg.dhcp, "ipv6_prefix", "") or "fd00:da7a:2::/64",
+                    iface=_find_lan_interface(_default_run, _SYS_NET) or "",
+                    fallback_dns=list(getattr(self.cfg.dhcp, "dns_servers", []) or []))
+                if res["dnsmasq_changed"]:
+                    _reload_dnsmasq()
+                from quota.ipv6_setup import rollback_if_dnsmasq_down
+                rollback_if_dnsmasq_down()
+            except Exception:  # noqa: BLE001 — never block startup on IPv6 setup
+                log.exception("startup self-heal: IPv6 host config failed")
 
     async def _apply_topology_override(self) -> None:
         """Apply a dashboard WAN-mode toggle (takes effect on the NEXT restart).
@@ -810,6 +971,28 @@ class Gateway:
         except Exception:  # noqa: BLE001
             log.exception("failed to persist lease %s -> %s", mac, ip)
 
+    async def _purge_phantom_devices(self) -> None:
+        """Delete devices/leases whose "MAC" is not a MAC (once per run).
+
+        An earlier version registered DHCPv6 IAIDs ("0", "415503221") as devices.
+        Their pending-guest block was then pushed to nftables as a MAC, failed
+        with "Invalid LL address" and switched the packet engine off.
+        """
+        if getattr(self, "_phantoms_purged", False):
+            return
+        self._phantoms_purged = True
+        try:
+            for dev in await self.database.list_devices():
+                if dev.mac != GATEWAY_MAC and not _LEASE_MAC_RE.match(dev.mac or ""):
+                    await self.database.delete_device(dev.id)
+                    await self.database.delete_lease(dev.mac)
+                    log.warning("removed phantom device %r (not a MAC address)", dev.mac)
+            for lease in await self.database.list_leases():
+                if not _LEASE_MAC_RE.match(lease.mac or ""):
+                    await self.database.delete_lease(lease.mac)
+        except Exception:  # noqa: BLE001
+            log.exception("phantom device purge failed")
+
     async def _sync_dnsmasq_leases(self) -> None:
         """Learn MAC<->IP bindings from dnsmasq's lease file.
 
@@ -826,6 +1009,7 @@ class Gateway:
         except OSError as exc:
             log.warning("cannot read dnsmasq leases %s: %s", path, exc)
             return
+        await self._purge_phantom_devices()
         seen: set[str] = set()
         for line in text.splitlines():
             parts = line.split()
@@ -833,6 +1017,11 @@ class Gateway:
             if len(parts) < 3:
                 continue
             mac, ip = parts[1], parts[2]
+            # DHCPv6 leases look like `<expiry> <iaid> <ipv6> <host> <duid>`: the
+            # 2nd field is an IAID (a number), NOT a MAC. Treating it as one
+            # registered phantom "Guest" devices named "0" / "415503221".
+            if ":" in ip or not _LEASE_MAC_RE.match(mac):
+                continue
             if mac in seen:
                 continue
             seen.add(mac)
@@ -856,52 +1045,119 @@ class Gateway:
             log.debug("new device detected — scheduling immediate ARP sweep")
 
     async def _collect_neigh_active(self) -> None:
-        """Collect IPs with an active kernel neighbor state into
-        ``_neigh_active_ips``.
+        """Read the kernel neighbor table: IPv4 presence + IPv6 address map.
 
-        ``ip -j neigh`` returns one entry per resolved neighbor: IP + state.
-        Anything except FAILED/INCOMPLETE means the kernel recently spoke to
-        that neighbor — these reinforce the ARP probe for the LED: a device
-        that missed the probe burst but is generating traffic still has a
-        valid ARP mapping.
+        IPv4 — only a *fresh* (``REACHABLE``) entry proves presence into
+        ``_neigh_active_ips``. ``STALE`` means "no confirmation for a while" and
+        Linux keeps STALE entries for hours (the GC only runs under memory
+        pressure), so a phone that left the house would otherwise keep a green
+        LED all day. ``PERMANENT``/``NOARP`` are static and prove nothing. An
+        idle-but-connected device is re-confirmed by the ARP probe sweep.
 
-        Parsing falls back to plain ``ip neigh`` text when ``-j`` is
-        unavailable (old iproute2). Neighbor states that carry no usable MAC
-        (FAILED/INCOMPLETE) are skipped. IPv6 rows are skipped (the quota model
-        is IPv4). A missing/unusable ``ip`` binary or a non-Linux box degrades
-        to a no-op — the LED just falls back to the probe + lease data.
+        IPv6 — every non-failed row with a link-layer address maps a client's
+        ULA address (inside ``dhcp.ipv6_prefix``) to its MAC into
+        ``_ipv6_neigh``. A STALE row is fine here: this is address -> MAC
+        bookkeeping, not presence. Link-local rows are ignored (never reach the
+        internet); global (2000::/3) rows mean the device took an address
+        straight from the ISP router and bypasses this box — remembered in
+        ``_ipv6_direct_macs`` so the dashboard can warn.
+
+        Falls back to plain ``ip neigh`` text when ``-j`` is unavailable (old
+        iproute2). A missing/unusable ``ip`` binary degrades to a no-op.
         """
         leases = await self.database.list_leases()
-        if not leases:
-            return
-        wanted = {l.ip for l in leases}
-        active: set[str] = set()
+        wanted = {l.ip for l in leases} if leases else set()
+        rows: list[tuple[str, str, set[str]]] = []  # (dst, lladdr, states)
         code, out = await asyncio.to_thread(
             self._ip_run, ["ip", "-j", "neigh"])
         if code == 0 and out:
             for row in _iter_json_neigh(out):
-                dst = row.get("dst") or ""
-                if ":" in dst or dst not in wanted:
-                    continue
-                if row.get("state") in ("FAILED", "INCOMPLETE"):
-                    continue
-                active.add(dst)
+                st = row.get("state") or ""
+                states = {x.upper() for x in (st if isinstance(st, list) else [st])
+                          if isinstance(x, str)}
+                rows.append((row.get("dst") or "",
+                             (row.get("lladdr") or "").strip().lower(), states))
+            ok = True
         else:
-            # Fallback: `ip neigh` text (older iproute2). Same filters.
+            ok = False
             code2, out2 = await asyncio.to_thread(
                 self._ip_run, ["ip", "neigh"])
             if code2 == 0 and out2:
+                ok = True
                 for line in out2.splitlines():
                     fields = line.split()
-                    if len(fields) < 2 or ":" in fields[0]:
+                    if len(fields) < 2:
                         continue
-                    dst = fields[0]
-                    if dst not in wanted:
-                        continue
-                    if "FAILED" in fields or "INCOMPLETE" in fields:
-                        continue
+                    lladdr = ""
+                    if "lladdr" in fields:
+                        i = fields.index("lladdr")
+                        if i + 1 < len(fields):
+                            lladdr = fields[i + 1].strip().lower()
+                    rows.append((fields[0], lladdr, {f.upper() for f in fields[1:]}))
+        if not ok:
+            return
+
+        from quota.ipv6_probe import is_global_unicast_ipv6
+        try:
+            ula_net = ipaddress.ip_network(
+                getattr(self.cfg.dhcp, "ipv6_prefix", "") or "fd00:da7a:2::/64",
+                strict=False)
+        except ValueError:
+            ula_net = ipaddress.ip_network("fd00:da7a:2::/64")
+        active: set[str] = set()
+        ipv6_neigh: dict[str, str] = {}
+        direct: set[str] = set()
+        for dst, lladdr, states in rows:
+            if ":" not in dst:
+                if dst in wanted and states & _NEIGH_PRESENT_STATES:
                     active.add(dst)
+                continue
+            if not lladdr or states & {"FAILED", "INCOMPLETE"}:
+                continue
+            try:
+                addr = ipaddress.ip_address(dst.split("%")[0])
+            except ValueError:
+                continue
+            if addr in ula_net:
+                ipv6_neigh[dst.lower()] = lladdr
+            elif is_global_unicast_ipv6(dst):
+                direct.add(lladdr)
+        self._neigh_collected = True
         self._neigh_active_ips = active
+        self._ipv6_neigh = ipv6_neigh
+        self._ipv6_direct_macs = direct
+
+    def _ipv6_wan_wanted(self) -> bool:
+        """Should client IPv6 be allowed out to the internet right now?
+
+        Yes only when the ISP really delivers IPv6 AND the household is not
+        being relayed through the VPN: VPN share policy-routes the IPv4 client
+        subnet only, so open IPv6 would leak every device around the tunnel.
+        """
+        if not bool(getattr(self.ipv6_probe, "wan_ipv6_active", False)):
+            return False
+        return str(self._last_vpn_status.get("state", "")) != "on"
+
+    def _device_ipv6_map(self) -> dict[str, str]:
+        """MAC -> one display IPv6 address (the ULA address the box tracks)."""
+        out: dict[str, str] = {}
+        for ip6, mac in sorted(self._ipv6_neigh.items()):
+            out.setdefault(mac, ip6)
+        return out
+
+    def _tracked_ipv6(self, known_macs: set[str]) -> dict[str, str]:
+        """IPv6 address -> MAC for counting/cutting: only KNOWN devices'
+        addresses, capped at ``IPV6_MAX_PER_MAC`` per device (deterministic:
+        sorted, so the same addresses win every tick), plus static reservations."""
+        per_mac: dict[str, list[str]] = {}
+        for ip6, mac in sorted(self._ipv6_neigh.items()):
+            if mac in known_macs:
+                per_mac.setdefault(mac, []).append(ip6)
+        out: dict[str, str] = {}
+        for mac, addrs in per_mac.items():
+            for ip6 in addrs[:IPV6_MAX_PER_MAC]:
+                out[ip6] = mac
+        return out
 
     async def _wifi_probe_tick(self) -> None:
         """Collect a snapshot from the WiFi probe (monitor-mode radio data).
@@ -943,38 +1199,54 @@ class Gateway:
         except Exception:  # noqa: BLE001
             log.exception("latency probe failed")
             return
-        # Every completed sweep refreshes the responder map.  An empty sweep
-        # (0 replies from N targets) is treated as a probe-degradation event
-        # — NOT as "nobody is online" — because the probe backend can
-        # silently return {} (NIC resolution failure, raw-socket loss,
-        # power-save devices all sleeping through the burst).  The old map is
-        # kept; it goes stale after 3×interval and the freshness gate falls
-        # back to lease-based connectedness.  An *exception* already keeps
-        # the old map (line 987-989); this closes the clean-empty loophole.
+        # Every completed sweep refreshes the responder map: devices that
+        # answered the ARP burst plus those with a FRESH kernel neighbor entry.
+        # A single empty sweep keeps the previous map (the probe backend can
+        # silently return {} — NIC resolution failure, sleepy phones missing
+        # one burst), but a SECOND empty sweep in a row means nobody is home,
+        # so the map is cleared and every LED goes grey. Without this the old
+        # map aged out into "lease-based" mode and every leased device stayed
+        # green for the whole lease time.
         self._latency_sweep_ran = True
-        if rtts:
-            self._latency_responders = (
-                set(rtts) | self._neigh_active_ips)
-        # Even when the ARP probe returned results, merge the kernel neighbor
-        # table: a device that missed the ARP burst but is generating traffic
-        # still has a valid REACHABLE/STALE entry — it stays blue.
-        elif self._neigh_active_ips:
-            self._latency_responders = set(self._neigh_active_ips)
-        if not rtts and not self._neigh_active_ips:
-            return
+        fresh = set(rtts) | self._neigh_active_ips
+        if fresh:
+            self._latency_responders = fresh
+            self._empty_sweeps = 0
+        else:
+            self._empty_sweeps += 1
+            if self._empty_sweeps >= 2:
+                self._latency_responders = set()
+
+    def _recent_traffic_ips(self) -> set[str]:
+        """IPs that moved bytes in the latest counter flush — a device that is
+        passing traffic right now is, by definition, connected."""
+        try:
+            by_ip = self.holder.get().by_ip
+        except Exception:  # noqa: BLE001
+            return set()
+        return {ip for ip, c in by_ip.items()
+                if getattr(c, "up", 0) or getattr(c, "down", 0)}
 
     def _latency_active_ips(self) -> Optional[set[str]]:
-        """IPs that answered the latest ARP sweep, or None when the probe
-        isn't running / data is stale (caller falls back to lease-based
-        connectedness). Drives the device-card LED: a leased device that
-        stopped answering (asleep, off, or on another network) goes grey."""
-        if self.latency_probe is None or not self._latency_sweep_ran:
-            return None
-        if (self._latency_interval > 0
-                and time.monotonic() - self._last_latency_sweep
-                > 3 * self._latency_interval):
-            return None  # stale — fall back to lease-based
-        return set(self._latency_responders)
+        """IPs that are connected NOW, or None when there is no presence
+        signal at all (caller falls back to lease-based connectedness).
+
+        Sources, strongest first: the latest ARP sweep, fresh kernel neighbor
+        entries, and IPs that carried traffic in the last flush. When the ARP
+        probe is off or its data went stale, the neighbor table + traffic are
+        used on their own (never the bare lease, which lags reality by up to
+        ``LEASE_HOURS`` and kept away devices green)."""
+        traffic = self._recent_traffic_ips()
+        probe_fresh = (
+            self.latency_probe is not None and self._latency_sweep_ran
+            and not (self._latency_interval > 0
+                     and time.monotonic() - self._last_latency_sweep
+                     > 3 * self._latency_interval))
+        if probe_fresh:
+            return set(self._latency_responders) | traffic
+        if self._neigh_collected:
+            return set(self._neigh_active_ips) | traffic
+        return None
 
     async def _scan_rogues(self) -> None:
         """Probe the LAN for active hosts that are NOT known DHCP devices.
@@ -1020,7 +1292,11 @@ class Gateway:
         device_by_ip: dict[str, int | None] = {}
         for ev in events:
             if ev.ip not in device_by_ip:
-                dev = await self.database.get_device_by_ip(ev.ip)
+                mac6 = self._ipv6_neigh.get(ev.ip.lower()) if ":" in ev.ip else None
+                if mac6:
+                    dev = await self.database.get_device(mac=mac6)
+                else:
+                    dev = await self.database.get_device_by_ip(ev.ip)
                 device_by_ip[ev.ip] = dev.id if dev else None
         # Aggregate into (device_id, minute, domain) -> count buckets; an IP
         # with no device (rogue / lease gap at drain time) is skipped — the
@@ -1112,20 +1388,6 @@ class Gateway:
             if dt > 1.0:
                 log.warning("maintenance step %s took %.1fs", name, dt)
 
-    def _spawn_telegram_tick(self) -> None:
-        """Run the Telegram WAN-IP notifier OFF the tick: a blocked/slow
-        Telegram endpoint used to hold the whole 15 s maintenance cycle for its
-        network timeout (shaping, blocks and VPN routing all waited)."""
-        task = getattr(self, "_telegram_task", None)
-        if task is not None and not task.done():
-            return
-        self._telegram_task = asyncio.ensure_future(
-            asyncio.wait_for(self._wan_telegram_ip_tick(), timeout=20))
-        # Swallow the result: a timeout/failure here is already logged inside
-        # the tick and must not surface as "exception never retrieved".
-        self._telegram_task.add_done_callback(
-            lambda t: t.cancelled() or t.exception())
-
     async def _maintenance_tick(self) -> None:
         # 1. Roll the quota period if stale (covers month boundary).
         await self.service.ensure_period()
@@ -1180,9 +1442,6 @@ class Gateway:
         #     isn't working, and renewing into a dead line is pointless.
         await self._timed("_wan_ip_renew_tick", self._wan_ip_renew_tick())
 
-        # 1g. Telegram WAN IP change trigger (notifies admin whenever public IP changes).
-        self._spawn_telegram_tick()
-
         # 1h. GitHub self-update check (24 h gate lives inside the updater —
         #     maybe_check is a no-op until the interval elapses). A failure is
         #     swallowed inside; the state surfaces in the Admin tab. None when
@@ -1198,9 +1457,16 @@ class Gateway:
         #    it off the event loop so a slow nft never stalls the WebSocket
         #    push or the API.
         live_by_ip: dict[str, object] = {}
+        live_lan_by_ip: dict[str, object] = {}
+        flush_interval = 15.0
         if self.engine is not None:
             snap = await asyncio.to_thread(self.engine.flush)
+            _mono = time.monotonic()
+            if self._last_flush_mono is not None:
+                flush_interval = min(120.0, max(1.0, _mono - self._last_flush_mono))
+            self._last_flush_mono = _mono
             live_by_ip = snap.by_ip
+            live_lan_by_ip = getattr(snap, "lan_by_ip", None) or {}
             today = _dt.date.today().isoformat()
             if snap.by_ip or snap.gateway.up or snap.gateway.down:
                 devices = await self.database.list_devices()
@@ -1235,6 +1501,23 @@ class Gateway:
                 if usage_records:
                     await self.database.add_usage_batch(usage_records)
 
+            # LOCAL (LAN) traffic: stored apart from the metered usage, never
+            # part of quota math - purely for the dashboard's LAN monitor.
+            lan_by_ip = getattr(snap, "lan_by_ip", None) or {}
+            if lan_by_ip:
+                try:
+                    devices_l = await self.database.list_devices()
+                    by_mac_l = {d.mac.lower(): d for d in devices_l}
+                    lan_records: list[tuple[int, str, int, int]] = []
+                    for ip, c in lan_by_ip.items():
+                        mac = snap.ip_to_mac.get(ip) or await self.database.get_mac_for_ip(ip)
+                        dev = by_mac_l.get(mac.lower()) if mac else None
+                        if dev is not None and (c.up or c.down):
+                            lan_records.append((dev.id, today, c.up, c.down))
+                    await self.database.add_lan_usage_batch(lan_records)
+                except Exception:  # noqa: BLE001 - monitoring must never stall the tick
+                    log.exception("LAN usage drain failed")
+
         # 3. Recompute block states from usage vs allowances.
         changes = await self.service.evaluate_blocks()
         for ch in changes:
@@ -1243,7 +1526,16 @@ class Gateway:
         # 4. Push fresh enforcement maps into the engine + holder.
         state = await self.service.snapshot_state()
         ip_to_mac = {v["ip"]: mac for mac, v in state.items() if v.get("ip")}
-        self._last_ip_to_mac = ip_to_mac  # for an immediate shaping re-sync
+        # IPv6: the engine counts/cuts each known device's tracked IPv6
+        # addresses exactly like its IPv4 lease (static reservations + the
+        # ULA addresses learned from the neighbor table).
+        ip_to_mac_all = dict(ip_to_mac)
+        for s_row in await self.database.list_static_leases():
+            ip6 = (s_row.get("ip6") or "").strip().lower()
+            if ip6 and s_row["mac"].lower() in state:
+                ip_to_mac_all[ip6] = s_row["mac"].lower()
+        ip_to_mac_all.update(self._tracked_ipv6({m.lower() for m in state}))
+        self._last_ip_to_mac = ip_to_mac_all  # for an immediate shaping re-sync
         blocked = {mac: v["blocked"] for mac, v in state.items()}
         pending_guests = {
             v["ip"] for mac, v in state.items()
@@ -1257,14 +1549,17 @@ class Gateway:
             # the event loop so a slow kernel sync never stalls the WS push.
             try:
                 await asyncio.to_thread(
-                    self.engine.update_state, ip_to_mac, blocked, list(pending_guests))
+                    self.engine.update_state, ip_to_mac_all, blocked, list(pending_guests))
             except TypeError:
                 await asyncio.to_thread(
-                    self.engine.update_state, ip_to_mac, blocked)
+                    self.engine.update_state, ip_to_mac_all, blocked)
             # The box's own internet is cut via the gateway chains (gw_blocked
             # set) — its MAC has no lease/IP, so it never enters the forward
             # blocked set above. The Gateway user's resolved state drives the
             # toggle; the engine cache-gates a no-op on an unchanged state.
+            _set6 = getattr(self.engine, "set_ipv6_wan", None)
+            if self.ipv6_probe is not None and _set6 is not None:
+                await asyncio.to_thread(_set6, self._ipv6_wan_wanted())
             await asyncio.to_thread(
                 self.engine.set_gateway_blocked,
                 bool(state.get(GATEWAY_MAC, {}).get("blocked", False)))
@@ -1275,21 +1570,39 @@ class Gateway:
             # None if it was never programmed — copied into the snapshot so the
             # dashboard can show "Blocked in the UI but not cut at the kernel".
             gateway_blocked = getattr(self.engine, "gateway_blocked", None)
+        # Where is each device's traffic going? Diff conntrack byte counters
+        # (off-loop: /proc read + parse). Best effort — never blocks the tick.
+        flows_by_mac: dict[str, list[dict]] = {}
+        try:
+            _addr_mac = {a: m for a, m in ip_to_mac_all.items()}
+            await asyncio.to_thread(self.flows.sample, set(_addr_mac))
+            by_mac_addrs: dict[str, set[str]] = {}
+            for a, m in _addr_mac.items():
+                by_mac_addrs.setdefault(m, set()).add(a)
+            for m, addrs in by_mac_addrs.items():
+                dests = self.flows.top_destinations(addrs)
+                if dests:
+                    flows_by_mac[m] = dests
+        except Exception:  # noqa: BLE001
+            log.debug("flow sampling failed", exc_info=True)
         # Live counters = the flushed delta, so the dashboard shows real
         # recent traffic instead of always-zero values.
         self.holder.swap(EngineSnapshot(
             by_ip=live_by_ip,
-            ip_to_mac=ip_to_mac, blocked=blocked, rogue=list(self._rogues),
+            lan_by_ip=live_lan_by_ip,
+            ip_to_mac=ip_to_mac_all, blocked=blocked, rogue=list(self._rogues),
             wan_status=await self._wan_status(),
             gateway_blocked=gateway_blocked,
             engine_available=engine_available,
             pending_guests=pending_guests,
+            interval_s=flush_interval,
+            flows_by_mac=flows_by_mac,
             ts=time.time()))
 
         # 5. Linux: reconcile the tc speed-shaping tree (settings + live IPs).
         #    update_state is signature-gated, so an unchanged state does not
         #    touch the kernel; a DB edit lands here within one tick (<=15 s).
-        await self._timed("_sync_shaping", self._sync_shaping(ip_to_mac))
+        await self._timed("_sync_shaping", self._sync_shaping(ip_to_mac_all))
 
         # 6. Regenerate dnsmasq's domain-rule + tag config if anything
         #    changed (new device -> new tag, or a rule/preset/DNS-server
@@ -1320,6 +1633,16 @@ class Gateway:
             except Exception:  # noqa: BLE001 — never let the firewall stall a tick
                 log.exception("firewall reconcile failed")
 
+        # 9. Network self-heal: forwarding / NAT / engine table that something
+        #    outside the app removed (a package install, an nftables restart).
+        try:
+            fixed = await asyncio.to_thread(self._network_heal, "tick")
+            if fixed:
+                await self.database.add_event(
+                    "Network self-heal restored: " + ", ".join(fixed), "warn")
+        except Exception:  # noqa: BLE001
+            log.exception("network self-heal tick failed")
+
     async def _sync_shaping(self, ip_to_mac: dict[str, str]) -> None:
         """Push the latest shaping settings + device caps into the tc shaper.
 
@@ -1340,7 +1663,14 @@ class Gateway:
                 users = {u.id: u for u in await self.database.list_users()}
                 devices = {d.mac.lower(): d for d in await self.database.list_devices()}
                 rate_map: list[dict[str, object]] = []
+                # IPv6 addresses ride on their device's (IPv4) entry as ``ip6``
+                v6_by_mac: dict[str, list[str]] = {}
                 for ip, mac in ip_to_mac.items():
+                    if ":" in ip:
+                        v6_by_mac.setdefault(mac.lower(), []).append(ip)
+                for ip, mac in ip_to_mac.items():
+                    if ":" in ip:
+                        continue
                     dev = devices.get(mac.lower())
                     if dev is None or dev.user_id is None:
                         continue  # untracked or orphaned — nothing to shape
@@ -1361,6 +1691,7 @@ class Gateway:
                         "up": float(dev.limit_up_mbps or 0.0),
                         "user_down": user_down,
                         "user_up": user_up,
+                        "ip6": sorted(v6_by_mac.get(mac.lower(), ())),
                     })
                 # "VPN active" = the tunnel is genuinely carrying the client
                 # subnet right now (VpnShareManager applied the policy route).
@@ -1528,7 +1859,8 @@ class Gateway:
                     if dev.dns_server:
                         dns_servers.append((_db.DNS_SCOPE_DEVICE, dev.id, dev.dns_server))
                 static_leases_list = await self.database.list_static_leases()
-                static_map = {r["mac"]: r["ip"] for r in static_leases_list}
+                static_map = {r["mac"]: (r.get("ip", ""), r.get("ip6", ""))
+                              for r in static_leases_list}
                 await asyncio.to_thread(
                     manager.apply, devices, rules, dns_servers, device_ids_by_user,
                     static_map)
@@ -1953,66 +2285,6 @@ class Gateway:
         if elapsed >= cfg_["minutes"] * 60:
             await self._renew_wan_ip()
 
-    async def _wan_telegram_ip_tick(self) -> None:
-        """Check for WAN public IP changes and notify Telegram bot if trigger is armed."""
-        try:
-            enabled = (await self.database.get_setting("wan_telegram_enabled", "0")) == "1"
-            if not enabled:
-                return
-
-            bot_token = await self.database.get_setting("wan_telegram_bot_token", "")
-            chat_id = await self.database.get_setting("wan_telegram_chat_id", "")
-            if not bot_token or not chat_id:
-                return
-
-            effective = getattr(self.cfg.engine, "topology", "lan") or "lan"
-            from quota import wan_telegram as _wan_tg
-            current_ip = await _wan_tg.get_current_public_ip(effective)
-            if not current_ip:
-                return
-
-            last_ip = (await self.database.get_setting("wan_telegram_last_ip", "") or "").strip()
-            if current_ip == last_ip:
-                return
-
-            # IP changed (or first detection)! Send Telegram notification
-            wan_exposed = False
-            if self.firewall is not None:
-                try:
-                    fw_cfg = await self.firewall.load_config()
-                    wan_exposed = bool(fw_cfg.get("wan_confirmed"))
-                except Exception:
-                    pass
-
-            web_port = int(getattr(self.cfg.web, "port", 8080) or 8080)
-            web_proto = "https" if getattr(self.cfg.web, "tls_certfile", None) else "http"
-
-            msg = _wan_tg.format_wan_ip_message(
-                ip=current_ip,
-                web_port=web_port,
-                web_proto=web_proto,
-                wan_exposed=wan_exposed,
-                interface="ppp0" if effective == "wan" else "eth0",
-                is_test=False,
-            )
-
-            ok, err_desc = await _wan_tg.send_telegram_message(bot_token, chat_id, msg)
-            if ok:
-                await self.database.set_setting("wan_telegram_last_ip", current_ip)
-                await self.database.set_setting(
-                    "wan_telegram_last_sent",
-                    _dt.datetime.now(_dt.timezone.utc).isoformat(),
-                )
-                await self.database.add_event(
-                    f"Telegram WAN IP notification sent (New IP: {current_ip})",
-                    "info",
-                )
-                log.info("Telegram notification sent for new WAN IP: %s", current_ip)
-            else:
-                log.warning("Failed to send Telegram WAN notification: %s", err_desc)
-        except Exception as e:
-            log.exception("Error in Telegram WAN IP tick: %s", e)
-
     async def _wan_status(self) -> dict[str, object]:
         """Live WAN-mode status for the dashboard/API (cheap, every 15 s tick).
 
@@ -2041,7 +2313,12 @@ class Gateway:
             "topology": effective, "configured": configured, "source": source,
             "pending": configured if source == "dashboard" else None,
             "ppp0": "n/a", "ppp_ip": "", "ppp_peer": "",
+            "public_ip6": "", "ipv6_active": False,
         }
+        if getattr(self, "ipv6_probe", None) is not None:
+            st6 = self.ipv6_probe.get_status()
+            out["public_ip6"] = st6.get("wan_ipv6_address") or ""
+            out["ipv6_active"] = bool(st6.get("wan_ipv6_active"))
         # The WAN-tab auto-renew schedule + last renewal time (ISO or ""). The
         # dashboard reads these from the WS snapshot / GET /api/wan so the
         # toggle + "last renewed" line stay live without a separate query.
@@ -2139,6 +2416,11 @@ class Gateway:
                 await asyncio.wait_for(self.vpn_core.disconnect(user_initiated=False), timeout=3.0)
             except Exception as e:
                 log.debug("VPN core shutdown notice: %s", e)
+        if self.ipv6_probe is not None and hasattr(self.ipv6_probe, "stop"):
+            try:
+                await self.ipv6_probe.stop()
+            except Exception as e:  # noqa: BLE001
+                log.debug("IPv6 probe shutdown notice: %s", e)
         await self.database.close()
         log.info("shutdown complete")
 
@@ -2212,13 +2494,18 @@ def main() -> None:
                          stop_new_sync=gateway._apply_stop_new_now,
                          decline_random_sync=gateway._apply_decline_random_now,
                          active_ips_getter=gateway._latency_active_ips,
+                         tailscale_manager=TailscaleManager(
+                             on_system_change=gateway._network_heal),
                          firewall=gateway.firewall,
                          firewall_wan_preapply=gateway._firewall_wan_preapply,
                          updater=gateway.updater,
                          vpn_manager=gateway.vpn_manager,
                          engine=gateway.engine,
                          web_config=cfg.web,
-                         waf_config=cfg.waf)
+                         waf_config=cfg.waf,
+                         ipv6_probe=lambda: gateway.ipv6_probe,
+                         ipv6_map_getter=gateway._device_ipv6_map,
+                         ipv6_direct_getter=lambda: sorted(gateway._ipv6_direct_macs))
         # TLS (web.tls_certfile / web.tls_keyfile): uvicorn terminates HTTPS
         # itself — a self-signed cert is fine (one-time trust step in the
         # browser). When TLS is on, secure_cookies is forced True by the app.

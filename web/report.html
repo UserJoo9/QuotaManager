@@ -4,7 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Consumption report — Quota Manager</title>
- <link rel="stylesheet" href="/assets/styles.css?v=49">
+<link rel="stylesheet" href="/css/tokens.css">
+<link rel="stylesheet" href="/assets/pub.css?v=1">
+<script src="/assets/pub-theme.js"></script>
 <style>
   /* Report page: read-only consumption view, source-IP gated (no session). */
   body { padding: 24px; }
@@ -15,7 +17,7 @@
   .rep-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
   .rep-card { padding: 20px 22px; }
   .rep-card h3 { font-size: 0.95rem; margin-bottom: 12px; color: var(--accent-3); }
-  .rep-stat { display: flex; justify-content: space-between; padding: 5px 0; font-size: 0.85rem; border-bottom: 1px solid rgba(255,255,255,0.06); }
+  .rep-stat { display: flex; justify-content: space-between; padding: 5px 0; font-size: 0.85rem; border-bottom: 1px solid color-mix(in srgb, var(--text) 6%, transparent); }
   .rep-stat:last-child { border-bottom: none; }
   .rep-stat span:first-child { color: var(--text-dim); }
   .rep-stat b { font-family: ui-monospace, monospace; }
@@ -24,13 +26,13 @@
   .rep-user-head h3 { font-size: 1rem; }
   .rep-tag { font-size: 0.68rem; padding: 2px 8px; border-radius: 8px; background: var(--glass-bg-2); color: var(--text-dim); }
   .rep-tag.protected { color: var(--accent-3); }
-  .rep-tag.blocked { color: var(--danger); background: rgba(248,113,113,0.15); border: 1px solid rgba(248,113,113,0.35); }
+  .rep-tag.blocked { color: var(--danger); background: color-mix(in srgb, var(--danger) 15%, transparent); border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent); }
   .rep-bar { height: 8px; border-radius: 6px; background: var(--glass-bg-2); overflow: hidden; margin: 10px 0 4px; }
   .rep-bar > div { height: 100%; border-radius: 6px; background: linear-gradient(90deg, var(--accent-2), var(--accent)); }
   .rep-bar > div.over { background: linear-gradient(90deg, var(--danger), var(--warn)); }
   table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.82rem; }
   th { text-align: left; color: var(--text-dim); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--glass-border); }
-  td { padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+  td { padding: 6px 8px; border-bottom: 1px solid color-mix(in srgb, var(--text) 5%, transparent); }
   td.num, th.num { text-align: right; font-family: ui-monospace, monospace; }
   .rep-sections { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 18px; }
   @media (max-width: 900px) { .rep-sections { grid-template-columns: 1fr; } }
@@ -51,7 +53,7 @@
     .ev { flex-wrap: wrap; }
   }
   .rep-events, .rep-logs { max-height: 320px; overflow: auto; }
-  .ev { padding: 5px 0; font-size: 0.8rem; border-bottom: 1px solid rgba(255,255,255,0.05); }
+  .ev { padding: 5px 0; font-size: 0.8rem; border-bottom: 1px solid color-mix(in srgb, var(--text) 5%, transparent); }
   .ev .lvl { font-weight: 600; margin-right: 6px; }
   .lvl.warn { color: var(--warn); }
   .lvl.error { color: var(--danger); }

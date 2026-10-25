@@ -297,6 +297,13 @@ class TcShaper:
         # internet — the pass-through must exempt it too.
         self.own_addresses = _find_own_addresses(self.iface, self._run_command)
 
+        #: ULA prefix of the dual-stack LAN ("" = IPv6 not shaped). Client IPv6
+        #: traffic is redirected into the same ifb/HTB trees as IPv4, matched
+        #: per device by its tracked IPv6 addresses (``ip6`` in the rate map).
+        _dh = getattr(cfg, "dhcp", None)
+        self.ipv6_prefix = (str(getattr(_dh, "ipv6_prefix", "") or "").strip()
+                            if getattr(_dh, "ipv6_enable", False) else "")
+
         self.available = True
         self._warned = False
         #: last-applied state signature (None = not applied / needs rebuild).
@@ -459,7 +466,8 @@ class TcShaper:
              round(float(e.get("down") or 0.0), 3),
              round(float(e.get("up") or 0.0), 3),
              round(float(e.get("user_down") or 0.0), 3),
-             round(float(e.get("user_up") or 0.0), 3))
+             round(float(e.get("user_up") or 0.0), 3),
+             tuple(sorted(e.get("ip6") or ())))
             for e in self._rate_map)
         return (self._enabled, self._fair_sharing, self._vpn_active, self._ppp,
                 self._rates_measured, self._line_margin_pct,
@@ -744,6 +752,13 @@ class TcShaper:
                  self.client_subnet, "action", "mirred", "egress", "redirect",
                  "dev", self.ifb],
             ]
+            if self.ipv6_prefix:
+                # IPv6 clients (ULA, pre-NAT66 source) take the same ifb path.
+                cmds.append(["tc", "filter", "add", "dev", self.iface,
+                             "parent", "ffff:", "protocol", "ipv6", "prio", "7",
+                             "u32", "match", "ip6", "src", self.ipv6_prefix,
+                             "action", "mirred", "egress", "redirect", "dev",
+                             self.ifb])
             if self._total_up > 0:
                 cmds += self._tree_cmds(self.ifb, self._total_up, "src")
             if wan_ingress:
@@ -935,6 +950,13 @@ class TcShaper:
                 cmds.append(["tc", "filter", "add", "dev", dev, "parent", "1:",
                              "protocol", "ip", "prio", "2", "u32", "match",
                              "ip", match_field, str(e["ip"]), "flowid", dev_cid])
+                # same class for the device's IPv6 addresses (prio is per
+                # protocol, so IPv6 gets its own prio — never reuse 2)
+                for a6 in sorted(e.get("ip6") or ()):
+                    cmds.append(["tc", "filter", "add", "dev", dev, "parent",
+                                 "1:", "protocol", "ipv6", "prio", "5", "u32",
+                                 "match", "ip6", match_field, f"{a6}/128",
+                                 "flowid", dev_cid])
         return cmds
 
     def _teardown(self) -> None:

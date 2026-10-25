@@ -36,6 +36,15 @@ dhcp:
   pool_start: 192.168.2.100   # first address handed to devices
   pool_end: 192.168.2.200     # last address handed to devices
   lease_hours: 24
+  # --- IPv6 dual-stack (SLAAC + DHCPv6 on a private ULA /64, NAT66 out) ------
+  # Must match ULA_NET in scripts/setup_gateway_kali.sh (default below). Until
+  # the ISP really delivers IPv6 the box answers client IPv6 with ICMPv6
+  # "no route" so apps fall back to IPv4 instantly; the probe re-checks every
+  # ipv6_probe_interval_s and opens the path by itself when IPv6 appears.
+  ipv6_enable: true
+  ipv6_prefix: "fd00:da7a:2::/64"
+  ipv6_gateway: "fd00:da7a:2::1"
+  ipv6_probe_interval_s: 600
   lease_file: /var/lib/misc/dnsmasq.leases
   # App-owned dnsmasq fragment refusing DHCP to "STOP NEW CONNECTIONS" MACs
   # (one `dhcp-host=<mac>,ignore` line each). Written by run.py, emptied when

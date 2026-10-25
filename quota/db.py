@@ -295,6 +295,16 @@ CREATE TABLE IF NOT EXISTS usage_daily (
     PRIMARY KEY (device_id, date)
 );
 
+-- Per-device LOCAL (LAN) traffic, monitoring only - never part of the quota
+-- math (usage_daily is the metered internet). Fed by the engine's LAN counters.
+CREATE TABLE IF NOT EXISTS lan_usage_daily (
+    device_id INTEGER NOT NULL,
+    date      TEXT NOT NULL,
+    up_bytes  INTEGER NOT NULL DEFAULT 0,
+    down_bytes INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (device_id, date)
+);
+
 -- Per-device DNS browsing history (what each device queries, per minute
 -- bucket). Fed from dnsmasq's query log by quota/dnslog.py; pruned hourly
 -- per-user by their history_days retention (NULL = the global default).
@@ -406,6 +416,7 @@ CREATE TABLE IF NOT EXISTS dns_presets (
 CREATE TABLE IF NOT EXISTS static_leases (
     mac        TEXT PRIMARY KEY,
     ip         TEXT NOT NULL UNIQUE,
+    ip6        TEXT NOT NULL DEFAULT '',
     hostname   TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL
 );
@@ -617,6 +628,13 @@ class Database:
             await self._conn.commit()
         except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
             pass
+        try:
+            await self._conn.execute(
+                "ALTER TABLE static_leases ADD COLUMN ip6 "
+                "TEXT NOT NULL DEFAULT ''")
+            await self._conn.commit()
+        except Exception:  # noqa: BLE001
+            pass
         await self._migrate_domain_rules_scope_key()
         await self._backfill_users()
         await self._seed_gateway()
@@ -775,6 +793,11 @@ class Database:
         return _row_to_device(row) if row else None
 
     async def get_device_by_ip(self, ip: str) -> Device | None:
+        if ":" in ip:
+            row = await self._fetch_one(
+                """SELECT d.* FROM devices d JOIN static_leases s ON d.mac = s.mac
+                   WHERE s.ip6 = ?""", (ip,))
+            return _row_to_device(row) if row else None
         row = await self._fetch_one(
             """SELECT d.* FROM devices d JOIN leases l ON d.mac = l.mac
                WHERE l.ip = ?""", (ip,))
@@ -939,6 +962,8 @@ class Database:
                 await self.add_mac_list("deny", [r["mac"]])
             await self.conn.execute(
                 "DELETE FROM usage_daily WHERE device_id=?", (r["id"],))
+            await self.conn.execute(
+                "DELETE FROM lan_usage_daily WHERE device_id=?", (r["id"],))
             await self.conn.execute("DELETE FROM devices WHERE id=?", (r["id"],))
             await self.delete_domain_rules_by_scope(DNS_SCOPE_DEVICE, r["id"])
         await self.conn.execute("DELETE FROM users WHERE id=?", (user_id,))
@@ -1096,14 +1121,14 @@ class Database:
     async def list_static_leases(self) -> list[dict[str, Any]]:
         """Return all static lease reservations ordered by IP."""
         rows = await self.conn.execute_fetchall(
-            "SELECT mac, ip, hostname, created_at FROM static_leases ORDER BY ip"
+            "SELECT mac, ip, ip6, hostname, created_at FROM static_leases ORDER BY ip"
         )
         return [dict(r) for r in rows]
 
     async def get_static_lease(self, mac: str) -> dict[str, Any] | None:
         """Get static lease reservation for a MAC address."""
         row = await self._fetch_one(
-            "SELECT mac, ip, hostname, created_at FROM static_leases WHERE mac=?",
+            "SELECT mac, ip, ip6, hostname, created_at FROM static_leases WHERE mac=?",
             (mac.lower(),),
         )
         return dict(row) if row else None
@@ -1111,22 +1136,35 @@ class Database:
     async def get_static_lease_by_ip(self, ip: str) -> dict[str, Any] | None:
         """Get static lease reservation for an IP address (conflict check)."""
         row = await self._fetch_one(
-            "SELECT mac, ip, hostname, created_at FROM static_leases WHERE ip=?",
+            "SELECT mac, ip, ip6, hostname, created_at FROM static_leases WHERE ip=?",
             (ip.strip(),),
         )
         return dict(row) if row else None
 
-    async def set_static_lease(self, mac: str, ip: str, hostname: str = "") -> dict[str, Any]:
-        """Insert or update a static lease reservation."""
+    async def get_static_lease_by_ip6(self, ip6: str) -> dict[str, Any] | None:
+        """Get static lease reservation for an IPv6 address (conflict check)."""
+        clean = ip6.strip().lower()
+        if not clean:
+            return None
+        row = await self._fetch_one(
+            "SELECT mac, ip, ip6, hostname, created_at FROM static_leases WHERE LOWER(ip6)=?",
+            (clean,),
+        )
+        return dict(row) if row else None
+
+    async def set_static_lease(self, mac: str, ip: str, hostname: str = "", ip6: str = "") -> dict[str, Any]:
+        """Insert or update a static lease reservation (IPv4 and optional IPv6)."""
         mac_clean = mac.lower().strip()
         ip_clean = ip.strip()
+        ip6_clean = ip6.strip().lower()
         now = time.time()
         await self.conn.execute(
-            """INSERT INTO static_leases (mac, ip, hostname, created_at)
-               VALUES (?, ?, ?, ?)
+            """INSERT INTO static_leases (mac, ip, ip6, hostname, created_at)
+               VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(mac) DO UPDATE SET ip=excluded.ip,
+                 ip6=excluded.ip6,
                  hostname=excluded.hostname""",
-            (mac_clean, ip_clean, hostname.strip(), now),
+            (mac_clean, ip_clean, ip6_clean, hostname.strip(), now),
         )
         # Also update the active lease table so it reflects immediately
         await self.set_lease(mac_clean, ip_clean)
@@ -1339,6 +1377,47 @@ class Database:
         )
         await self.conn.commit()
 
+    async def add_lan_usage_batch(self, records: list[tuple[int, str, int, int]]) -> None:
+        """Add LOCAL (LAN) byte deltas per (device, day). Monitoring only."""
+        if not records:
+            return
+        await self.conn.executemany(
+            """INSERT INTO lan_usage_daily (device_id, date, up_bytes, down_bytes)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(device_id, date) DO UPDATE SET
+                 up_bytes = up_bytes + excluded.up_bytes,
+                 down_bytes = down_bytes + excluded.down_bytes""",
+            records,
+        )
+        await self.conn.commit()
+
+    async def get_lan_usage_daily_totals(self, since_date: str) -> list[dict[str, Any]]:
+        """Per-day LAN totals (all devices) since ``since_date``, oldest first."""
+        rows = await self.conn.execute_fetchall(
+            "SELECT date, SUM(up_bytes) up, SUM(down_bytes) down FROM lan_usage_daily "
+            "WHERE date>=? GROUP BY date ORDER BY date", (since_date,))
+        return [{"date": r["date"], "up_bytes": int(r["up"] or 0), "down_bytes": int(r["down"] or 0)} for r in rows]
+
+    async def get_lan_period_usage(self) -> dict[int, dict[str, int]]:
+        """LAN usage since period_start, keyed by device_id."""
+        bundle = await self.get_bundle()
+        since = bundle.period_start or ""
+        rows = await self.conn.execute_fetchall(
+            "SELECT device_id, SUM(up_bytes) up, SUM(down_bytes) down FROM lan_usage_daily "
+            "WHERE date>=? GROUP BY device_id", (since,))
+        return {r["device_id"]: {"up": int(r["up"] or 0), "down": int(r["down"] or 0)} for r in rows}
+
+    async def get_lan_period_usage_by_user(self) -> dict[int, dict[str, int]]:
+        """LAN usage since period_start, keyed by user_id."""
+        bundle = await self.get_bundle()
+        since = bundle.period_start or ""
+        rows = await self.conn.execute_fetchall(
+            "SELECT d.user_id user_id, SUM(u.up_bytes) up, SUM(u.down_bytes) down "
+            "FROM lan_usage_daily u JOIN devices d ON u.device_id = d.id "
+            "WHERE u.date>=? GROUP BY d.user_id", (since,))
+        return {r["user_id"]: {"up": int(r["up"] or 0), "down": int(r["down"] or 0)}
+                for r in rows if r["user_id"] is not None}
+
     async def set_usage(self, device_id: int, date: str,
                         up_bytes: int, down_bytes: int) -> None:
         """Set (upsert/override) exact usage for a device on a given date."""
@@ -1414,6 +1493,13 @@ class Database:
         up = sum(r["up_bytes"] for r in rows)
         down = sum(r["down_bytes"] for r in rows)
         return {"up_bytes": up, "down_bytes": down, "total_bytes": up + down}
+
+    async def get_usage_daily_totals(self, since_date: str) -> list[dict[str, Any]]:
+        """Per-day totals (all devices) since ``since_date`` (YYYY-MM-DD), oldest first."""
+        rows = await self.conn.execute_fetchall(
+            "SELECT date, SUM(up_bytes) up, SUM(down_bytes) down FROM usage_daily "
+            "WHERE date>=? GROUP BY date ORDER BY date", (since_date,))
+        return [{"date": r["date"], "up_bytes": int(r["up"] or 0), "down_bytes": int(r["down"] or 0)} for r in rows]
 
     async def get_period_usage(self) -> dict[int, dict[str, int]]:
         """Aggregate usage since period_start, keyed by device_id."""

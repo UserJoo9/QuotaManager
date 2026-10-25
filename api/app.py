@@ -10,6 +10,7 @@ on connect, then the app pushes refreshed snapshots on a timer.
 from __future__ import annotations
 
 import asyncio
+import collections
 import datetime as _dt
 import hashlib
 import hmac
@@ -50,7 +51,7 @@ from api.schemas import (BundleUpdate, ConsumptionSpoofRequest, DeviceCreate,
                          UpdateSettings, UserCreate, UserUpdate,
                          VpnConnectRequest, VpnNodeCreate, VpnNodeUpdate,
                          VpnRoutingUpdateRequest, VpnSettingsUpdate,
-                         WanRenewConfig, WanTelegramTest, WanTelegramUpdate, WanTest, WanUpdate)
+                         WanRenewConfig, WanTest, WanUpdate, TailscaleDisconnect)
 from api import waf as _waf
 from core import passwords as _passwords
 from core import timeutil
@@ -58,7 +59,7 @@ from core.config import WafConfig, WebConfig
 from quota import db as _db
 from quota import dns_rules as _dns_rules
 from quota import totp as _totp
-from quota import wan_telegram as _wan_tg
+from quota.tailscale import TailscaleManager
 from quota.engine import GATEWAY_MAC, EngineSnapshot, SnapshotHolder
 from quota.history_analytics import get_history_analytics, get_live_traffic_analytics
 from quota.local_share import (
@@ -295,8 +296,13 @@ def create_app(
     web_config: WebConfig | None = None,
     waf_config: WafConfig | None = None,
     local_share_manager: LocalShareManager | None = None,
+    ipv6_probe: Optional[object] = None,
+    ipv6_map_getter: Optional[Callable[[], dict[str, str]]] = None,
+    ipv6_direct_getter: Optional[Callable[[], list[str]]] = None,
+    tailscale_manager: Optional[object] = None,
 ) -> FastAPI:
     web_cfg: WebConfig = web_config or WebConfig()
+    tailscale = tailscale_manager or TailscaleManager()
     waf_cfg: WafConfig = waf_config or WafConfig()
     local_share = local_share_manager or LocalShareManager(
         Path(__file__).resolve().parent.parent / "data" / "local_share"
@@ -483,7 +489,10 @@ def create_app(
                      uv: dict[str, Any], leases: dict[str, str],
                      live: EngineSnapshot, state: str,
                      dusage: dict[str, int] | None = None,
-                     active_ips: Optional[set[str]] = None) -> dict[str, Any]:
+                     active_ips: Optional[set[str]] = None,
+                     lan_usage: dict[str, int] | None = None,
+                     ip6: str = "",
+                     ipv6_direct: bool = False) -> dict[str, Any]:
         """Device card. allowance/used/percent are the USER's aggregates (all of
         a user's devices report the same), ``state`` is the resolved block state
         (service.resolve_device_state) so a user cut reaches every device.
@@ -494,6 +503,7 @@ def create_app(
         allowance = uv["allowance_gb"] if uv else 0.0
         live_c = live.counters_for(dev.mac)
         dusage = dusage or {"up": 0, "down": 0}
+        lan_usage = lan_usage or {"up": 0, "down": 0}
         dused_gb = (dusage.get("up", 0) + dusage.get("down", 0)) / GB
         return {
             "id": dev.id,
@@ -508,14 +518,20 @@ def create_app(
             "user_id": dev.user_id,
             "user_name": user.name if user else "",
             "ip": leases.get(dev.mac, ""),
+            "ip6": ip6,
+            # took a GLOBAL IPv6 address from the ISP router: its IPv6 traffic
+            # bypasses this box (not counted, not cut) until router RA is off
+            "ipv6_direct": ipv6_direct,
             # connected NOW? The DHCP lease alone lags reality (dnsmasq keeps
             # leases for the whole LEASE_HOURS after a disconnect), so when the
             # gateway's ARP probe is running the device must ALSO have answered
             # its latest sweep — otherwise the LED goes grey despite the lease.
             "connected": (
-                dev.mac in leases
-                and (active_ips is None
-                     or (leases.get(dev.mac) or "") in active_ips)),
+                # the box itself is online whenever it answers this request
+                dev.mac == GATEWAY_MAC
+                or (dev.mac in leases
+                    and (active_ips is None
+                         or (leases.get(dev.mac) or "") in active_ips))),
             # owning user is a guest account (guest-mode auto-registration)
             "guest": bool(user.guest) if user else False,
             "quota_mode": uv["quota_mode"] if uv else dev.quota_mode,
@@ -544,6 +560,11 @@ def create_app(
             "device_percent": round(dused_gb / allowance * 100, 1) if allowance > 0 else 0.0,
             "device_up_gb": round(dusage.get("up", 0) / GB, 3),
             "device_down_gb": round(dusage.get("down", 0) / GB, 3),
+            # LOCAL (LAN) traffic this period - monitoring only, never counted
+            # against the bundle (device_* above is the metered internet)
+            "lan_up_gb": round(lan_usage.get("up", 0) / GB, 3),
+            "lan_down_gb": round(lan_usage.get("down", 0) / GB, 3),
+            "lan_used_gb": round((lan_usage.get("up", 0) + lan_usage.get("down", 0)) / GB, 3),
         }
 
     def _recharge_view(p: _db.RechargePack) -> dict[str, Any]:
@@ -580,8 +601,18 @@ def create_app(
         devices = await database.list_devices()
         usage_by_user = await database.get_period_usage_by_user()
         usage_by_device = await database.get_period_usage()
+        lan_by_user = await database.get_lan_period_usage_by_user()
+        lan_by_device = await database.get_lan_period_usage()
         leases = {l.mac: l.ip for l in await database.list_leases()}
         active_ips = active_ips_getter() if active_ips_getter else None
+        static_leases = await database.list_static_leases()
+        static_ip6_map = {
+            s["mac"].lower(): s["ip6"]
+            for s in static_leases
+            if s.get("ip6")
+        }
+        dynamic_ip6_map = ipv6_map_getter() if ipv6_map_getter else {}
+        direct_macs = set(ipv6_direct_getter()) if ipv6_direct_getter else set()
         allowances = bundle.allowances
         live = holder.get()
         now_ts = service._now().timestamp()
@@ -628,6 +659,8 @@ def create_app(
                 "allowance_gb": round(allowance, 3),
                 "used_gb": round(used_gb, 3),
                 "percent": round(used_gb / allowance * 100, 1) if allowance > 0 else 0.0,
+                # LOCAL (LAN) traffic of all this user's devices (monitoring only)
+                "lan_used_gb": round(sum(lan_by_user.get(u.id, {"up": 0, "down": 0}).values()) / GB, 3),
                 "blocked": admin_blocked or quota_blocked,
                 "block_state": state,
                 "quota_blocked": quota_blocked,
@@ -650,10 +683,15 @@ def create_app(
                 allow_listed=d.mac in allow_set,
                 deny_listed=d.mac in deny_set,
                 has_device_booster=d.id in device_booster_ids)
+            dev_mac = d.mac.lower().strip()
+            dev_ip6 = static_ip6_map.get(dev_mac) or dynamic_ip6_map.get(dev_mac, "")
             dev_view = _device_view(
                 d, user, uv, leases, live, state,
                 usage_by_device.get(d.id, {"up": 0, "down": 0}),
-                active_ips)
+                active_ips,
+                ip6=dev_ip6,
+                ipv6_direct=dev_mac in direct_macs,
+                lan_usage=lan_by_device.get(d.id))
             devices_view.append(dev_view)
             if uv is not None:
                 uv["devices"].append(dev_view)
@@ -731,6 +769,9 @@ def create_app(
             # attack (failed-login clusters + WAF blocks in the last hour), not
             # just a buried log line.
             "security": {
+                # Failed logins + WAF blocks since the admin last pressed
+                # "acknowledged": the alert stays until a person dismisses it.
+                "attack_new": await _attack_new(),
                 "failed_logins_1h": await database.count_matching_events(
                     "Failed login%", 3600),
                 "waf_blocks_1h": await database.count_matching_events(
@@ -1123,7 +1164,12 @@ def create_app(
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "X-Content-Type-Options": "nosniff",
         }
-        if file_size > 0:
+        # A multi-file / folder send is streamed as a ZIP that the *sender* builds on the fly;
+        # its real length (local headers + data descriptors + central directory) is larger than
+        # the sum of the file sizes the sender announced. Declaring that smaller number as
+        # Content-Length makes the server abort the body and the browser report a cancelled
+        # download. So only a plain single file gets a Content-Length.
+        if file_size > 0 and not safe_name.lower().endswith(".zip"):
             headers["Content-Length"] = str(file_size)
 
         queue = await hub.get_or_create_stream_queue(transfer_id)
@@ -1243,6 +1289,13 @@ def create_app(
                         accepted = bool(data.get("accepted"))
                         if not accepted and tid:
                             await hub.unregister_transfer(tid)
+                        elif accepted and tid and data.get("http_stream") and tid in hub.active_transfers:
+                            # The receiver saves through a plain HTTP download that connects a
+                            # moment *after* it accepted. Create the stream queue now, before the
+                            # sender is told to start, so the first chunks wait for that GET
+                            # instead of being forwarded to a WebSocket nobody reads (which
+                            # silently dropped the first bytes of the file / ZIP on some runs).
+                            await hub.get_or_create_stream_queue(tid)
                         target_peer = hub.peers.get(target_id)
                         if not target_peer and target_ip:
                             for p in hub.peers.values():
@@ -1324,6 +1377,18 @@ def create_app(
         """
         return (await _dashboard_payload())["rogue"]
 
+    speed_hist: "collections.deque[tuple[float, float, float, float, float]]" = collections.deque(maxlen=120)
+
+    def _record_speed(res: dict[str, Any]) -> list[dict[str, float]]:
+        """Remember one speed sample per ~5 s and return the last ~5 minutes."""
+        now = time.time()
+        if not speed_hist or now - speed_hist[-1][0] >= 4.0:
+            speed_hist.append((now, float(res.get("total_down_bps") or 0), float(res.get("total_up_bps") or 0),
+                               float(res.get("total_lan_down_bps") or 0), float(res.get("total_lan_up_bps") or 0)))
+        cutoff = now - 330
+        return [{"t": round(t, 1), "down": d, "up": u, "lan_down": ld, "lan_up": lu}
+                for (t, d, u, ld, lu) in speed_hist if t >= cutoff][-60:]
+
     @app.get("/api/history/live", dependencies=[Depends(_require_auth)])
     async def get_live_traffic(device_id: str | None = None) -> dict[str, Any]:
         """Real-time live bandwidth traffic ranking, active apps, and top consumer."""
@@ -1333,14 +1398,20 @@ def create_app(
         users_map = {u.id: u.name for u in users_list}
         leases = {l.mac: l.ip for l in await database.list_leases()}
         live = holder.get()
-        return await get_live_traffic_analytics(
+        res = await get_live_traffic_analytics(
             db=database,
             devices=devices,
             leases=leases,
             live=live,
             users=users_map,
             selected_device_id=did,
+            ip6_by_mac=(ipv6_map_getter() if ipv6_map_getter else None),
         )
+        if did is None and isinstance(res, dict):
+            # The last few minutes of speed, kept here so a page refresh (or a
+            # second device) draws the chart straight away instead of from zero.
+            res["history"] = _record_speed(res)
+        return res
 
     @app.get("/api/history/{device_id}", dependencies=[Depends(_require_auth)])
     async def device_history(device_id: int | str, window: int = 24,
@@ -1437,6 +1508,15 @@ def create_app(
         did = None if str(device_id).lower() in ("all", "0") else int(device_id)
         return await get_history_analytics(database, device_id=did, hours=window)
 
+
+    @app.get("/api/usage/daily", dependencies=[Depends(_require_auth)])
+    async def get_usage_daily(days: int = 30) -> dict[str, Any]:
+        """Read-only: total consumption per day (all devices) for the last ``days`` days."""
+        days = max(1, min(int(days), 366))
+        since = (_now() - _dt.timedelta(days=days - 1)).date().isoformat()
+        rows = await database.get_usage_daily_totals(since)
+        lan_rows = await database.get_lan_usage_daily_totals(since)
+        return {"days": days, "since": since, "rows": rows, "lan_rows": lan_rows}
 
     @app.get("/api/wan", dependencies=[Depends(_require_auth)])
     async def get_wan() -> dict[str, Any]:
@@ -1877,80 +1957,47 @@ def create_app(
         except Exception:
             return False
 
-    @app.get("/api/wan/telegram", dependencies=[Depends(_require_auth)])
-    async def get_wan_telegram() -> dict[str, Any]:
-        """Fetch Telegram notification trigger configuration for WAN IP changes."""
-        enabled = (await database.get_setting("wan_telegram_enabled", "0")) == "1"
-        stored_token = await database.get_setting("wan_telegram_bot_token", "")
-        chat_id = await database.get_setting("wan_telegram_chat_id", "")
-        last_ip = await database.get_setting("wan_telegram_last_ip", "")
-        last_sent = await database.get_setting("wan_telegram_last_sent", "")
+    # -- Tailscale (built-in remote access) ---------------------------------
 
-        wan_exposed = await _is_wan_firewall_exposed()
-        web_port = int(getattr(web_cfg, "port", 8080) or 8080)
-        web_proto = "https" if getattr(web_cfg, "tls_certfile", None) else "http"
+    async def _tailscale_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
+        """Add what the dashboard needs to show the address to open."""
+        port = int(getattr(web_cfg, "port", 8080) or 8080)
+        proto = "https" if getattr(web_cfg, "tls_certfile", None) else "http"
+        host = snapshot.get("dns_name") or snapshot.get("ip") or ""
+        snapshot["web_port"] = port
+        snapshot["url"] = f"{proto}://{snapshot.get('ip')}:{port}" if snapshot.get("ip") else ""
+        snapshot["url_name"] = f"{proto}://{host}:{port}" if snapshot.get("dns_name") else ""
+        snapshot["wan_exposed"] = await _is_wan_firewall_exposed()
+        return snapshot
 
-        return {
-            "enabled": enabled,
-            "has_token": bool(stored_token),
-            "bot_token": _wan_tg.mask_bot_token(stored_token),
-            "chat_id": chat_id,
-            "last_ip": last_ip,
-            "last_sent": last_sent,
-            "wan_exposed": wan_exposed,
-            "web_port": web_port,
-            "web_proto": web_proto,
-        }
+    @app.get("/api/tailscale", dependencies=[Depends(_require_auth)])
+    async def get_tailscale() -> dict[str, Any]:
+        """State of the built-in Tailscale remote access."""
+        return await _tailscale_payload(await asyncio.to_thread(tailscale.status))
 
-    @app.post("/api/wan/telegram", dependencies=[Depends(_require_auth)])
-    async def set_wan_telegram(body: WanTelegramUpdate) -> dict[str, Any]:
-        """Save Telegram WAN IP change trigger settings."""
-        await database.set_setting("wan_telegram_enabled", "1" if body.enabled else "0")
-        if body.bot_token is not None and body.bot_token.strip():
-            await database.set_setting("wan_telegram_bot_token", body.bot_token.strip())
-        await database.set_setting("wan_telegram_chat_id", (body.chat_id or "").strip())
+    @app.post("/api/tailscale/install", dependencies=[Depends(_require_auth)])
+    async def install_tailscale() -> dict[str, Any]:
+        """Install the official Tailscale client (runs in the background)."""
+        snap = await asyncio.to_thread(tailscale.install)
+        await database.add_event("Tailscale install started", "info")
+        return await _tailscale_payload(snap)
 
-        await database.add_event(
-            f"Telegram WAN IP trigger {'enabled' if body.enabled else 'disabled'}",
-            "info",
-        )
-        return await get_wan_telegram()
+    @app.post("/api/tailscale/connect", dependencies=[Depends(_require_auth)])
+    async def connect_tailscale() -> dict[str, Any]:
+        """Connect; when not signed in yet the answer carries the sign-in link."""
+        snap = await asyncio.to_thread(tailscale.connect)
+        if snap.get("state") == "connected":
+            await database.add_event("Tailscale connected", "info")
+        return await _tailscale_payload(snap)
 
-    @app.post("/api/wan/telegram/test", dependencies=[Depends(_require_auth)])
-    async def test_wan_telegram(body: WanTelegramTest) -> dict[str, Any]:
-        """Send an immediate test notification to the configured Telegram bot."""
-        token = (body.bot_token or "").strip()
-        if not token:
-            token = await database.get_setting("wan_telegram_bot_token", "")
-        chat = (body.chat_id or "").strip()
-        if not chat:
-            chat = await database.get_setting("wan_telegram_chat_id", "")
+    @app.post("/api/tailscale/disconnect", dependencies=[Depends(_require_auth)])
+    async def disconnect_tailscale(body: TailscaleDisconnect | None = None) -> dict[str, Any]:
+        """Switch the tailnet off (``logout`` also signs this box out)."""
+        logout = bool(body.logout) if body else False
+        snap = await asyncio.to_thread(tailscale.disconnect, logout)
+        await database.add_event("Tailscale signed out" if logout else "Tailscale disconnected", "info")
+        return await _tailscale_payload(snap)
 
-        if not token or not chat:
-            raise HTTPException(400, "Both Telegram Bot Token and Chat ID are required for testing.")
-
-        effective_top = getattr(getattr(service, "cfg", None), "engine", None)
-        top = getattr(effective_top, "topology", "wan") if effective_top else "wan"
-        current_ip = await _wan_tg.get_current_public_ip(top) or "156.204.12.34"
-
-        wan_exposed = await _is_wan_firewall_exposed()
-        web_port = int(getattr(web_cfg, "port", 8080) or 8080)
-        web_proto = "https" if getattr(web_cfg, "tls_certfile", None) else "http"
-
-        msg = _wan_tg.format_wan_ip_message(
-            ip=current_ip,
-            web_port=web_port,
-            web_proto=web_proto,
-            wan_exposed=wan_exposed,
-            interface="ppp0" if top == "wan" else "eth0",
-            is_test=True,
-        )
-
-        ok, err_desc = await _wan_tg.send_telegram_message(token, chat, msg)
-        if not ok:
-            raise HTTPException(400, f"Failed to send Telegram message: {err_desc}")
-
-        return {"ok": True, "message": "Test notification sent successfully to Telegram!"}
 
     @app.get("/api/devices", dependencies=[Depends(_require_auth)])
     async def list_devices() -> list[dict[str, Any]]:
@@ -2870,6 +2917,7 @@ def create_app(
             result.append({
                 "mac": item["mac"],
                 "ip": item["ip"],
+                "ip6": item.get("ip6") or "",
                 "hostname": item.get("hostname") or "",
                 "created_at": item.get("created_at"),
                 "device_id": dev.id if dev else None,
@@ -2881,20 +2929,29 @@ def create_app(
     async def create_static_lease(body: StaticLeaseCreate) -> dict[str, Any]:
         mac = body.mac.lower()
         ip = body.ip.strip()
+        ip6 = (body.ip6 or "").strip().lower().lstrip("[").rstrip("]")
 
-        # Check if IP is already assigned to a DIFFERENT MAC
+        # Check if IPv4 is already assigned to a DIFFERENT MAC
         existing = await database.get_static_lease_by_ip(ip)
         if existing and existing["mac"].lower() != mac:
-            raise HTTPException(400, f"IP {ip} is already assigned to MAC {existing['mac']}")
+            raise HTTPException(400, f"IPv4 {ip} is already assigned to MAC {existing['mac']}")
 
-        saved = await database.set_static_lease(mac, ip, body.hostname or "")
+        # Check if IPv6 is already assigned to a DIFFERENT MAC
+        if ip6:
+            existing6 = await database.get_static_lease_by_ip6(ip6)
+            if existing6 and existing6["mac"].lower() != mac:
+                raise HTTPException(400, f"IPv6 {ip6} is already assigned to MAC {existing6['mac']}")
+
+        saved = await database.set_static_lease(mac, ip, body.hostname or "", ip6=ip6)
         dev = await database.get_device(mac=mac)
         label = dev.name if (dev and dev.name) else (body.hostname or mac)
-        await database.add_event(f"Static IP reservation set: {label} ({mac}) -> {ip}", "info")
+        msg_ips = f"{ip}" + (f" + {ip6}" if ip6 else "")
+        await database.add_event(f"Static IP reservation set: {label} ({mac}) -> {msg_ips}", "info")
         _schedule_dns_apply()
         return {
             "mac": saved.get("mac", mac),
             "ip": saved.get("ip", ip),
+            "ip6": saved.get("ip6", ip6),
             "hostname": saved.get("hostname", body.hostname or ""),
             "device_id": dev.id if dev else None,
             "device_name": dev.name if dev else "",
@@ -2909,6 +2966,42 @@ def create_app(
         await database.add_event(f"Static IP reservation removed: {clean_mac}", "info")
         _schedule_dns_apply()
         return {"mac": clean_mac, "deleted": True}
+
+    # -- IPv6 Dual-Stack Subsystem ---------------------------------------------
+
+    def _ipv6_probe():
+        # The probe is created by the gateway's background startup (after this
+        # app is built), so run.py hands over a getter instead of the object;
+        # a plain probe object (tests) is still accepted.
+        return ipv6_probe() if callable(ipv6_probe) and not hasattr(ipv6_probe, "get_status") else ipv6_probe
+
+    @app.get("/api/network/ipv6/status", dependencies=[Depends(_require_auth)])
+    async def get_ipv6_status() -> dict[str, Any]:
+        _p6 = _ipv6_probe()
+        if _p6 is not None and hasattr(_p6, "get_status"):
+            st = dict(_p6.get_status())
+            direct = ipv6_direct_getter() if ipv6_direct_getter else []
+            st["direct_device_macs"] = direct
+            st["direct_devices"] = len(direct)
+            return st
+        return {
+            "lan_ipv6_enabled": True,
+            "lan_prefix": "fd00:da7a:2::/64",
+            "lan_gateway": "fd00:da7a:2::1",
+            "lan_mode": "SLAAC + DHCPv6 (RFC 4862)",
+            "wan_ipv6_active": False,
+            "wan_ipv6_address": "",
+            "last_probe_time": 0.0,
+            "last_probe_status": "not_initialized",
+            "last_probe_details": "IPv6 probe not initialized",
+        }
+
+    @app.post("/api/network/ipv6/probe", dependencies=[Depends(_require_auth)])
+    async def trigger_ipv6_probe() -> dict[str, Any]:
+        _p6 = _ipv6_probe()
+        if _p6 is not None and hasattr(_p6, "probe_now"):
+            return await _p6.probe_now()
+        raise HTTPException(503, "IPv6 probe subsystem unavailable")
 
     # -- VPN subsystem (Built-in sing-box + Clash API) -----------------------
 
@@ -3243,6 +3336,24 @@ def create_app(
         return (bool(getattr(web_cfg, "tls_certfile", "")) or
                 bool(getattr(web_cfg, "secure_cookies", False)))
 
+    async def _attack_new() -> int:
+        """Failed logins + WAF blocks newer than the last acknowledgement
+        (7 days back when it was never acknowledged, never more than 30)."""
+        try:
+            ack = float(await database.get_setting("attack_ack_ts", "") or 0)
+        except (TypeError, ValueError):
+            ack = 0.0
+        seconds = min(30 * 86400.0, time.time() - ack) if ack > 0 else 7 * 86400.0
+        return (await database.count_matching_events("Failed login%", seconds)
+                + await database.count_matching_events("WAF %", seconds))
+
+    @app.post("/api/security/ack-attack", dependencies=[Depends(_require_auth)])
+    async def ack_attack() -> dict[str, Any]:
+        """The admin has seen the suspicious-activity alert: dismiss it until new activity."""
+        await database.set_setting("attack_ack_ts", str(time.time()))
+        await database.add_event("Security alert acknowledged", "info")
+        return {"ok": True}
+
     async def _totp_enabled() -> bool:
         if await database.get_setting("totp_enabled", "") != "1":
             return False
@@ -3267,7 +3378,7 @@ def create_app(
             raise HTTPException(429, "too many failed logins — try again later",
                                 headers={"Retry-After": f"{int(retry) + 1}"})
         stored = await database.get_setting("admin_password") or _DUMMY_HASH
-        valid, needs_rehash = _verify_password(body.password, stored)
+        valid, needs_rehash = await asyncio.to_thread(_verify_password, body.password, stored)
         if not valid:
             login_limiter.fail(ip_key)
             login_limiter.fail(acct_key)
@@ -3288,6 +3399,7 @@ def create_app(
                             await ban(host, seconds, "login brute-force")
                         except Exception:  # noqa: BLE001
                             log.exception("firewall brute-force ban failed")
+            log.warning("login rejected: wrong password from %s", host)
             # Generic message for BOTH "unknown account" and "wrong password" —
             # never reveal which part failed (username enumeration).
             raise HTTPException(401, "invalid credentials")
@@ -3297,7 +3409,7 @@ def create_app(
             # Legacy 200k hash verified — upgrade it to the current work
             # factor so the stored secret keeps pace with the default.
             await database.set_setting("admin_password",
-                                       _hash_password(body.password))
+                                       await asyncio.to_thread(_hash_password, body.password))
         if await _totp_enabled():
             # TOTP second factor. Stage 1: password verified, no session yet —
             # the client prompts for the 6-digit code and re-posts WITH it.
@@ -3307,6 +3419,7 @@ def create_app(
                 return {"ok": False, "totp": True}
             secret = await database.get_setting("totp_secret", "")
             if not _totp.verify_code(secret, code):
+                log.warning("login rejected: password OK but 2FA code wrong from %s", host)
                 login_limiter.fail(ip_key)
                 login_limiter.fail(acct_key)
                 await _record_failed_login(database, host)
@@ -3696,15 +3809,22 @@ def create_app(
         # response (API + the HTML pages) is marked no-store so the browser
         # never writes the payloads — MACs, usage, history, events, log lines —
         # to the HTTP cache, back/forward cache, or disk on a shared machine.
-        # Static assets (/assets/*) stay cacheable (public, no secrets).
-        if path.startswith(("/api", "/report", "/milestone", "/share", "/guest-pending")) or path == "/":
+        # Static assets (/assets/*) hold no secrets, so they may be cached — but
+        # only with revalidation (`no-cache` = ask with the ETag, get a cheap 304).
+        # Without a header browsers cache them heuristically for days, so after an
+        # update the dashboard kept running the OLD app.js against the NEW API.
+        if path.startswith(("/assets/", "/js/", "/css/", "/fonts/")) or path == "/logo.svg":
+            response.headers.setdefault("Cache-Control", "no-cache")
+        if path.startswith(("/api", "/report", "/milestone", "/share", "/guest-pending", "/guest/pending", "/spoof")) or path == "/":
             response.headers.setdefault("Cache-Control",
                                         "no-store, no-cache, must-revalidate, max-age=0")
             response.headers.setdefault("Pragma", "no-cache")
             response.headers.setdefault("Expires", "0")
-        # Strict CSP for the dashboard + API. /report, /milestone and /share carry
-        # inline scripts, so they get the looser (still-useful) profile.
-        if path.startswith(("/report", "/milestone", "/share")):
+        # Strict CSP for the dashboard + API. /report, /milestone, /share, the guest
+        # portal and the calibration page carry inline scripts, so they get the
+        # looser (still-useful) profile (a strict script-src blocked the guest
+        # page's status polling and its "Check now" button).
+        if path.startswith(("/report", "/milestone", "/share", "/guest/pending", "/spoof")):
             response.headers.setdefault(
                 "Content-Security-Policy",
                 "default-src 'self'; style-src 'self' 'unsafe-inline'; "
@@ -3718,6 +3838,15 @@ def create_app(
                 "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
                 "connect-src 'self' ws: wss:; font-src 'self'; "
                 "base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
+
+    # The dashboard used to live under /ui/ while the classic one sat at "/".
+    # Old bookmarks and any cached page still point there: send them to the same
+    # file at the root (so /ui/ -> /, /ui/js/main.js -> /js/main.js).
+    @app.get("/ui", include_in_schema=False)
+    @app.get("/ui/", include_in_schema=False)
+    @app.get("/ui/{rest:path}", include_in_schema=False)
+    async def _legacy_ui_path(rest: str = "") -> RedirectResponse:
+        return RedirectResponse("/" + rest.lstrip("/"), status_code=307)
 
     # static UI
     if WEB_DIR.exists():

@@ -393,3 +393,41 @@ def test_vpn_connect_disconnect_persists_vpn_share(tmp_path):
     assert loop.run_until_complete(database.get_setting("vpn_share_interface", "")) == ""
 
 
+
+
+def test_generated_singbox_resolves_server_name_via_system_dns():
+    """The VPN server's hostname must resolve through the system resolver — nothing
+    listens on 127.0.0.1:53, so routing it there gave REFUSED and no internet."""
+    from quota.vpn_parser import generate_sing_box_config
+    cfg = generate_sing_box_config({"type": "vless", "server": "x.example", "server_port": 443})
+    assert cfg["dns"]["final"] == "direct-dns"
+    assert {r["server"] for r in cfg["dns"]["rules"]} == {"direct-dns"}
+    assert cfg["route"]["default_domain_resolver"] == "direct-dns"
+
+
+def test_server_hostname_is_pinned_to_ip_keeping_sni_and_host():
+    """The VPN server's DDNS name is resolved before the TUN exists; the name
+    stays as SNI / WS Host so TLS + CDN setups still match."""
+    from quota.vpn_parser import pin_server_hostnames
+    cfg = {"outbounds": [
+        {"type": "vless", "tag": "proxy-out", "server": "yax.ddns.net",
+         "tls": {"enabled": True}, "transport": {"type": "ws"}},
+        {"type": "direct", "tag": "direct"}]}
+    pin_server_hostnames(cfg, resolver=lambda h: "195.110.58.167")
+    ob = cfg["outbounds"][0]
+    assert ob["server"] == "195.110.58.167"
+    assert ob["tls"]["server_name"] == "yax.ddns.net"
+    assert ob["transport"]["headers"]["Host"] == "yax.ddns.net"
+
+
+def test_pinning_keeps_explicit_sni_ips_and_failed_lookups():
+    from quota.vpn_parser import pin_server_hostnames
+    cfg = {"outbounds": [
+        {"type": "vless", "server": "a.example", "tls": {"server_name": "front.example"}},
+        {"type": "vless", "server": "1.2.3.4"},
+        {"type": "vless", "server": "gone.example"}]}
+    pin_server_hostnames(cfg, resolver=lambda h: "9.9.9.9" if h == "a.example" else None)
+    a, b, c = cfg["outbounds"]
+    assert a["server"] == "9.9.9.9" and a["tls"]["server_name"] == "front.example"
+    assert b["server"] == "1.2.3.4"
+    assert c["server"] == "gone.example"

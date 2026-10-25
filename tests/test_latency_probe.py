@@ -281,13 +281,14 @@ def test_latency_tick_populates_responders(tmp_path):
         loop.run_until_complete(gw._maybe_latency_tick())
         # responders = the LED's "connected NOW" source
         assert gw._latency_active_ips() == {"192.168.2.2", "192.168.2.3"}
-        # empty sweep preserves the old responder map (probe-degradation
-        # guard); the map goes stale after 3×interval and falls back to
-        # lease-based connectedness.  No _neigh_active_ips => old set kept.
+        # ONE empty sweep keeps the old responder map (probe-degradation
+        # grace); a second empty sweep in a row clears it (nobody is home).
         gw.latency_probe = type("P", (), {"probe": staticmethod(
             lambda targets: {})})()
         loop.run_until_complete(gw._maybe_latency_tick())
         assert gw._latency_active_ips() == {"192.168.2.2", "192.168.2.3"}
+        loop.run_until_complete(gw._maybe_latency_tick())
+        assert gw._latency_active_ips() == set()
         # monitor probe available => the latency sweep yields
         gw.wifi_probe = type("P", (), {"snapshot": staticmethod(
             lambda: {"available": True, "error": "", "ssid_by_mac": {},
@@ -302,10 +303,10 @@ def test_latency_tick_populates_responders(tmp_path):
 
 
 def test_empty_sweep_preserves_old_responder_map(tmp_path):
-    """An empty ARP sweep (probe returns {}) no longer wipes the responder
-    set — the old map is kept and goes stale after 3×interval, falling back
-    to lease-based connectedness.  This prevents the 'all LEDs gray while
-    traffic flows' bug when the probe backend degrades."""
+    """A single empty ARP sweep (probe returns {}) keeps the old responder
+    map — this prevents the 'all LEDs gray while traffic flows' bug when the
+    probe backend hiccups. Two empty sweeps in a row clear it (see
+    test_two_empty_sweeps_clear_led)."""
     from core.config import Config, DhcpConfig
     from run import Gateway
 
@@ -425,8 +426,9 @@ def test_collect_neigh_active_populates_active_ips(tmp_path):
                 gw.database.upsert_device(mac, name=mac))
             loop.run_until_complete(gw.database.set_lease(mac, ip))
         loop.run_until_complete(gw._collect_neigh_active())
-        # REACHABLE + STALE are active; FAILED is excluded
-        assert gw._neigh_active_ips == {"192.168.2.10", "192.168.2.11"}
+        # only REACHABLE proves presence: STALE entries linger for hours after
+        # a device leaves, FAILED means unreachable
+        assert gw._neigh_active_ips == {"192.168.2.10"}
     finally:
         loop.run_until_complete(gw.database.close())
         loop.close()
@@ -456,3 +458,81 @@ def test_latency_tick_yields_to_monitor_probe(tmp_path):
     finally:
         loop.run_until_complete(gw.database.close())
         loop.close()
+
+def _mk_gw(tmp_path, name):
+    from core.config import Config, DhcpConfig
+    from run import Gateway
+
+    cfg = Config()
+    cfg.db_path = str(tmp_path / name)
+    cfg.dhcp = DhcpConfig(gateway_ip="192.168.2.1", subnet="255.255.255.0")
+    cfg.network.latency_probe.min_samples = 1
+    cfg.network.latency_probe.interval_s = 0.0
+    return Gateway(cfg)
+
+
+def test_two_empty_sweeps_clear_led(tmp_path):
+    """Regression: a device that left the house must go grey. After two
+    consecutive sweeps where nobody answers, the responder map is cleared
+    instead of aging into 'lease-based' mode (which kept everything green)."""
+    gw = _mk_gw(tmp_path, "gone.db")
+    replies = [{"192.168.2.2": [0.3]}, {}, {}]
+    gw.latency_probe = type("P", (), {"probe": staticmethod(
+        lambda targets: replies.pop(0))})
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(gw.database.connect())
+        loop.run_until_complete(gw.service.ensure_period())
+        loop.run_until_complete(gw.database.upsert_device("aa:bb:cc:dd:ee:01", name="a"))
+        loop.run_until_complete(gw.database.set_lease("aa:bb:cc:dd:ee:01", "192.168.2.2"))
+        loop.run_until_complete(gw._maybe_latency_tick())
+        assert gw._latency_active_ips() == {"192.168.2.2"}
+        loop.run_until_complete(gw._maybe_latency_tick())   # grace
+        assert gw._latency_active_ips() == {"192.168.2.2"}
+        loop.run_until_complete(gw._maybe_latency_tick())   # nobody home
+        assert gw._latency_active_ips() == set()
+    finally:
+        loop.run_until_complete(gw.database.close())
+        loop.close()
+
+
+def test_absent_device_not_kept_green_by_stale_neighbor(tmp_path):
+    """Regression: another device answering ARP must not drag a departed
+    device (only a STALE kernel neighbor entry) back to green."""
+    import json as _json
+    gw = _mk_gw(tmp_path, "stale.db")
+    gw.latency_probe = type("P", (), {"probe": staticmethod(
+        lambda targets: {"192.168.2.2": [0.3]})})
+    gw._ip_run = lambda argv: (0, _json.dumps([
+        {"dst": "192.168.2.2", "lladdr": "aa:bb:cc:dd:ee:01", "state": ["REACHABLE"]},
+        {"dst": "192.168.2.3", "lladdr": "aa:bb:cc:dd:ee:02", "state": ["STALE"]},
+    ])) if argv == ["ip", "-j", "neigh"] else (1, "")
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(gw.database.connect())
+        loop.run_until_complete(gw.service.ensure_period())
+        for mac, ip in (("aa:bb:cc:dd:ee:01", "192.168.2.2"),
+                        ("aa:bb:cc:dd:ee:02", "192.168.2.3")):
+            loop.run_until_complete(gw.database.upsert_device(mac, name=mac))
+            loop.run_until_complete(gw.database.set_lease(mac, ip))
+        loop.run_until_complete(gw._collect_neigh_active())
+        loop.run_until_complete(gw._maybe_latency_tick())
+        assert gw._latency_active_ips() == {"192.168.2.2"}
+    finally:
+        loop.run_until_complete(gw.database.close())
+        loop.close()
+
+
+def test_traffic_keeps_device_connected_and_no_probe_falls_back_to_neighbors(tmp_path):
+    """A device moving bytes is connected even if it missed the ARP burst; with
+    no probe running the neighbor table (not the bare lease) decides."""
+    from quota.engine import EngineCounters, EngineSnapshot
+
+    gw = _mk_gw(tmp_path, "traffic.db")
+    gw.latency_probe = None
+    # no presence signal at all yet -> None (lease-based)
+    assert gw._latency_active_ips() is None
+    gw._neigh_collected = True
+    gw._neigh_active_ips = {"192.168.2.2"}
+    gw.holder.swap(EngineSnapshot(by_ip={"192.168.2.3": EngineCounters(up=10, down=900)}))
+    assert gw._latency_active_ips() == {"192.168.2.2", "192.168.2.3"}

@@ -1,0 +1,19 @@
+/* QuotaManager UI - design tokens (ported from the approved prototype). */
+@font-face{font-family:"Inter";src:url(../fonts/inter-latin.woff2) format("woff2");font-weight:100 900;font-display:swap}
+@font-face{font-family:"QM Arabic";src:url(../fonts/ibm-plex-sans-arabic-arabic-400-normal.woff2) format("woff2");font-weight:400;font-display:swap}
+@font-face{font-family:"QM Arabic";src:url(../fonts/ibm-plex-sans-arabic-arabic-600-normal.woff2) format("woff2");font-weight:500 600;font-display:swap}
+@font-face{font-family:"QM Arabic";src:url(../fonts/ibm-plex-sans-arabic-arabic-700-normal.woff2) format("woff2");font-weight:700;font-display:swap}
+@font-face{font-family:"JetBrains Mono";src:url(../fonts/jetbrains-mono-latin.woff2) format("woff2");font-weight:100 800;font-display:swap}
+
+:root{
+  --pad:22px;--gap:18px;--rowpad:14px;--navh:42px;--dir:1;
+  --font:Inter,"QM Arabic",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --accent:#5B8CFF;--accent-ink:#06101F;--accent-2:#5EEAD4;
+  --accent-soft:color-mix(in srgb,var(--accent) 14%,transparent);
+  --accent-line:color-mix(in srgb,var(--accent) 38%,transparent);
+}
+:root[dir=rtl]{--dir:-1;--font:"QM Arabic",Inter,system-ui,sans-serif}
+:root[data-density=compact]{--pad:16px;--gap:14px;--rowpad:9px;--navh:36px}
+:root,:root[data-theme=dark]{--bg:#07090E;--surface:#0D1017;--surface-2:#131723;--surface-3:#1B2132;--line:rgba(255,255,255,.07);--line-2:rgba(255,255,255,.14);--text:#EEF1F8;--text-2:#A5ADC0;--text-3:#7C859B;--ok:#3DDC97;--warn:#F5B544;--danger:#FF6B7A;--shadow:0 1px 0 rgba(255,255,255,.035) inset,0 14px 34px -18px rgba(0,0,0,.75);--scrim:rgba(3,5,9,.62);color-scheme:dark}
+:root[data-theme=light]{--bg:#F2F3F8;--surface:#FFFFFF;--surface-2:#F5F6FA;--surface-3:#E9EBF3;--line:rgba(15,20,40,.08);--line-2:rgba(15,20,40,.17);--text:#0F1424;--text-2:#4A5266;--text-3:#5F677C;--ok:#0A7F58;--warn:#9A5B00;--danger:#C42B45;--shadow:0 1px 2px rgba(15,20,40,.04),0 14px 30px -20px rgba(15,20,40,.25);--scrim:rgba(15,20,40,.38);color-scheme:light}

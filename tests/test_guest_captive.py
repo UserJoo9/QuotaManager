@@ -134,7 +134,7 @@ def test_pending_guest_search_interception_middleware(captive_env):
         r_status = guest_client.get("/api/guest/status")
         assert r_status.status_code == 200
 
-        r_asset = guest_client.get("/assets/styles.css")
+        r_asset = guest_client.get("/assets/pub.css")
         assert r_asset.status_code == 200
 
 
@@ -234,3 +234,16 @@ def test_nftables_pending_guests_kernel_sync():
         pending_guests=[],
     )
     assert len(fake._sets["inet quota_gateway"]["pending_guests"]) == 0
+
+
+def test_public_pages_allow_their_inline_scripts(captive_env):
+    """The guest portal and the other public pages ship inline scripts; a strict
+    ``script-src 'self'`` CSP would silently disable them (status polling, the
+    "Check now" button)."""
+    _, _, _, app = captive_env
+    with TestClient(app) as client:
+        for path in ("/guest/pending", "/milestone", "/spoof.html"):
+            r = client.get(path)
+            assert r.status_code == 200, path
+            assert "script-src 'self' 'unsafe-inline'" in r.headers["content-security-policy"], path
+        assert "no-store" in client.get("/guest/pending").headers["cache-control"]

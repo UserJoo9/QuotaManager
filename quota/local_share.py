@@ -676,7 +676,13 @@ class LiveShareHub:
 
         # If HTTP stream queue is active (zero RAM in browser tab):
         if stream_q is not None:
-            await stream_q.put(payload)
+            try:
+                # bounded wait: if the receiver's download never connects (or died) we must not
+                # freeze the sender's whole WebSocket loop forever
+                await asyncio.wait_for(stream_q.put(payload), timeout=30)
+            except asyncio.TimeoutError:
+                await self.unregister_transfer(transfer_id)
+                return False
             # Emit throttled progress JSON to receiver WebSocket while downloading via HTTP
             now = time.time()
             if now - self._last_progress_time.get(transfer_id, 0) > 0.15:

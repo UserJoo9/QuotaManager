@@ -79,6 +79,18 @@ class EngineSnapshot:
     #: IPs of guest devices currently awaiting admin approval (for captive portal)
     pending_guests: set[str] = field(default_factory=set)
     ts: float = field(default_factory=time.time)
+    #: seconds of traffic that ``by_ip`` / ``gateway`` cover (the real time
+    #: between two counter flushes). Live speeds must divide by THIS, not by an
+    #: assumed 15 s — a slow/late maintenance tick would otherwise inflate them.
+    interval_s: float = 15.0
+    #: ip -> LOCAL (LAN) byte deltas since the last flush: client<->uplink-subnet
+    #: hosts (router, NAS, ...) crossing the forward hook plus client<->box
+    #: traffic (dashboard, share portal, live transfer) on the input/output
+    #: hooks. Never counted against the bundle - monitoring only.
+    lan_by_ip: dict = field(default_factory=dict)
+    #: MAC -> top remote destinations of that device in the last window
+    #: (``quota.flows``: real per-flow bytes, not DNS guesses).
+    flows_by_mac: dict = field(default_factory=dict)
 
     def counters_for(self, mac: str) -> EngineCounters:
         """Aggregate live counters for a MAC (sum over its IPs)."""

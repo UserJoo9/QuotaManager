@@ -4,7 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Usage Calibration Studio — Quota Manager</title>
-<link rel="stylesheet" href="/assets/styles.css?v=60">
+<link rel="stylesheet" href="/css/tokens.css">
+<link rel="stylesheet" href="/assets/pub.css?v=1">
+<script src="/assets/pub-theme.js"></script>
 <script disable-devtool-auto src='/assets/detector.js'></script>
 <style>
   body {
@@ -23,9 +25,9 @@
   .spoof-panel-card {
     padding: 30px;
     border-radius: var(--radius-xl);
-    border: 1px solid rgba(59, 130, 246, 0.35) !important;
-    background: linear-gradient(135deg, rgba(22, 27, 38, 0.96), rgba(13, 16, 23, 0.99)) !important;
-    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6), 0 0 24px rgba(59, 130, 246, 0.12);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent) !important;
+    background: linear-gradient(135deg, color-mix(in srgb, var(--surface) 96%, transparent), color-mix(in srgb, var(--surface) 99%, transparent)) !important;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6), 0 0 24px color-mix(in srgb, var(--accent) 12%, transparent);
     position: relative;
     overflow: hidden;
   }
@@ -34,7 +36,7 @@
     position: absolute;
     top: 0; left: 0; right: 0;
     height: 3px;
-    background: linear-gradient(90deg, #EF4444, var(--accent), var(--accent-3));
+    background: linear-gradient(90deg, var(--danger), var(--accent), var(--accent-3));
   }
   .spoof-top-nav {
     display: flex;
@@ -52,7 +54,7 @@
   .spoof-title-wrap h2 {
     font-size: 1.35rem;
     margin: 0;
-    color: #fff;
+    color: var(--text);
     letter-spacing: -0.02em;
   }
   .badge-stealth {
@@ -62,9 +64,9 @@
     letter-spacing: 0.06em;
     padding: 3px 8px;
     border-radius: 6px;
-    background: rgba(239, 68, 68, 0.16);
-    color: #F87171;
-    border: 1px solid rgba(239, 68, 68, 0.4);
+    background: color-mix(in srgb, var(--danger) 16%, transparent);
+    color: var(--danger);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
   }
   .back-btn {
     text-decoration: none;
@@ -75,14 +77,14 @@
     gap: 6px;
     padding: 6px 12px;
     border-radius: var(--radius-sm);
-    background: rgba(255, 255, 255, 0.04);
+    background: color-mix(in srgb, var(--text) 4%, transparent);
     border: 1px solid var(--border-soft);
     transition: all 150ms ease;
   }
   .back-btn:hover {
-    color: #fff;
+    color: var(--text);
     border-color: var(--accent);
-    background: rgba(59, 130, 246, 0.15);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
   }
   .spoof-desc {
     color: var(--text-dim);
@@ -105,7 +107,7 @@
     justify-content: space-around;
     padding: 12px 16px;
     border-radius: var(--radius-md);
-    background: rgba(13, 16, 23, 0.7);
+    background: color-mix(in srgb, var(--surface) 70%, transparent);
     border: 1px solid var(--border-soft);
     margin-bottom: 18px;
     flex-wrap: wrap;
@@ -121,7 +123,7 @@
     font-family: var(--mono);
     font-size: 1.05rem;
     font-weight: 700;
-    color: #fff;
+    color: var(--text);
   }
   .mode-radios-wrap {
     display: flex;
@@ -148,15 +150,15 @@
     font-size: 0.84rem;
     font-weight: 600;
     border: 1px solid var(--border);
-    background: rgba(22, 27, 38, 0.75);
+    background: color-mix(in srgb, var(--surface) 75%, transparent);
     color: var(--text-dim);
     transition: all 150ms var(--ease);
   }
   .mode-pill input:checked + span {
     border-color: var(--accent);
-    background: rgba(59, 130, 246, 0.22);
-    color: #fff;
-    box-shadow: 0 0 12px rgba(59, 130, 246, 0.3);
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    color: var(--text);
+    box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 30%, transparent);
   }
   .amount-input-wrap {
     display: flex;
@@ -205,7 +207,7 @@
     color: var(--text-dim);
   }
   .preset-btn {
-    background: rgba(30, 37, 51, 0.75);
+    background: color-mix(in srgb, var(--surface-2) 75%, transparent);
     border: 1px solid var(--border);
     color: var(--text-dim);
     font-size: 0.78rem;
@@ -217,8 +219,8 @@
   }
   .preset-btn:hover {
     border-color: var(--accent);
-    color: #fff;
-    background: rgba(59, 130, 246, 0.2);
+    color: var(--text);
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
   }
   .notify-box {
     margin-top: 16px;
@@ -228,21 +230,21 @@
     line-height: 1.45;
   }
   .notify-box.success {
-    background: rgba(16, 185, 129, 0.12);
-    border: 1px solid rgba(16, 185, 129, 0.4);
-    color: #34D399;
+    background: color-mix(in srgb, var(--ok) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--ok) 40%, transparent);
+    color: var(--ok);
   }
   .notify-box.error {
-    background: rgba(239, 68, 68, 0.12);
-    border: 1px solid rgba(239, 68, 68, 0.4);
-    color: #F87171;
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+    color: var(--danger);
   }
   .login-req-banner {
     padding: 18px;
     border-radius: var(--radius-md);
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid rgba(239, 68, 68, 0.3);
-    color: #F87171;
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+    color: var(--danger);
     text-align: center;
   }
 </style>

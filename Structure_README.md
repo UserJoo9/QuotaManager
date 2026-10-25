@@ -18,13 +18,14 @@ the project layout, tests, and the release process.
 - [Quota model](#quota-model)
 - [Speed shaping](#speed-shaping)
 - [DNS filtering (domain rules, presets, per-client DNS servers)](#dns-filtering-domain-rules-presets-per-client-dns-servers)
-- [Strong (WAN) mode & Telegram IP Engine](#strong-wan-mode)
+- [Strong (WAN) mode](#strong-wan-mode)
+- [Tailscale remote access](#tailscale-remote-access)
 - [VPN share](#vpn-share)
 - [Native VPN Subsystem (sing-box Core & Clash API)](#native-vpn-subsystem-sing-box-core--clash-api)
 - [Ultra Ad-Blocker & History Analytics Engine](#ultra-ad-blocker--history-analytics-engine)
-- [Speedometer Gauge & Frontend Subsystems (Themes, Particles, Navigation)](#speedometer-gauge--frontend-subsystems-themes-particles-navigation)
 - [Local Share Subsystem (LAN Direct Transfer & In-Memory/Disk Streaming Engine)](#local-share-subsystem-lan-direct-transfer--in-memorydisk-streaming-engine)
 - [Guest Captive Portal & Search Interception Engine](#guest-captive-portal--search-interception-engine)
+- [The dashboard (web UI)](#the-dashboard-web-ui)
 - [Software updates](#software-updates)
 - [Key design decisions](#key-design-decisions)
 - [Known bottlenecks & technical debt](#known-bottlenecks--technical-debt)
@@ -94,7 +95,7 @@ no userspace packet sniffing.
 The stack is configured once by `scripts/setup_gateway_kali.sh` (run
 automatically by the `.deb`'s `postinst`):
 
-- **sysctl** — `ip_forward=1`, IPv6 off (persisted in `/etc/sysctl.d/`).
+- **sysctl** — `ip_forward=1`, IPv6 forwarding on + `accept_ra=2` on the LAN NIC (persisted in `/etc/sysctl.d/`); see *IPv6 dual-stack* below.
 - **Static IPs on the wired NIC** — the uplink `192.168.1.110/24` *and* the
   client-subnet alias `192.168.2.1/24`, via NetworkManager (`nmcli`) or the
   ifupdown fallback. The setup script auto-detects the wired NIC (Ethernet +
@@ -706,40 +707,38 @@ drops internet briefly) re-dials on its own. Both only run while ppp0 is
 actually **up** (a dead dial has nothing to renew into), and the last-renewed
 timestamp is persisted so a gateway restart never re-renews mid-schedule.
 
-### Telegram WAN IP Detection & Notification Engine
+### Tailscale remote access
 
-`quota/wan_telegram.py` provides an asynchronous public IP monitoring and alert
-subsystem for remote gateway administration:
+`quota/tailscale.py` (`TailscaleManager`) manages the official `tailscale`
+client already installed on the box; it never reimplements the protocol. It
+exists because many ISP lines (CGNAT, filtered ports, lossy paths) cannot be
+reached from the internet directly, even with the firewall open.
 
-- **Detection Strategy (`get_current_public_ip`)**:
-  - In **Strong (WAN) mode**, reads the kernel's local address assigned to `ppp0`
-    via `detect_ppp` in `quota/topology.py` (instantaneous sysfs/netlink query,
-    zero network latency, no external dependencies).
-  - When running in LAN mode or during PPPoE initialization, falls back to external
-    probes: HTTP GET to `https://api.ipify.org?format=json` via `httpx.AsyncClient`
-    (6.0s timeout), followed by `https://icanhazip.com` via threaded `urllib.request`.
-- **State Machine & Notification Deduplication**:
-  - Polled periodically during the maintenance cycle (`quota/netmgr.py`).
-  - IP changes are compared against the SQLite setting `wan_telegram_last_ip`.
-  - When an IP change is detected and Telegram notifications are enabled
-    (`wan_telegram_enabled == 1`), `send_telegram_message` is invoked with an
-    escaped HTML payload formatted by `format_wan_ip_message`.
-  - The notification includes:
-    - Current Public IPv4 address wrapped in `<code>` tags.
-    - Timestamp formatted as `%Y-%m-%d %H:%M:%S`.
-    - Active egress interface name (e.g. `ppp0`).
-    - **Firewall WAN Remote Access Status**: dynamically queries `FirewallConfig.wan_web_access`.
-      If remote WAN port access is open, outputs a clickable URL
-      (`{web_proto}://{ip}:{web_port}`); if blocked by nftables input policy,
-      outputs a warning banner alerting the operator that remote management must
-      be unblocked in the Firewall tab.
-- **Resilience**:
-  - Primary network requests utilize `httpx.AsyncClient` with a 10.0s timeout.
-  - Automatic runtime fallback to a daemon thread running `urllib.request.urlopen`
-    with JSON payload serialization if `httpx` is missing or uninstalled.
-  - Endpoints: `POST /api/wan/telegram` (updates token/chat_id/enabled),
-    `POST /api/wan/telegram/test` (synchronously triggers test alert). Tokens are
-    masked (`1234...wxyz`) in UI API responses via `mask_bot_token`.
+- **State** — `status()` runs `tailscale status --json` (parsed by the pure
+  `parse_status`) and maps Tailscale's `BackendState` to `state`:
+  `not_installed`, `installing`, `daemon_down`, `needs_login` (carries
+  `auth_url`), `stopped`, `starting`, `connected` (carries `ip`, `dns_name`).
+- **Install** — `install()` runs the vendor script
+  (`curl -fsSL https://tailscale.com/install.sh | sh`) in a background thread,
+  keeping the last log lines for the UI, then enables `tailscaled`.
+- **Connect** — `connect()` starts `tailscale up --reset --accept-dns=false
+  --accept-routes=false --hostname quota-gateway` as a background process and
+  polls the status until it is `connected` or exposes the sign-in link. DNS and
+  routes are never touched (the gateway runs its own dnsmasq and VPN policy
+  rules, which sit at later `ip rule` priorities than Tailscale's).
+- **Disconnect** — `tailscale down`, or `tailscale logout` to forget the box.
+- **Firewall** — `fw_input` accepts `iifname "tailscale0"` early, in BOTH
+  topologies, so the remote-access switch (which governs the public `ppp0` /
+  router path only) never locks the tailnet out. Verified against real nftables
+  in network namespaces.
+- **API** (admin session required): `GET /api/tailscale`, `POST
+  /api/tailscale/install`, `POST /api/tailscale/connect`, `POST
+  /api/tailscale/disconnect` (`{"logout": bool}`). Responses add `url`
+  (`http(s)://<tailnet ip>:<web port>`), `url_name` and `wan_exposed`.
+- **UI** — Internet page card with one panel per state (install, sign-in link,
+  connected address + copy, disconnect, sign out). It polls every 3 s while a
+  transition is in progress.
+
 
 ---
 
@@ -934,7 +933,7 @@ desktop or mobile VPN clients on end-user devices.
     process search eliminates thousands of `router: failed to search process: process not found`
     log warnings per hour.
   - **Local DNS & Content Filter Preservation (Tunnel Upstream Resolution)**:
-    - `sing-box` DNS server array explicitly targets `local-dnsmasq` at `127.0.0.1:53` with `direct-dns` fallback.
+    - `sing-box` DNS server array resolves through `direct-dns` (the system resolver) — dnsmasq does not listen on 127.0.0.1, so `local-dnsmasq` is declared but unused.
     - Local private IP ranges (`127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) are routed to `outbound: "direct"` in `route.rules`. This ensures client queries to `192.168.2.1:53` or `127.0.0.1:53` are intercepted and filtered locally by `dnsmasq` (applying Ultra Ad-Blocker, parental control lists, custom DNS rewrites, and DNS history logging) before any traffic is encrypted or tunneled over the VPN.
     - Public upstream DNS queries (e.g. `dnsmasq` forwarding uncached lookups to `8.8.8.8` or `1.1.1.1`) fall through to `"final": "proxy-out"` so they traverse the encrypted VPN tunnel. This eliminates the fatal "DNS freeze during heavy download / expired bundle" bug where ISP-expired physical WAN connections drop direct port 53 packets, which previously caused all browsing on the downloading PC and other LAN devices to fail while active TCP download streams kept running.
     - In `setup_gateway_kali.sh`, `all-servers` is configured in `/etc/dnsmasq.d/quota-gateway.conf` to query upstream resolvers concurrently, ensuring the fastest valid response wins and eliminating single-resolver stalls.
@@ -1038,61 +1037,9 @@ filtering running directly on top of `dnsmasq`:
 
 ---
 
-## Speedometer Gauge & Frontend Subsystems (Themes, Particles, Navigation)
-
-The frontend features a responsive, GPU-accelerated speedometer gauge, an adaptive visual theme system, an interactive background particle FX engine, and optimized multi-tab panel navigation:
-
-### 1. Speedometer Architecture & SVG Geometry
-The quota gauge is built with scalable inline SVG (`viewBox="0 0 190 90"`), anchored around a center coordinate of `(95, 82)` with an arc radius $R = 64$:
-- **Arc Geometry & Length**:
-  The semicircular path covers $180^\circ$ ($\pi$ radians), giving an exact perimeter:
-  $$L = \pi \times R = \pi \times 64 \approx 201.1\,\text{px}$$
-  Dynamic quota consumption is rendered via SVG dash geometry:
-  `stroke-dasharray: 201.1` and `stroke-dashoffset: 201.1 * (1 - ratio)`.
-- **Track Paths (Safe & Danger Zones)**:
-  - **Safe Track (0% to 80%)**: `d="M 31 82 A 64 64 0 0 1 146.8 44.4"`
-  - **Danger Track (80% to 100%)**: `d="M 146.8 44.4 A 64 64 0 0 1 159 82"`
-- **Three Interchangeable Models**:
-  Users can switch between three visual designs from Settings:
-  1. **Model 1: Needle & Dial (`.gauge-needle`)**: High-contrast needle beam originating from `(95, 82)` to `(95, 42)` (length 40px, maintaining 24px clearance from the outer dial arc). Rotates smoothly from $-90^\circ$ (0%) to $+90^\circ$ (100%) around pivot `(95, 82)`.
-  2. **Model 2: Segmented Arc (`.gauge-segmented`)**: Futuristic HUD style with radial dash segments generated via an SVG `<mask id="gauge-seg-mask">` with `stroke-dasharray: 7 3`.
-  3. **Model 3: Minimal Glowing Arc (`.gauge-minimal`)**: Ultra-clean 6px glowing horizon curve with a subtle backdrop glow.
-- **Sidebar 3-Row Grid Layout**:
-  The sidebar quota stats are organized in a 6-column CSS grid (`.bundle-stats-grid`):
-  - **Row 1**: Remaining GB (columns 1–3) and Days Left (columns 4–6).
-  - **Row 2**: Full-width period badge (columns 1–6) displaying renewal dates or "Manual Cycle" comfortably without text clipping.
-  - **Row 3**: Users (columns 1–2), Devices (columns 3–4), and Blocked devices (columns 5–6).
-
-### 2. Theme Engine & Particle Background FX
-- **Themes**: Supported color schemes (`theme-classic-dark`, `theme-matrix`, `theme-cyberpunk`, `theme-ocean-calm`, `theme-nordic-frost`) persist in `localStorage`.
-- **Particle Canvas (`#bg-canvas`)**: Runs on a native HTML5 Canvas using `requestAnimationFrame`:
-  - `mesh`: Interactive geometric node web with distance-threshold line connections.
-  - `starfield`: 3D warp-speed starfield simulation.
-  - `matrix`: Digital raining green code stream.
-  - `clean`: Minimalist ambient static background without animations.
-  - Canvas throttles during tab inactivity and auto-resizes on viewport changes.
-
-### 3. Panel Navigation & Terminal Log Viewport
-- **Race Condition Prevention**: Tab switching coordinates through `activePanelLoadSeq` and cached panel states (`loadedPanels`, `isPanelContentLoaded`) to prevent asynchronous payload overrides during rapid tab switching.
-- **Admin Tab Scrollable Logs**: The system and audit log viewports feature fixed-height scrollable terminal containers, ensuring system logs remain readable and accessible without pushing admin controls or action buttons off-screen.
-
-### 4. Device & User Kick vs. Blacklist Lifecycle
-The management plane provides two distinct disconnection modes:
-- **Kick / Disconnect (`POST /api/devices/{id}/kick`, `POST /api/users/{id}/kick` or `DELETE ?blacklist=false`)**:
-  - Drops existing connection states instantly via `conntrack -D` and nftables.
-  - Deletes the DHCP lease from dnsmasq (`database.delete_lease(mac)`).
-  - Registers a temporary 5-second cooldown via `service.register_kick_timeout(mac, 5.0)` to force the client device to renegotiate DHCP.
-  - After 5 seconds, `_schedule_kick_unblock(mac, 5.0)` lifts the kernel drop rule.
-  - The MAC is **not** added to the permanent blacklist (`mac_lists`), allowing the device to reconnect freely once renegotiated.
-- **Block & Blacklist (`POST /api/devices/{id}/block-blacklist`, `POST /api/users/{id}/block-blacklist` or `DELETE ?blacklist=true`)**:
-  - Permanently writes the MAC to `mac_lists` (`deny`).
-  - Instantly drops all active and future traffic at line-rate in nftables until an admin explicitly removes the MAC from the blacklist.
-
----
-
 ## Local Share Subsystem (LAN Direct Transfer & In-Memory/Disk Streaming Engine)
 
-The Local Share subsystem (`quota/local_share.py`, `web/share.html`, `web/index.html`, and `web/assets/app.js`) provides a high-speed, private, zero-configuration local file and text/clipboard sharing portal across any client device (smartphones, PCs, laptops, tablets, and smart TVs) connected to the local home network.
+The Local Share subsystem (`quota/local_share.py`, `web/share.html`, and the dashboard's Share page `web/js/pages/share.js` + `shareLive.js` + `core/live.js`) provides a high-speed, private, zero-configuration local file and text/clipboard sharing portal across any client device (smartphones, PCs, laptops, tablets, and smart TVs) connected to the local home network.
 
 ### 1. Architectural Highlights & Zero-Dependency Streaming
 
@@ -1121,8 +1068,8 @@ The Local Share subsystem (`quota/local_share.py`, `web/share.html`, `web/index.
 
 ### 3. Client Experience & Standalone Web Portal
 
-- **Admin Dashboard Integration (`#panel-share`)**:
-  - Accessible via the **Local Share** nav-tab in the sidebar.
+- **Admin Dashboard Integration (the **Share** page, `#/share`)**:
+  - Accessible via **Share** in the sidebar.
   - Real-time drag-and-drop dropzone with dynamic upload progress bar, transferred byte counters, and upload speed meter ($MB/s$).
   - Tabular view of active shared files with file-type badges, countdown expiration timers, direct download links, 1-click clipboard link copy, and deletion triggers.
   - Quick text/clipboard notes console supporting automatic URL hyperlinking.
@@ -1164,9 +1111,13 @@ The Local Share subsystem (`quota/local_share.py`, `web/share.html`, `web/index.
 - **In-Browser Slicing-by-8 CRC-32 & Zero-Copy Streaming**:
   When users stream multiple files or folder hierarchies, browsers build a streaming uncompressed STORE ZIP archive on the fly. CRC-32 checksums are computed incrementally using Intel's 8-way parallel Slicing-by-8 algorithm (`updateLiveCrc32`), processing 8 bytes per iteration at $>700\,\text{MB/s}$ without pegging mobile CPU cores. On receiving devices, binary payloads are referenced directly via zero-copy `Uint8Array` memory views into `Blob`, completely eliminating redundant memory duplication and layout thrashing.
 - **Multi-Folder Sequential Staging & Direct Device-to-Device Streaming**:
-  Both the dashboard (`#panel-share`) and standalone portal (`/share`) integrate multi-folder staging directly into the unified `Folders 📂` action trigger. The staging workflow overcomes OS picker restrictions (which typically prohibit multi-folder selection in a single native dialog) by allowing users to queue multiple directories sequentially using `+ Add Folder`, remove unwanted folders with `✕`, or drag-and-drop multiple directories directly onto target peer cards or dropzones. All folders are bundled and streamed with zero storage overhead on the host router.
+  Both the dashboard (Share page) and standalone portal (`/share`) integrate multi-folder staging directly into the unified `Folders 📂` action trigger. The staging workflow overcomes OS picker restrictions (which typically prohibit multi-folder selection in a single native dialog) by allowing users to queue multiple directories sequentially using `+ Add Folder`, remove unwanted folders with `✕`, or drag-and-drop multiple directories directly onto target peer cards or dropzones. All folders are bundled and streamed with zero storage overhead on the host router.
 - **Self-Peer, Multi-Tab Discovery Isolation & IP Deduplication**:
-  `LiveShareHub.broadcast_peer_list()` broadcasts `self_id` and `self_ip` metadata alongside the active peer table. Both the dashboard client (`#panel-share`) and mobile portal (`/share`) deduplicate peer tables by unique `p.ip` and filter out self-IP (`(!myIp || p.ip !== myIp)`). This prevents devices running multiple browser tabs (such as the management dashboard alongside `/share`) from appearing multiple times on remote device radars, ensuring exactly one card per physical device.
+  `LiveShareHub.broadcast_peer_list()` broadcasts `self_id` and `self_ip` metadata alongside the active peer table. Both the dashboard client (Share page) and mobile portal (`/share`) deduplicate peer tables by unique `p.ip` and filter out self-IP (`(!myIp || p.ip !== myIp)`). This prevents devices running multiple browser tabs (such as the management dashboard alongside `/share`) from appearing multiple times on remote device radars, ensuring exactly one card per physical device.
+- **Accept → stream-queue handshake (no lost first bytes)**:
+  The receiver's HTTP download connects a moment *after* it accepted. When a `transfer-response` arrives with `accepted: true` **and** `http_stream: true`, the server creates the transfer's stream queue immediately (before the sender is told to start), so early chunks wait for the GET instead of being forwarded to a WebSocket the receiver ignores. `route_binary_chunk` bounds the wait on a full queue to 30 s and then drops the transfer, so a dead download can never freeze the sender's socket loop.
+- **`Content-Length` only for single files**:
+  A multi-file/folder send is a ZIP the *sender* builds on the fly; it is larger than the sum of the announced file sizes. `GET /api/share/live/download/{id}` therefore omits `Content-Length` for names ending in `.zip` (chunked body); with a too-small length the server aborted the body and browsers reported a cancelled download. [`tests/test_local_share.py`]
 - **50 MB Live Direct Transfer Safety Clamp**:
   To protect low-memory mobile browser engines from memory pressure or prolonged connection hangs during live Wi-Fi streaming, a strict $50\,\text{MB}$ payload limit is enforced. Both frontend interfaces (`initiateDashSendDirect`, `initiateSendDirect`, and multi-folder staging confirm) calculate total payload size upfront and immediately warn users via friendly toast notices if exceeded. The backend WebSocket relay endpoint (`/api/share/live/ws`) additionally enforces this ceiling on `transfer-request` messages, rejecting payloads $> 50\,\text{MB}$ with a descriptive `transfer-error` response. Larger files and folders are routed to standard Local Share upload.
 
@@ -1227,6 +1178,21 @@ When a new device connects to the network as a guest before administrative appro
     2. `@pending_guests` removes the client IP in kernel nftables.
     3. `/api/guest/status` returns `{"status": "approved", "quota_gb": ...}`.
     4. The page instantly switches to emerald green (✅), plays a success animation, displays the granted quota slice, and initiates a 3-second countdown redirect to the guest's original requested URL or Google search.
+
+---
+
+## The dashboard (web UI)
+
+The one and only dashboard, served at `/` (the former `/ui/` address and any old `/ui/...` path answer `307` → the same path at the root; the classic single-file UI and its gauge styles were removed). **No build step**: plain ES modules directly under `web/` — `index.html` loads `js/main.js?v=N` (bump `N` when shipping JS so browsers refetch), plus `css/`, `fonts/`, `js/` and `logo.svg`. Static files outside `/assets/` are served `Cache-Control: no-cache` (`/js/`, `/css/`, `/fonts/`, `/logo.svg`); the page itself is `no-store`.
+
+- **Shell** (`js/main.js`): hash router (`#/overview` … `#/system`), a tiny store (`core/store.js`) fed by the `/ws` dashboard snapshot, `core/api.js` (cookie session + `X-QM-CSRF`; 401 → login; English server messages that users meet — wrong password, wrong 2FA code, bare `HTTP nnn` — are mapped to the UI language in `nice()`), `core/i18n.js` (`t(key)`, AR/EN dictionaries in `js/i18n/`, numbers/MACs wrapped in LRI/PDI so RTL never reorders them), `core/prefs.js` (theme, accent, fx, density, language → `data-*` on `<html>`), the privacy eye (`quota_privacy_hide`, shared with the classic UI).
+- **Redraw rule** (`drawChanged`): a live snapshot rebuilds the page **except while an `input/select/textarea` has focus** (typing is never wiped). Consequence: after an Enter-submit that leaves the field focused, call `ctx.rerender()` and re-focus (see Share → text), otherwise the list stays stale until blur.
+- **Confirm convention**: destructive buttons are *armed* on the first tap (`.armed`, label "Tap again to confirm", auto-disarm after 4 s) and act on the second: kick/blacklist, enable/remove HTTPS, MAC allow/deny entries, Share "clear" / "delete all", firewall apply/revert, VPN node delete, 2FA off.
+- **Pages** (`js/pages/`): overview, people, quota, network, internet (+`internetWan`), security (+`securityDns`), vpn, insights, share (+`shareLive`), system (+`systemTabs`). DNS preset names/descriptions are translated client-side by preset id (`dns.cat.<id>.n|d`, falling back to the server text for unknown ids).
+- **Live transfer client** (`core/live.js`): one WebSocket to `/api/share/live/ws` opened at sign-in so an incoming request pops up on any page; protocol identical to the classic dashboard and `/share` (JSON control + 16-byte transfer-id framed binary).
+- **Public pages** (`/share`, `/milestone`, `/report`, guest portal, `spoof.html`) share `web/assets/pub.css` + `pub-theme.js` and follow the dashboard's light/dark choice.
+- **Limits**: no speedometer gauge (bundle ring + system themes replace it). The anti-DevTools script (`assets/detector.js`) closes headless browsers — abort that request in browser tests. There is a single admin session (`session_token`): signing in elsewhere, or changing the password, invalidates the others.
+- **Tests**: `tests/test_new_ui.py` (static serving, no inline scripts/external URLs, AR↔EN key parity, every used key exists). End-to-end behaviour was verified with Playwright against a real gateway inside network namespaces (client / "internet" / NAS veth pairs, real nftables); anything needing real PPPoE, sing-box, `tc` cake/fq_codel, a real Tailscale or phones must be tried on the box.
 
 ---
 
@@ -1366,7 +1332,7 @@ breaking-change baseline.
   to 5 MB) log synchronously; `/report` also does `list_leases()` once per device
   (the dashboard payload hoists it once).
 - **WS payload built N+1 times per 5 s** (per-client loop + `_push_loop`), and
-  app.js does a full DOM rebuild per push.
+  the dashboard rebuilds the page on every push (skipped while a field has focus).
 - **DB:** no batching (~30+ commits/tick), `get_period_usage_by_user` ×2/tick,
   `get_bundle` ~×5/tick, and the `events` table is unbounded (no prune — the only
   real disk-growth risk).
@@ -1381,7 +1347,7 @@ breaking-change baseline.
 - The protected **Gateway user** is a real DB row forcing ~6 special cases across
   service/run/api/UI — and its fixed 1.0 GB is silently deducted from every
   auto-share bundle.
-- Big files, big coupling: `web/app.js` (1297 lines), `api/app.py` (999),
+- Big files, big coupling: `api/app.py` (999),
   `quota/db.py` (872), `quota/nftables.py` (751), `run.py` (672) — each a god
   module; `quota/engine.py` is the cross-cutting type hub (a field rename ripples
   through every consumer).
@@ -1751,8 +1717,10 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | GET/POST | `/api/vpn/routing` | fetch / update per-user or per-device VPN policy routing rule (`{"target_type", "target_id", "route_vpn"}`) |
 | GET/POST | `/api/vpn/settings` | read / update global VPN settings (`{"allow_insecure": bool}`) |
 | GET | `/api/vpn/logs?limit=150` | tail of in-memory sing-box process log ring buffer |
-| GET/POST | `/api/wan/telegram` | read / save Telegram WAN IP change notification trigger (`{"enabled", "bot_token", "chat_id"}`) |
-| POST | `/api/wan/telegram/test` | send immediate test notification to configured Telegram bot |
+| GET | `/api/tailscale` | Tailscale state: `state`, `ip`, `dns_name`, `auth_url`, `url`, `wan_exposed` |
+| POST | `/api/tailscale/install` | install the official client in the background |
+| POST | `/api/tailscale/connect` | connect; returns the sign-in link when the box is not signed in |
+| POST | `/api/tailscale/disconnect` | disconnect (`{"logout": bool}` also signs the box out) |
 | WS | `/ws` | pushes `{"type":"snapshot","data":{...}}` every 5 s |
 
 Interactive docs: `http://<gateway-ip>:8080/api/docs` (Swagger UI) — OFF by
@@ -1765,7 +1733,9 @@ config.yaml.
 
 ```
 QuotaManager/
-├── CLAUDE.md                 # SYSTEM MAP (architecture, flow, known limits)
+├── CLAUDE.md                 # working guide for Claude/devs: module map, 'where do I change X', invariants
+├── AGENTS.md                 # documentation + release-tag rules
+├── docs/legacy-system-audit-v0.2.1.md  # the old (historical) deep audit
 ├── README.md                 # end-user quick-start docs
 ├── Structure_README.md       # this file — developer docs
 ├── LICENSE                   # MIT license
@@ -1836,10 +1806,15 @@ QuotaManager/
 │   │                         #   traffic metrics, policy routing, persistent auto-healing
 │   ├── vpn_parser.py         # parse_vpn_link (VLESS/VMess/Trojan/Shadowsocks/WireGuard),
 │   │                         #   sing-box config generator, validation via sing-box check
-│   ├── wan_telegram.py       # Telegram WAN IP change trigger: ppp0 / external probe,
-│   │                         #   token masking, Telegram HTML messaging, firewall check
-│   ├── startup_health.py     # startup self-heal: ensure NAT table, ip forwarding,
-│   │                         #   nftables.conf, DNS routing
+│   ├── tailscale.py          # built-in Tailscale remote access: status parse, install,
+│   │                         #   connect (sign-in link), disconnect; interface tailscale0
+│   ├── startup_health.py     # startup self-heal: ensure NAT table (+NAT66, ip6 DNS redirect),
+│   │                         #   ip forwarding, ULA gateway address, nftables.conf, DNS routing
+│   ├── flows.py              # FlowSampler: conntrack byte deltas -> per-device top remote destinations
+│   │                         #   (+ dnsmasq reply IP->name cache, off-thread reverse DNS)
+│   ├── ipv6_probe.py         # Ipv6Probe: ISP IPv6 reachability probe (600 s, hysteresis)
+│   ├── ipv6_setup.py         # app-owned IPv6 host config: dnsmasq RA fragment, sysctl fragment,
+│   │                         #   box-DNS fix (nmcli), dnsmasq rollback, kill-switch
 │   ├── topology.py           # WAN-topology detection: is ppp0 up (for the WAN tab)?
 │   │                         #   restart_pppoe() = public-IP renewal (v24)
 │   ├── updater.py            # self-update checks (Admin tab): version compare vs the
@@ -1853,15 +1828,21 @@ QuotaManager/
 │   ├── app.py                # FastAPI factory: REST + /ws + static mount
 │   └── schemas.py            # pydantic request models
 ├── web/
-│   ├── index.html            # login + dashboard + modals
+│   ├── index.html            # the dashboard shell (loads js/main.js)
+│   ├── css/  fonts/  js/     # tokens/base/layout/components CSS, self-hosted fonts,
+│   │                         #   js/core (api, ws, i18n, prefs, store, live), js/components,
+│   │                         #   js/pages (overview, people, quota, network, internet,
+│   │                         #   security, vpn, insights, share, system + sub-pages),
+│   │                         #   js/i18n ar+en; see "The dashboard (web UI)"
+│   ├── logo.svg
 │   ├── milestone.html        # public household page: own usage + per-device split,
 │   │                         #   one-time 50/75/100% milestone acknowledge
 │   ├── report.html           # source-IP-gated read-only consumption report
-│   └── assets/
-│       ├── styles.css        # obsidian-glass cobalt theme (sidebar, masonry);
-│       │                     #   responsive + touch-first (nav -> swipeable
-│       │                     #   strip, cards stack, modals scroll) on phones
-│       └── app.js            # WS client, dashboard render, user-grouped device cards
+│   ├── share.html            # public /share portal (upload, download, live transfer)
+│   ├── guest_pending.html    # captive portal for unapproved guests
+│   ├── spoof.html            # calibration page
+│   └── assets/               # pub.css + pub-theme.js + share.css (public pages),
+│                             #   qrcode.min.js, detector.js, logo.png
 └── tests/
     ├── test_quota_service.py # period math, per-user allowance math, block fan-out
     │                         #   + bypass, recharge
@@ -1881,7 +1862,11 @@ QuotaManager/
     ├── test_netmgr.py        # TopologyManager WAN/LAN apply + rollback + PPPoE test
     ├── test_topology.py      # detect_ppp / check_internet probes (fake `ip`)
     ├── test_vpn.py           # VpnManager, link parsing, config generation, and REST API
-    ├── test_wan_telegram.py  # WAN Telegram IP trigger, token masking, message formatting
+    ├── test_tailscale.py     # Tailscale status/states/install/connect, API routes, firewall rule
+    ├── test_new_ui.py        # dashboard at /, /ui/ redirect, no inline script/external URL, AR/EN key parity
+    ├── test_flows.py         # live-traffic destination naming (DNS names, RDAP owners)
+    ├── test_ipv6_setup.py    # dual-stack host setup (SLAAC/DHCPv6 on a ULA, NAT66)
+    ├── test_ipv6_probe.py    # IPv6 reachability probe + fallback state
     ├── test_startup_health.py# startup self-heal (NAT table, sysctl forwarding, nftables config)
     ├── test_vpnshare.py      # VpnShareManager vs a fake `ip`: rule/route program,
     │                         #   peer.parse, pin, reconcile, teardown
@@ -1909,11 +1894,15 @@ the kernel counts and drops.
 ```bash
 .venv/bin/python -m pytest tests/ -q        # full suite
 .venv/bin/python -m pyflakes run.py core quota api tests   # lint
-node --check web/assets/app.js              # JS syntax
+for f in $(find web/js -name '*.js'); do node --check $f; done   # JS syntax
 bash -n scripts/setup_gateway_kali.sh scripts/topology.sh scripts/test_pppoe.sh
 ```
 
 The suite covers:
+
+- **IPv6 / host self-heal** — `test_ipv6_setup`, `test_ipv6_probe`, `TestDualStackSelfHeal` in
+  `test_startup_health`, the v6 gate/`in6guard` in `test_nftables`, v6 filters in `test_shaping`.
+- **Regression tests named in *Lessons learned* above** — one per past outage; keep them.
 
 - **Per-user quota math** — allowance on the user, usage = Σ devices, block
   fan-out + bypass precedence, top-ups, reset-day-0, bundle recharge.
@@ -1962,6 +1951,8 @@ The suite covers:
 - **The WiFi/LAN access labels** — `quota/latency_probe.py` (ARP-RTT classifier
   math, min-sample + streak guards, ping fallback, sweep wiring) and
   `quota/wifi_probe.py` (airodump CSV parse, probe snapshot, thread smoke).
+
+The suite is currently **844 tests** (`pytest tests/ -q`, ~160 s). Live-share regression tests: `test_live_zip_download_does_not_declare_a_too_small_content_length` and `test_live_first_chunk_sent_before_the_http_download_connects_is_not_lost`.
 
 Everything that needs hardware/root (nftables, tc, DHCP, raw sockets, PPPoE) is
 simulated or disabled in tests, so the suite runs anywhere.
@@ -2037,3 +2028,100 @@ populated and signed by `apt-repo.yml`. Setting it up the first time:
    ```bash
    gh workflow run apt-repo.yml --ref main -f version=0.2.1
    ```
+
+
+---
+
+## IPv6 dual-stack (SLAAC + DHCPv6 on a ULA, NAT66 out)
+
+**Self-applying on update.** `quota/ipv6_setup.py::ensure_ipv6_host_config` runs from
+`run.py::_startup_self_heal` on every start (when `dhcp.ipv6_enable`). It owns two
+generated fragments — `/etc/dnsmasq.d/quota-ipv6.conf` (RA + SLAAC range + DNS) and
+`/etc/sysctl.d/99-zz-quota-ipv6.conf` (named `99-zz` so it overrides the legacy
+`disable_ipv6=1`) — writes them only when content changed, runs `sysctl -p` when the
+file changed or the kernel still has IPv6 off, and dnsmasq is restarted only if the
+fragment changed. `startup_health` re-adds the ULA gateway address, the NAT66
+masquerade and the ip6 DNS redirect. `setup_gateway_kali.sh` writes the same
+fragments, so fresh installs and updates converge; no manual script re-run is needed.
+
+**Packet path.** Clients get a ULA (`dhcp.ipv6_prefix`, default `fd00:da7a:2::/64`) via dnsmasq RA (`slaac,ra-names`) and DHCPv6; the box is `dhcp.ipv6_gateway` (`::1`, persisted by NetworkManager/ifupdown and self-healed by `startup_health.ensure_network_infrastructure`). `inet quota_nat` masquerades the ULA (NAT66; `ensure_nat_table` re-adds the rule if the table is rebuilt) and redirects client DNS (port 53) to the box.
+
+**Gate (`NftablesEngine.set_ipv6_wan`).** The app table's `forward` chain starts with `meta nfproto ipv6 jump v6gate`. While the ISP has no IPv6 the chain holds `ip6 saddr <ULA> ip6 daddr != {local nets} reject with icmpv6 type no-route` — clients get an immediate ICMPv6 error and Happy-Eyeballs falls back to IPv4 with no stall (a silently black-holed default route would instead time out per connection). The chain is flushed (open) when `Ipv6Probe` reports a working WAN. Default = closed; the maintenance tick re-pushes the verdict (cache-gated), so an engine restart never leaves the gate stuck open.
+
+**Probe (`quota/ipv6_probe.py`).** Global address on the uplink (2000::/3) + TCP connect to Cloudflare/Google DNS over IPv6 (ICMPv6 fallback). Runs at boot and every `dhcp.ipv6_probe_interval_s` (600 s) and on demand (`POST /api/network/ipv6/probe`). Activation is immediate; deactivation needs `fail_threshold` (2) consecutive failures so one lost probe never flaps every client. `GET /api/network/ipv6/status` reports state, interval and `direct_devices`.
+   *Wiring gotcha:* the probe is created in `startup_subsystems()`, **after** `create_app()` runs, so the API must receive a *getter* (`ipv6_probe=lambda: gateway.ipv6_probe`), never the attribute value (it was captured as `None` → `/api/ipv6/*` returned 503). `_ipv6_probe()` in `api/app.py` accepts either shape. [`tests/test_api.py`]
+
+**Accounting / cut.** Per-address named counters (`q_up_<addr>`/`q_down_<addr>`, `:`→`_`) exactly like IPv4, LAN-excluded (`fe80::/10`, `fd00::/8`, `ff00::/8`, the prefix). `@blocked6` + the MAC-keyed `@blocked_macs` set cut IPv6 with IPv4. Addresses are learned from `ip -6 neigh` (`Gateway._ipv6_neigh`, ULA rows only; link-local ignored) plus static reservations, **capped at `IPV6_MAX_PER_MAC` (8) per known device** — SLAAC privacy extensions rotate addresses and a hostile client could spray sources; every tracked address costs 2 counters + 2 rules. Usage drains into the device's usage via `ip_to_mac`, so v4+v6 share one quota.
+
+**Shaping.** `TcShaper` redirects the ULA prefix into the same ifb tree (`protocol ipv6 prio 7`) and adds per-device `protocol ipv6 prio 5` filters (`ip6 src|dst <addr>/128`) into the device's existing HTB class (tc prios are per-protocol — never reuse the IPv4 prio). A new/rotated address changes the signature and rebuilds the tree.
+
+**Known limits.** (1) If the ISP router is dual-stack its RAs still reach the clients: a device that takes a *global* address from it routes around the box (uncounted, uncuttable). Detected best-effort from the neighbor table (`direct_devices`, "IPv6 bypass" tag) — the fix is disabling IPv6/RA on the router. (2) Static IPv6 reservations only bind DHCPv6 clients; Android/iOS use SLAAC and pick their own address. (3) The ULA is private: IPv6 reaches the internet only through NAT66.
+
+**VPN share + IPv6.** VPN share policy-routes only the IPv4 client subnet, so `Gateway._ipv6_wan_wanted()` keeps `v6gate` closed while it is on (IPv6 would otherwise leak around the tunnel).
+
+**Box protection.** `in6guard` (input, priority -10) drops NEW inbound tcp/udp from outside `::1`/ULA/link-local — the box gets a global IPv6 address from the ISP router (`accept_ra=2`) and `quota_firewall` is IPv4-only. ICMPv6 (ND/RA) and DHCPv6 stay open. The dashboard binds `0.0.0.0` (IPv4), so it is not reachable over IPv6 at all.
+
+**Not covered yet.** `quota_firewall` bans/deny/geo rules and the captive-portal redirect are IPv4-only (blocked/pending guests are still cut over IPv6 via `@blocked6`).
+
+### Lessons learned (IPv6 rollout, v0.4.x) — read before touching this area
+
+Each item below was a real outage on a live gateway; the regression test is named in brackets.
+
+1. **dnsmasq options conflict silently under `--test`.** `bind-dynamic` next to the main
+   conf's `bind-interfaces` makes dnsmasq refuse to *start* ("cannot set --bind-interfaces
+   and --bind-dynamic") although `dnsmasq --test` passes file by file. The generated
+   fragment must never contain `bind-*`; `rollback_if_dnsmasq_down` removes the fragment and
+   restarts dnsmasq if it is down while the fragment exists. [`test_fragment_never_conflicts_with_bind_interfaces`, `test_rollback_when_dnsmasq_is_down`]
+2. **The box must not use its own ULA as its DNS.** dnsmasq's RA carries the gateway as
+   RDNSS; NetworkManager can adopt it for the box. Programs on the box (the VPN client)
+   then query `[ula]:53` (dnsmasq binds the LAN NIC only → timeout / refused). Self-heal:
+   `ensure_box_ignores_ula_dns` sets `ipv6.ignore-auto-dns yes` and, when no real resolver
+   is left, `ipv4.dns` from `dhcp.dns_servers`. [`test_box_dns_fix_uses_nmcli_and_is_idempotent`, `test_empty_resolver_gets_the_upstream_dns`]
+3. **DHCPv6 lease lines are not devices.** `expiry iaid ipv6 host duid` — field 2 is an IAID
+   (`0`, `415503221`), not a MAC. Treating it as one registered phantom guests, whose
+   pending-guest block reached `nft add element … blocked_macs { 415503221 }` →
+   `Invalid LL address` → the whole engine was switched off ("Packet engine is off", no
+   counting, no blocking). Fixes: lease parser accepts only `aa:bb:…` + IPv4; startup
+   `_purge_phantom_devices`; nftables only programs real MACs. [`test_sync_dnsmasq_leases_ignores_dhcpv6_lines`, `test_phantom_non_mac_devices_are_purged`, `test_malformed_blocked_mac_never_switches_the_engine_off`]
+4. **A name-based VPN server inside its own TUN.** sing-box `auto_route` captures the box's
+   own packets, including the lookup of the VPN server's hostname (`yax.ddns.net: REFUSED`):
+   the tunnel needs the name, the name needs the tunnel. `vpn_parser.pin_server_hostnames`
+   resolves the name to IPv4 *before* sing-box starts and keeps the original name as TLS SNI /
+   WS Host. The generated config also resolves through `direct-dns` (system resolver), never
+   `127.0.0.1:53` (nothing listens there). [`test_server_hostname_is_pinned_to_ip_keeping_sni_and_host`, `test_generated_singbox_resolves_server_name_via_system_dns`]
+5. **Kill-switch.** `dhcp.ipv6_enable: false` → `disable_ipv6_host_config` removes the RA
+   fragment and rewrites the sysctl fragment to `disable_ipv6 = 1` (only if the app created
+   them). The sysctl fragment is named `99-zz-…` so it overrides the legacy `99-quota-gateway.conf`.
+6. **Setup re-runs and `config.yaml`.** The setup script regenerates `/etc/quota-gateway/config.yaml`
+   from its variables and does not write `firewall`, `dns_filter`, `vpn_share`, `network`, `updates`,
+   `waf`, `report`. It now saves `config.yaml.prev` and appends every top-level section it does not
+   write (verbatim, comments kept) so a re-run never resets them. Runtime settings (firewall rules,
+   DNS rules/presets, VPN nodes, WAN/topology, shaping) are in the SQLite DB at
+   `/var/lib/quota-gateway/quota.db`, which is outside the project folder and untouched by copying it.
+7. **Live traffic shows sites, never app names.** `get_live_traffic_analytics` returns
+   `recent_sites` (`[{domain, hits}]`, top `LIVE_TOP_SITES`=4, last 5 min of `dns_history`, base
+   domains summed, noise such as bare labels / `.arpa` / `.local` / IP literals dropped by
+   `_is_displayable_site`) plus `recent_domains` (same domains, list of strings). DNS shows what was
+   contacted, not where the bytes went — do not reintroduce `KNOWN_SERVICES`-style labels there.
+   UI: `sites()` in `web/js/pages/insights.js` (Live tab).
+8. **Where the bytes go (`quota/flows.py`).** DNS lookups don't show a long upload (no new lookups),
+   so the Live-traffic box uses conntrack: `nf_conntrack_acct=1` (enabled at start) makes
+   `/proc/net/nf_conntrack` carry `bytes=` per direction; `FlowSampler.sample()` (in the 15 s tick,
+   off-loop) diffs them per flow (first sample = baseline only, new flow after = counts fully,
+   LAN/ULA/multicast destinations ignored), `top_destinations()` aggregates per remote *name* —
+   name source order: dnsmasq `reply <name> is <ip>` lines (parsed in `DnslogTailer`) → reverse DNS
+   (one daemon thread, cached) → the bare IP. Result goes into `EngineSnapshot.flows_by_mac` →
+   `top_destinations` in `/api/history/live`; the UI prefers it over the DNS `recent_sites`
+   fallback. If `/proc/net/nf_conntrack` is missing it tries `conntrack -L` (package `conntrack`).
+   Still no app-name guessing. Extra step before the bare IP: `_OwnerResolver` asks RDAP (`rdap.org`, one query per network *range*, ≤1/s, daemon thread `flows-rdap`) who registered the range, caches it in memory + `<db dir>/ip-owners.json`; `history.ip_owner_lookup: false` disables it. `seed_dns_names_from_log` pre-fills `DNS_NAMES` from the tail of the dnsmasq log at start. Labels carry `kind` = name/owner/ip. [`tests/test_flows.py`]
+9. **Counting vs. presence.** Live share % is meaningless on an idle line (`LIVE_IDLE_NET_BPS`),
+   live speed uses the real flush window (`EngineSnapshot.interval_s`), and a device's green LED
+   needs a REACHABLE neighbor entry, an ARP reply or recent traffic — never a bare lease or a
+   STALE neighbor entry (they linger for hours).
+
+
+### Firewall persistence & self-heal (`quota/firewall.py`)
+- Runtime master = DB setting `firewall_config`; every `persist_config` also writes `<db dir>/firewall_config.json` and `load_config` restores the DB from it when the DB value is empty. Snapshots default to `<db dir>/firewall_snapshots` (never the app folder, which deploys replace).
+- **Revert semantics**: `safe_apply` captures the config that was running *before* persisting the new one (falling back to `firewall_last_good`, then the sanitized new config when it is the very first apply since boot), and `revert_last_good` re-applies it **and persists it**, so a restart never resurrects the reverted rules. A second apply followed by Revert goes back exactly one step, not to the first apply since boot. [`tests/test_firewall.py`]
+- LAN mode: `fw_forward` accepts the local subnets before custom rules, so custom *deny* rules whose source is a local subnet cannot match (the UI says so on the rules card); `sanitize` also refuses client-subnet-wide denies and bans of protected IPs.
+- `reconcile` (every tick) re-applies when `nft list table inet quota_firewall` fails (external `flush ruleset`), and clears a sticky `available=False` after 60 s (not when nft is missing).

@@ -67,9 +67,32 @@ def _has_masquerade(run: RunCommand) -> bool:
     return "masquerade" in out
 
 
+def _has_masquerade6(run: RunCommand) -> bool:
+    """Return True when the postrouting chain carries an IPv6 (NAT66) masquerade."""
+    code, out = run(["nft", "list", "chain", NFT_TABLE, "postrouting"])
+    return code == 0 and any(
+        "ip6 saddr" in line and "masquerade" in line for line in out.splitlines())
+
+
+def _ensure_dns_redirect6(run: RunCommand, ipv6_prefix: str) -> None:
+    """Re-add the IPv6 DNS redirect (client :53 -> the box) when the setup
+    script's ``prerouting`` chain exists but lacks it (older installs). Without
+    it a client could bypass domain filtering by using IPv6 DNS directly."""
+    code, out = run(["nft", "list", "chain", NFT_TABLE, "prerouting"])
+    if code != 0:
+        return  # no prerouting chain on this install — nothing to extend
+    for proto in ("udp", "tcp"):
+        has = any("ip6 saddr" in l and f"{proto} dport 53" in l and "redirect" in l
+                  for l in out.splitlines())
+        if not has:
+            run(["nft", "add", "rule", NFT_TABLE, "prerouting",
+                 f"ip6 saddr {ipv6_prefix} {proto} dport 53 redirect to :53"])
+
+
 def ensure_nat_table(
     client_subnet: str,
     *,
+    ipv6_prefix: str = "",
     run: RunCommand | None = None,
 ) -> bool:
     """Verify ``inet quota_nat`` exists with a masquerade rule; recreate if not.
@@ -84,8 +107,11 @@ def ensure_nat_table(
 
     run = run or _default_run
 
-    # Fast path: table + masquerade already present.
-    if _table_exists(run) and _has_masquerade(run):
+    # Fast path: table + masquerade (+ NAT66 when dual-stack) already present.
+    if (_table_exists(run) and _has_masquerade(run)
+            and (not ipv6_prefix or _has_masquerade6(run))):
+        if ipv6_prefix:
+            _ensure_dns_redirect6(run, ipv6_prefix)
         return True
 
     if not _table_exists(run):
@@ -103,12 +129,23 @@ def ensure_nat_table(
     elif not _has_masquerade(run):
         log.warning("quota_nat table exists but masquerade rule missing — adding")
 
-    code, out = run(["nft", "add", "rule", NFT_TABLE, "postrouting",
-                     f"ip saddr {client_subnet} masquerade"])
-    if code != 0 and "File exists" not in out and "already exists" not in out:
-        log.error("ensure_nat_table: add masquerade rule failed: %s", out.strip())
-        return False
+    if not _has_masquerade(run):
+        code, out = run(["nft", "add", "rule", NFT_TABLE, "postrouting",
+                         f"ip saddr {client_subnet} masquerade"])
+        if code != 0 and "File exists" not in out and "already exists" not in out:
+            log.error("ensure_nat_table: add masquerade rule failed: %s", out.strip())
+            return False
+    if ipv6_prefix and not _has_masquerade6(run):
+        # NAT66 for the dual-stack clients (the engine's v6gate decides whether
+        # their IPv6 may leave at all; this rule only rewrites the source).
+        code, out = run(["nft", "add", "rule", NFT_TABLE, "postrouting",
+                         f"ip6 saddr {ipv6_prefix} masquerade"])
+        if code != 0 and "File exists" not in out and "already exists" not in out:
+            log.error("ensure_nat_table: add NAT66 rule failed: %s", out.strip())
+            return False
 
+    if ipv6_prefix:
+        _ensure_dns_redirect6(run, ipv6_prefix)
     log.info("ensure_nat_table: quota_nat table ready (masquerade %s)", client_subnet)
     return True
 
@@ -215,8 +252,14 @@ def _current_addrs(run: RunCommand, iface: str) -> dict[str, str]:
     return addrs
 
 
+def _has_ipv6_addr(run: RunCommand, iface: str, addr: str) -> bool:
+    code, out = run(["ip", "-o", "-6", "addr", "show", "dev", iface])
+    return code == 0 and f" {addr}/" in (out or "")
+
+
 def ensure_network_infrastructure(
     *,
+    ipv6_gateway: str = "",
     gateway_ip: str = "192.168.2.1",
     uplink_ip: str = "",
     lan_cidr: int = 24,
@@ -294,6 +337,17 @@ def ensure_network_infrastructure(
             ok = False
         else:
             log.info("ensure_network_infrastructure: added %s to %s", cidr, iface)
+
+    # Dual-stack: the ULA gateway address must exist or dnsmasq stops sending
+    # Router Advertisements and clients silently lose IPv6.
+    if ipv6_gateway and not _has_ipv6_addr(run, iface, ipv6_gateway):
+        log.warning("LAN interface %s missing IPv6 gateway %s — re-adding",
+                    iface, ipv6_gateway)
+        code, out = run(["ip", "-6", "addr", "add", f"{ipv6_gateway}/64", "dev", iface])
+        if code != 0 and "File exists" not in out and "already exists" not in out:
+            log.error("ensure_network_infrastructure: ip -6 addr add %s dev %s failed: %s",
+                      ipv6_gateway, iface, out.strip())
+            ok = False
 
     # -- nftables.conf symlink --------------------------------------
     if not ensure_nftables_conf():

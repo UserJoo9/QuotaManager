@@ -326,8 +326,8 @@ def test_dnsmasq_configs_allocate_sequential_ips():
     (e.g. .155 then .185) instead of filling contiguously from POOL_START."""
     for script in ("setup_gateway_kali.sh", "topology.sh"):
         text = _read(REPO / "scripts" / script)
-        assert text.count("dhcp-range=") == 2, \
-            f"{script} must write two dnsmasq heredocs (WAN + LAN)"
+        assert text.count("dhcp-range=$POOL_START") == 2, \
+            f"{script} must write two IPv4 dnsmasq heredocs (WAN + LAN)"
         # the directive itself is a bare config line; the comment mentions it too
         seq_lines = re.findall(r"(?m)^dhcp-sequential-ip$", text)
         assert len(seq_lines) == 2, \

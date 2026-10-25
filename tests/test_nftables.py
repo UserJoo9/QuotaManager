@@ -222,8 +222,8 @@ def test_update_state_is_add_only():
     eng.update_state({"192.168.2.111": "aa:bb:cc:dd:ee:01"}, {})
     n_calls = len(fake.calls)
     eng.update_state({}, {})  # device gone
-    # only the two blocked-set flushes (IP + MAC, both empty) — no deletes
-    assert len(fake.calls) == n_calls + 2
+    # only the three blocked-set flushes (IPv4 + IPv6 + MAC, all empty) — no deletes
+    assert len(fake.calls) == n_calls + 3
     # counters still exist but are not surfaced (flush filters by ip_to_mac)
     assert "q_up_192_168_2_111" in fake.counters
 
@@ -963,3 +963,158 @@ def test_gateway_dhcp_exemption_rules_are_valid_nft_grammar():
     proc = subprocess.run([nft, "-c", "-f", "-"], input=ruleset, capture_output=True,
                           text=True)
     assert proc.returncode == 0, f"nft -c rejected the DHCP exemption rules:\n{proc.stderr}"
+
+
+def test_ipv6_counters_and_blocked6_set():
+    """Verify NftablesEngine handles IPv6 addresses for counters and blocked6 set."""
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+
+    ip6 = "fd00:da7a:2::50"
+    mac = "aa:bb:cc:dd:ee:50"
+    eng.update_state({ip6: mac}, {})
+
+    # Check IPv6 counters created
+    assert "q_up_fd00_da7a_2__50" in fake.counters
+    assert "q_down_fd00_da7a_2__50" in fake.counters
+
+    # Check ip6 match rules generated
+    joined = " | ".join(fake.rules)
+    assert f"ip6 saddr {ip6}" in joined
+    assert f"ip6 daddr {ip6}" in joined
+    assert "counter name q_up_fd00_da7a_2__50" in joined
+
+    # Block the device
+    eng.update_state({ip6: mac}, {mac: True})
+    assert ip6 in fake._sets["inet quota_gateway"]["blocked6"]
+
+    # Usage flush
+    fake.counters["q_up_fd00_da7a_2__50"] = 4096
+    fake.counters["q_down_fd00_da7a_2__50"] = 8192
+    snap = eng.flush()
+    assert snap.by_ip[ip6].up == 4096
+    assert snap.by_ip[ip6].down == 8192
+
+
+
+def test_ipv6_wan_gate_closed_by_default_then_open_close():
+    """Until the ISP probe says IPv6 works, client IPv6 bound for the internet
+    gets ICMPv6 no-route (instant IPv4 fallback). Opening flushes the gate;
+    the verdict is cache-gated."""
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    joined = " | ".join(fake.rules)
+    assert "meta nfproto ipv6 jump v6gate" in joined
+    reject = ("ip6 saddr fd00:da7a:2::/64 ip6 daddr != { fd00::/8, "
+              "fd00:da7a:2::/64, fe80::/10, ff00::/8 } "
+              "reject with icmpv6 type no-route")
+    assert reject in fake.rules
+    assert eng.ipv6_wan_active is False
+
+    n = len(fake.calls)
+    eng.set_ipv6_wan(False)                       # unchanged -> no nft call
+    assert len(fake.calls) == n
+
+    eng.set_ipv6_wan(True)                        # ISP IPv6 works -> flush gate
+    assert eng.ipv6_wan_active is True
+    assert ["nft", "flush", "chain", "inet quota_gateway v6gate"] in fake.calls
+    adds = len([r for r in fake.rules if r == reject])
+    eng.set_ipv6_wan(False)                       # ISP lost IPv6 -> close again
+    assert eng.ipv6_wan_active is False
+    assert len([r for r in fake.rules if r == reject]) == adds + 1
+
+
+def test_box_is_not_exposed_over_ipv6():
+    """The box gets a global IPv6 address from the ISP router; new inbound
+    tcp/udp from outside the LAN must be dropped (the firewall is IPv4-only)."""
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    assert ("meta nfproto ipv6 meta l4proto { tcp, udp } ct state new "
+            "ip6 saddr != { ::1, fd00::/8, fe80::/10 } drop") in fake.rules
+    assert "{ type filter hook input priority -10; policy accept; }" in fake.rules
+
+
+def test_malformed_blocked_mac_never_switches_the_engine_off():
+    """A non-MAC key in `blocked` (a phantom device) made `nft add element`
+    fail with "Invalid LL address" and disabled the whole engine. It is skipped."""
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    eng.update_state({}, {"415503221": True, "aa:bb:cc:dd:ee:01": True})
+    assert eng.available
+    assert fake.blocked_macs == {"aa:bb:cc:dd:ee:01"}
+
+
+# -- LAN (local) monitoring counters ------------------------------------------
+
+def test_lan_counters_installed_per_ipv4_device():
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    eng.update_state({"192.168.2.50": "aa:bb:cc:00:00:01"}, {})
+    joined = " | ".join(fake.rules)
+    # forward hook: client <-> LOCAL nets (router/NAS), counted apart from the
+    # metered internet counters
+    assert ("ip saddr 192.168.2.50 ip daddr { 192.168.1.0/24, 192.168.2.0/24 } "
+            "counter name q_lup_192_168_2_50") in joined
+    assert ("ip daddr 192.168.2.50 ip saddr { 192.168.1.0/24, 192.168.2.0/24 } "
+            "counter name q_ldn_192_168_2_50") in joined
+    # client <-> the box itself (dashboard, share portal, live transfer)
+    assert "ip saddr 192.168.2.50 counter name q_lup_192_168_2_50" in joined
+    assert "ip daddr 192.168.2.50 counter name q_ldn_192_168_2_50" in joined
+    # the metered internet counters keep their LAN exclusions (disjoint)
+    assert "q_up_192_168_2_50" in joined and "q_down_192_168_2_50" in joined
+    # no LAN rule ever drops
+    assert not [r for r in fake.rules if "q_l" in r and "drop" in r]
+
+
+def test_flush_reports_lan_delta_separately_from_internet():
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    ip = "192.168.2.50"
+    eng.update_state({ip: "aa:bb:cc:00:00:01"}, {})
+    fake.counters[_counter_name(ip, "up")] = 1000
+    fake.counters[_counter_name(ip, "down")] = 4000
+    fake.counters["q_lup_192_168_2_50"] = 300
+    fake.counters["q_ldn_192_168_2_50"] = 700
+    snap = eng.flush()
+    assert snap.by_ip[ip].up == 1000 and snap.by_ip[ip].down == 4000
+    assert snap.lan_by_ip[ip].up == 300 and snap.lan_by_ip[ip].down == 700
+    fake.counters["q_lup_192_168_2_50"] = 350
+    snap2 = eng.flush()
+    assert snap2.lan_by_ip[ip].up == 50 and snap2.lan_by_ip[ip].down == 0
+
+
+def test_lan_counter_failure_never_disables_engine():
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    orig = fake.__call__
+
+    def flaky(argv):
+        if argv[1:3] == ["add", "counter"] and "q_l" in argv[-1]:
+            return 1, "fake: lan counter refused"
+        return orig(argv)
+
+    eng._run_command = flaky
+    eng.update_state({"192.168.2.51": "aa:bb:cc:00:00:02"}, {})
+    assert eng.available                      # quota accounting unaffected
+    assert "192.168.2.51" in eng._installed   # internet counters installed
+    assert "192.168.2.51" not in eng._lan_installed
+
+
+def test_lan_counter_carried_over_restart_is_baseline_not_usage():
+    fake = FakeNft()
+    fake.counters["q_lup_192_168_2_50"] = 5000   # survived a restart
+    fake.counters["q_ldn_192_168_2_50"] = 9000
+    eng = _engine(fake)
+    eng.start()
+    eng.update_state({"192.168.2.50": "aa:bb:cc:00:00:01"}, {})
+    first = eng.flush()
+    assert "192.168.2.50" not in first.lan_by_ip   # old total not counted
+    fake.counters["q_lup_192_168_2_50"] = 5100
+    assert eng.flush().lan_by_ip["192.168.2.50"].up == 100

@@ -85,6 +85,8 @@ class FakeNft:
         self.chain_rules: dict[str, list[str]] = {}  # hook -> [expr]
         #: persistent write failure (add/flush/delete/reset all return 1).
         self.reject_writes = False
+        #: simulates `nft flush ruleset` having wiped the table
+        self.table_gone = False
 
     def _counters_json(self) -> tuple[int, str]:
         entries = [{"name": name, "value": {"packets": packets, "bytes": packets * 96}}
@@ -103,6 +105,10 @@ class FakeNft:
         args = argv[1:]
         if self.reject_writes and args[0] in ("add", "flush", "delete", "reset"):
             return 1, "fake: write rejected"
+        if args[:2] == ["list", "table"]:
+            return (1, "Error: No such file or directory") if self.table_gone else (0, "")
+        if args[:2] == ["add", "table"]:
+            self.table_gone = False
         if args[0] == "-j":
             if args[1] == "list" and args[2] == "counters":
                 return self._counters_json()
@@ -429,6 +435,30 @@ def test_revert_last_good_restores_previous_config(env):
                for e in env.fw.recent_log(20))
 
 
+def test_revert_after_a_single_apply_since_boot_really_reverts(env):
+    """Boot -> ONE apply -> Revert must go back to what was running before it
+    (it used to 'revert' to the freshly applied rules, a silent no-op)."""
+    rule = {"name": "block-x", "chain": "forward", "action": "deny",
+            "protocol": "tcp", "dst_port": 443}
+    _run(env.fw.safe_apply(_base_cfg(rules=[rule]), reason="only"))
+    assert any("fw_custom_0" in r for r in env.fake.rules)
+    _run(env.fw.revert_last_good())
+    assert not any("fw_custom" in r for r in env.fake.rules)
+    # and the stored config follows, so a restart does not resurrect the rule
+    assert json.loads(_run(env.db.get_setting("firewall_config")))["rules"] == []
+
+
+def test_revert_goes_back_one_step_not_to_the_first_apply(env):
+    r1 = {"name": "one", "chain": "forward", "action": "deny", "protocol": "tcp", "dst_port": 1111}
+    r2 = {"name": "two", "chain": "forward", "action": "deny", "protocol": "tcp", "dst_port": 2222}
+    _run(env.fw.safe_apply(_base_cfg(rules=[]), reason="a"))
+    _run(env.fw.safe_apply(_base_cfg(rules=[r1]), reason="b"))
+    _run(env.fw.safe_apply(_base_cfg(rules=[r1, r2]), reason="c"))
+    _run(env.fw.revert_last_good())
+    joined = "\n".join(env.fake.rules)
+    assert "1111" in joined and "2222" not in joined, "must return to the config before the last apply"
+
+
 def test_apply_failure_degrades_gracefully(env):
     env.fake.reject_writes = True
     ok = _run(env.fw.safe_apply(_base_cfg()))
@@ -662,6 +692,47 @@ def test_reconcile_rebuilds_after_config_change(env):
                 if c[1] in ("add", "flush", "delete")]) > n_writes
 
 
+def test_reconcile_reapplies_when_table_was_flushed_externally(env):
+    _run(env.fw.reconcile())
+    n = len([c for c in env.fake.calls if c[1] == "flush"])
+    env.fake.table_gone = True
+    _run(env.fw.reconcile())
+    assert len([c for c in env.fake.calls if c[1] == "flush"]) > n
+    assert env.fake.table_gone is False
+
+
+def test_failed_apply_is_retried_instead_of_staying_off(env):
+    env.fake.reject_writes = True
+    assert env.fw.apply() is False and env.fw.available is False
+    env.fake.reject_writes = False
+    _run(env.fw.reconcile())                 # too soon: still off
+    assert env.fw.available is False
+    env.fw._fail_mono -= 61
+    assert _run(env.fw.reconcile()) is True
+    assert env.fw.available is True
+
+
+def test_config_survives_a_replaced_database_via_mirror(tmp_path):
+    env = _make_env(tmp_path)
+    try:
+        env.fw._state_dir = tmp_path / "state"
+        _run(env.fw.persist_config(_base_cfg(deny_cidrs=["198.51.100.0/24"])))
+        assert (tmp_path / "state" / "firewall_config.json").exists()
+        _run(env.db.set_setting("firewall_config", ""))      # DB reset by a deploy
+        cfg = _run(env.fw.load_config())
+        assert "198.51.100.0/24" in cfg["deny_cidrs"]
+        assert _run(env.db.get_setting("firewall_config", ""))   # written back
+    finally:
+        _close(env)
+
+
+def test_state_dir_defaults_next_to_the_database(tmp_path):
+    cfg = Config()
+    cfg.db_path = str(tmp_path / "var" / "quota.db")
+    fw = FirewallManager(cfg, None, run_command=FakeNft())
+    assert fw._snapshot_dir == tmp_path / "var" / "firewall_snapshots"
+
+
 # ---------------------------------------------------------------------------
 # 9. API surface: CRUD, revert, ban/unban, geo, auth, brute-force ban
 # ---------------------------------------------------------------------------
@@ -764,3 +835,29 @@ def test_api_without_firewall_degrades_gracefully(tmp_path):
                           json={"mapping": {}}).status_code == 404
     finally:
         _run(db.close())
+
+def test_lan_mode_closes_dashboard_to_the_internet_by_default():
+    """Behind the ISP router the box sees a port-forwarded public client's own
+    source address: with remote access OFF the dashboard port refuses NEW
+    connections from anything outside the home networks."""
+    cmds = render_commands(_base_cfg(), "lan", LOCAL_NETS, BOX_IPS)
+    joined = " | ".join(_rules(cmds))
+    assert ("tcp dport 8080 ct state new ip saddr != 192.168.1.0/24 "
+            f"ip saddr != 192.168.2.0/24 counter name {COUNTER_WAN_IN_DROP} drop") in joined
+    # the counter it references is declared, and home networks are accepted first
+    assert any(c[:2] == ["add", "counter"] and c[-1] == COUNTER_WAN_IN_DROP for c in cmds)
+    rules = _rules(cmds)
+    drop_i = next(i for i, r in enumerate(rules) if "tcp dport 8080 ct state new" in r)
+    for net in LOCAL_NETS:
+        assert rules.index(f"ip saddr {net} accept") < drop_i
+
+
+def test_lan_mode_remote_access_switch_opens_the_dashboard():
+    cmds = render_commands(_base_cfg(wan_confirmed=True), "lan", LOCAL_NETS, BOX_IPS)
+    assert "tcp dport 8080 ct state new" not in " | ".join(_rules(cmds))
+
+
+def test_lan_guard_skipped_without_local_networks():
+    """No resolvable home network => never emit a rule that could drop everyone."""
+    cmds = render_commands(_base_cfg(), "lan", [], [])
+    assert "tcp dport 8080 ct state new" not in " | ".join(_rules(cmds))

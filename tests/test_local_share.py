@@ -616,6 +616,59 @@ def test_live_share_http_stream_download(share_client):
 
 
 
+def test_live_zip_download_does_not_declare_a_too_small_content_length(share_client):
+    """A multi-file send is a ZIP built on the fly by the sender, so it is LARGER than the
+    sum of file sizes it announced. Declaring that sum as Content-Length cut the body
+    short and browsers reported a cancelled download."""
+    client, _ = share_client
+    with client.websocket_connect("/api/share/live/ws") as ws1:
+        self_id1 = ws1.receive_json()["self_id"]
+        with client.websocket_connect("/api/share/live/ws") as ws2:
+            self_id2 = ws2.receive_json()["self_id"]
+            ws1.receive_json()
+            tid = "t_zip_len_1"
+            ws1.send_json({"type": "transfer-request", "transfer_id": tid, "target_id": self_id2,
+                           "file_name": "Files_x.zip", "file_size": 5, "file_type": "application/zip"})
+            ws2.receive_json()
+            ws2.send_json({"type": "transfer-response", "transfer_id": tid, "target_id": self_id1,
+                           "accepted": True, "http_stream": True})
+            assert ws1.receive_json()["accepted"] is True
+            payload = b"PK-this-body-is-much-longer-than-the-announced-five-bytes"
+            ws1.send_bytes(tid.encode().ljust(16, b" ") + payload)
+            ws1.send_json({"type": "transfer-done", "transfer_id": tid, "target_id": self_id2})
+            r = client.get(f"/api/share/live/download/{tid}")
+            assert r.status_code == 200
+            assert r.content == payload
+            assert "content-length" not in {k.lower() for k in r.headers} or int(r.headers["content-length"]) == len(payload)
+
+
+def test_live_first_chunk_sent_before_the_http_download_connects_is_not_lost(share_client):
+    """The receiver's HTTP download connects a moment AFTER it accepted. Chunks that
+    arrive in between must wait for it, not be forwarded to the WebSocket (where the
+    receiver ignores them) — that silently dropped the first bytes of a file/ZIP."""
+    client, _ = share_client
+    with client.websocket_connect("/api/share/live/ws") as ws1:
+        self_id1 = ws1.receive_json()["self_id"]
+        with client.websocket_connect("/api/share/live/ws") as ws2:
+            self_id2 = ws2.receive_json()["self_id"]
+            ws1.receive_json()
+            tid = "t_first_chunk_1"
+            body = b"FIRST-CHUNK|" + b"x" * 2000
+            ws1.send_json({"type": "transfer-request", "transfer_id": tid, "target_id": self_id2,
+                           "file_name": "a.bin", "file_size": len(body), "file_type": "application/octet-stream"})
+            ws2.receive_json()
+            ws2.send_json({"type": "transfer-response", "transfer_id": tid, "target_id": self_id1,
+                           "accepted": True, "http_stream": True})
+            assert ws1.receive_json()["accepted"] is True
+            # NOTE: no stream queue is created by the test — the server must have done it already
+            ws1.send_bytes(tid.encode().ljust(16, b" ") + body[:12])
+            ws1.send_bytes(tid.encode().ljust(16, b" ") + body[12:])
+            ws1.send_json({"type": "transfer-done", "transfer_id": tid, "target_id": self_id2})
+            r = client.get(f"/api/share/live/download/{tid}")
+            assert r.status_code == 200
+            assert r.content == body
+
+
 def test_live_share_50mb_size_limit(share_client):
     """Test that Live Direct Transfer requests exceeding 50 MB are rejected."""
     client, _ = share_client

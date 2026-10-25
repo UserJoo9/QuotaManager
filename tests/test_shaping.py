@@ -169,8 +169,9 @@ def test_unlimited_device_goes_to_default_class():
                         "classid", "1:0x8002")
     assert not fake.has("tc", "class", "add", "dev", "ifb0", "parent", "1:0x301",
                         "classid", "1:0x8002")
-    # only the ingress-redirect filter exists — no per-device flowid filters
-    assert fake.count("tc", "filter", "add", "dev", "eth0", "parent", "ffff:") == 1
+    # only the ingress-redirect filters exist (IPv4 + the IPv6 ULA one) — no
+    # per-device flowid filters
+    assert fake.count("tc", "filter", "add", "dev", "eth0", "parent", "ffff:") == 2
     assert fake.count("tc", "filter", "add", "dev", "ifb0") == 0
     assert fake.count("tc", "filter", "add", "dev", "eth0", "parent", "1:") == 0
 
@@ -1058,3 +1059,38 @@ def test_wan_topology_lan_trees_run_below_the_outer_caps():
     # the outer caps themselves are unchanged
     assert fake.has("tc", "qdisc", "add", "dev", "ifb1", "root", "cake",
                     "bandwidth", "79.05mbit", "besteffort", "ingress")
+
+
+def test_ipv6_traffic_is_redirected_and_shaped_per_device():
+    """Dual-stack: the client ULA prefix is redirected into ifb0 and each
+    device's IPv6 addresses land in the SAME class as its IPv4 address (own
+    tc prio — a prio cannot be shared across protocols)."""
+    fake = FakeTc()
+    shaper = TcShaper(make_cfg(), run_command=fake)
+    shaper.start()
+    e = entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)
+    e["ip6"] = ["fd00:da7a:2::100"]
+    shaper.update_state([e], True, 100.0, 20.0, True)
+    assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "ffff:",
+                    "protocol", "ipv6", "prio", "7", "u32", "match", "ip6",
+                    "src", "fd00:da7a:2::/64", "action", "mirred", "egress",
+                    "redirect", "dev", "ifb0")
+    # download tree matches the destination, upload tree the source
+    assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
+                    "protocol", "ipv6", "prio", "5", "u32", "match", "ip6",
+                    "dst", "fd00:da7a:2::100/128", "flowid", "1:0x8001")
+    assert fake.has("tc", "filter", "add", "dev", "ifb0", "parent", "1:",
+                    "protocol", "ipv6", "prio", "5", "u32", "match", "ip6",
+                    "src", "fd00:da7a:2::100/128", "flowid", "1:0x8001")
+
+
+def test_new_ipv6_address_rebuilds_the_tree():
+    fake = FakeTc()
+    shaper = TcShaper(make_cfg(), run_command=fake)
+    shaper.start()
+    e = entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)
+    shaper.update_state([e], True, 100.0, 20.0, True)
+    sig1 = shaper._last_signature
+    e2 = dict(e, ip6=["fd00:da7a:2::100"])
+    shaper.update_state([e2], True, 100.0, 20.0, True)
+    assert shaper._last_signature != sig1

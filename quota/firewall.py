@@ -65,6 +65,9 @@ RunCommand = Callable[[list[str]], tuple[int, str]]
 FAMILY = "inet"
 TABLE = "quota_firewall"
 CHAIN_INPUT = "fw_input"
+#: Interface the Tailscale client creates (quota/tailscale.py INTERFACE).
+TAILSCALE_IF = "tailscale0"
+TAILSCALE_PORT = 41641
 CHAIN_FORWARD = "fw_forward"
 CHAIN_DNAT = "fw_dnat"
 SET_BANS = "fw_bans"
@@ -387,6 +390,11 @@ def render_commands(
     # the same: nftables.py ``_add_counter`` before ``_add_device``).
     counter_names = {COUNTER_DENY_DROP, COUNTER_BAN_DROP,
                      COUNTER_SYN_DROP, COUNTER_SYN_PASS}
+    # LAN topology (box behind the ISP router): the dashboard is closed to
+    # everything outside the home networks unless the admin allows it.
+    lan_guard = (not wan) and (not wan_expose) and bool(client_nets)
+    if lan_guard:
+        counter_names.add(COUNTER_WAN_IN_DROP)
     if wan:
         counter_names.add(COUNTER_WAN_IN_DROP)
         counter_names.add(COUNTER_WAN_FWD_DROP)
@@ -407,6 +415,9 @@ def render_commands(
     add_rule(CHAIN_INPUT, "ct state established,related accept")
     add_rule(CHAIN_INPUT, "iif lo accept")
     add_rule(CHAIN_INPUT, "ip saddr 127.0.0.0/8 accept")
+    # Tailscale (built-in remote access): the private, authenticated tailnet
+    # reaches the box here in BOTH topologies, never through ppp0 / the router.
+    add_rule(CHAIN_INPUT, f'iifname "{TAILSCALE_IF}" accept')
     for net in client_nets:
         add_rule(CHAIN_INPUT, f"ip saddr {net} accept")
     for ip in box_ips:
@@ -435,6 +446,10 @@ def render_commands(
         _render_custom(add_rule, r, i)
     add_rule(CHAIN_INPUT, f"ip saddr @{SET_BANS} "
                           f"counter name {COUNTER_BAN_DROP} drop")
+    # Tailscale's WireGuard port: lets the phone reach the box DIRECTLY instead
+    # of through a slow relay (authenticated + encrypted, nothing else listens).
+    # After the deny/ban drops, so a banned address still cannot reach it.
+    add_rule(CHAIN_INPUT, f"udp dport {TAILSCALE_PORT} accept")
     # WAN-mode ppp0 drop MUST come before the SYN flood guard below —
     # otherwise the flood-accept matches new SYNs from any interface and
     # external connections slip through before the ppp0 drop is reached.
@@ -445,6 +460,16 @@ def render_commands(
         add_rule(CHAIN_INPUT,
                  f'iifname "ppp0" ct state new '
                  f'counter name {COUNTER_WAN_IN_DROP} drop')
+    elif lan_guard:
+        # Behind a router the "WAN" is whatever the router forwards in (a port
+        # forward, DMZ or UPnP mapping): the box sees the public client's own
+        # source address. With the remote-access switch OFF, refuse NEW
+        # connections to the dashboard port from any source outside the home
+        # networks (local nets / box IPs were accepted above).
+        add_rule(CHAIN_INPUT,
+                 f"tcp dport {web_port} ct state new "
+                 f"{_neg(client_nets, 'ip saddr')} "
+                 f"counter name {COUNTER_WAN_IN_DROP} drop")
     if scan_enabled:
         add_rule(CHAIN_INPUT,
                  f"tcp flags syn ct state new "
@@ -589,7 +614,14 @@ class FirewallManager:
         self._run_command = run_command or _default_run_command
         self._probe = probe
         self._web_port = web_port
-        self._snapshot_dir = Path(snapshot_dir or "data/firewall_snapshots")
+        db_path = getattr(cfg, "db_path", "")
+        #: Directory that SURVIVES an app-folder replacement (next to the DB).
+        self._state_dir: Path | None = (
+            Path(db_path).parent if isinstance(db_path, str) and db_path else None)
+        self._snapshot_dir = Path(
+            snapshot_dir or ((self._state_dir / "firewall_snapshots")
+                             if self._state_dir else "data/firewall_snapshots"))
+        self._fail_mono = 0.0
 
         engine_cfg = getattr(cfg, "engine", None)
         self._local_nets = _resolve_local_nets(
@@ -654,6 +686,7 @@ class FirewallManager:
 
     def _fail(self, message: str) -> None:
         self.available = False
+        self._fail_mono = time.monotonic()
         self._last_error = message
         if not self._warned:
             self._warned = True
@@ -680,6 +713,12 @@ class FirewallManager:
         if self._db is None:
             return self._config
         raw = await self._db.get_setting("firewall_config", "")
+        if not raw:
+            raw = self._read_mirror()
+            if raw:   # DB was replaced/reset: restore the admin's rules from the mirror
+                log.warning("firewall: firewall_config missing in DB - restored from %s",
+                            self._mirror_path())
+                await self._db.set_setting("firewall_config", raw)
         if raw:
             try:
                 data = json.loads(raw)
@@ -691,6 +730,32 @@ class FirewallManager:
         self._config = _merge_defaults(self._config)
         return self._config
 
+    def _mirror_path(self) -> Path | None:
+        return (self._state_dir / "firewall_config.json") if self._state_dir else None
+
+    def _read_mirror(self) -> str:
+        path = self._mirror_path()
+        try:
+            return path.read_text(encoding="utf-8") if path and path.exists() else ""
+        except OSError:
+            return ""
+
+    def _write_mirror(self, text: str) -> None:
+        path = self._mirror_path()
+        if not path:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(text, encoding="utf-8")
+            tmp.replace(path)
+        except OSError as exc:
+            log.warning("firewall: config mirror write failed: %s", exc)
+
+    def _table_present(self) -> bool:
+        code, _ = self._run_command(["nft", "list", "table", FAMILY, TABLE])
+        return code == 0
+
     async def persist_config(self, data: dict[str, Any]) -> dict[str, Any]:
         """Sanitize + store a config and make it the runtime master."""
         clean = self.sanitize(data)
@@ -698,6 +763,7 @@ class FirewallManager:
         if self._db is not None:
             await self._db.set_setting("firewall_config",
                                        json.dumps(stored, sort_keys=True))
+            self._write_mirror(json.dumps(stored, sort_keys=True))
         self._config = clean
         return clean
 
@@ -889,12 +955,24 @@ class FirewallManager:
         """
         cfg = await self.load_config()
         if not self.available:
-            return False
+            # A failed nft call must not switch the firewall off until the next
+            # restart: retry once a minute (not when nft itself is missing).
+            if (self._fail_mono and time.monotonic() - self._fail_mono >= 60
+                    and "not found" not in self._last_error):
+                self.available = True
+                self._last_sig = self._applied_sig = None
+            else:
+                return False
         drained: list[tuple[str, str]] = []
 
         def _work() -> bool:
             sig = self._signature(cfg)
             changed = not (sig == self._last_sig and self._applied_sig == sig)
+            if (not changed and cfg.get("enabled", True)
+                    and not self._table_present()):
+                # `nft flush ruleset` (nftables restart, package upgrade...) wiped us
+                log.warning("firewall: table vanished - re-applying the stored rules")
+                changed = True
             if changed:
                 if not self.apply(cfg):
                     self._last_sig = sig
@@ -954,6 +1032,12 @@ class FirewallManager:
         A watchdog task re-verifies reachability after ``watchdog_seconds`` and
         auto-reverts to the last-good config on failure.
         """
+        # The config in force BEFORE this apply is the rollback target. It must
+        # be read before persist_config(), which makes the new config the
+        # runtime master (reading it afterwards made the very first apply since
+        # boot "revert" to itself, and later applies keep reverting to the
+        # first one instead of the previous one).
+        previous_good = json.loads(json.dumps(self._config)) if self._config else None
         clean = await self.persist_config(data)
         warnings = clean.pop("_warnings", [])
         if not self.available:
@@ -969,7 +1053,8 @@ class FirewallManager:
         # failed watchdog must restore the previous working rules — NOT the
         # just-applied ones that locked the admin out (the naive "last good =
         # what I just applied" would revert to the same broken ruleset).
-        previous_good = self._last_good or self._config
+        if previous_good is None:
+            previous_good = self._last_good or clean
         ok = await asyncio.to_thread(self.apply, clean)
         if not ok:
             await self._event(f"FW: apply failed ({reason}) — {self._last_error}", "error")
@@ -1004,6 +1089,12 @@ class FirewallManager:
         if not good.get("enabled", True):
             good = {**good, "enabled": True}
         await asyncio.to_thread(self.apply, good)
+        # The reverted rules become the stored config too, otherwise the next
+        # restart (reconcile) would bring the reverted-away rules back.
+        try:
+            await self.persist_config(good)
+        except Exception:  # noqa: BLE001 — the kernel is already reverted
+            log.exception("firewall: could not persist the reverted config")
         await self._event("FW: reverted to last-good firewall config", "warn")
         return {"ok": True, "applied": True}
 
