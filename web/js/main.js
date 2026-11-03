@@ -127,7 +127,11 @@ function renderShell() {
 }
 function rerender(full) { if (full) { setLang(getPrefs().lang); document.title = "QuotaManager"; } if (store.get().authed) renderShell(); else renderLogin(); }
 
+let hiddenDirty = false;
+document.addEventListener("visibilitychange", () => { if (!document.hidden && hiddenDirty && store.get().authed) { hiddenDirty = false; drawChanged(null, store.get()); } });
 function drawChanged(prev, s) {
+  // A background tab never repaints; it draws once when it comes back.
+  if (document.hidden && document.querySelector(".shell")) { hiddenDirty = true; return; }
   // A live snapshot only needs the page + drawer refreshed; keep scroll and focus untouched.
   const sc = window.scrollY;
   const active = document.activeElement;
@@ -158,7 +162,9 @@ async function boot() {
   await refresh();
   maybeWelcome(refresh);
   startLiveShare();
-  if (!stopLive) stopLive = startLive((snap) => store.set({ dashboard: snap }), (live) => { clearTimeout(offTimer); if (live) store.set({ live: true }); else offTimer = setTimeout(() => store.set({ live: false }), 2500); });
+  // Identical snapshots (nothing changed in the last 5 s) are dropped instead of rebuilding the page.
+  let lastSnap = "";
+  if (!stopLive) stopLive = startLive((snap) => { let j = ""; try { j = JSON.stringify(snap); } catch { /* draw anyway */ } if (j && j === lastSnap) return; lastSnap = j; store.set({ dashboard: snap }); }, (live) => { clearTimeout(offTimer); if (live) store.set({ live: true }); else offTimer = setTimeout(() => store.set({ live: false }), 2500); });
 }
 
 setUnauthorizedHandler(() => { if (stopLive) stopLive(); stopLive = null; closeDrawer(); store.set({ authed: false, dashboard: null, live: false }); });

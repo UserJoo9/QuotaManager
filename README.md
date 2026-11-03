@@ -85,9 +85,22 @@ Then continue with [First setup](#first-setup).
 No spare device? Run the gateway inside a Debian virtual machine on the computer you already have.
 
 1. Install **VirtualBox** or **VMware**, and create a **Debian** VM.
-2. Set the VM network to **Bridged** and pick the **Ethernet (cable)** adapter, not Wi-Fi.
-3. Install the package inside the VM using the [Linux PC](#linux-pc-or-laptop) steps.
-4. The computer must stay on, and wired, while you want the limits to work.
+2. Set the VM network to **Bridged** and pick the **Ethernet (cable)** adapter. *(VMware: Edit → Virtual Network Editor → `VMnet0` → "Bridged to" → your Ethernet card; leave it off "Automatic".)*
+3. Plug the computer into the router with a **cable**, then restart the VM.
+4. Install the package inside the VM using the [Linux PC](#linux-pc-or-laptop) steps.
+5. The computer must stay on, and wired, while you want the limits to work.
+
+> **Do not bridge to Wi-Fi.** A Wi-Fi bridge shares one address with the VM, so the VM can browse the internet but never sees the other devices' traffic. Everything *looks* connected, yet devices show "connected, no internet", the counters stay at 0 and speed limits do nothing. If you have no cable, use a **USB Ethernet adapter** passed through to the VM (it behaves like a cable).
+
+**Quick check inside the VM:**
+
+```bash
+ip -br a                       # the card should hold your router-side IP and 192.168.2.1
+ping -c2 192.168.1.1           # your router; around 1 ms on a cable, several ms on Wi-Fi
+sudo nft list counters | grep -A2 q_up_192_168_2   # bytes grow while a phone browses
+```
+
+The card is found automatically (the one holding `192.168.2.1`), so a different name such as `ens34` is fine. After changing the VM's network, restart with `sudo systemctl restart quota-gateway`.
 
 Great for trying Quota Manager before buying anything.
 
@@ -192,6 +205,8 @@ Your data lives in `/var/lib/quota-gateway/quota.db` — copy it now and then as
 |---|---|
 | No internet after setup | Make sure router DHCP is **off**, then reconnect the device |
 | Device has internet but isn't counted | Turn off IPv6 / Router Advertisement on the router |
+| A computer has no internet and shows under *Unmanaged devices* | It uses a **manually typed IP**. Set it to obtain an IP **automatically (DHCP)**; to keep one fixed address, reserve it for that device in the dashboard instead |
+| Running in a VM: devices connect but no internet, counters stay 0 | The VM is bridged to Wi-Fi. Bridge it to the **Ethernet** card (see [virtual machine](#windows--mac-virtual-machine)) |
 | Install says "no installation candidate" | Run `sudo apt-get update` first |
 | Everything stopped after a reboot | `sudo systemctl enable --now quota-gateway` |
 | Forgot the password | Ask in an issue, or see the developer guide below |

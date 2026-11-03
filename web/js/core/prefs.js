@@ -18,8 +18,23 @@ export const TONES = {
 };
 export const PARTICLES = ["mesh", "dust", "rain", "orbs", "off"];
 const DEFAULTS = { tone: "", particles: "mesh", theme: "dark", lang: (navigator.language || "en").toLowerCase().startsWith("ar") ? "ar" : "en", accent: "azure", fx: "rich", density: "comfortable", rail: false };
-let prefs = { ...DEFAULTS };
-try { Object.assign(prefs, JSON.parse(localStorage.getItem(KEY) || "{}")); } catch { /* private mode */ }
+// Weak machines (2 cores or less, or a browser drawing without a GPU - typical inside a virtual machine)
+// start with the light look: no animated background, effects "subtle". Animations that repaint the whole
+// screen 60 times a second are what makes the panel feel laggy there. Picking particles/effects by hand
+// in System -> Appearance always wins (fxChosen).
+function softwareGpu() {
+  try {
+    const gl = document.createElement("canvas").getContext("webgl");
+    if (!gl) return true;
+    const ext = gl.getExtension("WEBGL_debug_renderer_info");
+    const r = String(ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
+    return /llvmpipe|softpipe|swiftshader|software|basic render/i.test(r);
+  } catch { return false; }
+}
+export const lowEnd = (() => { try { return (navigator.hardwareConcurrency || 4) <= 2 || softwareGpu(); } catch { return false; } })();
+let saved = {};
+try { saved = JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch { /* private mode */ }
+let prefs = { ...DEFAULTS, ...saved, ...(lowEnd && !saved.fxChosen ? { particles: "off", fx: "subtle" } : {}) };
 if (!/^(ar|en)$/.test(prefs.lang)) prefs.lang = DEFAULTS.lang;
 if (!ACCENTS[prefs.accent]) prefs.accent = "azure";
 if (prefs.tone && !TONES[prefs.tone]) prefs.tone = "";
@@ -44,6 +59,8 @@ export function applyPrefs() {
   r.dispatchEvent(new CustomEvent("qm:prefs"));
 }
 export function setPref(k, v) {
-  prefs[k] = v; applyPrefs();
-  try { localStorage.setItem(KEY, JSON.stringify(prefs)); } catch { /* ignore */ }
+  prefs[k] = v; saved[k] = v;
+  if (k === "particles" || k === "fx") { saved.fxChosen = true; saved.particles = prefs.particles; saved.fx = prefs.fx; }
+  applyPrefs();
+  try { localStorage.setItem(KEY, JSON.stringify(saved)); } catch { /* ignore */ }
 }

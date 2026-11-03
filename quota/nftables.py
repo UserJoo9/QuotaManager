@@ -599,7 +599,10 @@ class NftablesEngine:
         """
         if not self._arp_lock or not self._client_net:
             return
-        known = sorted(ip_to_mac)
+        # known_ips is an ipv4_addr set: an IPv6 address (a dual-stack device
+        # the engine also tracks) makes `nft add element` fail, which used to
+        # switch the WHOLE engine off ("engine unavailable" -> no counters).
+        known = sorted(ip for ip in ip_to_mac if ":" not in ip)
         if known and known == self._last_known_ips:
             return
         # A genuinely empty set is never programmed (see the guard above): the

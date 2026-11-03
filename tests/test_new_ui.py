@@ -142,3 +142,28 @@ def test_usage_daily_endpoint(client):
 
 def test_usage_daily_requires_login(client):
     assert client.get("/api/usage/daily").status_code == 401
+
+
+def test_drawer_never_rebuilds_over_unsaved_picks_or_a_held_click():
+    """A live snapshot (every 5 s) used to rebuild the side drawer under the person: a changed
+    <select> (e.g. "belongs to") snapped back and the "Save" press was swallowed."""
+    js = (UI / "js" / "components" / "drawer.js").read_text(encoding="utf-8")
+    assert "defaultSelected" in js          # select picks count as unsaved edits
+    assert "defaultChecked" in js           # so do checkbox / radio toggles
+    assert "pointerdown" in js and "pressing" in js  # no rebuild between mouse-down and mouse-up
+
+
+def test_light_look_on_weak_machines_and_cheap_particles():
+    """Inside a VM (no GPU / 2 cores) the animated background made the whole panel lag."""
+    prefs = (UI / "js" / "core" / "prefs.js").read_text(encoding="utf-8")
+    assert "lowEnd" in prefs and "fxChosen" in prefs
+    assert "llvmpipe" in prefs              # software rendering is detected
+    parts = (UI / "js" / "core" / "particles.js").read_text(encoding="utf-8")
+    assert "shadowBlur" not in parts        # per-dot canvas shadows are very slow without a GPU
+    assert "< 33" in parts                  # ~30 fps cap
+
+
+def test_unchanged_snapshots_and_hidden_tabs_do_not_redraw():
+    js = (UI / "js" / "main.js").read_text(encoding="utf-8")
+    assert "lastSnap" in js
+    assert "document.hidden" in js and "hiddenDirty" in js

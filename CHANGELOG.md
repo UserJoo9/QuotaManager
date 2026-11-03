@@ -6,6 +6,14 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## [0.5.1] — 2026-11-03
+
+### Fixed
+- **Picking from a list in the side panel (e.g. "Belongs to") snapped back before you could press Save.** The live refresh every few seconds rebuilt the panel; it now waits while you have an unsaved pick or toggle, and never interrupts a press on a button.
+- **The dashboard felt slow on weak machines and inside virtual machines.** On 2-core computers or browsers without graphics acceleration it now starts with the light look (no animated background, subtle effects); you can turn the effects back on in System → Appearance. The animated background itself is also about 30% lighter everywhere, unchanged live updates are skipped, and a background tab no longer redraws.
+- **Counters stopped after a device got an IPv6 address.** In LAN mode with the ARP lock on, an IPv6 address was wrongly pushed into the IPv4 allow-list, which made the whole usage engine switch itself off ("nftables engine unavailable") — no counters until a restart. IPv6 addresses are now skipped for that list.
+- **Docs**: the virtual-machine guide now explains why the VM must be bridged to a **wired** adapter (a Wi-Fi bridge makes the internet look fine but the gateway never sees the devices' traffic, so nothing is counted or limited), plus quick checks. The troubleshooting table also covers devices with a manually typed IP.
+
 ## [0.5.0] — 2026-10-25
 
 ### Added — the new dashboard

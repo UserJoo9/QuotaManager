@@ -20,26 +20,29 @@ export function startParticles() {
     else if (style === "orbs") for (let i = 0; i < 18; i++) ps.push({ x: R() * w, y: R() * hh, r: R() * 28 + 14, vx: (R() - .5) * .35, vy: (R() - .5) * .35, a: R() * .08 + .05, tw: R() * 6.28 });
     else for (let i = 0; i < (style === "mesh" ? 42 : 45); i++) ps.push({ x: R() * w, y: R() * hh, r: style === "mesh" ? R() * 1.4 + 1.2 : R() * 2 + 1.2, vx: (R() - .5) * .5, vy: style === "dust" ? -(R() * .5 + .3) : (R() - .5) * .45, a: R() * .2 + .35, tw: R() * 6.28 });
   }
-  function tick() {
+  let last = 0;
+  function tick(ts) {
+    raf = requestAnimationFrame(tick);
+    if (ts - last < 33) return; // ~30 fps is plenty for a slow ambient drift and halves the cost
+    last = ts;
     c.clearRect(0, 0, w, hh);
     if (style === "rain") {
       for (const p of ps) {
-        p.y += p.sp; if (p.y > hh + 30) { p.y = -30; p.x = R() * w; }
+        p.y += p.sp * 2; if (p.y > hh + 30) { p.y = -30; p.x = R() * w; }
         const g = c.createLinearGradient(p.x, p.y - p.len, p.x, p.y); g.addColorStop(0, `rgba(${rgb},0)`); g.addColorStop(1, `rgba(${rgb},${p.a.toFixed(3)})`);
         c.strokeStyle = g; c.lineWidth = 1.6; c.beginPath(); c.moveTo(p.x, p.y - p.len); c.lineTo(p.x, p.y); c.stroke();
         c.fillStyle = `rgba(${rgb},${(p.a * 1.3).toFixed(3)})`; c.beginPath(); c.arc(p.x, p.y, 1.2, 0, 6.283); c.fill();
       }
     } else if (style === "orbs") {
       for (const p of ps) {
-        p.x += p.vx; p.y += p.vy; p.tw += .01;
+        p.x += p.vx * 2; p.y += p.vy * 2; p.tw += .02;
         if (p.x < -p.r) p.x = w + p.r; if (p.x > w + p.r) p.x = -p.r; if (p.y < -p.r) p.y = hh + p.r; if (p.y > hh + p.r) p.y = -p.r;
         const g = c.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r); g.addColorStop(0, `rgba(${rgb},${(p.a * (.8 + .2 * Math.sin(p.tw))).toFixed(3)})`); g.addColorStop(1, `rgba(${rgb},0)`);
         c.fillStyle = g; c.beginPath(); c.arc(p.x, p.y, p.r, 0, 6.283); c.fill();
       }
     } else {
-      c.shadowColor = `rgba(${rgb},.7)`; c.shadowBlur = 8;
       for (let i = 0; i < ps.length; i++) {
-        const p = ps[i]; p.x += p.vx; p.y += p.vy; p.tw += .01;
+        const p = ps[i]; p.x += p.vx * 2; p.y += p.vy * 2; p.tw += .02;
         if (p.y < -8) { p.y = hh + 8; p.x = R() * w; } if (p.y > hh + 8) { p.y = -8; p.x = R() * w; } if (p.x < -8) p.x = w + 8; if (p.x > w + 8) p.x = -8;
         c.beginPath(); c.arc(p.x, p.y, p.r, 0, 6.283); c.fillStyle = `rgba(${rgb},${(p.a * (.7 + .3 * Math.sin(p.tw))).toFixed(3)})`; c.fill();
         if (style === "mesh") for (let j = i + 1; j < ps.length; j++) {
@@ -47,9 +50,7 @@ export function startParticles() {
           if (d < 130) { c.beginPath(); c.moveTo(p.x, p.y); c.lineTo(q.x, q.y); c.strokeStyle = `rgba(${rgb},${((1 - d / 130) * .18).toFixed(3)})`; c.lineWidth = .9; c.stroke(); }
         }
       }
-      c.shadowBlur = 0;
     }
-    raf = requestAnimationFrame(tick);
   }
   const stop = () => { if (raf) cancelAnimationFrame(raf); raf = 0; };
   function sync() {

@@ -614,6 +614,20 @@ def test_arp_lock_known_ips_syncs_leased_clients():
     assert fake.known_ips == {"192.168.2.111"}
 
 
+def test_arp_lock_known_ips_ignores_ipv6_addresses():
+    """known_ips is an ipv4_addr set: a dual-stack device's IPv6 address must
+    never be added (nft rejects it, which used to switch the whole engine off)."""
+    fake = FakeNft()
+    eng = _locked_engine(fake)
+    eng.start()
+    eng.update_state({"192.168.2.111": "aa:bb:cc:dd:ee:01",
+                      "fd00:da7a:2:0:4dd:a74b:4099:f2d7": "aa:bb:cc:dd:ee:01"}, {})
+    assert fake.known_ips == {"192.168.2.111"}
+    assert not any(c[1:3] == ["add", "element"] and c[3].endswith("known_ips")
+                   and ":" in c[4] for c in fake.calls)
+    assert eng.available
+
+
 def test_arp_lock_known_ips_only_rebuilt_on_change():
     """A same-set membership must not re-flush known_ips every tick (a rebuild
     briefly drops every managed device between the flush and the last re-add)."""

@@ -22,7 +22,25 @@ function fill() {
     h("div", { class: "dr-body" }, v.body), v.footer && v.footer.length ? h("footer", { class: "dr-f" }, v.footer) : null].filter(Boolean));
   const nb = p.querySelector(".dr-body"); if (nb) nb.scrollTop = top;
 }
+// True when the person has changed anything in the drawer that is not saved yet (text, number, checkbox,
+// radio, or a <select> pick). A live snapshot must never rebuild the drawer over that.
+function hasUnsaved(root) {
+  for (const i of root.querySelectorAll("input")) {
+    if (i.type === "checkbox" || i.type === "radio") { if (i.checked !== i.defaultChecked) return true; }
+    else if (i.value !== i.defaultValue) return true;
+  }
+  for (const x of root.querySelectorAll("textarea")) if (x.value !== x.defaultValue) return true;
+  for (const sel of root.querySelectorAll("select")) for (const o of sel.options) if (o.selected !== o.defaultSelected) return true;
+  return false;
+}
+// A press that started inside the drawer (e.g. on "Save") must reach its click: rebuilding between mouse-down and
+// mouse-up would replace the button and swallow the click.
+let pressing = false;
+const down = () => { pressing = true; }, up = () => { setTimeout(() => { pressing = false; }, 0); };
+document.addEventListener("pointerdown", down, true);
+document.addEventListener("pointerup", up, true);
+document.addEventListener("pointercancel", up, true);
 export function refreshDrawer() { if (current && builder) {
   const a = document.activeElement; if (a && current.contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)) return; // never rebuild under a cursor
-  if ([...current.querySelectorAll("input")].some((i) => i.value !== i.defaultValue)) return; // unsaved edits stay put
+  if (pressing || hasUnsaved(current)) return; // unsaved edits and in-flight clicks stay put
   try { fill(); } catch { closeDrawer(); } } }
