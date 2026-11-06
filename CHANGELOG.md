@@ -6,7 +6,7 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
-## [0.5.2] — 2026-11-06
+## [0.5.3] — 2026-11-06
 
 Added:
 - Optional daily quota (off by default). Turn it on from Quota > Daily quota, then give each person a plan in their card.
@@ -20,6 +20,8 @@ Added:
 - Optionally the person can adjust their own plan (never the total) from their usage page (/milestone).
 
 Fixed:
+- Updating from the panel no longer switches a WAN-mode box back to LAN (the PPPoE login and NIC are kept).
+- A failure in the update's network setup step no longer leaves the package half-installed with the service disabled.
 - The collapsed (narrow) sidebar came out broken, with no button to bring it back. It now shows only the icons, with the collapse/expand button right under the logo.
 - The "What's new" window showed the release notes as raw text (stray ### and ** marks). It now shows proper headings, bullets and bold text, and English notes read left-to-right inside the Arabic interface.
 - The "What's new" window had both an X and two buttons (Close and Cancel). It now has the X and a single Close button.

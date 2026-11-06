@@ -34,7 +34,59 @@ fi
 # idempotent and refuses to run while the service is live. We stop it first so
 # an upgrade can re-run setup cleanly.
 systemctl stop "$SERVICE" 2>/dev/null || true
-APP_DIR="$APP_DIR" QUOTA_NO_APT=1 bash "$APP_DIR/scripts/setup_gateway_kali.sh"
+
+# --- keep WAN mode across upgrades ------------------------------------------
+# The setup script regenerates config.yaml for the topology it is given
+# (default: whatever config.yaml says) and drops the dashboard's topology
+# override from the DB. A box switched to WAN from the dashboard therefore came
+# back in LAN mode after every update. Work out the CURRENT topology (DB
+# override first, then config.yaml) and, when it is WAN, hand the setup script
+# the same PPPoE login/NIC it already holds, so the upgrade re-applies WAN.
+DB=/var/lib/quota-gateway/quota.db
+CUR_TOPO=""
+if [ -f "$DB" ] && command -v python3 >/dev/null 2>&1; then
+    CUR_TOPO="$(python3 - "$DB" <<'PYEOF' 2>/dev/null || true
+import sqlite3, sys
+try:
+    db = sqlite3.connect(sys.argv[1])
+    g = lambda k: (db.execute("SELECT value FROM settings WHERE key=?", (k,)).fetchone() or [""])[0]
+    if g("topology_source") == "dashboard" and g("topology") in ("lan", "wan"):
+        print(g("topology"))
+except Exception:
+    pass
+PYEOF
+)"
+fi
+if [ -z "$CUR_TOPO" ] && [ -f "$CONF_DIR/config.yaml" ]; then
+    CUR_TOPO="$(awk '/^[[:space:]]*topology:/{gsub(/["'"'"']/,"",$2); print $2; exit}' "$CONF_DIR/config.yaml")"
+fi
+if [ -z "${QUOTA_TOPOLOGY:-}" ] && [ "$CUR_TOPO" = "wan" ]; then
+    log "WAN mode detected - keeping it across this update"
+    export QUOTA_TOPOLOGY=wan
+    PEER=/etc/ppp/peers/quota-wan
+    if [ -f "$PEER" ]; then
+        _u="$(sed -n 's/^user "\(.*\)"$/\1/p' "$PEER" | head -1)"
+        _if="$(awk '/^plugin/{getline; print $1; exit}' "$PEER")"
+        if [ -n "$_u" ] && [ -z "${PPPOE_USER:-}" ]; then
+            export PPPOE_USER="$_u"
+            _p="$(grep -F "\"$_u\" *" /etc/ppp/chap-secrets 2>/dev/null | head -1 | sed -n 's/^"[^"]*" \* "\(.*\)" \*$/\1/p' || true)"
+            [ -n "$_p" ] && export PPPOE_PASSWORD="$_p"
+        fi
+        _lan="$(awk '/^[[:space:]]*interface:/{print $2; exit}' "$CONF_DIR/config.yaml" 2>/dev/null || true)"
+        if [ -n "$_if" ] && [ -n "$_lan" ] && [ "$_if" != "$_lan" ] && [ -z "${WAN_IF:-}" ]; then
+            export WAN_IF="$_if"
+        fi
+    fi
+fi
+
+# A failing setup step must never leave the package half-configured with the
+# service disabled (prerm disables it on upgrade): report it, but carry on and
+# still enable + start the gateway below.
+if ! APP_DIR="$APP_DIR" QUOTA_NO_APT=1 bash "$APP_DIR/scripts/setup_gateway_kali.sh"; then
+    echo "[quota-manager] WARNING: setup script reported an error - continuing; re-run" \
+         "'bash $APP_DIR/scripts/setup_gateway_kali.sh' and check the output" >&2
+fi
+systemctl daemon-reload 2>/dev/null || true
 
 log "enabling + starting $SERVICE"
 systemctl enable "$SERVICE" >/dev/null 2>&1 || true

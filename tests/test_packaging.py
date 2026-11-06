@@ -341,3 +341,13 @@ def test_dnsmasq_configs_allocate_sequential_ips():
 def test_deb_ignored():
     text = _read(REPO / ".gitignore")
     assert re.search(r"^\*\.deb$", text, re.M), ".gitignore must ignore *.deb"
+
+
+def test_postinst_keeps_wan_mode_and_never_aborts_on_setup_failure():
+    text = (PACKAGING / "DEBIAN" / "postinst").read_text()
+    # an update must not reset a dashboard-enabled WAN box to LAN
+    assert "export QUOTA_TOPOLOGY=wan" in text
+    assert "topology_source" in text and "chap-secrets" in text
+    # a failing setup step must not leave the package half-configured
+    assert "if ! APP_DIR=" in text
+    assert text.index("if ! APP_DIR=") < text.index('systemctl enable "$SERVICE"')

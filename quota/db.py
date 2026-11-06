@@ -660,7 +660,7 @@ class Database:
             await self._conn.commit()
         except Exception:  # noqa: BLE001
             pass
-        # Optional daily quota (0.5.2). All additive; defaults = feature off.
+        # Optional daily quota (0.5.3). All additive; defaults = feature off.
         for table, col, decl in (
                 ("users", "daily_mode", "TEXT NOT NULL DEFAULT 'off'"),
                 ("users", "daily_gb", "REAL NOT NULL DEFAULT 0"),
