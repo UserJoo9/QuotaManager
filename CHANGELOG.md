@@ -8,26 +8,29 @@ match it. Release notes are composed from a version's section below.)_
 
 ## [0.5.2] — 2026-11-06
 
-### Added
-- **Optional daily quota** (off by default). Turn it on from **Quota → Daily quota**, then give each person a plan in their card. Two modes: **fixed** (e.g. 5 GB every day) or **split what is left** of the month equally over the days that are left. The day runs from 12:00 AM to 12:00 AM. The monthly quota stays the hard limit; the daily plan only paces it.
-  - What a person did not use today can **move to the next day** (and keep rolling) or be **spread over the remaining days**.
-  - Pick **heavier days** (a date and an amount): the other days share the rest equally.
-  - Devices of a person can **share the daily pool**, get an **equal slice** each, or a **fixed share** set on each device's card.
-  - Enabling or changing a plan mid-day never cuts anyone: what was already used today is deducted and today's share is still available.
-  - Top-ups and packs for the person or the whole house simply raise the month and the plan re-splits; a pack for one device keeps that device working.
-  - At the daily limit the person's devices stop until midnight (their status says **Daily limit**) and come back by themselves.
-  - Optionally the person can adjust their own plan (not the total) from their usage page, `/milestone`.
+Added:
+- Optional daily quota (off by default). Turn it on from Quota > Daily quota, then give each person a plan in their card.
+- Two modes: a fixed amount every day (for example 5 GB), or split what is left of the month equally over the days that are left. The day runs from 12:00 AM to 12:00 AM, and the monthly quota stays the hard limit.
+- What a person did not use today can move to the next day (and keep rolling) or be spread over the remaining days.
+- Pick heavier days (a date and an amount): the other days share the rest equally. Changes apply immediately.
+- A person's devices can share the daily pool, get an equal slice each, or a fixed share set on each device's card.
+- Enabling or changing a plan in the middle of the day never cuts anyone: what was already used today is deducted and today's share is still available.
+- Top-ups and packs for the person or the whole house simply raise the month and the plan re-splits. A pack for one device keeps that device working.
+- At the daily limit the person's devices stop until midnight (the status says "Daily limit") and come back by themselves.
+- Optionally the person can adjust their own plan (never the total) from their usage page (/milestone).
 
-### Fixed
-- **The collapsed (narrow) sidebar came out broken, with no button to bring it back.** Labels were squeezed into cut-off fragments and the expand button was pushed out of sight, so it could not be reopened. The narrow bar now shows only the icons, with the collapse/expand button right under the logo.
+Fixed:
+- The collapsed (narrow) sidebar came out broken, with no button to bring it back. It now shows only the icons, with the collapse/expand button right under the logo.
+- The "What's new" window showed the release notes as raw text (stray ### and ** marks). It now shows proper headings, bullets and bold text, and English notes read left-to-right inside the Arabic interface.
+- The "What's new" window had both an X and two buttons (Close and Cancel). It now has the X and a single Close button.
 
 ## [0.5.1] — 2026-11-03
 
-### Fixed
-- **Picking from a list in the side panel (e.g. "Belongs to") snapped back before you could press Save.** The live refresh every few seconds rebuilt the panel; it now waits while you have an unsaved pick or toggle, and never interrupts a press on a button.
-- **The dashboard felt slow on weak machines and inside virtual machines.** On 2-core computers or browsers without graphics acceleration it now starts with the light look (no animated background, subtle effects); you can turn the effects back on in System → Appearance. The animated background itself is also about 30% lighter everywhere, unchanged live updates are skipped, and a background tab no longer redraws.
-- **Counters stopped after a device got an IPv6 address.** In LAN mode with the ARP lock on, an IPv6 address was wrongly pushed into the IPv4 allow-list, which made the whole usage engine switch itself off ("nftables engine unavailable") — no counters until a restart. IPv6 addresses are now skipped for that list.
-- **Docs**: the virtual-machine guide now explains why the VM must be bridged to a **wired** adapter (a Wi-Fi bridge makes the internet look fine but the gateway never sees the devices' traffic, so nothing is counted or limited), plus quick checks. The troubleshooting table also covers devices with a manually typed IP.
+Fixed:
+- Picking from a list in the side panel (for example "Belongs to") snapped back before you could press Save. The panel now waits while you have an unsaved pick or toggle.
+- The dashboard felt slow on weak machines and inside virtual machines. It now starts with the light look there (no animated background); you can turn the effects back on in System > Appearance. The animated background is also about 30% lighter everywhere, and a background tab no longer redraws.
+- Counters stopped after a device got an IPv6 address (LAN mode with the ARP lock on). IPv6 addresses are now skipped for that list.
+- Docs: the virtual-machine guide now explains why the VM must be bridged to a wired adapter (a Wi-Fi bridge makes the internet look fine but nothing is counted or limited), plus quick checks.
 
 ## [0.5.0] — 2026-10-25
 

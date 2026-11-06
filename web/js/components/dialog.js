@@ -4,7 +4,8 @@ let current = null;
 export function closeDialog() { if (current) { current.remove(); current = null; document.removeEventListener("keydown", onKey); } }
 function onKey(e) { if (e.key === "Escape") closeDialog(); }
 // content: Node[] shown in a <form>. onSubmit(setError) => Promise; return truthy to close.
-export function openDialog({ title, sub, content, submitLabel, onSubmit, wide }) {
+// infoOnly: a read-only dialog — the header X plus a single Close button (no redundant Cancel).
+export function openDialog({ title, sub, content, submitLabel, onSubmit, wide, infoOnly }) {
   closeDialog();
   const err = h("div", { class: "err", role: "alert", hidden: true, style: { "text-align": "start" } });
   const submit = h("button", { class: "btn primary", type: "submit" }, submitLabel);
@@ -15,7 +16,7 @@ export function openDialog({ title, sub, content, submitLabel, onSubmit, wide })
     finally { submit.disabled = false; }
   } },
     content, err,
-    h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: closeDialog }, t("common.cancel")), submit));
+    h("div", { class: "dialog-actions" }, infoOnly ? null : h("button", { class: "btn", type: "button", onclick: closeDialog }, t("common.cancel")), submit));
   current = h("div", {},
     h("div", { class: "scrim", onclick: closeDialog }),
     h("div", { class: "dialog" + (wide ? " wide" : ""), role: "dialog", "aria-modal": "true" },

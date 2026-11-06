@@ -353,3 +353,8 @@ textarea.input{height:auto;min-height:120px;padding:10px 12px;resize:vertical;fo
 .dq-prev,.dq-today{display:flex;flex-direction:column;gap:8px}
 .dq-mini{display:block;margin-top:4px}
 .dq-mini.over{color:var(--danger,#ef4444)}
+.cl-body{display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--text-2);line-height:1.6}
+.cl-h{font-weight:700;color:var(--text);margin-top:6px}
+.cl-li{position:relative;padding-inline-start:14px}
+.cl-li::before{content:"\2022";position:absolute;inset-inline-start:2px}
+.cl-body code{font-family:var(--mono,monospace);background:var(--surface-3);padding:0 4px;border-radius:4px}

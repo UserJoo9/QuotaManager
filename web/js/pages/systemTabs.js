@@ -5,6 +5,21 @@ import { sw, chip } from "../components/ui.js";
 import { openDialog } from "../components/dialog.js";
 import { toast } from "../components/toast.js";
 
+// Release notes are Markdown; render the few constructs they use as DOM nodes (never innerHTML).
+// Each block gets dir="auto" so English notes read left-to-right even inside the Arabic UI.
+const inlineMd = (txt) => txt.split(/(\*\*[^*]+\*\*|`[^`]+`)/).filter(Boolean).map((p) =>
+  p.startsWith("**") ? h("strong", {}, p.slice(2, -2)) : p.startsWith("`") ? h("code", {}, p.slice(1, -1)) : p);
+export function mdLite(body) {
+  return String(body || "").split("\n").map((raw) => raw.replace(/\s+$/, "")).filter((l) => l.trim()).map((l) => {
+    const head = l.match(/^#{2,4}\s+(.*)$/) || l.match(/^([A-Za-z\u0600-\u06FF ]{2,24}):$/);
+    if (head) return h("div", { class: "cl-h", dir: "auto" }, ...inlineMd(head[1]));
+    const li = l.match(/^\s*[-*]\s+(.*)$/);
+    if (li) return h("div", { class: "cl-li", dir: "auto" }, ...inlineMd(li[1]));
+    return h("div", { class: "cl-p", dir: "auto" }, ...inlineMd(l.trim()));
+  });
+}
+
+
 const field = (label, control, hint) => h("div", { class: "field" }, h("label", {}, label), control, hint ? h("span", { class: "sub" }, hint) : null);
 const fail = (e) => toast(`${t("dr.failed")}: ${e.message}`, "bad");
 
@@ -77,8 +92,8 @@ export function updatesTab(ctx) {
   const off = !u.enabled;
   const run = (key, fn, ok) => async () => { if (upd.busy) return; upd.busy = key; ctx.touch(); try { const r = await fn(); if (r && typeof r === "object" && "current_version" in r) { upd.u = r; upd.at = Date.now(); } if (ok) toast(ok); } catch (e) { fail(e); } finally { upd.busy = ""; await loadUpd(ctx, true); } };
   const status = off ? t("upd.st.off") : u.checking ? t("upd.st.checking") : u.error ? (/timeout|timed ?out/i.test(u.error) ? t("upd.st.timeout") : t("upd.st.error")) : u.available ? t("upd.st.available") : u.latest_version ? t("upd.st.latest") : "—";
-  const details = () => openDialog({ title: t("upd.details"), sub: `v${u.current_version} → v${u.latest_version}`, submitLabel: t("common.close"),
-    content: (u.changelog || []).length ? (u.changelog || []).map((c) => h("div", { class: "field" }, h("b", {}, c.title), h("span", { class: "sub", style: { "white-space": "pre-wrap" } }, c.body))) : [h("div", { class: "empty" }, t("upd.nolog"))], onSubmit: async () => true });
+  const details = () => openDialog({ title: t("upd.details"), sub: `v${u.current_version} → v${u.latest_version}`, submitLabel: t("common.close"), infoOnly: true,
+    content: (u.changelog || []).length ? (u.changelog || []).map((c) => h("div", { class: "field" }, h("b", {}, c.title), h("div", { class: "cl-body" }, ...mdLite(c.body)))) : [h("div", { class: "empty" }, t("upd.nolog"))], onSubmit: async () => true });
   const row = (title, sub, on, fn) => h("div", { class: "row-sw", style: { padding: "12px 0" } }, h("div", {}, h("b", {}, title), h("span", {}, sub)), sw(on, title, fn));
   return h("div", { class: "grid" },
     h("section", { class: "card c12" },

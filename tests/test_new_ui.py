@@ -163,3 +163,21 @@ def test_daily_plan_ui_is_wired_and_guarded():
     # the daily editor builds nodes with textContent, never innerHTML of server text
     seg = ms[ms.index("function renderDaily"):ms.index("function ack")]
     assert "innerHTML = '" not in seg.replace("box.innerHTML = '';", "").replace("list.innerHTML = '';", "")
+
+
+def test_release_notes_are_rendered_not_dumped_as_raw_markdown():
+    """The "What's new" dialog turns **bold**, `code`, ### headings and - bullets
+    into nodes (never innerHTML) and lets each line pick its own direction."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    js = (root / "web/js/pages/systemTabs.js").read_text(encoding="utf-8")
+    assert "export function mdLite" in js and 'dir: "auto"' in js
+    assert "mdLite(c.body)" in js and "pre-wrap" not in js[js.index("const details"):js.index("const details") + 600]
+    assert ".cl-li" in (root / "web/css/components.css").read_text(encoding="utf-8")
+
+
+def test_read_only_dialogs_have_one_close_button():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1] / "web/js"
+    assert "infoOnly ? null" in (root / "components/dialog.js").read_text(encoding="utf-8")
+    assert "infoOnly: true" in (root / "pages/systemTabs.js").read_text(encoding="utf-8")
