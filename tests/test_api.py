@@ -2917,3 +2917,111 @@ def test_attack_alert_stays_until_acknowledged(client):
     assert c.get("/api/dashboard").json()["security"]["attack_new"] >= 7
     assert c.post("/api/security/ack-attack", headers={"X-QM-CSRF": "1"}).json() == {"ok": True}
     assert c.get("/api/dashboard").json()["security"]["attack_new"] == 0
+
+
+# ---------------------------------------------------------------------------
+# optional daily quota
+# ---------------------------------------------------------------------------
+
+def _daily_world(tmp_path, ip="192.168.2.77"):
+    database = _db.Database(tmp_path / "dq.db")
+    service = QuotaService(database, timezone="Africa/Cairo",
+                           clock=lambda: datetime(2026, 8, 15, 12, 0, tzinfo=TZ))
+    holder = SnapshotHolder()
+    loop = _get_loop()
+    loop.run_until_complete(database.connect())
+
+    async def _seed():
+        await database.set_bundle(_db.Bundle(total_gb=71.0, reset_day=1))
+        await service.open_period()
+        u = await database.create_user("Mom", _db.QUOTA_AUTO)
+        dev = await database.upsert_device("de:ad:be:ef:00:07", name="Phone",
+                                           user_id=u.id)
+        await service.recompute_allowances()
+        await database.set_lease(dev.mac, ip)
+        return u, dev
+    u, dev = loop.run_until_complete(_seed())
+    return database, service, holder, u, dev
+
+
+def test_daily_admin_flow_and_validation(tmp_path):
+    database, service, holder, u, dev = _daily_world(tmp_path)
+    app = create_app(database, service, holder)
+    with TestClient(app) as c:
+        _login(c)
+        assert c.get("/api/daily").json() == {"enabled": False}
+        r = c.patch(f"/api/users/{u.id}",
+                    json={"daily_mode": "spread", "daily_carry": "next_day"})
+        assert r.status_code == 200, r.text
+        assert c.post("/api/daily", json={"enabled": True}).json()["enabled"]
+        users = c.get("/api/users").json()
+        d = next(x for x in users if x["id"] == u.id)["daily"]
+        assert d["mode"] == "spread" and d["carry"] == "next_day" and d["active"]
+        assert abs(d["cap_gb"] - 70 / 17) < 0.01
+        # heavy days that do not fit in the month are refused with the numbers
+        r = c.patch(f"/api/users/{u.id}", json={"daily_heavy": {"2026-08-20": 500}})
+        assert r.status_code == 400 and "500.00" in r.text
+        r = c.patch(f"/api/users/{u.id}", json={"daily_heavy": {"nope": 5}})
+        assert r.status_code == 400
+        r = c.patch(f"/api/users/{u.id}", json={"daily_heavy": {"2026-08-20": 12}})
+        assert r.status_code == 200
+        plan = c.get(f"/api/users/{u.id}/daily-plan").json()
+        assert plan["error"] is None
+        assert any(x["heavy"] and x["cap_gb"] == 12 for x in plan["schedule"])
+        # preview does not save anything
+        pv = c.post(f"/api/users/{u.id}/daily-plan/preview",
+                    json={"mode": "fixed", "daily_gb": 3}).json()
+        assert pv["schedule"][1]["cap_gb"] == 3
+        assert c.get(f"/api/users/{u.id}/daily-plan").json()["schedule"][1]["cap_gb"] != 3
+        # fixed needs GB
+        r = c.patch(f"/api/users/{u.id}", json={"daily_mode": "fixed"})
+        assert r.status_code == 400
+        # device share
+        assert c.patch(f"/api/devices/{dev.id}",
+                       json={"daily_share_gb": 2.5}).status_code == 200
+
+
+def test_daily_self_edit_is_ip_checked_csrf_guarded_and_opt_in(tmp_path):
+    database, service, holder, u, dev = _daily_world(tmp_path)
+    loop = _get_loop()
+    loop.run_until_complete(database.update_user(u.id, daily_mode="spread"))
+    loop.run_until_complete(database.set_setting("daily_quota_enabled", "1"))
+    app = create_app(database, service, holder)
+    hdr = {"X-QM-CSRF": "1"}
+    me = _client_from(app, "192.168.2.77")
+    body = {"carry": "next_day", "heavy": {"2026-08-20": 9}}
+    # payload exposes the plan, but editing is off by default
+    assert me.get("/api/milestone").json()["daily"]["self_edit"] is False
+    assert me.put("/api/milestone/daily-plan", json=body, headers=hdr).status_code == 403
+    loop.run_until_complete(database.update_user(u.id, daily_self_edit=True))
+    # no CSRF header -> refused (a foreign website cannot do this)
+    assert me.put("/api/milestone/daily-plan", json=body).status_code == 403
+    # a stranger IP is refused
+    stranger = _client_from(app, "192.168.2.200")
+    assert stranger.put("/api/milestone/daily-plan", json=body, headers=hdr).status_code == 403
+    # the past cannot be marked heavy
+    assert me.put("/api/milestone/daily-plan", headers=hdr,
+                  json={"heavy": {"2026-08-14": 9}}).status_code == 400
+    # only carry / split / heavy exist on the model: the total cannot change
+    r = me.put("/api/milestone/daily-plan", json=body, headers=hdr)
+    assert r.status_code == 200, r.text
+    got = loop.run_until_complete(database.get_user(u.id))
+    assert got.daily_carry == "next_day" and got.daily_heavy == {"2026-08-20": 9.0}
+    me.put("/api/milestone/daily-plan", json={"mode": "off", "daily_gb": 999}, headers=hdr)
+    got = loop.run_until_complete(database.get_user(u.id))
+    assert got.daily_mode == "spread" and got.daily_gb == 0.0
+    # 'fixed' split needs per-device shares the admin sets - not offered here
+    assert me.put("/api/milestone/daily-plan", json={"split": "fixed"},
+                  headers=hdr).status_code == 422
+
+
+def test_daily_off_means_no_daily_block_in_dashboard(tmp_path):
+    database, service, holder, u, dev = _daily_world(tmp_path)
+    loop = _get_loop()
+    loop.run_until_complete(database.update_user(u.id, daily_mode="fixed", daily_gb=1.0))
+    loop.run_until_complete(database.add_usage(dev.id, "2026-08-15", 5 * GB, 0))
+    app = create_app(database, service, holder)
+    with TestClient(app) as c:
+        _login(c)
+        usr = next(x for x in c.get("/api/users").json() if x["id"] == u.id)
+        assert usr["daily"]["active"] is False and usr["blocked"] is False

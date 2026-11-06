@@ -39,6 +39,19 @@
   .ms-pill.done { border-color: color-mix(in srgb, var(--accent-2) 35%, transparent); color: var(--text-dim); }
   .ms-note { margin-top: 14px; font-size: 0.78rem; color: var(--text-dim); line-height: 1.5; }
   .ms-actions { margin-top: 18px; display: flex; gap: 10px; }
+  .ms-daily { margin-top: 20px; padding: 14px 16px; border-radius: var(--radius-md);
+              border: 1px solid var(--glass-border); background: color-mix(in srgb, var(--text) 3%, transparent); }
+  .ms-daily h3 { font-size: 0.95rem; margin-bottom: 6px; }
+  .ms-daily .ms-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .ms-chip { padding: 3px 9px; border-radius: 999px; font-size: 0.75rem; border: 1px solid var(--glass-border); }
+  .ms-chip.heavy { border-color: var(--accent); color: var(--accent); }
+  .ms-edit { margin-top: 12px; display: grid; gap: 8px; font-size: 0.82rem; }
+  .ms-edit label { display: grid; gap: 4px; color: var(--text-dim); }
+  .ms-edit select, .ms-edit input { padding: 7px 9px; border-radius: 8px; border: 1px solid var(--glass-border);
+              background: var(--glass-bg); color: var(--text); font: inherit; }
+  .ms-edit select, .ms-edit input { width: 100%; min-width: 0; box-sizing: border-box; }
+  .ms-edit .row { display: flex; gap: 8px; }
+  .ms-edit .row input[type=number] { width: 80px; flex: none; }
   @media (max-width: 480px) {
     /* align to the top so a long device list scrolls naturally instead of
        clipping off both ends of the centered flex */
@@ -69,6 +82,8 @@
         <div class="ms-bar"><div id="ms-bar-fill" style="width:0%"></div></div>
 
         <div id="ms-milestones" class="ms-milestones"></div>
+
+        <div id="ms-daily" class="ms-daily hidden"></div>
 
         <h3 style="margin-top:20px; font-size:0.95rem;">Your devices</h3>
         <ul class="ms-devices" id="ms-devices"></ul>
@@ -138,6 +153,8 @@
       box.appendChild(pill);
     });
 
+    renderDaily(data.daily);
+
     // per-device breakdown
     var list = document.getElementById('ms-devices');
     list.innerHTML = '';
@@ -163,6 +180,93 @@
     if (pendingNotified.length) {
       ack();
     }
+  }
+
+  var heavyDraft = null;
+
+  function mk(tag, text, cls) {
+    var e = document.createElement(tag);
+    if (text != null) e.textContent = text;
+    if (cls) e.className = cls;
+    return e;
+  }
+
+  function renderDaily(q) {
+    var box = document.getElementById('ms-daily');
+    if (!q) { box.classList.add('hidden'); return; }
+    box.classList.remove('hidden');
+    box.innerHTML = '';
+    box.appendChild(mk('h3', "Today's plan"));
+    if (q.error) { box.appendChild(mk('div', q.error, 'ms-note')); return; }
+    var pct = q.cap_gb > 0 ? Math.min(100, q.used_gb / q.cap_gb * 100) : 100;
+    box.appendChild(mk('div', 'Used ' + fmt(q.used_gb) + ' of ' + fmt(q.cap_gb) + ' today', 'ms-note'));
+    var bar = mk('div', null, 'ms-bar'); var fillEl = document.createElement('div');
+    fillEl.style.width = pct + '%'; bar.appendChild(fillEl); box.appendChild(bar);
+    if (q.blocked) {
+      var t = new Date(q.resets_at);
+      box.appendChild(mk('div', 'Daily limit reached. Your internet is back at ' +
+        t.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) + '.', 'ms-note'));
+    }
+    var chips = mk('div', null, 'ms-chips');
+    (q.schedule || []).slice(1, 8).forEach(function (r) {
+      var d = new Date(r.date + 'T00:00:00');
+      chips.appendChild(mk('span', d.toLocaleDateString([], {month: 'short', day: 'numeric'}) +
+        ' · ' + r.cap_gb.toFixed(1) + ' GB', 'ms-chip' + (r.heavy ? ' heavy' : '')));
+    });
+    box.appendChild(chips);
+    if (q.self_edit) renderEdit(box, q);
+  }
+
+  function renderEdit(box, q) {
+    if (!heavyDraft) heavyDraft = JSON.parse(JSON.stringify(q.heavy || {}));
+    var form = mk('div', null, 'ms-edit');
+    var carry = document.createElement('select');
+    [['next_day', 'Move to the next day'], ['spread', 'Spread over the remaining days']].forEach(function (o) {
+      var op = mk('option', o[1]); op.value = o[0]; if (q.carry === o[0]) op.selected = true; carry.appendChild(op);
+    });
+    var split = document.createElement('select');
+    [['open', 'Devices share the pool'], ['equal', 'Equal slice per device']].forEach(function (o) {
+      var op = mk('option', o[1]); op.value = o[0]; if (q.split === o[0]) op.selected = true; split.appendChild(op);
+    });
+    var l1 = mk('label', 'Unused GB of a day'); l1.appendChild(carry);
+    var l2 = mk('label', 'Between your devices'); l2.appendChild(split);
+    var l3 = mk('label', 'Heavier days');
+    var list = mk('div', null, 'ms-chips');
+    function paint() {
+      list.innerHTML = '';
+      Object.keys(heavyDraft).sort().forEach(function (d) {
+        var c = mk('span', d + ' · ' + heavyDraft[d] + ' GB', 'ms-chip heavy');
+        var x = mk('button', '×'); x.type = 'button'; x.style.cssText = 'background:none;border:0;color:inherit;cursor:pointer';
+        x.addEventListener('click', function () { delete heavyDraft[d]; paint(); });
+        c.appendChild(x); list.appendChild(c);
+      });
+    }
+    paint();
+    var day = document.createElement('input'); day.type = 'date';
+    var t = new Date();
+    day.min = t.getFullYear() + '-' + String(t.getMonth() + 1).padStart(2, '0') + '-' + String(t.getDate()).padStart(2, '0');
+    var gb = document.createElement('input'); gb.type = 'number'; gb.min = '0'; gb.step = 'any'; gb.placeholder = 'GB';
+    var add = mk('button', 'Add', 'btn ghost'); add.type = 'button';
+    add.addEventListener('click', function () {
+      if (day.value && +gb.value > 0) { heavyDraft[day.value] = +gb.value; day.value = ''; gb.value = ''; paint(); }
+    });
+    var row = mk('div', null, 'row'); row.appendChild(day); row.appendChild(gb); row.appendChild(add);
+    l3.appendChild(list); l3.appendChild(row);
+    var msg = mk('div', '', 'ms-note');
+    var save = mk('button', 'Save', 'btn'); save.type = 'button';
+    save.addEventListener('click', function () {
+      fetch('/api/milestone/daily-plan', {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json', 'X-QM-CSRF': '1'},
+        body: JSON.stringify({carry: carry.value, split: split.value, heavy: heavyDraft})
+      }).then(function (r) { return r.json().then(function (j) { return [r.ok, j]; }); })
+        .then(function (res) {
+          msg.textContent = res[0] ? 'Saved - applied now.' : (res[1].detail || 'Could not save.');
+          if (res[0]) { heavyDraft = null; load(); }
+        }).catch(function () { msg.textContent = 'Could not reach the gateway.'; });
+    });
+    [l1, l2, l3, save, msg].forEach(function (e) { form.appendChild(e); });
+    box.appendChild(form);
   }
 
   function ack() {

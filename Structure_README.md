@@ -361,6 +361,51 @@ The period opens once and never rolls by itself; the bundle grows only via the
 dashboard "Bundle recharged" action (keeps `period_start`), and a new month
 starts only via the manual "Reset month now" action.
 
+### Daily quota (optional, off by default)
+
+Per-**user** pacing of the monthly allowance, switched on by the
+`daily_quota_enabled` setting (**Quota → Daily quota**). With the switch off,
+`daily_state()` returns `{}` and nothing else changes.
+
+* `quota/daily_plan.py` is a **pure** module (no DB/clock/IO) — `plan_day()`
+  (cap for today), `validate_heavy()`, `device_caps()`, `preview()`. Modes
+  `fixed` (X GB/day) and `spread` (month left ÷ days left, today included;
+  `period_end` is the reset date, i.e. the first day of the next period, so
+  `spread` needs `reset_day > 0`). Carry: `next_day` (unused GB roll forward,
+  accumulating) or `spread` (redistributed by recomputing each day). Heavy days
+  are `{date: GB}`; the other days share the rest. Today's cap never exceeds
+  what is left of the month at the start of the day.
+* **The cap of a day is frozen** in `daily_caps(user_id, date, cap_gb, allow_gb,
+  mode, daily_gb)` when the day starts or when the plan mode / daily GB /
+  allowance changes, and is computed as `used_today + share(month_left_now)` —
+  so enabling or editing mid-day deducts what was already used and never cuts
+  anyone. Using more internet never raises the cap; a *smaller* allowance never
+  raises it either (`min(new, old)`). Heavy-day / carry edits apply **immediately**: the cap
+  is recomputed from the same basis the day started on (`daily_caps.anchor_gb`,
+  guarded by `daily_caps.sig`), so editing again never grants extra GB and an
+  edit never cuts anyone.
+* `QuotaService.daily_state()` (persisting) feeds `evaluate_blocks()` (a device
+  is `quota`-blocked when the monthly OR the daily cap is hit — the daily
+  reason is derived at render time, no new block state is stored),
+  `snapshot_state()` and the dashboard payload (`users[].daily`,
+  `devices[].daily_*`). Exempt users, the protected Gateway, `bypass`
+  devices, allow-listed MACs and devices with an active booster pack are never
+  daily-blocked. Per-device split: `users.daily_split` = `open` (shared pool) |
+  `equal` | `fixed` (proportional to `devices.daily_share_gb`; devices without
+  a share stay open).
+* DB (additive ALTERs): `users.daily_mode/daily_gb/daily_carry/daily_split/
+  daily_heavy(JSON)/daily_self_edit`, `devices.daily_share_gb`, table
+  `daily_caps`. API: `GET/POST /api/daily`, `PATCH /api/users/{id}` (`daily_*`,
+  validated — heavy days must fit the month), `GET /api/users/{id}/daily-plan`,
+  `POST …/daily-plan/preview`, `PATCH /api/devices/{id}` (`daily_share_gb`),
+  `/api/milestone` (`daily` block) and `PUT /api/milestone/daily-plan`
+  (public: source IP → device → user, requires `daily_self_edit`, the
+  `X-QM-CSRF: 1` header and rate-limited; can only change carry / equal-open
+  split / future heavy days, never the total).
+* UI: `web/js/components/dailyPlan.js` (person drawer section with live
+  preview, device share field, master switch card on the Quota page), a
+  "Today" line + **Daily limit** chip in People, the editor on `/milestone`.
+
 ### Electric-cut fallback (optional)
 
 The gateway is a single point of failure, so the router can keep a small

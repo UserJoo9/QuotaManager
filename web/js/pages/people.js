@@ -48,7 +48,8 @@ export default function people(ctx) {
           h("div", {}, h("div", { class: "u-name" }, u.name, u.protected ? chip("", t("common.protected")) : null, u.guest ? chip("accent", t("common.guest")) : null),
             h("div", { class: "u-sub" }, `${num(devs.length, 0)} ${t("pp.devs")} · ${num(online, 0)} ${t("pp.on")}`))),
         h("div", { class: "u-use" }, h("div", { class: "u-num" }, h("b", {}, `${num(u.used_gb)} ${t("common.gb")}`), h("span", {}, u.allowance_gb > 0 ? `${t("ov.of")} ${num(u.allowance_gb)}` : t("pp.unlimited")), u.allowance_gb > 0 ? h("em", {}, `${num(u.percent, 0)}%`) : null),
-          bar(u.allowance_gb > 0 ? u.percent : 0), netLine(u.used_gb, u.lan_used_gb)),
+          bar(u.allowance_gb > 0 ? u.percent : 0), netLine(u.used_gb, u.lan_used_gb),
+          u.daily && u.daily.active ? h("span", { class: "sub dq-mini" + (u.daily.blocked ? " over" : "") }, `${t("dq.today")}: ${num(u.daily.used_gb)} ${t("ov.of")} ${num(u.daily.cap_gb)} ${t("common.gb")}`) : null),
         h("div", { class: "u-stat" }, chip(st.cls.replace("chip", "").trim(), st.text)),
         sw(!u.blocked, t("pp.access"), act(() => actions.blockUser(u.id, !u.blocked)))),
       isOpen ? h("div", { class: "drows" }, devs.length ? devs.map((x) => {

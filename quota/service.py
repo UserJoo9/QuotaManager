@@ -36,6 +36,7 @@ import time
 from typing import Any, Optional
 
 from core import timeutil
+from quota import daily_plan as _dp
 from quota import db as _db
 from quota.vendor import vendor_for
 
@@ -578,6 +579,188 @@ class QuotaService:
             out[uid] = self.user_quota_blocked(user, allowance, used_gb)
         return out
 
+    # -- daily quota (optional) --------------------------------------------------
+
+    async def daily_enabled(self) -> bool:
+        return (await self.db.get_setting("daily_quota_enabled", "0")) == "1"
+
+    async def daily_state(self, *, persist: bool = True) -> dict[int, dict[str, Any]]:
+        """Today's daily-quota state per user (empty when the feature is off).
+
+        Per user: ``cap_gb``, ``used_gb`` (today), ``blocked`` (person-level),
+        ``device_caps`` {device_id: GB}, ``device_blocked`` {device_id, ...},
+        ``resets_at`` (ISO of the next local midnight). The cap of a day is
+        frozen in ``daily_caps`` when the day starts (or when the plan or the
+        allowance changes) so using more internet never raises it.
+        """
+        if not await self.daily_enabled():
+            return {}
+        users = [u for u in await self.db.list_users()
+                 if u.daily_mode in (_dp.MODE_FIXED, _dp.MODE_SPREAD)
+                 and not u.protected and not u.exempt_quota
+                 and u.quota_mode != _db.QUOTA_DISABLED]
+        if not users:
+            return {}
+        bundle = await self.db.get_bundle()
+        now = self._now()
+        today = now.date()
+        today_s = today.isoformat()
+        try:
+            period_end = _dp.parse_day(bundle.period_end) if bundle.period_end else None
+        except ValueError:
+            period_end = None
+        usage = await self.db.get_usage_before_and_on(bundle.period_start, today_s)
+        devices = await self.db.list_devices()
+        by_user: dict[int, list[_db.Device]] = {}
+        for d in devices:
+            if d.mac != _db.GATEWAY_MAC and d.user_id is not None:
+                by_user.setdefault(d.user_id, []).append(d)
+        resets_at = (now.replace(hour=0, minute=0, second=0, microsecond=0)
+                     + _dt.timedelta(days=1)).isoformat()
+        out: dict[int, dict[str, Any]] = {}
+        for u in users:
+            allowance = float(bundle.allowances.get(u.id, 0.0) or 0.0)
+            if allowance <= 0:
+                continue  # allowance 0 = unmetered: nothing to pace
+            if u.daily_mode == _dp.MODE_SPREAD and period_end is None:
+                continue  # needs a period end; the UI refuses this combination
+            if u.daily_mode == _dp.MODE_FIXED and u.daily_gb <= 0:
+                continue
+            st = _dp.settings_from_user(u)
+            st.heavy = dict(u.daily_heavy or {})
+            used_before = usage["before"].get(u.id, 0) / GB
+            used_today = usage["today"].get(u.id, 0) / GB
+            row = await self.db.get_daily_cap(u.id, today_s)
+            sig = _dp.shape_signature(st)
+            cap: float
+            if row is not None and row["mode"] == u.daily_mode \
+                    and abs(row["daily_gb"] - u.daily_gb) <= 1e-6 \
+                    and abs(row["allow_gb"] - allowance) <= 0.01 \
+                    and row["sig"] != sig:
+                # carry / heavy days edited: applies RIGHT NOW. Recompute from
+                # the same basis the day started on (what had been used when
+                # the cap was first set), so editing again never hands out
+                # extra GB and nobody is cut by an edit.
+                bank = await self._daily_bank(u.id, st, today_s, bundle.period_start)
+                cap = _dp.plan_day(st, allowance=allowance, used_before=used_before,
+                                   used_today=min(row["anchor_gb"], used_today),
+                                   today=today, period_end=period_end, bank=bank)
+                if persist:
+                    await self.db.set_daily_cap(u.id, today_s, cap, allowance,
+                                                u.daily_mode, u.daily_gb,
+                                                row["anchor_gb"], sig)
+            elif row is None or row["mode"] != u.daily_mode \
+                    or abs(row["daily_gb"] - u.daily_gb) > 1e-6 \
+                    or abs(row["allow_gb"] - allowance) > 0.01:
+                bank = await self._daily_bank(u.id, st, today_s, bundle.period_start)
+                cap = _dp.plan_day(st, allowance=allowance, used_before=used_before,
+                                   used_today=used_today, today=today,
+                                   period_end=period_end, bank=bank)
+                same_plan = (row is not None and row["mode"] == u.daily_mode
+                             and abs(row["daily_gb"] - u.daily_gb) <= 1e-6)
+                if same_plan and allowance < row["allow_gb"]:
+                    cap = min(cap, row["cap_gb"])  # a smaller pool never raises the cap
+                if persist:
+                    await self.db.set_daily_cap(u.id, today_s, cap, allowance,
+                                                u.daily_mode, u.daily_gb,
+                                                used_today, sig)
+            else:
+                cap = row["cap_gb"]
+            devs = by_user.get(u.id, [])
+            dcaps = _dp.device_caps(cap, st.split, [d.id for d in devs],
+                                    {d.id: d.daily_share_gb for d in devs})
+            dev_today = usage["dev_today"]
+            dev_blocked = {d.id for d in devs
+                           if d.id in dcaps and dev_today.get(d.id, 0) / GB >= dcaps[d.id]}
+            out[u.id] = {
+                "mode": u.daily_mode, "cap_gb": round(cap, 3),
+                "used_gb": round(used_today, 3),
+                "blocked": used_today >= cap - 1e-9,
+                "device_caps": dcaps, "device_blocked": dev_blocked,
+                "device_used": {d.id: round(dev_today.get(d.id, 0) / GB, 3) for d in devs},
+                "resets_at": resets_at,
+            }
+        return out
+
+    async def _daily_bank(self, user_id: int, st: "_dp.DailySettings",
+                          today_s: str, period_start: str) -> float:
+        """GB carried over from earlier days (``next_day`` carry only)."""
+        if st.carry != _dp.CARRY_NEXT_DAY:
+            return 0.0
+        prev = await self.db.get_last_daily_cap_before(user_id, today_s)
+        if prev and prev["date"] >= (period_start or ""):
+            prev_used = await self.db.get_user_usage_on(user_id, prev["date"]) / GB
+            return max(0.0, prev["cap_gb"] - prev_used)
+        return 0.0
+
+    @staticmethod
+    def daily_blocked_devices(state: dict[int, dict[str, Any]],
+                              devices: list[_db.Device]) -> set[int]:
+        """Device ids cut by the daily plan (person-level cap or own share)."""
+        out: set[int] = set()
+        for d in devices:
+            st = state.get(d.user_id) if d.user_id is not None else None
+            if st and (st["blocked"] or d.id in st["device_blocked"]):
+                out.add(d.id)
+        return out
+
+    async def daily_schedule(self, user_id: int,
+                             override: "_dp.DailySettings | None" = None) -> dict[str, Any]:
+        """Today's cap + the projected schedule for the rest of the period.
+
+        ``override`` previews a proposed plan (nothing is saved). The result
+        always carries ``error`` (None when the plan fits in the month).
+        """
+        user = await self.db.get_user(user_id)
+        if user is None:
+            return {"error": "user not found", "schedule": []}
+        bundle = await self.db.get_bundle()
+        now = self._now()
+        today = now.date()
+        try:
+            period_end = _dp.parse_day(bundle.period_end) if bundle.period_end else None
+        except ValueError:
+            period_end = None
+        st = override or _dp.settings_from_user(user)
+        if override is None:
+            st.heavy = dict(user.daily_heavy or {})
+        allowance = float(bundle.allowances.get(user_id, 0.0) or 0.0)
+        usage = await self.db.get_usage_before_and_on(bundle.period_start, today.isoformat())
+        used_before = usage["before"].get(user_id, 0) / GB
+        used_today = usage["today"].get(user_id, 0) / GB
+        err: str | None = None
+        if not st.active:
+            return {"error": None, "schedule": [], "cap_gb": 0.0,
+                    "used_gb": round(used_today, 3), "allowance_gb": allowance}
+        if st.mode == _dp.MODE_SPREAD and period_end is None:
+            err = "spread needs a billing period with an automatic reset day"
+        elif st.mode == _dp.MODE_FIXED and st.daily_gb <= 0:
+            err = "daily GB must be greater than 0"
+        elif allowance <= 0:
+            err = "this person has no GB allowance to pace"
+        else:
+            err = _dp.validate_heavy(st, allowance=allowance, used_before=used_before,
+                                     used_today=used_today, today=today,
+                                     period_end=period_end)
+        if err:
+            return {"error": err, "schedule": [], "cap_gb": 0.0,
+                    "used_gb": round(used_today, 3), "allowance_gb": allowance}
+        row = await self.db.get_daily_cap(user_id, today.isoformat())
+        same = (override is None and row is not None)
+        cap = row["cap_gb"] if same else _dp.plan_day(
+            st, allowance=allowance, used_before=used_before, used_today=used_today,
+            today=today, period_end=period_end)
+        return {"error": None, "cap_gb": round(cap, 3), "used_gb": round(used_today, 3),
+                "allowance_gb": allowance,
+                "schedule": _dp.preview(st, allowance=allowance, used_before=used_before,
+                                        used_today=used_today, today=today,
+                                        period_end=period_end, cap_today=cap)}
+
+    async def set_daily_enabled(self, enabled: bool) -> None:
+        await self.db.set_setting("daily_quota_enabled", "1" if enabled else "0")
+        # (re)start every day's cap from scratch: usage so far is deducted
+        await self.db.clear_daily_caps()
+
     async def evaluate_blocks(self) -> list[dict[str, Any]]:
         """Recompute block states from per-USER usage vs per-USER allowance.
 
@@ -591,6 +774,7 @@ class QuotaService:
         users = {u.id: u for u in await self.db.list_users()}
         devices = await self.db.list_devices()
         user_quota = await self._user_quota_map(allowances)
+        daily_cut = self.daily_blocked_devices(await self.daily_state(), devices)
         changes: list[dict[str, Any]] = []
 
         now_ts = self._now().timestamp()
@@ -615,7 +799,8 @@ class QuotaService:
             if user.block_state == _db.BLOCK_ADMIN:
                 continue  # user-level cut resolved at render time, not persisted
             has_booster = dev.id in device_booster_ids
-            new_state = (_db.BLOCK_QUOTA if (user_quota.get(dev.user_id, False) and not dev.bypass and not has_booster)
+            over = user_quota.get(dev.user_id, False) or dev.id in daily_cut
+            new_state = (_db.BLOCK_QUOTA if (over and not dev.bypass and not has_booster)
                          else _db.BLOCK_OK)
             if new_state != dev.block_state:
                 await self.db.set_device_state(dev.id, new_state)
@@ -647,6 +832,8 @@ class QuotaService:
             if p.target_type == "device" and p.target_id is not None
             and p.remaining_gb > 0 and p.expires_at > now_ts
         }
+        daily = await self.daily_state()
+        daily_cut = self.daily_blocked_devices(daily, devices)
         out: dict[str, dict[str, Any]] = {}
         for dev in devices:
             user = users.get(dev.user_id)
@@ -656,7 +843,7 @@ class QuotaService:
                 used_gb = (u["up"] + u["down"]) / GB
                 allowance = allowances.get(user.id, 0.0)
                 quota_blocked = self.user_quota_blocked(
-                    user, allowance, used_gb)
+                    user, allowance, used_gb) or dev.id in daily_cut
             state = self.resolve_device_state(
                 user, dev, quota_blocked,
                 allow_listed=dev.mac in allow_set,
@@ -675,6 +862,10 @@ class QuotaService:
                 "block_state": state,
                 "guest": bool(user.guest if user is not None else dev.guest),
             }
+            if dev.id in daily_cut and state == _db.BLOCK_QUOTA:
+                dst = daily.get(dev.user_id, {})
+                out[dev.mac]["daily_blocked"] = True
+                out[dev.mac]["daily_cap_gb"] = dst.get("cap_gb", 0.0)
         # Second pass: deny-listed MACs with NO device row (the admin deleted
         # the device/user — the MAC was blacklisted and never auto-registers).
         # The device still holds a lease, so the kernel must keep dropping its

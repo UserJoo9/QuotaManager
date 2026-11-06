@@ -6,6 +6,21 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## [0.5.2] — 2026-11-06
+
+### Added
+- **Optional daily quota** (off by default). Turn it on from **Quota → Daily quota**, then give each person a plan in their card. Two modes: **fixed** (e.g. 5 GB every day) or **split what is left** of the month equally over the days that are left. The day runs from 12:00 AM to 12:00 AM. The monthly quota stays the hard limit; the daily plan only paces it.
+  - What a person did not use today can **move to the next day** (and keep rolling) or be **spread over the remaining days**.
+  - Pick **heavier days** (a date and an amount): the other days share the rest equally.
+  - Devices of a person can **share the daily pool**, get an **equal slice** each, or a **fixed share** set on each device's card.
+  - Enabling or changing a plan mid-day never cuts anyone: what was already used today is deducted and today's share is still available.
+  - Top-ups and packs for the person or the whole house simply raise the month and the plan re-splits; a pack for one device keeps that device working.
+  - At the daily limit the person's devices stop until midnight (their status says **Daily limit**) and come back by themselves.
+  - Optionally the person can adjust their own plan (not the total) from their usage page, `/milestone`.
+
+### Fixed
+- **The collapsed (narrow) sidebar came out broken, with no button to bring it back.** Labels were squeezed into cut-off fragments and the expand button was pushed out of sight, so it could not be reopened. The narrow bar now shows only the icons, with the collapse/expand button right under the logo.
+
 ## [0.5.1] — 2026-11-03
 
 ### Fixed

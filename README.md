@@ -166,7 +166,7 @@ Many internet lines block or drop connections coming from outside, so opening a 
 |---|---|
 | **Overview** | Remaining bundle, days left, live speed and who is using it right now |
 | **People & devices** | Add people, move devices, top up GB, speed limits, block or kick |
-| **Quota** | Bundle size, renewal day, top-up packs |
+| **Quota** | Bundle size, renewal day, top-up packs, optional daily quota switch |
 | **Network** | Guest mode, new-device rules, IP reservations, allow / block lists |
 | **Internet** | Line status, public IP, direct PPPoE mode, remote access with Tailscale |
 | **Security** | Firewall, ad & content blocking, HTTPS |
@@ -179,6 +179,7 @@ Handy to know:
 
 - **Top up** a person mid-month from their card — they're back online instantly.
 - **Eye icon** hides names and MAC addresses, handy before showing your screen.
+- **Daily quota (optional):** switch it on in **Quota**, then open a person's card → **Daily plan**. Choose *fixed GB per day* or *split what is left of the month over the days left*, what happens to unused GB (next day or spread), heavier days, and how the person's devices share the day. The monthly quota still applies; at the daily limit the devices pause until midnight. The person sees today's plan on their usage page.
 - **My usage page:** any device can open `http://192.168.2.1:8080/milestone` (no login) to see its own remaining allowance.
 - The dashboard opens at the same address as always (`http://<gateway>:8080/`). Old bookmarks to `/ui/` forward there automatically.
 - **WAN | LAN switch** above the Overview chart: the same live speed, daily usage and top devices, for the internet or for traffic inside your home (NAS, router, the gateway itself).

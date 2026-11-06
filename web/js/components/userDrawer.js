@@ -4,6 +4,7 @@ import { actions } from "../core/actions.js";
 import { openDrawer, closeDrawer } from "./drawer.js";
 import { toast } from "./toast.js";
 import { bar, sw, chip, userStatus, devIcon, netSplit } from "./ui.js";
+import { dailySection, deviceShare } from "./dailyPlan.js";
 
 const armed = new Set(); // destructive buttons armed by a first tap (confirm-by-second-tap)
 
@@ -99,6 +100,7 @@ export function openDeviceDrawer(userId, deviceId, getDashboard, refresh) {
       d.ip6 ? h("div", {}, h("span", { class: "k" }, t("dr.ip6")), h("span", { class: "v mono" }, iso(d.ip6))) : null,
       d.vendor ? h("div", {}, h("span", { class: "k" }, t("dr.vendor")), h("span", { class: "v" }, d.vendor)) : null)));
     if (!d.gateway) body.push(settingsBlock("device", d, run, false));
+    const ds = d.gateway ? null : deviceShare(d, u, run); if (ds) body.push(ds);
     body.push(deviceDetails(d, u, users, run, danger));
     return { icon: devIcon(d), title: d.name || d.mac, sub: `${t("dr.dev.sub")} · ${u.name}`, body, footer: [] };
   });
@@ -131,6 +133,7 @@ export function openUserDrawer(userId, getDashboard, refresh) {
       body.push(h("div", { class: "fa" }, a));
     }
     body.push(settingsBlock("user", u, run, true));
+    const dq = dailySection(u, getDashboard() || {}, run); if (dq) body.push(dq);
     if (!u.protected) body.push(userDetails(u, run));
     if (!u.protected) body.push(h("div", { class: "dr-sec" }, h("h4", {}, t("dr.danger")),
       h("div", { class: "danger-z" },

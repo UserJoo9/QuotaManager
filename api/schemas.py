@@ -41,6 +41,9 @@ class DeviceUpdate(BaseModel):
     vpn_bypass: Optional[bool] = None
     limit_down_mbps: Optional[float] = _cap_field()
     limit_up_mbps: Optional[float] = _cap_field()
+    #: Daily-quota fixed share (GB) of this device (used when its owner's
+    #: split is 'fixed'; 0 = no individual daily cap).
+    daily_share_gb: Optional[float] = Field(None, ge=0, le=100000)
 
 
 class UserCreate(BaseModel):
@@ -76,6 +79,37 @@ class UserUpdate(BaseModel):
     vpn_bypass: Optional[bool] = None
     #: Guest flag — setting to false converts a guest user to a permanent regular user.
     guest: Optional[bool] = None
+    #: Optional DAILY quota plan (see quota/daily_plan.py).
+    daily_mode: Optional[str] = Field(None, pattern="^(off|fixed|spread)$")
+    daily_gb: Optional[float] = Field(None, ge=0, le=100000)
+    daily_carry: Optional[str] = Field(None, pattern="^(next_day|spread)$")
+    daily_split: Optional[str] = Field(None, pattern="^(open|equal|fixed)$")
+    #: {"YYYY-MM-DD": GB} days with a bigger amount (replaces the whole map).
+    daily_heavy: Optional[dict[str, float]] = None
+    #: May the person edit carry/heavy days/split from the milestone page?
+    daily_self_edit: Optional[bool] = None
+
+
+class DailyPreview(BaseModel):
+    """A proposed plan to preview (nothing is saved)."""
+
+    mode: str = Field("spread", pattern="^(off|fixed|spread)$")
+    daily_gb: float = Field(0.0, ge=0, le=100000)
+    carry: str = Field("spread", pattern="^(next_day|spread)$")
+    split: str = Field("open", pattern="^(open|equal|fixed)$")
+    heavy: dict[str, float] = Field(default_factory=dict)
+
+
+class DailyToggle(BaseModel):
+    enabled: bool
+
+
+class MilestoneDailyPlan(BaseModel):
+    """What a person may change about their own daily plan (never the total)."""
+
+    carry: Optional[str] = Field(None, pattern="^(next_day|spread)$")
+    split: Optional[str] = Field(None, pattern="^(open|equal)$")
+    heavy: Optional[dict[str, float]] = None
 
 
 class NetworkUpdate(BaseModel):

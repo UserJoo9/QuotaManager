@@ -102,6 +102,9 @@ class Device:
     #: Manual pin: what the admin typed in the device modal ("WiFi · MyNet",
     #: "LAN1", ...). Wins over the auto label; empty = let the probe decide.
     access_override: str = ""
+    #: Daily-quota fixed share (GB) used when the owner's ``daily_split`` is
+    #: 'fixed' (0 = this device has no individual daily cap).
+    daily_share_gb: float = 0.0
 
 
 @dataclass
@@ -148,6 +151,14 @@ class User:
     #: Per-user upstream DNS server override, inherited by every device of
     #: this user that has no override of its own (empty = no override).
     dns_server: str = ""
+    #: Optional DAILY quota plan (see quota/daily_plan.py). 'off' = disabled.
+    daily_mode: str = "off"            # 'off' | 'fixed' | 'spread'
+    daily_gb: float = 0.0              # GB/day for 'fixed'
+    daily_carry: str = "spread"        # 'next_day' | 'spread'
+    daily_split: str = "open"          # 'open' | 'equal' | 'fixed'
+    daily_heavy: dict = field(default_factory=dict)   # {"YYYY-MM-DD": GB}
+    #: May the person edit their own plan from the milestone page?
+    daily_self_edit: bool = False
 
 
 @dataclass
@@ -318,6 +329,20 @@ CREATE TABLE IF NOT EXISTS dns_history (
     PRIMARY KEY (device_id, bucket_minute, domain)
 );
 CREATE INDEX IF NOT EXISTS idx_dns_history_bucket ON dns_history(bucket_minute);
+
+-- Daily quota: the cap of each person's day, computed once when the day starts
+-- (or when the plan/allowance changes) and then frozen. See quota/daily_plan.py.
+CREATE TABLE IF NOT EXISTS daily_caps (
+    user_id  INTEGER NOT NULL,
+    date     TEXT NOT NULL,
+    cap_gb   REAL NOT NULL,
+    allow_gb REAL NOT NULL DEFAULT 0,
+    mode     TEXT NOT NULL DEFAULT '',
+    daily_gb REAL NOT NULL DEFAULT 0,
+    anchor_gb REAL NOT NULL DEFAULT 0,
+    sig      TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (user_id, date)
+);
 
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
@@ -635,6 +660,29 @@ class Database:
             await self._conn.commit()
         except Exception:  # noqa: BLE001
             pass
+        # Optional daily quota (0.5.2). All additive; defaults = feature off.
+        for table, col, decl in (
+                ("users", "daily_mode", "TEXT NOT NULL DEFAULT 'off'"),
+                ("users", "daily_gb", "REAL NOT NULL DEFAULT 0"),
+                ("users", "daily_carry", "TEXT NOT NULL DEFAULT 'spread'"),
+                ("users", "daily_split", "TEXT NOT NULL DEFAULT 'open'"),
+                ("users", "daily_heavy", "TEXT NOT NULL DEFAULT '{}'"),
+                ("users", "daily_self_edit", "INTEGER NOT NULL DEFAULT 0"),
+                ("devices", "daily_share_gb", "REAL NOT NULL DEFAULT 0")):
+            try:
+                await self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+                await self._conn.commit()
+            except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
+                pass
+        for col, decl in (("anchor_gb", "REAL NOT NULL DEFAULT 0"),
+                          ("sig", "TEXT NOT NULL DEFAULT ''")):
+            try:
+                await self._conn.execute(
+                    f"ALTER TABLE daily_caps ADD COLUMN {col} {decl}")
+                await self._conn.commit()
+            except Exception:  # noqa: BLE001  (duplicate column on existing DBs)
+                pass
         await self._migrate_domain_rules_scope_key()
         await self._backfill_users()
         await self._seed_gateway()
@@ -818,7 +866,7 @@ class Database:
                    "user_id", "bypass", "vpn_bypass",
                    "limit_down_mbps", "limit_up_mbps",
                    "dns_server", "access_interface",
-                   "access_override"}
+                   "access_override", "daily_share_gb"}
         sets, args = [], []
         for key, value in fields.items():
             if key in allowed:
@@ -929,12 +977,18 @@ class Database:
                    "limit_down_mbps", "limit_up_mbps",
                    "notified_50", "notified_75", "notified_100",
                    "history_days", "dns_server", "exempt_quota",
-                   "vpn_bypass", "guest"}
+                   "vpn_bypass", "guest", "daily_mode", "daily_gb",
+                   "daily_carry", "daily_split", "daily_heavy",
+                   "daily_self_edit"}
         sets, args = [], []
         for key, value in fields.items():
             if key in allowed:
                 sets.append(f"{key}=?")
-                args.append(int(bool(value)) if key == "guest" else value)
+                if key in ("guest", "daily_self_edit"):
+                    value = int(bool(value))
+                elif key == "daily_heavy":
+                    value = json.dumps(value or {}, sort_keys=True)
+                args.append(value)
         if not sets:
             return await self.get_user(user_id)
         args.append(user_id)
@@ -966,6 +1020,7 @@ class Database:
                 "DELETE FROM lan_usage_daily WHERE device_id=?", (r["id"],))
             await self.conn.execute("DELETE FROM devices WHERE id=?", (r["id"],))
             await self.delete_domain_rules_by_scope(DNS_SCOPE_DEVICE, r["id"])
+        await self.conn.execute("DELETE FROM daily_caps WHERE user_id=?", (user_id,))
         await self.conn.execute("DELETE FROM users WHERE id=?", (user_id,))
         await self.conn.commit()
         await self.delete_domain_rules_by_scope(DNS_SCOPE_USER, user_id)
@@ -1610,6 +1665,86 @@ class Database:
         await self.conn.commit()
         return cur.rowcount
 
+    # -- daily quota -----------------------------------------------------------
+
+    async def get_daily_cap(self, user_id: int, date: str) -> dict[str, Any] | None:
+        row = await self._fetch_one(
+            "SELECT cap_gb, allow_gb, mode, daily_gb, anchor_gb, sig FROM daily_caps "
+            "WHERE user_id=? AND date=?", (user_id, date))
+        if not row:
+            return None
+        return {"cap_gb": float(row[0]), "allow_gb": float(row[1]),
+                "mode": row[2], "daily_gb": float(row[3]),
+                "anchor_gb": float(row[4]), "sig": row[5]}
+
+    async def get_last_daily_cap_before(self, user_id: int, date: str) -> dict[str, Any] | None:
+        row = await self._fetch_one(
+            "SELECT date, cap_gb FROM daily_caps WHERE user_id=? AND date<? "
+            "ORDER BY date DESC LIMIT 1", (user_id, date))
+        if not row:
+            return None
+        return {"date": row[0], "cap_gb": float(row[1])}
+
+    async def set_daily_cap(self, user_id: int, date: str, cap_gb: float,
+                            allow_gb: float, mode: str, daily_gb: float,
+                            anchor_gb: float = 0.0, sig: str = "") -> None:
+        await self.conn.execute(
+            """INSERT INTO daily_caps (user_id, date, cap_gb, allow_gb, mode, daily_gb,
+                                       anchor_gb, sig)
+               VALUES (?,?,?,?,?,?,?,?)
+               ON CONFLICT(user_id, date) DO UPDATE SET cap_gb=excluded.cap_gb,
+                 allow_gb=excluded.allow_gb, mode=excluded.mode,
+                 daily_gb=excluded.daily_gb, anchor_gb=excluded.anchor_gb,
+                 sig=excluded.sig""",
+            (user_id, date, float(cap_gb), float(allow_gb), mode, float(daily_gb),
+             float(anchor_gb), sig))
+        await self.conn.commit()
+
+    async def clear_daily_caps(self, user_id: int | None = None) -> None:
+        if user_id is None:
+            await self.conn.execute("DELETE FROM daily_caps")
+        else:
+            await self.conn.execute(
+                "DELETE FROM daily_caps WHERE user_id=?", (user_id,))
+        await self.conn.commit()
+
+    async def purge_daily_caps(self, before_date: str) -> None:
+        await self.conn.execute(
+            "DELETE FROM daily_caps WHERE date<?", (before_date,))
+        await self.conn.commit()
+
+    async def get_usage_before_and_on(self, since: str, day: str) -> dict[str, Any]:
+        """Per-user usage bytes in [since, day) and on ``day``; per-device on ``day``.
+
+        Returns ``{"before": {uid: bytes}, "today": {uid: bytes},
+        "dev_today": {device_id: bytes}}``.
+        """
+        rows = await self.conn.execute_fetchall(
+            "SELECT d.user_id uid, u.device_id did, u.date date, "
+            "u.up_bytes + u.down_bytes b FROM usage_daily u "
+            "JOIN devices d ON u.device_id = d.id WHERE u.date>=? AND u.date<=?",
+            (since or "", day))
+        before: dict[int, int] = {}
+        today: dict[int, int] = {}
+        dev_today: dict[int, int] = {}
+        for r in rows:
+            uid = r["uid"]
+            if uid is None:
+                continue
+            if r["date"] == day:
+                today[uid] = today.get(uid, 0) + r["b"]
+                dev_today[r["did"]] = dev_today.get(r["did"], 0) + r["b"]
+            else:
+                before[uid] = before.get(uid, 0) + r["b"]
+        return {"before": before, "today": today, "dev_today": dev_today}
+
+    async def get_user_usage_on(self, user_id: int, day: str) -> int:
+        row = await self._fetch_one(
+            "SELECT COALESCE(SUM(u.up_bytes + u.down_bytes), 0) FROM usage_daily u "
+            "JOIN devices d ON u.device_id = d.id WHERE d.user_id=? AND u.date=?",
+            (user_id, day))
+        return int(row[0]) if row else 0
+
     # -- settings -----------------------------------------------------------
 
     async def get_setting(self, key: str, default: str = "") -> str:
@@ -1913,6 +2048,7 @@ def _row_to_device(row: Any) -> Device:
         dns_server=row["dns_server"] or "",
         access_interface=row["access_interface"] or "",
         access_override=row["access_override"] or "",
+        daily_share_gb=float(_col(row, "daily_share_gb") or 0.0),
     )
 
 
@@ -1936,7 +2072,36 @@ def _row_to_user(row: Any) -> User:
         notified_100=bool(row["notified_100"]),
         history_days=row["history_days"],
         dns_server=row["dns_server"] or "",
+        daily_mode=_col(row, "daily_mode") or "off",
+        daily_gb=float(_col(row, "daily_gb") or 0.0),
+        daily_carry=_col(row, "daily_carry") or "spread",
+        daily_split=_col(row, "daily_split") or "open",
+        daily_heavy=_load_heavy(_col(row, "daily_heavy")),
+        daily_self_edit=bool(_col(row, "daily_self_edit")),
     )
+
+
+def _col(row: Any, name: str) -> Any:
+    try:
+        return row[name]
+    except (IndexError, KeyError):
+        return None
+
+
+def _load_heavy(raw: Any) -> dict:
+    try:
+        data = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for k, v in data.items():
+        try:
+            out[str(k)] = float(v)
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 def _row_to_domain_rule(row: Any) -> DomainRule:

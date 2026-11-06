@@ -39,12 +39,13 @@ from contextlib import asynccontextmanager
 from api.schemas import (BundleUpdate, ConsumptionSpoofRequest, DeviceCreate,
                          DeviceUpdate, DnsImportRequest, DnsPresetEnable,
                          DnsQuickRule,
+                         DailyPreview, DailyToggle,
                          DnsServerUpdate, DomainRuleCreate, DomainRuleUpdate,
                          FirewallBanRequest, FirewallConfigUpdate,
                          FirewallGeoUpdate, FirewallUnbanRequest,
                          GuestUpdate,
                          LoginRequest, MacListsUpdate,
-                         MilestoneNotify,
+                         MilestoneNotify, MilestoneDailyPlan,
                          NetworkUpdate, PasswordUpdate, RechargeCreate, SetupComplete,
                          StaticLeaseCreate,
                          TopUpRequest, TotpEnableRequest,
@@ -56,6 +57,7 @@ from api import waf as _waf
 from core import passwords as _passwords
 from core import timeutil
 from core.config import WafConfig, WebConfig
+from quota import daily_plan as _dp
 from quota import db as _db
 from quota import dns_rules as _dns_rules
 from quota import totp as _totp
@@ -594,6 +596,21 @@ def create_app(
                 cfg["status"] = {"state": "error", "message": "status probe failed"}
         return cfg
 
+    def _daily_user_view(u: _db.User, dst: dict[str, Any] | None,
+                         feature_on: bool) -> dict[str, Any]:
+        """The person's daily plan (settings) + today's live numbers."""
+        return {
+            "mode": u.daily_mode, "gb": float(u.daily_gb or 0.0),
+            "carry": u.daily_carry, "split": u.daily_split,
+            "heavy": dict(u.daily_heavy or {}),
+            "self_edit": bool(u.daily_self_edit),
+            "active": bool(feature_on and dst is not None),
+            "cap_gb": dst["cap_gb"] if dst else None,
+            "used_gb": dst["used_gb"] if dst else None,
+            "blocked": bool(dst and dst["blocked"]),
+            "resets_at": dst["resets_at"] if dst else None,
+        }
+
     async def _dashboard_payload() -> dict[str, Any]:
         await service.sync_recharges()
         bundle = await database.get_bundle()
@@ -625,6 +642,11 @@ def create_app(
             and p.remaining_gb > 0 and p.expires_at > now_ts
         }
 
+        # Optional daily quota: today's cap per person (empty when disabled).
+        daily_on = await service.daily_enabled()
+        daily = await service.daily_state()
+        daily_cut = service.daily_blocked_devices(daily, devices)
+
         # Per-user aggregate views (allowance + usage + resolved block state).
         user_views: dict[int, dict[str, Any]] = {}
         for u in users:
@@ -634,7 +656,10 @@ def create_app(
             # quota_blocked_for special-cases protected users: an allowance of
             # 0 cuts the box IMMEDIATELY (the engine's `allowance > 0` guard
             # would otherwise treat 0 as "unmetered").
-            quota_blocked = service.user_quota_blocked(u, allowance, used_gb)
+            monthly_blocked = service.user_quota_blocked(u, allowance, used_gb)
+            dst = daily.get(u.id)
+            daily_blocked = bool(dst and dst["blocked"])
+            quota_blocked = monthly_blocked or daily_blocked
             admin_blocked = u.block_state == _db.BLOCK_ADMIN
             state = (_db.BLOCK_ADMIN if admin_blocked
                      else (_db.BLOCK_QUOTA if quota_blocked else _db.BLOCK_OK))
@@ -664,6 +689,7 @@ def create_app(
                 "blocked": admin_blocked or quota_blocked,
                 "block_state": state,
                 "quota_blocked": quota_blocked,
+                "daily": _daily_user_view(u, dst, daily_on),
                 "devices": [],
             }
 
@@ -679,7 +705,8 @@ def create_app(
             user = next((x for x in users if x.id == d.user_id), None)
             uv = user_views.get(d.user_id)
             state = service.resolve_device_state(
-                user, d, uv["quota_blocked"] if uv else False,
+                user, d, ((uv["quota_blocked"] if uv else False)
+                          or d.id in daily_cut),
                 allow_listed=d.mac in allow_set,
                 deny_listed=d.mac in deny_set,
                 has_device_booster=d.id in device_booster_ids)
@@ -692,6 +719,14 @@ def create_app(
                 ip6=dev_ip6,
                 ipv6_direct=dev_mac in direct_macs,
                 lan_usage=lan_by_device.get(d.id))
+            dev_view["daily_share_gb"] = float(d.daily_share_gb or 0.0)
+            dcap = (daily.get(d.user_id) or {}).get("device_caps", {}).get(d.id)
+            if dcap is not None:
+                dev_view["daily_cap_gb"] = round(dcap, 3)
+                dev_view["daily_used_gb"] = (daily[d.user_id]["device_used"]
+                                             .get(d.id, 0.0))
+            dev_view["daily_blocked"] = bool(
+                d.id in daily_cut and state == _db.BLOCK_QUOTA)
             devices_view.append(dev_view)
             if uv is not None:
                 uv["devices"].append(dev_view)
@@ -719,6 +754,7 @@ def create_app(
                 "days_left": days_left,
                 "recharges": [_recharge_view(p) for p in packs],
             },
+            "daily_enabled": daily_on,
             "users": [user_views[u.id] for u in users],
             "devices": devices_view,
             "rogue": [
@@ -831,6 +867,7 @@ def create_app(
                 "device_percent": round(
                     dused_gb / allowance * 100, 1) if allowance > 0 else 0.0,
             })
+        daily_info = await _milestone_daily(user, device_rows)
         return {
             "recognized": True,
             "user": {
@@ -842,6 +879,33 @@ def create_app(
                 "milestones": ms["milestones"],
             },
             "devices": device_rows,
+            "daily": daily_info,
+        }
+
+    async def _milestone_daily(user: _db.User,
+                               device_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """The person's daily plan for the milestone page (None = feature off
+        or this person has no plan)."""
+        if not await service.daily_enabled() or user.daily_mode == "off":
+            return None
+        dst = (await service.daily_state()).get(user.id)
+        sched = await service.daily_schedule(user.id)
+        for row in device_rows:
+            cap = (dst or {}).get("device_caps", {}).get(row["id"])
+            if cap is not None:
+                row["daily_cap_gb"] = round(cap, 3)
+                row["daily_used_gb"] = dst["device_used"].get(row["id"], 0.0)
+        return {
+            "mode": user.daily_mode, "gb": float(user.daily_gb or 0.0),
+            "carry": user.daily_carry, "split": user.daily_split,
+            "heavy": dict(user.daily_heavy or {}),
+            "self_edit": bool(user.daily_self_edit),
+            "cap_gb": dst["cap_gb"] if dst else None,
+            "used_gb": dst["used_gb"] if dst else None,
+            "blocked": bool(dst and dst["blocked"]),
+            "resets_at": dst["resets_at"] if dst else None,
+            "schedule": sched.get("schedule", []),
+            "error": sched.get("error"),
         }
 
     @app.get("/api/milestone", response_model=None)
@@ -867,6 +931,71 @@ def create_app(
         if dev.user_id != body.user_id:
             raise HTTPException(403, "not your user")
         await service.mark_milestone_notified(body.user_id, body.milestone)
+        return {"ok": True}
+
+    _daily_edit_times: dict[int, list[float]] = {}
+
+    @app.put("/api/milestone/daily-plan", response_model=None)
+    async def milestone_daily_plan(body: MilestoneDailyPlan,
+                                   request: Request) -> dict[str, Any]:
+        """A person adjusts THEIR OWN daily plan (carry policy, heavy days,
+        equal split) from the milestone page.
+
+        No admin session: the requester is resolved by source IP to a device
+        and its user, and the admin must have switched ``daily_self_edit`` on
+        for that person. The custom ``X-QM-CSRF: 1`` header is required so a
+        foreign website cannot make a household browser change the plan. The
+        total (mode / GB per day / allowance) can never be changed here, only
+        how it is paced; changes apply immediately (today's cap is recomputed from the
+        same starting point, so editing again never grants extra GB).
+        """
+        if request.headers.get("x-qm-csrf") != "1":
+            raise HTTPException(403, "missing CSRF header")
+        host = request.client.host if request.client else ""
+        dev = await database.get_device_by_ip(host)
+        if dev is None or dev.user_id is None:
+            raise HTTPException(403, "unknown requester")
+        user = await database.get_user(dev.user_id)
+        if user is None or user.protected:
+            raise HTTPException(403, "unknown requester")
+        if not await service.daily_enabled() or user.daily_mode == "off":
+            raise HTTPException(409, "no daily plan")
+        if not user.daily_self_edit:
+            raise HTTPException(403, "editing is not allowed for this user")
+        now = time.time()
+        recent = [t for t in _daily_edit_times.get(user.id, []) if now - t < 60]
+        if len(recent) >= 10:
+            raise HTTPException(429, "too many changes, try again in a minute")
+        _daily_edit_times[user.id] = recent + [now]
+        fields: dict[str, Any] = {}
+        if body.carry is not None:
+            fields["daily_carry"] = body.carry
+        if body.split is not None:
+            fields["daily_split"] = body.split
+        if body.heavy is not None:
+            today = service._now().date()
+            clean: dict[str, float] = {}
+            for day, gb in body.heavy.items():
+                try:
+                    d = _dp.parse_day(day)
+                except ValueError:
+                    raise HTTPException(400, f"bad date: {day}")
+                if d < today:
+                    raise HTTPException(400, "heavy days cannot be in the past")
+                if gb <= 0 or gb > 100000:
+                    raise HTTPException(400, f"bad GB for {day}")
+                clean[d.isoformat()] = float(gb)
+            if len(clean) > 31:
+                raise HTTPException(400, "too many heavy days")
+            fields["daily_heavy"] = clean
+        if fields:
+            err = await _validate_daily(user, fields)
+            if err:
+                raise HTTPException(400, err)
+            await database.update_user(user.id, **fields)
+            await database.add_event(
+                f"Daily plan edited by the user: {user.name or user.id}",
+                "info", user_id=user.id)
         return {"ok": True}
 
     # -- on-demand report (source-IP gated) -----------------------------------
@@ -2050,6 +2179,8 @@ def create_app(
             fields["limit_down_mbps"] = body.limit_down_mbps
         if body.limit_up_mbps is not None:
             fields["limit_up_mbps"] = body.limit_up_mbps
+        if body.daily_share_gb is not None:
+            fields["daily_share_gb"] = body.daily_share_gb
         if fields:
             await database.update_device(device_id, **fields)
         # Quota lives on the USER now: a quota edit through a device card is
@@ -2121,6 +2252,70 @@ def create_app(
             raise HTTPException(404, "device not found")
         return result
 
+    # -- daily quota (optional) -------------------------------------------------
+
+    def _daily_settings(user: _db.User, fields: dict[str, Any]) -> _dp.DailySettings:
+        """The user's daily settings with ``fields`` (daily_* keys) applied."""
+        st = _dp.settings_from_user(user)
+        st.heavy = dict(user.daily_heavy or {})
+        if "daily_mode" in fields:
+            st.mode = fields["daily_mode"]
+        if "daily_gb" in fields:
+            st.daily_gb = float(fields["daily_gb"])
+        if "daily_carry" in fields:
+            st.carry = fields["daily_carry"]
+        if "daily_split" in fields:
+            st.split = fields["daily_split"]
+        if "daily_heavy" in fields:
+            st.heavy = dict(fields["daily_heavy"] or {})
+        return st
+
+    async def _validate_daily(user: _db.User, fields: dict[str, Any]) -> str | None:
+        """Reject a plan that cannot work (returns the error text)."""
+        heavy = fields.get("daily_heavy")
+        if heavy is not None:
+            for day, gb in heavy.items():
+                try:
+                    _dp.parse_day(day)
+                except ValueError:
+                    return f"bad date: {day}"
+                if gb <= 0 or gb > 100000:
+                    return f"bad GB for {day}"
+            if len(heavy) > 62:
+                return "too many heavy days"
+        st = _daily_settings(user, fields)
+        if not st.active:
+            return None
+        sched = await service.daily_schedule(user.id, override=st)
+        return sched.get("error")
+
+    @app.get("/api/daily", dependencies=[Depends(_require_auth)])
+    async def get_daily() -> dict[str, Any]:
+        return {"enabled": await service.daily_enabled()}
+
+    @app.post("/api/daily", dependencies=[Depends(_require_auth)])
+    async def set_daily(body: DailyToggle) -> dict[str, Any]:
+        await service.set_daily_enabled(body.enabled)
+        await database.add_event(
+            "Daily quota " + ("enabled" if body.enabled else "disabled"), "info")
+        return {"enabled": await service.daily_enabled()}
+
+    @app.get("/api/users/{user_id}/daily-plan", dependencies=[Depends(_require_auth)])
+    async def get_daily_plan(user_id: int) -> dict[str, Any]:
+        if await database.get_user(user_id) is None:
+            raise HTTPException(404, "user not found")
+        return await service.daily_schedule(user_id)
+
+    @app.post("/api/users/{user_id}/daily-plan/preview", dependencies=[Depends(_require_auth)])
+    async def preview_daily_plan(user_id: int, body: DailyPreview) -> dict[str, Any]:
+        """What a proposed plan would do — nothing is saved."""
+        if await database.get_user(user_id) is None:
+            raise HTTPException(404, "user not found")
+        st = _dp.DailySettings(mode=body.mode, daily_gb=body.daily_gb,
+                               carry=body.carry, split=body.split,
+                               heavy=dict(body.heavy))
+        return await service.daily_schedule(user_id, override=st)
+
     # -- users (a person owns devices; the quota lives on the user) ----------
 
     @app.get("/api/users", dependencies=[Depends(_require_auth)])
@@ -2151,10 +2346,16 @@ def create_app(
         fields: dict[str, Any] = {}
         for key in ("name", "quota_mode", "fixed_gb",
                     "limit_down_mbps", "limit_up_mbps", "history_days",
-                    "exempt_quota", "vpn_bypass", "guest"):
+                    "exempt_quota", "vpn_bypass", "guest",
+                    "daily_mode", "daily_gb", "daily_carry", "daily_split",
+                    "daily_heavy", "daily_self_edit"):
             value = getattr(body, key)
             if value is not None:
                 fields[key] = value
+        if any(k.startswith("daily_") for k in fields):
+            err = await _validate_daily(user, fields)
+            if err:
+                raise HTTPException(400, err)
         if fields:
             await database.update_user(user_id, **fields)
         if body.block is not None:
