@@ -1,6 +1,11 @@
 # RPM spec for Quota Manager (Fedora / RHEL family). __VERSION__ and __PAYLOAD__
 # are substituted by the release workflow; the payload is the same staged tree
 # the .deb ships (/opt/quota-manager).
+# The payload ships the bundled sing-box binary; the .deb is "all" the same way.
+%global _binaries_in_noarch_packages_terminate_build 0
+%global debug_package %{nil}
+%global __strip /bin/true
+
 Name:           quota-manager
 Version:        __VERSION__
 Release:        1
