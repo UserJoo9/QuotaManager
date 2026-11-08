@@ -127,14 +127,15 @@ OpenWrt 22.03+ وذاكرة 128MB أو أكتر (في الراوترات الص�
 </div>
 
 ```bash
-opkg update
-opkg install python3 python3-pip nftables kmod-nft-core ip-full dnsmasq-full
-git clone https://github.com/UserJoo9/QuotaManager.git /opt/QuotaManager
-cd /opt/QuotaManager && pip install -r requirements-linux.txt
-cp scripts/quota-manager.openwrt /etc/init.d/quota-manager
-chmod +x /etc/init.d/quota-manager
-/etc/init.d/quota-manager enable && /etc/init.d/quota-manager start
+wget -O /tmp/install_openwrt.sh https://raw.githubusercontent.com/UserJoo9/QuotaManager/main/scripts/install_openwrt.sh
+sh /tmp/install_openwrt.sh
 ```
+
+<div dir="rtl">
+
+> OpenWrt 25.12 استبدل `opkg` بـ `apk`، والسكربت ده بيكتشف اللي عندك تلقائياً (22.03 لحد 24.10 بيستخدموا `opkg`). الدعم **تجريبي**: راوترات/أجهزة x86_64 و aarch64 هي الأنسب. لو فشل افتح issue مع الـ output كامل.
+
+</div>
 
 <div dir="rtl">
 

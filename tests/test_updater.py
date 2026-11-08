@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from quota.updater import Updater, parse_changelog, parse_version
 
 
@@ -294,3 +296,80 @@ def test_set_enabled_clears_stale_error_on_enable():
     st = run(up.state())
     assert st["enabled"] is True
     assert st["error"] == ""
+
+# -- multi-distro assets -------------------------------------------------------
+
+def test_detect_install_kind_marker_then_package_manager(tmp_path):
+    from quota.updater import detect_install_kind
+    marker = tmp_path / "kind"
+    marker.write_text("rpm\n")
+    assert detect_install_kind(str(marker), which=lambda n: None) == "rpm"
+    missing = str(tmp_path / "nope")
+    pm = lambda have: (lambda n: "/bin/" + n if n in have else None)   # noqa: E731
+    assert detect_install_kind(missing, which=pm({"apt-get"})) == "deb"
+    assert detect_install_kind(missing, which=pm({"dnf"})) == "rpm"
+    assert detect_install_kind(missing, which=pm({"pacman"})) == "arch"
+    assert detect_install_kind(missing, which=pm(set())) == "tarball"
+    marker.write_text("garbage")
+    assert detect_install_kind(str(marker), which=pm({"pacman"})) == "arch"
+
+
+@pytest.mark.parametrize("kind,name", [
+    ("deb", "quota-manager_0.3.1_all.deb"),
+    ("rpm", "quota-manager-0.3.1-1.noarch.rpm"),
+    ("arch", "quota-manager-0.3.1-1-any.pkg.tar.zst"),
+    ("tarball", "quota-manager-0.3.1.tar.gz")])
+def test_asset_url_per_kind(kind, name):
+    up = Updater(FakeDb(), current_version="0.2.0", install_kind=kind)
+    release = {"assets": [
+        {"name": "quota-manager_0.3.1_all.deb", "browser_download_url": "https://x/deb"},
+        {"name": "quota-manager-0.3.1-1.noarch.rpm", "browser_download_url": "https://x/rpm"},
+        {"name": "quota-manager-0.3.1-1-any.pkg.tar.zst", "browser_download_url": "https://x/arch"},
+        {"name": "quota-manager-0.3.1.tar.gz", "browser_download_url": "https://x/tgz"}]}
+    expect = {"deb": "https://x/deb", "rpm": "https://x/rpm",
+              "arch": "https://x/arch", "tarball": "https://x/tgz"}[kind]
+    assert up._find_asset_url(release, "0.3.1", kind) == expect
+    assert up._find_asset_url({}, "0.3.1", kind).endswith("/v0.3.1/" + name)
+
+
+@pytest.mark.parametrize("kind,cmd", [
+    ("rpm", ["dnf", "install", "-y", "/tmp/q.rpm"]),
+    ("arch", ["pacman", "-U", "--noconfirm", "/tmp/q.pkg"])])
+def test_install_package_commands(kind, cmd):
+    calls = []
+    up = Updater("x", install_kind=kind,
+                 run_command=lambda argv, timeout=15: calls.append(argv) or (0, ""))
+    ok, _ = up._install_package(kind, cmd[-1])
+    assert ok and calls[0][0] == "systemd-run" and calls[0][-len(cmd):] == cmd
+
+
+def test_tarball_install_unpacks_and_runs_install_sh(tmp_path):
+    import io
+    import tarfile
+    tgz = tmp_path / "q.tar.gz"
+    with tarfile.open(tgz, "w:gz") as t:
+        data = b"#!/bin/bash\nexit 0\n"
+        info = tarfile.TarInfo("quota-manager-0.3.1/install.sh")
+        info.size = len(data)
+        t.addfile(info, io.BytesIO(data))
+    calls = []
+    up = Updater("x", install_kind="tarball",
+                 run_command=lambda argv, timeout=15: calls.append(argv) or (0, ""))
+    ok, _ = up._install_package("tarball", str(tgz))
+    assert ok
+    assert calls[0][-3] == "bash" and calls[0][-2].endswith("quota-manager-0.3.1/install.sh")
+    assert calls[0][-1] == "--upgrade"
+
+
+def test_tarball_with_escaping_member_is_refused(tmp_path):
+    import io
+    import tarfile
+    tgz = tmp_path / "evil.tar.gz"
+    with tarfile.open(tgz, "w:gz") as t:
+        info = tarfile.TarInfo("../evil.sh")
+        info.size = 1
+        t.addfile(info, io.BytesIO(b"x"))
+    up = Updater("x", install_kind="tarball",
+                 run_command=lambda argv, timeout=15: (0, ""))
+    ok, out = up._install_package("tarball", str(tgz))
+    assert not ok and "unsafe" in out

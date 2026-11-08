@@ -4,7 +4,7 @@ import { api } from "../core/api.js";
 import { bar, chip } from "../components/ui.js";
 import { openDialog } from "../components/dialog.js";
 import { toast } from "../components/toast.js";
-import { dailyMasterCard } from "../components/dailyPlan.js";
+import { dailyMasterCard, freeModeCard } from "../components/dailyPlan.js";
 
 let draft = null, topup = "", armedReset = false, armedDel = null, busy = false;
 const DAY = 86400;
@@ -83,6 +83,7 @@ export default function quota(ctx) {
       h("div", { class: "setting" }, h("div", {}, h("div", { class: "t" }, t("q.newperiod")), h("div", { class: "d" }, t("q.newperiod.d"))),
         h("button", { type: "button", class: "btn danger sm", onclick: doReset }, t("q.newperiod.btn")))),
     dailyMasterCard(!!d.daily_enabled, run(() => api.post("/api/daily", { enabled: !d.daily_enabled }))),
+    freeModeCard(d.free_mode_enabled !== false, !!d.free_mode, run(() => api.post("/api/free-mode", { enabled: d.free_mode_enabled === false }))),
     h("section", { class: "card c12" },
       h("header", { class: "card-h" }, h("h3", {}, t("q.packs")), h("button", { type: "button", class: "btn primary sm", onclick: packDialog }, icon("plus", 15), t("q.packs.new"))),
       packs.length ? h("div", {}, packs.map((p) => h("div", { class: "crow", style: { "grid-template-columns": "36px minmax(120px,1fr) minmax(130px,1.2fr) 84px auto" } },

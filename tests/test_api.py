@@ -55,6 +55,8 @@ def client(tmp_path):
 
     async def _init():
         await database.connect()
+        # plain quota blocking is under test here; free mode has its own tests
+        await database.set_setting("free_when_exhausted", "0")
         return database, service
 
 #     import asyncio

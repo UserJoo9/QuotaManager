@@ -701,3 +701,22 @@ def test_live_share_50mb_size_limit(share_client):
 
 
 
+
+
+def test_cancelled_upload_leaves_no_partial_file(tmp_path):
+    """A client that aborts mid-upload must not leave a half-written file."""
+    async def _test():
+        mgr = LocalShareManager(tmp_path / "share_data")
+
+        async def dropped():
+            yield b"first chunk"
+            raise ConnectionError("client went away")
+
+        with pytest.raises(ConnectionError):
+            await mgr.save_file_stream(stream=dropped(), filename="big.bin",
+                                       content_type="application/octet-stream",
+                                       sender_ip="192.168.1.50")
+        assert mgr.files == {}
+        assert [p for p in (tmp_path / "share_data").rglob("big.bin")] == []
+
+    asyncio.run(_test())

@@ -644,8 +644,9 @@ def create_app(
 
         # Optional daily quota: today's cap per person (empty when disabled).
         daily_on = await service.daily_enabled()
+        free_on = await service.refresh_free_mode()   # everyone out of quota -> open
         daily = await service.daily_state()
-        daily_cut = service.daily_blocked_devices(daily, devices)
+        daily_cut = set() if free_on else service.daily_blocked_devices(daily, devices)
 
         # Per-user aggregate views (allowance + usage + resolved block state).
         user_views: dict[int, dict[str, Any]] = {}
@@ -658,7 +659,7 @@ def create_app(
             # would otherwise treat 0 as "unmetered").
             monthly_blocked = service.user_quota_blocked(u, allowance, used_gb)
             dst = daily.get(u.id)
-            daily_blocked = bool(dst and dst["blocked"])
+            daily_blocked = bool(dst and dst["blocked"]) and not free_on
             quota_blocked = monthly_blocked or daily_blocked
             admin_blocked = u.block_state == _db.BLOCK_ADMIN
             state = (_db.BLOCK_ADMIN if admin_blocked
@@ -755,6 +756,8 @@ def create_app(
                 "recharges": [_recharge_view(p) for p in packs],
             },
             "daily_enabled": daily_on,
+            "free_mode": free_on,
+            "free_mode_enabled": await service.free_mode_enabled(),
             "users": [user_views[u.id] for u in users],
             "devices": devices_view,
             "rogue": [
@@ -1008,6 +1011,7 @@ def create_app(
         devices = await database.list_devices()
         usage_by_user = await database.get_period_usage_by_user()
         usage_by_device = await database.get_period_usage()
+        await service.refresh_free_mode()
         allowances = bundle.allowances
         live = holder.get()
 
@@ -2299,6 +2303,19 @@ def create_app(
         await database.add_event(
             "Daily quota " + ("enabled" if body.enabled else "disabled"), "info")
         return {"enabled": await service.daily_enabled()}
+
+    @app.get("/api/free-mode", dependencies=[Depends(_require_auth)])
+    async def get_free_mode() -> dict[str, Any]:
+        return {"enabled": await service.free_mode_enabled(),
+                "active": await service.refresh_free_mode()}
+
+    @app.post("/api/free-mode", dependencies=[Depends(_require_auth)])
+    async def set_free_mode(body: DailyToggle) -> dict[str, Any]:
+        await service.set_free_mode_enabled(body.enabled)
+        await database.add_event(
+            "Open-when-everyone-is-out-of-quota " + ("enabled" if body.enabled else "disabled"), "info")
+        return {"enabled": await service.free_mode_enabled(),
+                "active": service.free_mode}
 
     @app.get("/api/users/{user_id}/daily-plan", dependencies=[Depends(_require_auth)])
     async def get_daily_plan(user_id: int) -> dict[str, Any]:

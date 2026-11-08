@@ -1,0 +1,56 @@
+# RPM spec for Quota Manager (Fedora / RHEL family). __VERSION__ and __PAYLOAD__
+# are substituted by the release workflow; the payload is the same staged tree
+# the .deb ships (/opt/quota-manager).
+Name:           quota-manager
+Version:        __VERSION__
+Release:        1
+Summary:        Fair-split metered-internet quota gateway
+License:        MIT
+URL:            https://github.com/UserJoo9/QuotaManager
+BuildArch:      noarch
+AutoReqProv:    no
+Requires:       python3 >= 3.10
+Requires:       python3-pip
+Requires:       dnsmasq
+Requires:       nftables
+Requires:       iproute
+Requires:       kmod
+Requires:       ppp
+Requires:       ca-certificates
+
+%description
+Split a metered internet bundle fairly across users and devices. The package
+configures the network stack (dnsmasq + nftables + tc), installs the Python
+runtime into /opt/quota-manager and runs the gateway as a systemd service.
+
+%prep
+
+%build
+
+%install
+mkdir -p %{buildroot}/opt
+cp -a __PAYLOAD__/opt/quota-manager %{buildroot}/opt/quota-manager
+
+%files
+%defattr(-,root,root,-)
+/opt/quota-manager
+%ghost %attr(644,root,root) /opt/quota-manager/.install-kind
+%ghost %attr(755,root,root) /opt/quota-manager/.venv
+
+%post
+bash /opt/quota-manager/scripts/post_install.sh rpm || true
+
+# On upgrade the NEW %post runs before the OLD %preun, so act only on a real
+# erase ($1 = 0); an upgrade must not stop/disable the freshly started service.
+%preun
+if [ "$1" -eq 0 ]; then
+    systemctl stop quota-gateway 2>/dev/null || true
+    systemctl disable quota-gateway 2>/dev/null || true
+fi
+exit 0
+
+%postun
+if [ "$1" -eq 0 ]; then
+    systemctl daemon-reload 2>/dev/null || true
+fi
+exit 0

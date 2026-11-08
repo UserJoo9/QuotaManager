@@ -47,52 +47,22 @@ jobs:
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Render the Debian control file
+      # One script builds all four packages; the packaging-smoke workflow runs
+      # the very same script, so what was smoke-tested is what ships.
+      - name: Build all packages (.deb, .tar.gz, .rpm, .pkg.tar.zst)
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          # Strip the template's #-comment lines: Debian control files cannot
-          # contain comments, and dpkg-deb rejects any line starting with '#'.
-          sed -e "s/__VERSION__/${VERSION}/g" -e '/^#/d' packaging/DEBIAN/control.template > "${RUNNER_TEMP}/control"
-          # A control file is not valid Debian without a changelog entry for the
-          # version it ships; render one so metadata, changelog and .deb agree.
-          # (printf, not a heredoc — a heredoc inside a workflow run block breaks
-          # the YAML parser.)
-          printf 'quota-manager (%s) stable; urgency=medium\n\n  * Linux-only metered-internet quota gateway.\n\n -- Quota Manager Maintainer <noreply@github.com>  Tue, 05 Aug 2026 00:00:00 +0000\n' \
-              "${VERSION}" > "${RUNNER_TEMP}/changelog"
-
-      - name: Stage package payload
-        run: |
-          STAGE="${RUNNER_TEMP}/stage"
-          mkdir -p "$STAGE/DEBIAN" "$STAGE/opt/quota-manager"
-          cp "${RUNNER_TEMP}/control"    "$STAGE/DEBIAN/control"
-          cp "${RUNNER_TEMP}/changelog"  "$STAGE/DEBIAN/changelog"
-          cp packaging/DEBIAN/postinst   "$STAGE/DEBIAN/postinst"
-          cp packaging/DEBIAN/prerm      "$STAGE/DEBIAN/prerm"
-          # The runtime payload. Explicit allowlist — build/junk that lives in
-          # the repo must never ship.
-          cp run.py requirements-linux.txt LICENSE "$STAGE/opt/quota-manager/"
-          cp -r core quota api web scripts "$STAGE/opt/quota-manager/"
-          [ -d bin ] && cp -r bin "$STAGE/opt/quota-manager/" || true
-          # Scripts are only useful with executable bits; dpkg preserves them.
-          # Name the lifecycle scripts explicitly — a *install glob never
-          # matches "postinst" (and an unmatched glob fails under -e).
-          chmod 755 "$STAGE/DEBIAN/postinst" "$STAGE/DEBIAN/prerm" "$STAGE/opt/quota-manager/scripts"/*.sh
-          [ -f "$STAGE/opt/quota-manager/bin/sing-box" ] && chmod 755 "$STAGE/opt/quota-manager/bin/sing-box" || true
-          # No source-control noise on the box.
-          rm -rf "$STAGE/opt/quota-manager/api/__pycache__" "$STAGE/opt/quota-manager/core/__pycache__" \
-                 "$STAGE/opt/quota-manager/quota/__pycache__" "$STAGE/opt/quota-manager/web/__pycache__" \
-                 "$STAGE/opt/quota-manager/scripts/__pycache__"
-
-      - name: Build .deb
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          mkdir -p dist
-          dpkg-deb --build --root-owner-group "${RUNNER_TEMP}/stage" "dist/quota-manager_${VERSION}_all.deb"
+          sudo apt-get update -qq && sudo apt-get install -y -qq rpm zstd
+          bash packaging/build_packages.sh "${RUNNER_TEMP}/work"
 
       - name: Inspect the artifact (sanity)
         run: |
           dpkg-deb --info "dist/quota-manager_${{ steps.version.outputs.version }}_all.deb"
           dpkg-deb --contents "dist/quota-manager_${{ steps.version.outputs.version }}_all.deb" | head -40
+          V="${{ steps.version.outputs.version }}"
+          tar -tzf "dist/quota-manager-${V}.tar.gz" | head -8
+          rpm -qpl "dist/quota-manager-${V}-1.noarch.rpm" | head -8
+          tar --zstd -tf "dist/quota-manager-${V}-1-any.pkg.tar.zst" | head -8
+          ls -l dist
 
       # The release description = a short install note + this version's
       # CHANGELOG section (from "## [<ver>]" up to the next top-level "## ["
@@ -108,6 +78,10 @@ jobs:
             printf '```bash\nsudo apt install ./quota-manager_%s_all.deb\n```\n\n' "${VER}"
             printf 'Or, with the apt repository configured (see README):\n'
             printf '```bash\nsudo apt-get update && sudo apt-get install quota-manager\n```\n\n'
+            printf 'Other distros:\n\n'
+            printf '```bash\n# Fedora / RHEL family\nsudo dnf install ./quota-manager-%s-1.noarch.rpm\n\n' "${VER}"
+            printf '# Arch / Manjaro\nsudo pacman -U quota-manager-%s-1-any.pkg.tar.zst\n\n' "${VER}"
+            printf '# Any other systemd distro\ntar xzf quota-manager-%s.tar.gz && cd quota-manager-%s && sudo ./install.sh\n```\n\n' "${VER}" "${VER}"
             printf 'The package configures the network stack, installs the Python\n'
             printf 'dependencies into `/opt/quota-manager/.venv`, wires the\n'
             printf '`quota-gateway` systemd service and starts it. See the README for\n'
@@ -124,5 +98,9 @@ jobs:
       - name: Upload to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/quota-manager_*.deb
+          files: |
+            dist/quota-manager_*.deb
+            dist/quota-manager-*.tar.gz
+            dist/quota-manager-*.rpm
+            dist/quota-manager-*.pkg.tar.zst
           body_path: ${{ steps.release_body.outputs.body_path }}

@@ -1,0 +1,23 @@
+# Arch pacman install hooks for Quota Manager.
+post_install() {
+    bash /opt/quota-manager/scripts/post_install.sh arch || true
+}
+
+post_upgrade() {
+    bash /opt/quota-manager/scripts/post_install.sh arch || true
+}
+
+# pre_upgrade of the NEW package runs before files are replaced: stop the
+# service so the setup script can re-run cleanly afterwards.
+pre_upgrade() {
+    systemctl stop quota-gateway 2>/dev/null || true
+}
+
+pre_remove() {
+    systemctl stop quota-gateway 2>/dev/null || true
+    systemctl disable quota-gateway 2>/dev/null || true
+}
+
+post_remove() {
+    systemctl daemon-reload 2>/dev/null || true
+}

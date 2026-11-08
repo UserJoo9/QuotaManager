@@ -1789,8 +1789,16 @@ QuotaManager/
 │   └── release.yml           # builds the .deb on a version tag -> GitHub Releases
 ├── packaging/DEBIAN/
 │   ├── control.template      # Debian control file (Version rendered from quota/version.py)
-│   ├── postinst              # venv + setup script + start the gateway service
+│   ├── postinst              # thin wrapper -> scripts/post_install.sh deb
 │   └── prerm                 # stop + disable the gateway service on remove/upgrade
+├── packaging/generic/install.sh   # tarball installer for any systemd distro (--no-deps, --uninstall)
+├── packaging/rpm/quota-manager.spec.template   # Fedora/RHEL (noarch; %preun acts only on erase)
+├── packaging/arch/{PKGBUILD,quota-manager.install}   # Arch (CI builds the .pkg.tar.zst with tar --zstd)
+├── packaging/build_packages.sh   # builds deb+tarball+rpm+arch into dist/ (release.yml AND packaging-smoke.yml use it)
+├── packaging/ci/smoke.sh     # installs/upgrades/removes a package inside a distro container
+├── scripts/install_openwrt.sh # OpenWrt installer (apk on 25.12+, opkg before; experimental)
+├── scripts/post_install.sh   # shared post-install for deb/rpm/arch/tarball; writes .install-kind
+├── scripts/distro.sh         # package-manager detection + per-distro package names
 ├── config.yaml               # Linux gateway settings (dnsmasq + nftables)
 ├── run.py                    # gateway wiring: fast core boot (startup_core) + concurrent subsystems + uvicorn
 ├── requirements-linux.txt    # Linux deps (fastapi, uvicorn, aiosqlite, PyYAML + test deps)
@@ -2170,3 +2178,19 @@ Each item below was a real outage on a live gateway; the regression test is name
 - **Revert semantics**: `safe_apply` captures the config that was running *before* persisting the new one (falling back to `firewall_last_good`, then the sanitized new config when it is the very first apply since boot), and `revert_last_good` re-applies it **and persists it**, so a restart never resurrects the reverted rules. A second apply followed by Revert goes back exactly one step, not to the first apply since boot. [`tests/test_firewall.py`]
 - LAN mode: `fw_forward` accepts the local subnets before custom rules, so custom *deny* rules whose source is a local subnet cannot match (the UI says so on the rules card); `sanitize` also refuses client-subnet-wide denies and bans of protected IPs.
 - `reconcile` (every tick) re-applies when `nft list table inet quota_firewall` fails (external `flush ruleset`), and clears a sticky `available=False` after 60 s (not when nft is missing).
+
+## Open when everyone is out of quota (on by default)
+
+`QuotaService.refresh_free_mode()` (run on every block tick, snapshot and dashboard
+build) derives **free mode**: every metered person (not the Gateway, not exempt,
+not "disabled", not admin-cut, owning a device) is over their allowance **and** no
+add-on pack has GB left. While it is on, quota and daily-plan cuts are lifted
+(`user_quota_blocked` returns False; admin cuts and deny-lists stay). It is never
+latched: the moment anyone gets more GB (pack, top-up, bundle) the condition is
+false and the box enforces quotas again.
+
+Usage made while it is on is also written to `free_usage` (the `Database.free_mode`
+flag) and subtracted in `get_period_usage*`, `get_usage_before_and_on` and
+`get_user_usage_on`, so the GB added later is never eaten by it. Reports still show
+the real usage. Switch: setting `free_when_exhausted` (`/api/free-mode`, Quota page);
+the transition is logged as an event.

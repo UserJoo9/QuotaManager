@@ -1,0 +1,24 @@
+# Maintainer: Youssef Alkhodary <youssef.alkhodary@users.noreply.github.com>
+# Local build from the release tarball:
+#   makepkg -si    (with quota-manager-VER.tar.gz next to this file)
+# The release workflow also publishes a ready-made .pkg.tar.zst.
+pkgname=quota-manager
+pkgver=0.0.0
+pkgrel=1
+pkgdesc='Fair-split metered-internet quota gateway'
+arch=('any')
+url='https://github.com/UserJoo9/QuotaManager'
+license=('MIT')
+depends=('python>=3.10' 'python-pip' 'dnsmasq' 'nftables' 'iproute2' 'kmod' 'ppp' 'ca-certificates')
+install=quota-manager.install
+source=("quota-manager-${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+    cd "$srcdir/quota-manager-${pkgver}"
+    install -d "$pkgdir/opt/quota-manager"
+    for item in run.py requirements-linux.txt LICENSE core quota api web scripts bin; do
+        [ -e "$item" ] && cp -a "$item" "$pkgdir/opt/quota-manager/"
+    done
+    chmod 755 "$pkgdir"/opt/quota-manager/scripts/*.sh
+}

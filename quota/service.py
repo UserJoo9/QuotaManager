@@ -58,6 +58,10 @@ class QuotaService:
         #: injectable clock (callable returning datetime) for tests
         self._clock = clock
         self._temporary_kicks: dict[str, float] = {}
+        #: "everyone is out of quota and nobody has an add-on pack" — the box
+        #: opens the internet for all (see refresh_free_mode). Off by default
+        #: until the first refresh.
+        self.free_mode = False
 
     def register_kick_timeout(self, mac: str, duration: float = 5.0) -> None:
         """Hold a kicked MAC in temporary cooldown for ``duration`` seconds."""
@@ -512,8 +516,7 @@ class QuotaService:
             return used_gb >= allowance
         return allowance > 0 and used_gb >= allowance
 
-    @staticmethod
-    def user_quota_blocked(user: _db.User | None, allowance: float,
+    def user_quota_blocked(self, user: _db.User | None, allowance: float,
                            used_gb: float) -> bool:
         """Is the user quota-blocked, honouring the quota-exemption flag?
 
@@ -528,6 +531,8 @@ class QuotaService:
             return True
         if user is not None and user.exempt_quota:
             return False
+        if self.free_mode and not (user is not None and user.protected):
+            return False  # everyone is out of quota: the box opens for all
         return QuotaService.quota_blocked_for(user, allowance, used_gb)
 
     @staticmethod
@@ -578,6 +583,68 @@ class QuotaService:
             used_gb = (u["up"] + u["down"]) / GB
             out[uid] = self.user_quota_blocked(user, allowance, used_gb)
         return out
+
+    # -- free mode: everyone is out of quota ---------------------------------------
+
+    async def free_mode_enabled(self) -> bool:
+        return (await self.db.get_setting("free_when_exhausted", "1")) == "1"
+
+    async def set_free_mode_enabled(self, on: bool) -> None:
+        await self.db.set_setting("free_when_exhausted", "1" if on else "0")
+        await self.refresh_free_mode()
+
+    async def _everyone_exhausted(self) -> bool:
+        """Every metered person is out of quota AND no add-on pack has GB left.
+
+        Only people who could be metered count: not the protected Gateway, not
+        exempt people, not "disabled" (unassigned) devices, not admin-cut people,
+        and only people who own a device. A person with no allowance limit
+        (unmetered) means somebody still has internet, so it is not "everyone".
+        """
+        bundle = await self.db.get_bundle()
+        allowances = bundle.allowances
+        users = await self.db.list_users()
+        devices = await self.db.list_devices()
+        now_ts = self._now().timestamp()
+        for p in await self.db.list_recharges(active_only=True):
+            if p.remaining_gb > 0 and p.expires_at > now_ts:
+                return False
+        owners = {d.user_id for d in devices if d.mac != _db.GATEWAY_MAC}
+        usage = await self.db.get_period_usage_by_user()
+        seen = 0
+        for u in users:
+            if (u.protected or u.exempt_quota or u.quota_mode == _db.QUOTA_DISABLED
+                    or u.block_state == _db.BLOCK_ADMIN or u.id not in owners):
+                continue
+            allowance = allowances.get(u.id)
+            if allowance is None:
+                allowance = (u.fixed_gb or 0.0) if u.quota_mode == _db.QUOTA_FIXED else 0.0
+                allowance += (u.topup_gb or 0.0)
+            raw = usage.get(u.id, {"up": 0, "down": 0})
+            if not self.quota_blocked_for(u, allowance, (raw["up"] + raw["down"]) / GB):
+                return False
+            seen += 1
+        return seen > 0
+
+    async def refresh_free_mode(self) -> bool:
+        """Recompute free mode (derived, never latched) and tell the database so
+        usage made while it is on is kept out of the quota maths.
+
+        It turns on when everyone is exhausted and no pack exists, and turns off
+        by itself the moment someone gets more GB (a pack, a top-up, a bigger
+        bundle): that person is open again, everybody else is blocked again, and
+        nothing used while it was on is deducted from the new GB.
+        """
+        on = await self.free_mode_enabled() and await self._everyone_exhausted()
+        self.free_mode = on
+        self.db.free_mode = on
+        was = (await self.db.get_setting("free_mode_on", "0")) == "1"
+        if on != was:
+            await self.db.set_setting("free_mode_on", "1" if on else "0")
+            await self.db.add_event(
+                "Everyone is out of quota — internet opened for all until new GB is added"
+                if on else "Free mode ended — quotas are enforced again", "info")
+        return on
 
     # -- daily quota (optional) --------------------------------------------------
 
@@ -769,12 +836,14 @@ class QuotaService:
         :meth:`resolve_device_state`, never written to devices. Returns a list
         of persisted changes: ``{device_id, mac, state, changed}``.
         """
+        await self.refresh_free_mode()
         bundle = await self.db.get_bundle()
         allowances = bundle.allowances
         users = {u.id: u for u in await self.db.list_users()}
         devices = await self.db.list_devices()
         user_quota = await self._user_quota_map(allowances)
-        daily_cut = self.daily_blocked_devices(await self.daily_state(), devices)
+        daily_cut = (set() if self.free_mode else
+                     self.daily_blocked_devices(await self.daily_state(), devices))
         changes: list[dict[str, Any]] = []
 
         now_ts = self._now().timestamp()
@@ -818,6 +887,7 @@ class QuotaService:
         a user-level admin cut or user quota-block reaches every one of the
         user's device MACs — run.py's blocked-map push is unchanged.
         """
+        await self.refresh_free_mode()
         devices = await self.db.list_devices()
         users = {u.id: u for u in await self.db.list_users()}
         leases = {l.mac: l.ip for l in await self.db.list_leases()}
@@ -833,7 +903,7 @@ class QuotaService:
             and p.remaining_gb > 0 and p.expires_at > now_ts
         }
         daily = await self.daily_state()
-        daily_cut = self.daily_blocked_devices(daily, devices)
+        daily_cut = set() if self.free_mode else self.daily_blocked_devices(daily, devices)
         out: dict[str, dict[str, Any]] = {}
         for dev in devices:
             user = users.get(dev.user_id)
@@ -1618,6 +1688,7 @@ class QuotaService:
         # Re-evaluate blocks immediately
         block_changes = await self.evaluate_blocks()
 
+        await self.refresh_free_mode()
         # Fetch new state
         new_user_usage_map = await self.db.get_period_usage_by_user()
         new_user_usage = new_user_usage_map.get(user_id, {"up": 0, "down": 0})

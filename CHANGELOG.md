@@ -6,6 +6,21 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## [0.5.4] — 2026-11-08
+
+Added:
+- Fedora (.rpm), Arch / Manjaro (.pkg.tar.zst) and a generic tarball with `install.sh` for any systemd distro, built on every release next to the .deb. The updater installs the right file for how the box was set up (issue #15). Debian behaviour is unchanged.
+- When everyone runs out of quota and nobody has an add-on pack, the internet now opens for all instead of staying cut (the speed is poor anyway, but better than nothing). It is on by default; you can switch it off under Quota > Open when everyone is out.
+- The moment an add-on pack, a top-up or a bigger bundle adds GB, the box closes again for the people who are out. What was used while it was open is not deducted from the new GB.
+- /share and /milestone have an Arabic / English switch (remembered per browser).
+- /share: a Cancel button for uploads in progress (files and folders). A cancelled upload leaves nothing half-written on the box.
+
+Fixed:
+- OpenWrt 25.12+: the install steps used `opkg`, which that release no longer has (it uses `apk`). There is now `scripts/install_openwrt.sh` that detects `apk` or `opkg` and sets everything up (experimental; x86_64/aarch64 recommended).
+- In "Daily plan", the disabled "split the rest over the days" option now says why (it needs a reset day) right next to it.
+- In a person's card, the allowance section no longer repeats the word "Allowance" twice.
+- The update check no longer hides the "What's new" button just after a release, while GitHub still serves the old changelog.
+
 ## [0.5.3] — 2026-11-06
 
 Added:

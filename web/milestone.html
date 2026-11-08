@@ -7,6 +7,8 @@
 <link rel="stylesheet" href="/css/tokens.css">
 <link rel="stylesheet" href="/assets/pub.css?v=1">
 <script src="/assets/pub-theme.js"></script>
+<script src="/assets/pub-i18n.js"></script>
+<script src="/assets/i18n-milestone.js"></script>
 <style>
   /* Milestone page: a lightweight, public view — no admin session. */
   body { display: flex; align-items: center; justify-content: center; padding: 24px; }
@@ -69,7 +71,7 @@
   <div class="bg-glow"></div>
   <div class="ms-wrap screen">
     <div class="glass card ms-card">
-      <div class="ms-hero">
+      <div class="ms-hero" id="ms-hero">
         <h1 class="logo">Quota<span>Manager</span></h1>
         <p class="subtitle">Your internet allowance this period</p>
       </div>
@@ -106,13 +108,18 @@
 <script disable-devtool-auto src='/assets/detector.js'></script>
 <script>
 (function () {
+  var LOC = function () { return QMI.lang === 'ar' ? 'ar-u-nu-latn' : undefined; };
+  var lastData = null, relang = false;
+  // LRI..PDI keeps "62.00 GB" in one left-to-right run inside Arabic text.
+  var iso = function (x) { return '\u2066' + x + '\u2069'; };
   var fmt = function (gb) {
-    if (gb >= 1000) return (gb / 1024).toFixed(2) + ' TB';
-    return gb.toFixed(2) + ' GB';
+    if (gb >= 1000) return iso((gb / 1024).toFixed(2) + ' TB');
+    return iso(gb.toFixed(2) + ' GB');
   };
   var pendingNotified = [];
 
   function render(data) {
+    lastData = data;
     if (!data || !data.recognized) {
       document.getElementById('ms-loading').classList.add('hidden');
       document.getElementById('ms-unrecognized').classList.remove('hidden');
@@ -126,14 +133,14 @@
     document.getElementById('ms-percent').textContent = pct.toFixed(0) + '%';
     var used = fmt(u.used_gb), allowance = fmt(u.allowance_gb);
     document.getElementById('ms-summary').textContent =
-      'You have used ' + used + ' of your ' + allowance + ' allowance.';
+      QMI.t('You have used {used} of your {allowance} allowance.', {used: used, allowance: allowance});
     var fill = document.getElementById('ms-bar-fill');
     fill.style.width = Math.min(100, pct) + '%';
 
     // milestone pills: 50/75/100
     var box = document.getElementById('ms-milestones');
     box.innerHTML = '';
-    var labels = {50: 'Halfway', 75: 'Almost there', 100: 'Cap reached'};
+    var labels = {50: QMI.t('Halfway'), 75: QMI.t('Almost there'), 100: QMI.t('Cap reached')};
     var ms = u.milestones;
     [50, 75, 100].forEach(function (m) {
       var pill = document.createElement('div');
@@ -144,11 +151,11 @@
         pill.textContent = labels[m] + ' · ' + m + '%';
       } else if (!state.notified) {
         pill.classList.add('warn');
-        pill.textContent = '⚠ ' + labels[m] + ' (' + m + '%) — new';
+        pill.textContent = QMI.t('⚠ {label} ({m}%) — new', {label: labels[m], m: m});
         pendingNotified.push({user_id: u.id, milestone: m});
       } else {
         pill.classList.add('reached');
-        pill.textContent = '✓ ' + labels[m] + ' (' + m + '%)';
+        pill.textContent = QMI.t('✓ {label} ({m}%)', {label: labels[m], m: m});
       }
       box.appendChild(pill);
     });
@@ -161,7 +168,7 @@
     if (!data.devices.length) {
       var li = document.createElement('li');
       li.className = 'ms-device';
-      li.innerHTML = '<span class="ms-name">No devices on record</span>';
+      li.innerHTML = '<span class="ms-name">' + QMI.t('No devices on record') + '</span>';
       list.appendChild(li);
     }
     data.devices.forEach(function (d) {
@@ -171,13 +178,13 @@
       li.innerHTML =
         '<div><div class="ms-name">' + esc(name) + '</div>' +
         '<div class="ms-mac">' + esc(d.mac) + '</div></div>' +
-        '<div class="ms-bytes"><b>' + fmt(d.device_used_gb) + '</b> total' +
+        '<div class="ms-bytes"><b>' + fmt(d.device_used_gb) + '</b> ' + QMI.t('total') +
         '<br>↑ ' + fmt(d.device_up_gb) + ' · ↓ ' + fmt(d.device_down_gb) + '</div>';
       list.appendChild(li);
     });
 
     // acknowledge pending milestones once
-    if (pendingNotified.length) {
+    if (pendingNotified.length && !relang) {
       ack();
     }
   }
@@ -196,22 +203,22 @@
     if (!q) { box.classList.add('hidden'); return; }
     box.classList.remove('hidden');
     box.innerHTML = '';
-    box.appendChild(mk('h3', "Today's plan"));
+    box.appendChild(mk('h3', QMI.t("Today's plan")));
     if (q.error) { box.appendChild(mk('div', q.error, 'ms-note')); return; }
     var pct = q.cap_gb > 0 ? Math.min(100, q.used_gb / q.cap_gb * 100) : 100;
-    box.appendChild(mk('div', 'Used ' + fmt(q.used_gb) + ' of ' + fmt(q.cap_gb) + ' today', 'ms-note'));
+    box.appendChild(mk('div', QMI.t('Used {a} of {b} today', {a: fmt(q.used_gb), b: fmt(q.cap_gb)}), 'ms-note'));
     var bar = mk('div', null, 'ms-bar'); var fillEl = document.createElement('div');
     fillEl.style.width = pct + '%'; bar.appendChild(fillEl); box.appendChild(bar);
     if (q.blocked) {
       var t = new Date(q.resets_at);
-      box.appendChild(mk('div', 'Daily limit reached. Your internet is back at ' +
-        t.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) + '.', 'ms-note'));
+      box.appendChild(mk('div', QMI.t('Daily limit reached. Your internet is back at {time}.',
+        {time: t.toLocaleTimeString(LOC(), {hour: '2-digit', minute: '2-digit'})}), 'ms-note'));
     }
     var chips = mk('div', null, 'ms-chips');
     (q.schedule || []).slice(1, 8).forEach(function (r) {
       var d = new Date(r.date + 'T00:00:00');
-      chips.appendChild(mk('span', d.toLocaleDateString([], {month: 'short', day: 'numeric'}) +
-        ' · ' + r.cap_gb.toFixed(1) + ' GB', 'ms-chip' + (r.heavy ? ' heavy' : '')));
+      chips.appendChild(mk('span', d.toLocaleDateString(LOC(), {month: 'short', day: 'numeric'}) +
+        ' · ' + iso(r.cap_gb.toFixed(1) + ' GB'), 'ms-chip' + (r.heavy ? ' heavy' : '')));
     });
     box.appendChild(chips);
     if (q.self_edit) renderEdit(box, q);
@@ -221,21 +228,21 @@
     if (!heavyDraft) heavyDraft = JSON.parse(JSON.stringify(q.heavy || {}));
     var form = mk('div', null, 'ms-edit');
     var carry = document.createElement('select');
-    [['next_day', 'Move to the next day'], ['spread', 'Spread over the remaining days']].forEach(function (o) {
+    [['next_day', QMI.t('Move to the next day')], ['spread', QMI.t('Spread over the remaining days')]].forEach(function (o) {
       var op = mk('option', o[1]); op.value = o[0]; if (q.carry === o[0]) op.selected = true; carry.appendChild(op);
     });
     var split = document.createElement('select');
-    [['open', 'Devices share the pool'], ['equal', 'Equal slice per device']].forEach(function (o) {
+    [['open', QMI.t('Devices share the pool')], ['equal', QMI.t('Equal slice per device')]].forEach(function (o) {
       var op = mk('option', o[1]); op.value = o[0]; if (q.split === o[0]) op.selected = true; split.appendChild(op);
     });
-    var l1 = mk('label', 'Unused GB of a day'); l1.appendChild(carry);
-    var l2 = mk('label', 'Between your devices'); l2.appendChild(split);
-    var l3 = mk('label', 'Heavier days');
+    var l1 = mk('label', QMI.t('Unused GB of a day')); l1.appendChild(carry);
+    var l2 = mk('label', QMI.t('Between your devices')); l2.appendChild(split);
+    var l3 = mk('label', QMI.t('Heavier days'));
     var list = mk('div', null, 'ms-chips');
     function paint() {
       list.innerHTML = '';
       Object.keys(heavyDraft).sort().forEach(function (d) {
-        var c = mk('span', d + ' · ' + heavyDraft[d] + ' GB', 'ms-chip heavy');
+        var c = mk('span', iso(d + ' · ' + heavyDraft[d] + ' GB'), 'ms-chip heavy');
         var x = mk('button', '×'); x.type = 'button'; x.style.cssText = 'background:none;border:0;color:inherit;cursor:pointer';
         x.addEventListener('click', function () { delete heavyDraft[d]; paint(); });
         c.appendChild(x); list.appendChild(c);
@@ -246,14 +253,14 @@
     var t = new Date();
     day.min = t.getFullYear() + '-' + String(t.getMonth() + 1).padStart(2, '0') + '-' + String(t.getDate()).padStart(2, '0');
     var gb = document.createElement('input'); gb.type = 'number'; gb.min = '0'; gb.step = 'any'; gb.placeholder = 'GB';
-    var add = mk('button', 'Add', 'btn ghost'); add.type = 'button';
+    var add = mk('button', QMI.t('Add'), 'btn ghost'); add.type = 'button';
     add.addEventListener('click', function () {
       if (day.value && +gb.value > 0) { heavyDraft[day.value] = +gb.value; day.value = ''; gb.value = ''; paint(); }
     });
     var row = mk('div', null, 'row'); row.appendChild(day); row.appendChild(gb); row.appendChild(add);
     l3.appendChild(list); l3.appendChild(row);
     var msg = mk('div', '', 'ms-note');
-    var save = mk('button', 'Save', 'btn'); save.type = 'button';
+    var save = mk('button', QMI.t('Save'), 'btn'); save.type = 'button';
     save.addEventListener('click', function () {
       fetch('/api/milestone/daily-plan', {
         method: 'PUT',
@@ -261,9 +268,9 @@
         body: JSON.stringify({carry: carry.value, split: split.value, heavy: heavyDraft})
       }).then(function (r) { return r.json().then(function (j) { return [r.ok, j]; }); })
         .then(function (res) {
-          msg.textContent = res[0] ? 'Saved - applied now.' : (res[1].detail || 'Could not save.');
+          msg.textContent = res[0] ? QMI.t('Saved - applied now.') : (res[1].detail || QMI.t('Could not save.'));
           if (res[0]) { heavyDraft = null; load(); }
-        }).catch(function () { msg.textContent = 'Could not reach the gateway.'; });
+        }).catch(function () { msg.textContent = QMI.t('Could not reach the gateway.'); });
     });
     [l1, l2, l3, save, msg].forEach(function (e) { form.appendChild(e); });
     box.appendChild(form);
@@ -298,10 +305,12 @@
       .then(render)
       .catch(function () {
         document.getElementById('ms-loading').textContent =
-          'Could not reach the gateway. Try again later.';
+          QMI.t('Could not reach the gateway. Try again later.');
       });
   }
 
+  QMI.mount(document.getElementById('ms-hero'), 'btn ghost');
+  QMI.onChange(function () { if (lastData) { var h = heavyDraft; relang = true; render(lastData); relang = false; heavyDraft = h; } });
   document.getElementById('ms-refresh').addEventListener('click', load);
   load();
 })();

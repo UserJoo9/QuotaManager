@@ -175,26 +175,31 @@ class LocalShareManager:
         dest_file = dest_dir / safe_name
 
         total_bytes = 0
-        with open(dest_file, "wb") as f:
-            if hasattr(stream, "__aiter__"):
-                async for chunk in stream:
-                    if chunk:
+        try:
+            with open(dest_file, "wb") as f:
+                if hasattr(stream, "__aiter__"):
+                    async for chunk in stream:
+                        if chunk:
+                            f.write(chunk)
+                            total_bytes += len(chunk)
+                elif callable(stream):
+                    while True:
+                        chunk = await stream(65536)
+                        if not chunk:
+                            break
                         f.write(chunk)
                         total_bytes += len(chunk)
-            elif callable(stream):
-                while True:
-                    chunk = await stream(65536)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    total_bytes += len(chunk)
-            elif hasattr(stream, "read"):
-                while True:
-                    chunk = stream.read(65536)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    total_bytes += len(chunk)
+                elif hasattr(stream, "read"):
+                    while True:
+                        chunk = stream.read(65536)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        total_bytes += len(chunk)
+        except BaseException:
+            # client cancelled / connection dropped: leave no half-written file behind
+            shutil.rmtree(dest_dir, ignore_errors=True)
+            raise
 
         now = time.time()
         sf = SharedFile(

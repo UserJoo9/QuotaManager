@@ -1,7 +1,8 @@
 #!/bin/sh /etc/rc.common
 # /etc/init.d/quota-manager — OpenWrt procd service script for QuotaManager
 #
-# Install:
+# Easiest: sh scripts/install_openwrt.sh   (does all of this, apk or opkg)
+# Manual install:
 #   cp scripts/quota-manager.openwrt /etc/init.d/quota-manager
 #   chmod +x /etc/init.d/quota-manager
 #   /etc/init.d/quota-manager enable
@@ -13,6 +14,8 @@ STOP=10
 
 PROG="/usr/bin/python3"
 APP_DIR="/opt/QuotaManager"
+# prefer the venv install_openwrt.sh creates (falls back to system python)
+[ -x "$APP_DIR/.venv/bin/python" ] && PROG="$APP_DIR/.venv/bin/python"
 PIDFILE="/var/run/quota-manager.pid"
 
 start_service() {

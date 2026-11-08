@@ -1,0 +1,52 @@
+# Build every package and install it in a real Debian / Ubuntu / Fedora / Arch
+# container BEFORE a release tag is pushed. Run it by hand (Actions > Packaging
+# smoke test > Run workflow) or it runs on any change to packaging/scripts.
+name: Packaging smoke test
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ['packaging/**', 'scripts/**', 'quota/updater.py', '.github/workflows/**']
+  push:
+    branches: [main]
+    paths: ['packaging/**', 'scripts/**', 'quota/updater.py', '.github/workflows/**']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq rpm zstd
+      - name: Build all packages
+        run: bash packaging/build_packages.sh "${RUNNER_TEMP}/work"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: dist/
+          retention-days: 3
+
+  smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: 'debian:12',         kind: deb }
+          - { image: 'ubuntu:24.04',      kind: deb }
+          - { image: 'fedora:latest',     kind: rpm }
+          - { image: 'archlinux:latest',  kind: arch }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - name: Install + upgrade + remove inside ${{ matrix.image }}
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" -v "$PWD/packaging/ci:/ci:ro" \
+            "${{ matrix.image }}" bash /ci/smoke.sh "${{ matrix.kind }}" /dist

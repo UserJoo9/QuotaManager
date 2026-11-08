@@ -6,6 +6,8 @@
   <title>Local Share — Quota Manager</title>
   <link rel="stylesheet" href="/css/tokens.css">
   <link rel="stylesheet" href="/assets/share.css?v=1">
+  <script src="/assets/pub-i18n.js"></script>
+  <script src="/assets/i18n-share.js"></script>
   <script>
     /* Follow the dashboard's per-browser look (theme + accent); same origin => same localStorage. */
     (function () {
@@ -54,7 +56,7 @@
           </div>
         </div>
       </div>
-      <div class="header-actions">
+      <div class="header-actions" id="header-actions">
         <button class="btn-icon" id="theme-btn" type="button" title="Light / Dark" aria-label="Light / Dark">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path></svg>
         </button>
@@ -101,6 +103,7 @@
         <div class="upload-prog-header">
           <span id="upload-filename">Uploading...</span>
           <span id="upload-stats">0%</span>
+          <button type="button" class="btn-batch del" id="upload-cancel">Cancel</button>
         </div>
         <div class="prog-bar-wrap">
           <div class="prog-bar-fill" id="upload-bar-fill"></div>
@@ -219,11 +222,11 @@
   <div class="modal-backdrop hidden" id="live-transfer-modal">
     <div class="modal-box">
       <h3 style="margin: 0 0 4px; font-size: 1.05rem;" id="live-modal-title">Direct Transfer...</h3>
-      <p style="font-size: 0.76rem; color: var(--accent); margin: 0 0 10px;">● Direct Wi-Fi Transfer (نقل مباشر فائق السرعة)</p>
+      <p style="font-size: 0.76rem; color: var(--accent); margin: 0 0 10px;">● Direct Wi-Fi Transfer</p>
 
       <div id="live-modal-screen-warning" style="font-size: 0.72rem; color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 25%, transparent); border-radius: 6px; padding: 6px 10px; margin-bottom: 12px; display: flex; align-items: center; gap: 6px; text-align: left;">
         <span>💡</span>
-        <span>Keep screen on & browser open during transfer (يرجى إبقاء الشاشة مفتوحة)</span>
+        <span>Keep screen on &amp; browser open during transfer</span>
       </div>
 
       <div style="font-size: 0.84rem; font-weight: 600; color: var(--text); word-break: break-all; margin-bottom: 6px;" id="live-modal-filename">filename</div>
@@ -293,27 +296,27 @@
     }
 
     function formatBytes(bytes) {
-      if (!bytes || bytes === 0) return "0 B";
+      if (!bytes || bytes === 0) return "\u20660 B\u2069";
       const k = 1024;
       const sizes = ["B", "KB", "MB", "GB", "TB"];
       const i = Math.floor(Math.log(bytes) / Math.log(k));
-      return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+      return "\u2066" + parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i] + "\u2069";
     }
 
     function formatTimeAgo(epochSec) {
       const diff = Math.max(0, Math.floor(Date.now() / 1000 - epochSec));
-      if (diff < 60) return "just now";
-      if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-      if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-      return `${Math.floor(diff / 86400)}d ago`;
+      if (diff < 60) return QMI.t("just now");
+      if (diff < 3600) return QMI.t("{n}m ago", {n: Math.floor(diff / 60)});
+      if (diff < 86400) return QMI.t("{n}h ago", {n: Math.floor(diff / 3600)});
+      return QMI.t("{n}d ago", {n: Math.floor(diff / 86400)});
     }
 
     function formatExpiry(epochSec) {
       const left = Math.max(0, Math.floor(epochSec - Date.now() / 1000));
-      if (left <= 0) return "expired";
-      if (left < 60) return `${left}s left`;
-      if (left < 3600) return `${Math.floor(left / 60)}m left`;
-      return `${Math.floor(left / 3600)}h ${Math.floor((left % 3600) / 60)}m left`;
+      if (left <= 0) return QMI.t("expired");
+      if (left < 60) return QMI.t("{n}s left", {n: left});
+      if (left < 3600) return QMI.t("{n}m left", {n: Math.floor(left / 60)});
+      return QMI.t("{h}h {m}m left", {h: Math.floor(left / 3600), m: Math.floor((left % 3600) / 60)});
     }
 
     function isZipOrFolder(filename) {
@@ -361,7 +364,7 @@
       // Render Files
       const filesList = $("files-list");
       const files = data.files || [];
-      $("files-count").textContent = `${files.length} file${files.length === 1 ? "" : "s"} (${formatBytes(data.total_size || 0)})`;
+      $("files-count").textContent = QMI.t("{count} file(s) ({size})", {count: files.length, size: formatBytes(data.total_size || 0)});
 
       // Clean selections of deleted files
       const existingIds = new Set(files.map((f) => f.id));
@@ -373,10 +376,10 @@
       const selectAllRow = $("select-all-row");
       if (files.length === 0) {
         selectAllRow.classList.add("hidden");
-        filesList.innerHTML = `<div class="empty-state">No files shared yet. Drop any files or folders above!</div>`;
+        filesList.innerHTML = `<div class="empty-state">${QMI.t("No files shared yet. Drop any files or folders above!")}</div>`;
       } else {
         selectAllRow.classList.remove("hidden");
-        $("select-all-hint").textContent = `${selectedFileIds.size} of ${files.length}`;
+        $("select-all-hint").textContent = QMI.t("{a} of {b}", {a: selectedFileIds.size, b: files.length});
         $("select-all-cb").checked = files.length > 0 && selectedFileIds.size === files.length;
 
         filesList.innerHTML = files.map((f) => {
@@ -424,13 +427,13 @@
       const textsList = $("texts-list");
       const texts = data.texts || [];
       if (texts.length === 0) {
-        textsList.innerHTML = `<div class="empty-state" style="padding: 12px 0;">No text or notes shared yet.</div>`;
+        textsList.innerHTML = `<div class="empty-state" style="padding: 12px 0;">${QMI.t("No text or notes shared yet.")}</div>`;
       } else {
         textsList.innerHTML = texts.map((t) => `
           <div class="text-item">
             <div style="flex: 1; min-width: 0;">
               <div class="text-content">${renderTextContent(t.text)}</div>
-              <div class="text-meta">From ${t.sender_ip} • ${formatTimeAgo(t.created_at)}</div>
+              <div class="text-meta">${QMI.t("From {ip}", {ip: t.sender_ip})} • ${formatTimeAgo(t.created_at)}</div>
             </div>
             <div style="display: flex; gap: 6px;">
               <button class="btn-action" onclick="copyTextDirect(this, ${JSON.stringify(t.text)})" title="Copy Text">
@@ -444,11 +447,20 @@
           </div>
         `).join("");
       }
+      QMI.apply(filesList); QMI.apply(textsList);
     }
 
     function escapeHtml(str) {
       return (str || "").replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[m]);
     }
+
+    QMI.mount(document.getElementById("header-actions"), "btn-icon");
+    QMI.onChange(() => {
+      if (currentShareData) renderShareData(currentShareData);
+      renderLivePeers();
+      updateBatchToolbar();
+      if (!$("multi-folder-modal").classList.contains("hidden")) renderMultiFolderModal();
+    });
 
     function renderTextContent(text) {
       const escaped = escapeHtml(text);
@@ -462,13 +474,13 @@
       const count = selectedFileIds.size;
       if (count > 0) {
         toolbar.classList.remove("hidden");
-        $("batch-count-text").textContent = `${count} selected`;
+        $("batch-count-text").textContent = QMI.t("{count} selected", {count: count});
       } else {
         toolbar.classList.add("hidden");
       }
       const files = (currentShareData && currentShareData.files) || [];
       $("select-all-cb").checked = files.length > 0 && count === files.length;
-      $("select-all-hint").textContent = `${count} of ${files.length}`;
+      $("select-all-hint").textContent = QMI.t("{a} of {b}", {a: count, b: files.length});
     }
 
     $("files-list").addEventListener("change", (e) => {
@@ -517,7 +529,7 @@
     $("btn-batch-delete").addEventListener("click", async () => {
       const count = selectedFileIds.size;
       if (count === 0) return;
-      if (!confirm(`Delete ${count} selected file(s) from the router?`)) return;
+      if (!confirm(QMI.t("Delete {count} selected file(s) from the router?", {count: count}))) return;
       try {
         const res = await fetch("/api/share/delete-batch", {
           method: "POST",
@@ -525,15 +537,28 @@
           body: JSON.stringify({ ids: Array.from(selectedFileIds) })
         });
         if (res.ok) {
-          showToast(`Deleted ${count} file(s)`);
+          showToast(QMI.t("Deleted {count} file(s)", {count: count}));
           selectedFileIds.clear();
           fetchShareData();
         } else {
-          showToast("Failed to delete selected files");
+          showToast(QMI.t("Failed to delete selected files"));
         }
       } catch (err) {
-        showToast("Error deleting files");
+        showToast(QMI.t("Error deleting files"));
       }
+    });
+
+    // The upload in flight (regular files or a folder bundle) and its Cancel button.
+    let activeUpload = null;
+    $("upload-cancel").addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (!activeUpload) return;
+      activeUpload.cancelled = true;
+      if (activeUpload.xhr) { try { activeUpload.xhr.abort(); } catch (err) { /* already done */ } }
+      activeUpload = null;
+      $("upload-progress-card").classList.add("hidden");
+      showToast(QMI.t("Upload cancelled"));
+      fetchShareData();
     });
 
     // UPLOAD REGULAR FILES
@@ -546,21 +571,23 @@
 
       progressCard.classList.remove("hidden");
       let currentFileIndex = 0;
+      const job = activeUpload = { cancelled: false, xhr: null };
 
       function uploadNext() {
         if (currentFileIndex >= files.length) {
           setTimeout(() => progressCard.classList.add("hidden"), 1200);
-          showToast(`Successfully shared ${files.length} file(s)!`);
+          showToast(QMI.t("Successfully shared {count} file(s)!", {count: files.length}));
           fetchShareData();
           return;
         }
 
         const file = files[currentFileIndex];
-        nameEl.textContent = `Uploading (${currentFileIndex + 1}/${files.length}): ${file.name}`;
+        nameEl.textContent = QMI.t("Uploading ({i}/{n}): {name}", {i: currentFileIndex + 1, n: files.length, name: file.name});
         barEl.style.width = "0%";
         statsEl.textContent = "0%";
 
         const xhr = new XMLHttpRequest();
+        job.xhr = xhr;
         let startTime = Date.now();
 
         xhr.upload.onprogress = (e) => {
@@ -574,17 +601,19 @@
         };
 
         xhr.onload = () => {
+          if (job.cancelled) return;
           if (xhr.status >= 200 && xhr.status < 300) {
             currentFileIndex++;
             uploadNext();
           } else {
-            showToast(`Upload failed: ${xhr.statusText || xhr.status}`);
+            showToast(QMI.t("Upload failed: {err}", {err: xhr.statusText || xhr.status}));
             progressCard.classList.add("hidden");
           }
         };
 
         xhr.onerror = () => {
-          showToast("Network error during upload");
+          if (job.cancelled) return;
+          showToast(QMI.t("Network error during upload"));
           progressCard.classList.add("hidden");
         };
 
@@ -607,6 +636,7 @@
       const barEl = $("upload-bar-fill");
 
       progressCard.classList.remove("hidden");
+      const job = activeUpload = { cancelled: false, xhr: null };
 
       // Extract top folder name(s)
       const folderSet = new Set();
@@ -621,9 +651,9 @@
       else if (folderNames.length === 2) folderName = `${folderNames[0]}_and_${folderNames[1]}`;
       else if (folderNames.length > 2) folderName = `${folderNames[0]}_${folderNames[1]}_and_${folderNames.length - 2}_more`;
 
-      nameEl.textContent = `Creating folder bundle: "${folderName}.zip"...`;
+      nameEl.textContent = QMI.t("Creating folder bundle: \"{name}.zip\"...", {name: folderName});
       barEl.style.width = "5%";
-      statsEl.textContent = "Initializing...";
+      statsEl.textContent = QMI.t("Initializing...");
 
       try {
         const initRes = await fetch("/api/share/folder/init", {
@@ -631,17 +661,19 @@
           headers: { "Content-Type": "application/json", "X-QM-CSRF": "1" },
           body: JSON.stringify({ folder_name: folderName, ttl: 7200 })
         });
-        if (!initRes.ok) throw new Error("Could not initialize folder archive");
+        if (!initRes.ok) throw new Error(QMI.t("Could not initialize folder archive"));
         const { folder_id } = await initRes.json();
 
         // Stream each file into the folder ZIP
         for (let i = 0; i < files.length; i++) {
           const file = files[i];
           const relPath = file.webkitRelativePath || file.name;
-          nameEl.textContent = `Archiving folder "${folderName}" (${i + 1}/${files.length}): ${file.name}`;
+          nameEl.textContent = QMI.t("Archiving folder \"{folder}\" ({i}/{n}): {name}", {folder: folderName, i: i + 1, n: files.length, name: file.name});
 
           await new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
+            job.xhr = xhr;
+            xhr.onabort = () => reject(new Error("cancelled"));
             let startTime = Date.now();
             xhr.upload.onprogress = (e) => {
               if (e.lengthComputable) {
@@ -656,7 +688,7 @@
               if (xhr.status >= 200 && xhr.status < 300) resolve();
               else reject(new Error(xhr.statusText));
             };
-            xhr.onerror = () => reject(new Error("Network error during file archive"));
+            xhr.onerror = () => reject(new Error(QMI.t("Network error during file archive")));
             xhr.open("POST", `/api/share/folder/file?folder_id=${encodeURIComponent(folder_id)}&path=${encodeURIComponent(relPath)}`);
             xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
             xhr.setRequestHeader("X-QM-CSRF", "1");
@@ -665,22 +697,23 @@
         }
 
         // Finalize
-        nameEl.textContent = `Finalizing "${folderName}.zip"...`;
+        nameEl.textContent = QMI.t("Finalizing \"{name}.zip\"...", {name: folderName});
         const finRes = await fetch("/api/share/folder/finalize", {
           method: "POST",
           headers: { "Content-Type": "application/json", "X-QM-CSRF": "1" },
           body: JSON.stringify({ folder_id: folder_id })
         });
-        if (!finRes.ok) throw new Error("Could not finalize folder archive");
+        if (!finRes.ok) throw new Error(QMI.t("Could not finalize folder archive"));
 
         barEl.style.width = "100%";
-        statsEl.textContent = "100% Complete";
+        statsEl.textContent = QMI.t("100% Complete");
         setTimeout(() => progressCard.classList.add("hidden"), 1200);
-        showToast(`Folder "${folderName}" uploaded successfully as a single package!`);
+        showToast(QMI.t("Folder \"{name}\" uploaded successfully as a single package!", {name: folderName}));
         fetchShareData();
 
       } catch (err) {
-        showToast(`Folder upload error: ${err.message}`);
+        if (job.cancelled) return;
+        showToast(QMI.t("Folder upload error: {err}", {err: err.message}));
         progressCard.classList.add("hidden");
       }
     }
@@ -689,36 +722,36 @@
     window.copyFileLink = function(fileId) {
       const link = `${window.location.origin}/api/share/download/${fileId}`;
       navigator.clipboard.writeText(link).then(() => {
-        showToast("Download link copied!");
+        showToast(QMI.t("Download link copied!"));
       }).catch(() => {
-        prompt("Copy link:", link);
+        prompt(QMI.t("Copy link:"), link);
       });
     };
 
     window.copyTextDirect = function(btn, text) {
       navigator.clipboard.writeText(text).then(() => {
-        showToast("Copied to clipboard!");
+        showToast(QMI.t("Copied to clipboard!"));
       }).catch(() => {
-        prompt("Copy text:", text);
+        prompt(QMI.t("Copy text:"), text);
       });
     };
 
     window.deleteFile = async function(fileId) {
-      if (!confirm("Delete this shared file from the router?")) return;
+      if (!confirm(QMI.t("Delete this shared file from the router?"))) return;
       try {
         const res = await fetch(`/api/share/files/${fileId}`, {
           method: "DELETE",
           headers: { "X-QM-CSRF": "1" }
         });
         if (res.ok) {
-          showToast("File deleted");
+          showToast(QMI.t("File deleted"));
           selectedFileIds.delete(fileId);
           fetchShareData();
         } else {
-          showToast("Could not delete file");
+          showToast(QMI.t("Could not delete file"));
         }
       } catch (err) {
-        showToast("Error deleting file");
+        showToast(QMI.t("Error deleting file"));
       }
     };
 
@@ -729,11 +762,11 @@
           headers: { "X-QM-CSRF": "1" }
         });
         if (res.ok) {
-          showToast("Note deleted");
+          showToast(QMI.t("Note deleted"));
           fetchShareData();
         }
       } catch (err) {
-        showToast("Error deleting note");
+        showToast(QMI.t("Error deleting note"));
       }
     };
 
@@ -822,16 +855,16 @@
       }
 
       if (multiFolderStaging.mode === "direct") {
-        titleEl.textContent = "Send Folders Directly";
-        hintEl.textContent = `Bundle and send to "${multiFolderStaging.targetPeerName || "device"}" without storing on router:`;
-        badgeEl.textContent = `To: ${multiFolderStaging.targetPeerName || "Device"}`;
+        titleEl.textContent = QMI.t("Send Folders Directly");
+        hintEl.textContent = QMI.t("Bundle and send to \"{name}\" without storing on router:", {name: multiFolderStaging.targetPeerName || QMI.t("device")});
+        badgeEl.textContent = QMI.t("To: {name}", {name: multiFolderStaging.targetPeerName || QMI.t("device")});
         badgeEl.style.display = "inline-block";
-        confirmBtn.textContent = `Send Direct ⚡`;
+        confirmBtn.textContent = QMI.t("Send Direct ⚡");
       } else {
-        titleEl.textContent = "Upload Folders Bundle";
-        hintEl.textContent = "Bundle multiple folders and upload them to Local Share together:";
+        titleEl.textContent = QMI.t("Upload Folders Bundle");
+        hintEl.textContent = QMI.t("Bundle multiple folders and upload them to Local Share together:");
         badgeEl.style.display = "none";
-        confirmBtn.textContent = `Upload All 🚀`;
+        confirmBtn.textContent = QMI.t("Upload All 🚀");
       }
 
       let totalFiles = 0;
@@ -855,7 +888,8 @@
         `;
       }).join("");
 
-      countEl.textContent = `${multiFolderStaging.folders.length} folder(s), ${totalFiles} file(s)`;
+      QMI.apply(listEl);
+      countEl.textContent = QMI.t("{a} folder(s), {b} file(s)", {a: multiFolderStaging.folders.length, b: totalFiles});
       sizeEl.textContent = formatBytes(totalBytes);
       modal.classList.remove("hidden");
     }
@@ -893,7 +927,7 @@
       if (isDirect && targetId) {
         const totalBytes = allFiles.reduce((acc, f) => acc + f.size, 0);
         if (totalBytes > 50 * 1024 * 1024) {
-          showToast("حجم المجلدات يتجاوز 50 ميجا! يرجى استخدام الرفع العادي للملفات الكبيرة. / Direct Transfer limit is 50 MB.");
+          showToast(QMI.t("Direct Transfer limit is 50 MB. Use standard upload for larger folders."));
           return;
         }
         initiateSendDirect(targetId, allFiles, targetIp);
@@ -1032,13 +1066,13 @@
         });
         if (res.ok) {
           input.value = "";
-          showToast("Shared to all devices!");
+          showToast(QMI.t("Shared to all devices!"));
           fetchShareData();
         } else {
-          showToast("Failed to share text");
+          showToast(QMI.t("Failed to share text"));
         }
       } catch (err) {
-        showToast("Network error");
+        showToast(QMI.t("Network error"));
       }
     });
 
@@ -1141,7 +1175,7 @@
       clearTransferAcceptTimeout();
       acceptTimeoutTimer = setTimeout(() => {
         if (activeTransfer && activeTransfer.id === transferId && activeTransfer.role === "sender") {
-          finishLiveTransfer("Transfer timed out: Receiver did not respond in time.");
+          finishLiveTransfer(QMI.t("Transfer timed out: Receiver did not respond in time."));
           if (liveWs && liveWs.readyState === WebSocket.OPEN) {
             liveWs.send(JSON.stringify({
               type: "transfer-cancel",
@@ -1201,7 +1235,7 @@
       liveWs.onclose = () => {
         clearTransferAcceptTimeout();
         if (activeTransfer && activeTransfer.role === "sender" && !activeTransfer.cancelled) {
-          finishLiveTransfer("Live connection interrupted. Reconnecting...");
+          finishLiveTransfer(QMI.t("Live connection interrupted. Reconnecting..."));
         }
         setTimeout(initLiveShare, 2000);
       };
@@ -1264,7 +1298,7 @@
         try {
           if (navigator.vibrate) navigator.vibrate([150, 80, 150]);
         } catch (e) {}
-        $("incoming-sender-text").textContent = `"${msg.sender_name}" (${msg.sender_ip}) wants to send:`;
+        $("incoming-sender-text").textContent = QMI.t("\"{name}\" ({ip}) wants to send:", {name: msg.sender_name, ip: msg.sender_ip});
         $("incoming-file-name").textContent = msg.file_name;
         $("incoming-file-size").textContent = formatBytes(msg.file_size);
         $("live-incoming-modal").classList.remove("hidden");
@@ -1274,7 +1308,7 @@
           if (msg.accepted) {
             startLiveSenderStream();
           } else {
-            finishLiveTransfer("Transfer declined by receiver");
+            finishLiveTransfer(QMI.t("Transfer declined by receiver"));
           }
         }
       } else if (msg.type === "transfer-progress") {
@@ -1284,7 +1318,7 @@
         }
       } else if (msg.type === "transfer-error") {
         clearTransferAcceptTimeout();
-        finishLiveTransfer(msg.message || "Target device is offline or unavailable.");
+        finishLiveTransfer(msg.message || QMI.t("Target device is offline or unavailable."));
       } else if (msg.type === "transfer-done") {
         if (activeTransfer && activeTransfer.id === msg.transfer_id && activeTransfer.role === "receiver") {
           finishLiveReceiver();
@@ -1292,7 +1326,7 @@
       } else if (msg.type === "transfer-cancel") {
         if (activeTransfer && activeTransfer.id === msg.transfer_id) {
           clearTransferAcceptTimeout();
-          finishLiveTransfer("Transfer cancelled by other device");
+          finishLiveTransfer(QMI.t("Transfer cancelled by other device"));
         }
       }
     }
@@ -1301,7 +1335,7 @@
       const container = $("live-peers-list");
       const countEl = $("live-peers-count");
       if (!container) return;
-      if (countEl) countEl.textContent = `${livePeers.length} online`;
+      if (countEl) countEl.textContent = QMI.t("{count} online", {count: livePeers.length});
 
       if (livePeers.length === 0) {
         container.innerHTML = `
@@ -1311,6 +1345,7 @@
             <div style="font-size: 0.73rem; color: var(--text-3); margin-top: 2px;">Open Local Share on your other phone or PC to transfer directly over Wi-Fi.</div>
           </div>
         `;
+        QMI.apply(container);
         return;
       }
 
@@ -1332,6 +1367,7 @@
           </div>
         `;
       }).join("");
+      QMI.apply(container);
     }
 
     function getDeviceIcon(name) {
@@ -1356,7 +1392,7 @@
       const totalSize = files.reduce((acc, f) => acc + f.size, 0);
       const MAX_LIVE_DIRECT_BYTES = 50 * 1024 * 1024; // 50 MB
       if (totalSize > MAX_LIVE_DIRECT_BYTES) {
-        showToast("حجم الملفات يتجاوز 50 ميجا! يرجى استخدام الرفع العادي للملفات الكبيرة. / Direct Transfer limit is 50 MB. Use standard upload for larger files.");
+        showToast(QMI.t("Direct Transfer limit is 50 MB. Use standard upload for larger files."));
         return;
       }
 
@@ -1412,7 +1448,7 @@
         cancelled: false,
       };
 
-      setLiveModalState("Waiting for receiver to accept...", sendName, totalSize);
+      setLiveModalState(QMI.t("Waiting for receiver to accept..."), sendName, totalSize);
       $("live-transfer-modal").classList.remove("hidden");
 
       startTransferAcceptTimeout(transferId);
@@ -1438,7 +1474,7 @@
         }));
       } else {
         clearTransferAcceptTimeout();
-        finishLiveTransfer("Live connection not ready. Reconnecting...");
+        finishLiveTransfer(QMI.t("Live connection not ready. Reconnecting..."));
       }
     }
 
@@ -1459,7 +1495,7 @@
         headerBuf.set(new TextEncoder().encode(transferId).subarray(0, 16));
       }
 
-      setLiveModalState("Transferring directly over Wi-Fi...", activeTransfer.name, activeTransfer.size);
+      setLiveModalState(QMI.t("Transferring directly over Wi-Fi..."), activeTransfer.name, activeTransfer.size);
 
       async function sendLiveChunk(buf) {
         if (!activeTransfer || activeTransfer.id !== transferId || activeTransfer.cancelled) return false;
@@ -1606,10 +1642,10 @@
           }));
         }
         updateLiveProgressThrottled(activeTransfer.size, activeTransfer.size, activeTransfer.startTime, true);
-        $("live-modal-title").textContent = "Transfer Complete! 🎉";
+        $("live-modal-title").textContent = QMI.t("Transfer Complete! 🎉");
         $("live-modal-bar").style.background = "var(--ok)";
         await new Promise(r => setTimeout(r, 600));
-        finishLiveTransfer(`File "${activeTransfer.name}" sent directly!`);
+        finishLiveTransfer(QMI.t("File \"{name}\" sent directly!", {name: activeTransfer.name}));
       }
     }
 
@@ -1642,31 +1678,31 @@
       if (activeTransfer.useHttpStream) {
         updateLiveProgressThrottled(activeTransfer.size, activeTransfer.size, activeTransfer.startTime, true);
         try { if (navigator.vibrate) navigator.vibrate([200, 100, 200]); } catch (e) {}
-        $("live-modal-title").textContent = "Transfer Complete! 🎉";
+        $("live-modal-title").textContent = QMI.t("Transfer Complete! 🎉");
         const warnEl = $("live-modal-screen-warning");
         if (warnEl) warnEl.style.display = "none";
         $("live-modal-bar").style.width = "100%";
         $("live-modal-bar").style.background = "var(--ok)";
         $("live-modal-stats").textContent = `100% (${formatBytes(activeTransfer.size)})`;
-        $("live-modal-speed").textContent = "Saved to Downloads ⚡";
+        $("live-modal-speed").textContent = QMI.t("Saved to Downloads ⚡");
         const cancelBtn = $("btn-cancel-transfer");
         const saveBtn = $("btn-live-save-download");
         const doneBtn = $("btn-live-close-done");
         if (cancelBtn) cancelBtn.classList.add("hidden");
         if (saveBtn) saveBtn.classList.add("hidden");
         if (doneBtn) doneBtn.classList.remove("hidden");
-        showToast(`File "${activeTransfer.name}" saved directly to your Downloads!`);
+        showToast(QMI.t("File \"{name}\" saved directly to your Downloads!", {name: activeTransfer.name}));
         return;
       }
       if (!activeTransfer.chunks || activeTransfer.chunks.length === 0) {
-        finishLiveTransfer("Transfer finished but received 0 bytes.");
+        finishLiveTransfer(QMI.t("Transfer finished but received 0 bytes."));
         return;
       }
       updateLiveProgressThrottled(activeTransfer.currentBytes, activeTransfer.size, activeTransfer.startTime, true);
       const mimeType = activeTransfer.type || "application/octet-stream";
       const blob = new Blob(activeTransfer.chunks, { type: mimeType });
       if (blob.size === 0) {
-        finishLiveTransfer("Received empty file (0 bytes).");
+        finishLiveTransfer(QMI.t("Received empty file (0 bytes)."));
         return;
       }
 
@@ -1692,13 +1728,13 @@
       requestScreenWakeLock();
       clearTransferAcceptTimeout();
 
-      $("live-modal-title").textContent = "Transfer Complete! 🎉";
+      $("live-modal-title").textContent = QMI.t("Transfer Complete! 🎉");
       const warnEl = $("live-modal-screen-warning");
       if (warnEl) warnEl.style.display = "none";
       $("live-modal-bar").style.width = "100%";
       $("live-modal-bar").style.background = "var(--ok)";
       $("live-modal-stats").textContent = `100% (${formatBytes(blob.size)})`;
-      $("live-modal-speed").textContent = "Done ⚡";
+      $("live-modal-speed").textContent = QMI.t("Done ⚡");
 
       activeDownloadUrl = downloadUrl;
       activeDownloadName = fileName;
@@ -1710,13 +1746,13 @@
       if (cancelBtn) cancelBtn.classList.add("hidden");
       if (saveBtn) {
         saveBtn.classList.remove("hidden");
-        saveBtn.textContent = `💾 Save / Download (${formatBytes(blob.size)})`;
+        saveBtn.textContent = QMI.t("💾 Save / Download ({size})", {size: formatBytes(blob.size)});
       }
       if (doneBtn) {
         doneBtn.classList.remove("hidden");
       }
 
-      showToast(`Received "${fileName}" (${formatBytes(blob.size)})!`);
+      showToast(QMI.t("Received \"{name}\" ({size})!", {name: fileName, size: formatBytes(blob.size)}));
     }
 
     function setLiveModalState(title, filename, size, isReceiver = false) {
@@ -1730,9 +1766,9 @@
       if (warnEl) {
         warnEl.style.display = "flex";
         if (isReceiver) {
-          warnEl.innerHTML = `<span>💡</span><div><b>تنبيه للمستلم:</b> إذا ظهر شريط <b>Save...</b> أو <b>تنزيل</b> أسفل شاشة المتصفح، اضغط عليه فوراً لمتابعة الحفظ. مع إبقاء الشاشة مفتوحة.</div>`;
+          warnEl.innerHTML = `<span>💡</span><div><b>${QMI.t("Note to receiver:")}</b> ${QMI.t("If a Save... or Download bar appears at the bottom of the browser, tap it right away to finish saving. Keep the screen on.")}</div>`;
         } else {
-          warnEl.innerHTML = `<span>💡</span><span>Keep screen on & browser open during transfer (يرجى إبقاء الشاشة مفتوحة وعدم إغلاق المتصفح)</span>`;
+          warnEl.innerHTML = `<span>💡</span><span>${QMI.t("Keep screen on & browser open during transfer")}</span>`;
         }
       }
       const cancelBtn = $("btn-cancel-transfer");
@@ -1889,7 +1925,7 @@
         useHttpStream: true,
       };
 
-      setLiveModalState(`Receiving from "${req.sender_name}"...`, req.file_name, req.file_size, true);
+      setLiveModalState(QMI.t("Receiving from \"{name}\"...", {name: req.sender_name}), req.file_name, req.file_size, true);
       $("live-transfer-modal").classList.remove("hidden");
 
       // Trigger native browser streaming download directly to storage (0 JS heap RAM!)
@@ -1926,7 +1962,7 @@
         accepted: false
       }));
       pendingIncomingRequest = null;
-      showToast("Transfer declined");
+      showToast(QMI.t("Transfer declined"));
     });
 
     $("btn-cancel-transfer").addEventListener("click", () => {
@@ -1940,7 +1976,7 @@
           target_ip: activeTransfer.targetIp
         }));
       }
-      finishLiveTransfer("Transfer cancelled");
+      finishLiveTransfer(QMI.t("Transfer cancelled"));
     });
 
     const saveLiveBtn = $("btn-live-save-download");
@@ -1953,7 +1989,7 @@
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
-        showToast(`Saving ${activeDownloadName}...`);
+        showToast(QMI.t("Saving {name}...", {name: activeDownloadName}));
       });
     }
 

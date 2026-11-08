@@ -330,6 +330,17 @@ CREATE TABLE IF NOT EXISTS dns_history (
 );
 CREATE INDEX IF NOT EXISTS idx_dns_history_bucket ON dns_history(bucket_minute);
 
+-- Usage that happened while the "everyone is out of quota" free mode was on.
+-- It is real usage (reports show it) but is NOT counted against allowances, so a
+-- pack added afterwards is never eaten by it. See QuotaService.refresh_free_mode.
+CREATE TABLE IF NOT EXISTS free_usage (
+    device_id  INTEGER NOT NULL,
+    date       TEXT NOT NULL,
+    up_bytes   INTEGER NOT NULL DEFAULT 0,
+    down_bytes INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (device_id, date)
+);
+
 -- Daily quota: the cap of each person's day, computed once when the day starts
 -- (or when the plan/allowance changes) and then frozen. See quota/daily_plan.py.
 CREATE TABLE IF NOT EXISTS daily_caps (
@@ -499,6 +510,9 @@ class Database:
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
         self._conn: aiosqlite.Connection | None = None
+        #: set by QuotaService while free mode is on: new usage is also recorded
+        #: in free_usage so it can be excluded from the quota maths.
+        self.free_mode = False
 
     async def connect(self) -> None:
         if self._conn is not None:
@@ -934,6 +948,8 @@ class Database:
         """
         await self.conn.execute(
             "DELETE FROM usage_daily WHERE date >= ?", (since_date,))
+        await self.conn.execute(
+            "DELETE FROM free_usage WHERE date >= ?", (since_date,))
         await self.conn.commit()
 
     # -- users --------------------------------------------------------------
@@ -1016,6 +1032,8 @@ class Database:
                 await self.add_mac_list("deny", [r["mac"]])
             await self.conn.execute(
                 "DELETE FROM usage_daily WHERE device_id=?", (r["id"],))
+            await self.conn.execute(
+                "DELETE FROM free_usage WHERE device_id=?", (r["id"],))
             await self.conn.execute(
                 "DELETE FROM lan_usage_daily WHERE device_id=?", (r["id"],))
             await self.conn.execute("DELETE FROM devices WHERE id=?", (r["id"],))
@@ -1416,7 +1434,15 @@ class Database:
                  down_bytes = down_bytes + excluded.down_bytes""",
             (device_id, date, up_bytes, down_bytes),
         )
+        if self.free_mode:
+            await self.conn.execute(self._FREE_UPSERT, (device_id, date, up_bytes, down_bytes))
         await self.conn.commit()
+
+    _FREE_UPSERT = """INSERT INTO free_usage (device_id, date, up_bytes, down_bytes)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(device_id, date) DO UPDATE SET
+                 up_bytes = up_bytes + excluded.up_bytes,
+                 down_bytes = down_bytes + excluded.down_bytes"""
 
     async def add_usage_batch(self, records: list[tuple[int, str, int, int]]) -> None:
         """Insert or update usage records for multiple devices in a single batch transaction."""
@@ -1430,6 +1456,8 @@ class Database:
                  down_bytes = down_bytes + excluded.down_bytes""",
             records,
         )
+        if self.free_mode:
+            await self.conn.executemany(self._FREE_UPSERT, records)
         await self.conn.commit()
 
     async def add_lan_usage_batch(self, records: list[tuple[int, str, int, int]]) -> None:
@@ -1563,7 +1591,15 @@ class Database:
         rows = await self.conn.execute_fetchall(
             "SELECT device_id, SUM(up_bytes) up, SUM(down_bytes) down FROM usage_daily "
             "WHERE date>=? GROUP BY device_id", (since,))
-        return {r["device_id"]: {"up": r["up"], "down": r["down"]} for r in rows}
+        out = {r["device_id"]: {"up": r["up"], "down": r["down"]} for r in rows}
+        for r in await self.conn.execute_fetchall(
+                "SELECT device_id, SUM(up_bytes) up, SUM(down_bytes) down FROM free_usage "
+                "WHERE date>=? GROUP BY device_id", (since,)):
+            cur = out.get(r["device_id"])
+            if cur is not None:
+                cur["up"] = max(0, cur["up"] - (r["up"] or 0))
+                cur["down"] = max(0, cur["down"] - (r["down"] or 0))
+        return out
 
     async def get_period_usage_by_device(self) -> dict[int, dict[str, int]]:
         """Alias for get_period_usage(): aggregate usage since period_start, keyed by device_id."""
@@ -1582,6 +1618,15 @@ class Database:
             if r["user_id"] is None:
                 continue  # orphaned device (should not happen post-migration)
             out[r["user_id"]] = {"up": r["up"], "down": r["down"]}
+        # usage made while free mode was on never counts against the quota
+        for r in await self.conn.execute_fetchall(
+                "SELECT d.user_id user_id, SUM(f.up_bytes) up, SUM(f.down_bytes) down "
+                "FROM free_usage f JOIN devices d ON f.device_id = d.id "
+                "WHERE f.date>=? GROUP BY d.user_id", (since,)):
+            cur = out.get(r["user_id"])
+            if cur is not None:
+                cur["up"] = max(0, cur["up"] - (r["up"] or 0))
+                cur["down"] = max(0, cur["down"] - (r["down"] or 0))
         return out
 
     # -- DNS browsing history ----------------------------------------------
@@ -1724,6 +1769,9 @@ class Database:
             "u.up_bytes + u.down_bytes b FROM usage_daily u "
             "JOIN devices d ON u.device_id = d.id WHERE u.date>=? AND u.date<=?",
             (since or "", day))
+        free = {(r["device_id"], r["date"]): r["b"] for r in await self.conn.execute_fetchall(
+            "SELECT device_id, date, up_bytes + down_bytes b FROM free_usage "
+            "WHERE date>=? AND date<=?", (since or "", day))}
         before: dict[int, int] = {}
         today: dict[int, int] = {}
         dev_today: dict[int, int] = {}
@@ -1731,11 +1779,12 @@ class Database:
             uid = r["uid"]
             if uid is None:
                 continue
+            b = max(0, r["b"] - free.get((r["did"], r["date"]), 0))
             if r["date"] == day:
-                today[uid] = today.get(uid, 0) + r["b"]
-                dev_today[r["did"]] = dev_today.get(r["did"], 0) + r["b"]
+                today[uid] = today.get(uid, 0) + b
+                dev_today[r["did"]] = dev_today.get(r["did"], 0) + b
             else:
-                before[uid] = before.get(uid, 0) + r["b"]
+                before[uid] = before.get(uid, 0) + b
         return {"before": before, "today": today, "dev_today": dev_today}
 
     async def get_user_usage_on(self, user_id: int, day: str) -> int:
@@ -1743,7 +1792,11 @@ class Database:
             "SELECT COALESCE(SUM(u.up_bytes + u.down_bytes), 0) FROM usage_daily u "
             "JOIN devices d ON u.device_id = d.id WHERE d.user_id=? AND u.date=?",
             (user_id, day))
-        return int(row[0]) if row else 0
+        free = await self._fetch_one(
+            "SELECT COALESCE(SUM(f.up_bytes + f.down_bytes), 0) FROM free_usage f "
+            "JOIN devices d ON f.device_id = d.id WHERE d.user_id=? AND f.date=?",
+            (user_id, day))
+        return max(0, (int(row[0]) if row else 0) - (int(free[0]) if free else 0))
 
     # -- settings -----------------------------------------------------------
 

@@ -15,8 +15,11 @@ import asyncio
 import datetime as _dt
 import json
 import logging
+import os
 import re
 import subprocess
+import tarfile
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -26,10 +29,46 @@ from quota.version import __version__
 
 log = logging.getLogger("quota.updater")
 
-#: GitHub repo holding the releases (owner/repo). Releases carry the built
-#: ``quota-manager_<version>_all.deb``; the repo's ``CHANGELOG.md`` supplies
-#: the per-version notes (both are the release pipeline's outputs).
+#: GitHub repo holding the releases (owner/repo). Releases carry one asset per
+#: package type (see ASSET_KINDS); the repo's ``CHANGELOG.md`` supplies the
+#: per-version notes (both are the release pipeline's outputs).
 DEFAULT_REPO = "UserJoo9/QuotaManager"
+
+#: package type -> (asset suffix, deterministic asset name). The release
+#: pipeline names every asset this way, so a release with an empty asset list
+#: still resolves to a download URL.
+ASSET_KINDS: dict[str, tuple[str, str]] = {
+    "deb": (".deb", "quota-manager_{v}_all.deb"),
+    "rpm": (".rpm", "quota-manager-{v}-1.noarch.rpm"),
+    "arch": (".pkg.tar.zst", "quota-manager-{v}-1-any.pkg.tar.zst"),
+    "tarball": (".tar.gz", "quota-manager-{v}.tar.gz"),
+}
+
+#: written by every installer (deb postinst, rpm %post, PKGBUILD, install.sh) so
+#: the updater knows which asset this box was installed from.
+INSTALL_KIND_FILE = "/opt/quota-manager/.install-kind"
+
+
+def detect_install_kind(marker: str = INSTALL_KIND_FILE,
+                        which: Callable[[str], str | None] | None = None) -> str:
+    """Which release asset fits this box: the installer's marker file first,
+    then the host's package manager, else the generic tarball."""
+    try:
+        with open(marker, encoding="utf-8") as fh:
+            kind = fh.read().strip()
+        if kind in ASSET_KINDS:
+            return kind
+    except OSError:
+        pass
+    import shutil
+    which = which or shutil.which
+    if which("apt-get"):
+        return "deb"
+    if which("dnf") or which("yum"):
+        return "rpm"
+    if which("pacman"):
+        return "arch"
+    return "tarball"
 
 #: release lookup (the GitHub API's ``/releases/latest`` endpoint)
 def _releases_api(repo: str) -> str:
@@ -179,7 +218,8 @@ class Updater:
                  fetch_json: Callable[..., dict[str, Any]] | None = None,
                  fetch_text: Callable[..., str] | None = None,
                  download: Callable[..., None] | None = None,
-                 run_command: Callable[..., tuple[int, str]] | None = None
+                 run_command: Callable[..., tuple[int, str]] | None = None,
+                 install_kind: str | None = None
                  ) -> None:
         self.database = database
         self.repo = repo
@@ -189,6 +229,7 @@ class Updater:
         self._fetch_text = fetch_text or _fetch_text
         self._download = download or _download
         self._run_command = run_command or _run_command
+        self._install_kind = install_kind
         self._checking = False
         self._installing = False
         self._install_lock = asyncio.Lock()
@@ -292,6 +333,11 @@ class Updater:
                     changelog = parse_changelog(
                         text, self.current_version, latest)
                 except Exception:  # noqa: BLE001 — notes must not lose the flag
+                    changelog = []
+                if not changelog:
+                    # raw.githubusercontent.com caches for a few minutes, so right
+                    # after a release the file may not list the new version yet:
+                    # fall back to the release's own notes.
                     notes = (release.get("body") or "").strip()
                     if notes:
                         changelog = [{"version": latest,
@@ -339,14 +385,15 @@ class Updater:
                     return {"ok": False, "reason": "no update available"}
                 release = await asyncio.to_thread(
                     self._fetch_json, _releases_api(self.repo))
-                deb_url = self._find_deb_url(release, latest)
-                if not deb_url:
+                kind = self.install_kind
+                asset_url = self._find_asset_url(release, latest, kind)
+                if not asset_url:
                     return {"ok": False,
-                            "reason": "no .deb asset in the release"}
-                dest = f"/tmp/quota-manager_{latest}.deb"
-                await asyncio.to_thread(self._download, deb_url, dest)
+                            "reason": f"no {ASSET_KINDS[kind][0]} asset in the release"}
+                dest = "/tmp/" + ASSET_KINDS[kind][1].format(v=latest)
+                await asyncio.to_thread(self._download, asset_url, dest)
                 ok, out = await asyncio.to_thread(
-                    self._install_deb, dest)
+                    self._install_package, kind, dest)
                 if not ok:
                     log.error("update install failed: %s", out[-2000:])
                     return {"ok": False, "reason": "install failed (see logs)"}
@@ -365,41 +412,89 @@ class Updater:
 
     # -- install plumbing ----------------------------------------------------
 
-    def _find_deb_url(self, release: dict[str, Any], latest: str) -> str:
+    @property
+    def install_kind(self) -> str:
+        """deb | rpm | arch | tarball — which release asset this box installs."""
+        if self._install_kind is None:
+            self._install_kind = detect_install_kind()
+        return self._install_kind
+
+    def _find_asset_url(self, release: dict[str, Any], latest: str,
+                        kind: str) -> str:
+        suffix, name = ASSET_KINDS[kind]
         for asset in release.get("assets") or []:
-            if (asset.get("name") or "").endswith(".deb"):
+            if (asset.get("name") or "").endswith(suffix):
                 return asset.get("browser_download_url") or ""
         # the release pipeline names the asset deterministically; fall back to
         # the constructed URL when the API's asset list is empty
         return f"https://github.com/{self.repo}/releases/download/" \
-               f"v{latest}/quota-manager_{latest}_all.deb"
+               f"v{latest}/{name.format(v=latest)}"
 
-    def _install_deb(self, deb_path: str) -> tuple[bool, str]:
-        """Install ``deb_path`` outside the service's cgroup.
+    def _find_deb_url(self, release: dict[str, Any], latest: str) -> str:
+        return self._find_asset_url(release, latest, "deb")
 
-        Prefers a transient systemd unit (``systemd-run``) so the package's
-        ``prerm``/``postinst`` — which stop/start the ``quota-gateway``
+    def _install_package(self, kind: str, path: str) -> tuple[bool, str]:
+        """Install the downloaded asset with the host's package manager.
+
+        Everything runs under a transient systemd unit (``systemd-run``) so the
+        package's pre/post scripts — which stop/start the ``quota-gateway``
         service, killing our whole cgroup — cannot kill the install midway.
-        Falls back to a plain ``apt-get`` when systemd-run is absent.
+        Falls back to the plain command when systemd-run is absent.
         """
+        env: list[str] = []
+        if kind == "deb":
+            env = ["--property=Environment=DEBIAN_FRONTEND=noninteractive"]
+            cmd = ["apt-get", "install", "-y", path]
+        elif kind == "rpm":
+            cmd = ["dnf", "install", "-y", path]
+        elif kind == "arch":
+            cmd = ["pacman", "-U", "--noconfirm", path]
+        else:  # tarball: unpack, then run its installer in upgrade mode
+            try:
+                root = self._unpack_tarball(path)
+            except (OSError, ValueError, tarfile.TarError) as exc:
+                return False, f"bad tarball: {exc}"
+            cmd = ["bash", os.path.join(root, "install.sh"), "--upgrade"]
         argv = ["systemd-run", "--unit=quota-update-install", "--collect",
-                "--quiet", "--wait", "--property=Type=oneshot",
-                "--property=Environment=DEBIAN_FRONTEND=noninteractive",
-                "apt-get", "install", "-y", deb_path]
+                "--quiet", "--wait", "--property=Type=oneshot", *env, *cmd]
         try:
-            rc, out = self._run_command(argv, timeout=300.0)
+            rc, out = self._run_command(argv, timeout=600.0)
         except (OSError, subprocess.SubprocessError):
             rc, out = 1, "systemd-run unavailable"
         if rc == 0:
             return True, out
         if "not found" in out or rc == 1:
-            # no systemd-run — plain foreground apt-get (tests / non-systemd)
+            # no systemd-run — plain foreground command (tests / non-systemd)
             try:
-                rc, out = self._run_command(
-                    ["apt-get", "install", "-y", deb_path], timeout=300.0)
+                rc, out = self._run_command(cmd, timeout=600.0)
             except (OSError, subprocess.SubprocessError) as exc:
                 return False, str(exc)
         return rc == 0, out
+
+    def _install_deb(self, deb_path: str) -> tuple[bool, str]:
+        return self._install_package("deb", deb_path)
+
+    @staticmethod
+    def _unpack_tarball(path: str) -> str:
+        """Extract a release tarball to a fresh temp dir and return the
+        directory holding ``install.sh``. Refuses absolute/escaping members."""
+        dest = tempfile.mkdtemp(prefix="quota-update-")
+        base = os.path.realpath(dest)
+        with tarfile.open(path, "r:gz") as tar:
+            for m in tar.getmembers():
+                target = os.path.realpath(os.path.join(dest, m.name))
+                if not (target == base or target.startswith(base + os.sep)):
+                    raise ValueError(f"unsafe path in tarball: {m.name}")
+                if m.issym() or m.islnk() or m.isdev():
+                    raise ValueError(f"unsupported member: {m.name}")
+            try:
+                tar.extractall(dest, filter="data")  # py>=3.12 / backports
+            except TypeError:  # older Python: no extraction filters
+                tar.extractall(dest)  # noqa: S202 — members validated above
+        for name in sorted(os.listdir(dest)):
+            if os.path.isfile(os.path.join(dest, name, "install.sh")):
+                return os.path.join(dest, name)
+        raise ValueError("install.sh not found in the tarball")
 
 
 def _now_iso() -> str:

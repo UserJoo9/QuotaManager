@@ -47,6 +47,12 @@
 
 set -euo pipefail
 
+# Distro helpers (apt / dnf / pacman): package names, installer, pppd path.
+_DISTRO_LIB="$(dirname "${BASH_SOURCE[0]}")/distro.sh"
+[ -f "$_DISTRO_LIB" ] || { echo "missing $_DISTRO_LIB (copy the whole scripts/ directory)" >&2; exit 1; }
+# shellcheck source=scripts/distro.sh
+. "$_DISTRO_LIB"
+
 # --- overridable settings (defaults match config.yaml) ------------------------
 WAN_GATEWAY="${WAN_GATEWAY:-192.168.1.1}"      # upstream router
 LAN_IP="${LAN_IP:-192.168.1.110}"              # this laptop's uplink IP
@@ -220,10 +226,13 @@ if [ -n "${QUOTA_NO_APT:-}" ]; then
 elif command -v apt-get >/dev/null; then
     DEBIAN_FRONTEND=noninteractive apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq dnsmasq nftables iproute2 >/dev/null
-elif command -v apk >/dev/null; then
-    apk add --no-cache dnsmasq nftables iproute2
+elif [ "$(qm_detect_pm)" != "unknown" ]; then
+    _pm="$(qm_detect_pm)"
+    # shellcheck disable=SC2046
+    qm_install_pkgs "$_pm" $(qm_net_pkgs "$_pm") >/dev/null \
+        || die "could not install $(qm_net_pkgs "$_pm") with $_pm — install them, then re-run"
 else
-    warn "no apt/apk found — install dnsmasq + nftables + iproute2 manually"
+    warn "no apt/dnf/pacman/apk found — install dnsmasq + nftables + iproute2 manually"
 fi
 systemctl enable dnsmasq >/dev/null 2>&1 || warn "could not enable dnsmasq.service"
 if ! systemctl enable nftables >/dev/null 2>&1; then
@@ -242,6 +251,81 @@ ExecStop=
 ExecStop=/bin/sh -c 'nft flush table inet quota_nat 2>/dev/null || true'
 EOF
 systemctl daemon-reload
+
+# Static-address fallback when NetworkManager is not usable. Debian-style hosts
+# (ifupdown present) keep the /etc/network/interfaces.d file written since v0.1;
+# everything else (Arch/Fedora without NM, minimal installs) gets a
+# systemd-networkd unit. $1 = wan | lan | ipv6.
+static_fallback() {
+    if [ -d /etc/network/interfaces.d ] || command -v ifup >/dev/null 2>&1; then
+        mkdir -p /etc/network/interfaces.d
+        case "$1" in
+        wan)
+            cat > /etc/network/interfaces.d/quota-gateway <<EOF
+auto $LAN_IF
+iface $LAN_IF inet static
+    address $CLIENT_IP
+    netmask $SUBNET_MASK
+    up ip addr add $LAN_IP/$LAN_CIDR dev $LAN_IF
+    down ip addr del $LAN_IP/$LAN_CIDR dev $LAN_IF
+EOF
+            warn "NetworkManager not running/usable — wrote /etc/network/interfaces.d/quota-gateway (ifupdown; applies on reboot)" ;;
+        lan)
+            cat > /etc/network/interfaces.d/quota-gateway <<EOF
+auto $LAN_IF
+iface $LAN_IF inet static
+    address $LAN_IP
+    netmask $SUBNET_MASK
+    gateway $WAN_GATEWAY
+    up ip addr add $CLIENT_IP/$LAN_CIDR dev $LAN_IF
+    down ip addr del $CLIENT_IP/$LAN_CIDR dev $LAN_IF
+EOF
+            warn "NetworkManager not running/usable — wrote /etc/network/interfaces.d/quota-gateway (ifupdown; applies on reboot)" ;;
+        ipv6)
+            cat > /etc/network/interfaces.d/quota-gateway-ipv6 <<EOF
+iface $LAN_IF inet6 manual
+    up ip -6 addr add $ULA_GW/64 dev $LAN_IF
+    down ip -6 addr del $ULA_GW/64 dev $LAN_IF
+EOF
+            ;;
+        esac
+    else
+        mkdir -p /etc/systemd/network
+        case "$1" in
+        wan)
+            cat > /etc/systemd/network/10-quota-gateway.network <<EOF
+[Match]
+Name=$LAN_IF
+
+[Network]
+Address=$CLIENT_IP/$LAN_CIDR
+Address=$LAN_IP/$LAN_CIDR
+EOF
+            ;;
+        lan)
+            cat > /etc/systemd/network/10-quota-gateway.network <<EOF
+[Match]
+Name=$LAN_IF
+
+[Network]
+Address=$LAN_IP/$LAN_CIDR
+Address=$CLIENT_IP/$LAN_CIDR
+Gateway=$WAN_GATEWAY
+DNS=$UPSTREAM_DNS
+EOF
+            ;;
+        ipv6)
+            mkdir -p /etc/systemd/network/10-quota-gateway.network.d
+            cat > /etc/systemd/network/10-quota-gateway.network.d/ipv6.conf <<EOF
+[Network]
+Address=$ULA_GW/64
+EOF
+            ;;
+        esac
+        warn "NetworkManager not running/usable — wrote /etc/systemd/network/10-quota-gateway.network (systemd-networkd; enable it with 'systemctl enable --now systemd-networkd')"
+        networkctl reload >/dev/null 2>&1 || true
+    fi
+}
 
 # --- 3. static IPs on the LAN NIC --------------------------------------------
 # WAN mode: the box terminates the WAN itself (pppd dials PPPoE on $PPP_IF), so
@@ -292,15 +376,7 @@ GUI (address $CLIENT_IP/$LAN_CIDR), then re-run this script."
             nmcli con up "$profile" >/dev/null 2>&1 || true
         fi
     else
-        cat > /etc/network/interfaces.d/quota-gateway <<EOF
-auto $LAN_IF
-iface $LAN_IF inet static
-    address $CLIENT_IP
-    netmask $SUBNET_MASK
-    up ip addr add $LAN_IP/$LAN_CIDR dev $LAN_IF
-    down ip addr del $LAN_IP/$LAN_CIDR dev $LAN_IF
-EOF
-        warn "NetworkManager not running/usable — wrote /etc/network/interfaces.d/quota-gateway (ifupdown; applies on reboot)"
+        static_fallback wan
     fi
     # Make sure both addresses are live RIGHT NOW (NM may be mid-apply; an
     # ifupdown config only takes effect on ifup/reboot). Best-effort, idempotent.
@@ -360,16 +436,7 @@ second address $CLIENT_IP/$LAN_CIDR), then re-run this script."
         nmcli con up "$profile" >/dev/null 2>&1 || true
     fi
 else
-    cat > /etc/network/interfaces.d/quota-gateway <<EOF
-auto $LAN_IF
-iface $LAN_IF inet static
-    address $LAN_IP
-    netmask $SUBNET_MASK
-    gateway $WAN_GATEWAY
-    up ip addr add $CLIENT_IP/$LAN_CIDR dev $LAN_IF
-    down ip addr del $CLIENT_IP/$LAN_CIDR dev $LAN_IF
-EOF
-    warn "NetworkManager not running/usable — wrote /etc/network/interfaces.d/quota-gateway (ifupdown; applies on reboot)"
+    static_fallback lan
 fi
 # Make sure BOTH addresses are live RIGHT NOW (NM may be mid-apply; an ifupdown
 # config only takes effect on ifup/reboot). Best-effort, idempotent.
@@ -412,11 +479,7 @@ if command -v nmcli >/dev/null 2>&1 && nmcli general status >/dev/null 2>&1; the
         nmcli con up "$profile6" >/dev/null 2>&1 || true
     fi
 else
-    cat > /etc/network/interfaces.d/quota-gateway-ipv6 <<EOF
-iface $LAN_IF inet6 manual
-    up ip -6 addr add $ULA_GW/64 dev $LAN_IF
-    down ip -6 addr del $ULA_GW/64 dev $LAN_IF
-EOF
+    static_fallback ipv6
 fi
 ip -6 addr show "$LAN_IF" 2>/dev/null | grep -q "$ULA_GW/" \
     || ip -6 addr add "$ULA_GW/64" dev "$LAN_IF" 2>/dev/null \
@@ -456,7 +519,7 @@ if ! grep -qE '^\s*conf-dir=' /etc/dnsmasq.conf; then
         sed -i 's|^\s*#\s*conf-dir=|conf-dir=|' /etc/dnsmasq.conf
         log "   enabled conf-dir in /etc/dnsmasq.conf (was commented)"
     else
-        echo 'conf-dir=/etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new' >> /etc/dnsmasq.conf
+        echo 'conf-dir=/etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new,.rpmnew,.rpmsave,.pacnew,.pacsave' >> /etc/dnsmasq.conf
         log "   appended conf-dir=/etc/dnsmasq.d to /etc/dnsmasq.conf"
     fi
 fi
@@ -681,8 +744,11 @@ not installed — WAN mode cannot dial. Install the 'ppp' package, then re-run."
     elif command -v apt-get >/dev/null; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ppp >/dev/null 2>&1 \
             || warn "apt install ppp failed — WAN mode cannot dial until it is installed"
+    elif [ "$(qm_detect_pm)" != "unknown" ]; then
+        qm_install_pkgs "$(qm_detect_pm)" ppp >/dev/null 2>&1 \
+            || warn "installing ppp failed — WAN mode cannot dial until it is installed"
     else
-        warn "no apt/apk found — install the 'ppp' package manually"
+        warn "no apt/dnf/pacman/apk found — install the 'ppp' package manually"
     fi
     # pppoe kernel module + persist across reboots.
     if modprobe pppoe 2>/dev/null; then
@@ -744,7 +810,8 @@ ISP lines reject. Set both and re-run to dial properly."
     fi
     # The systemd unit: auto-redial at boot + after a crash. pppd itself retries
     # forever (persist + maxfail 0); Restart=always is a safety net.
-    if command -v pppd >/dev/null 2>&1 || [ -x /usr/sbin/pppd ]; then
+    PPPD_BIN="$(qm_pppd_bin || true)"
+    if [ -n "$PPPD_BIN" ]; then
         cat > /etc/systemd/system/quota-wan-ppp.service <<EOF
 [Unit]
 Description=Quota Manager PPPoE WAN (dial $PPP_IF -> ppp0)
@@ -758,7 +825,7 @@ RestartSec=5
 # nodetach keeps pppd in the foreground: pppd daemonizes by default after the
 # link is up, so Type=simple + Restart=always would kill the daemon 5 s later
 # and re-dial forever (an infinite connect/disconnect loop on the line).
-ExecStart=/usr/sbin/pppd call quota-wan nodetach
+ExecStart=$PPPD_BIN call quota-wan nodetach
 StandardOutput=null
 StandardError=journal
 
@@ -966,6 +1033,22 @@ except sqlite3.Error as e:
         else
             warn "could not clear the dashboard topology override (python3/DB issue) — the WAN tab may fight setup"
         fi
+    fi
+fi
+
+# --- 6.9 firewalld (Fedora/RHEL family) -------------------------------------
+# firewalld installs its own nftables tables with a default-deny FORWARD policy,
+# which can drop the clients' forwarded traffic next to our NAT table. We do not
+# silently turn a security service off: warn, or disable it when the admin asked
+# for it with QUOTA_DISABLE_FIREWALLD=1.
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+    if [ -n "${QUOTA_DISABLE_FIREWALLD:-}" ]; then
+        systemctl disable --now firewalld >/dev/null 2>&1 \
+            && log "   firewalld disabled (QUOTA_DISABLE_FIREWALLD=1)" \
+            || warn "could not disable firewalld"
+    else
+        warn "firewalld is active: it can block the clients' forwarded traffic. Stop it \
+('systemctl disable --now firewalld') or re-run with QUOTA_DISABLE_FIREWALLD=1."
     fi
 fi
 

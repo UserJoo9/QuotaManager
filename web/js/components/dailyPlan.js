@@ -30,7 +30,7 @@ export function dailySection(u, dash, run) {
 
   const hasEnd = !!(dash.bundle && dash.bundle.period_end);
   const opt = (v, label, cur, dis) => h("option", { value: v, selected: cur === v, disabled: !!dis }, label);
-  const mode = h("select", { class: "select" }, [opt("off", t("dq.mode.off"), q.mode), opt("fixed", t("dq.mode.fixed"), q.mode), opt("spread", t("dq.mode.spread"), q.mode, !hasEnd)]);
+  const mode = h("select", { class: "select" }, [opt("off", t("dq.mode.off"), q.mode), opt("fixed", t("dq.mode.fixed"), q.mode), opt("spread", t("dq.mode.spread") + (hasEnd ? "" : ` (${t("dq.mode.spread.need")})`), q.mode, !hasEnd)]);
   const gb = h("input", { class: "input", type: "number", min: "0", step: "any", value: String(q.gb || 0), inputmode: "decimal", "aria-label": t("dq.gb") });
   const carry = h("select", { class: "select" }, ["next_day", "spread"].map((v) => opt(v, t("dq.carry." + v), q.carry)));
   const split = h("select", { class: "select" }, ["open", "equal", "fixed"].map((v) => opt(v, t("dq.split." + v), q.split)));
@@ -92,11 +92,10 @@ export function dailySection(u, dash, run) {
 
   return h("div", { class: "dr-sec" }, head,
     q.active ? dailyToday(u) : null,
-    h("div", { class: "field" }, h("label", {}, t("dq.mode")), mode), gbField,
+    h("div", { class: "field" }, h("label", {}, t("dq.mode")), mode, !hasEnd ? h("span", { class: "sub" }, t("dq.mode.spread.no")) : null), gbField,
     h("div", { class: "field" }, h("label", {}, t("dq.carry")), carry),
     h("div", { class: "field" }, h("label", {}, t("dq.split")), split),
     splitHint,
-    !hasEnd ? h("span", { class: "sub" }, t("dq.mode.spread.no")) : null,
     h("div", { class: "field" }, h("label", {}, t("dq.heavy")), list,
       h("div", { class: "dq-add" }, dayIn, dayGb, h("button", { type: "button", class: "btn sm", onclick: addHeavy }, t("dq.heavy.add"))),
       h("span", { class: "sub" }, t("dq.heavy.hint"))),
@@ -119,4 +118,12 @@ export function dailyMasterCard(on, toggle) {
   return h("section", { class: "card c12" },
     h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("dq.master")), h("span", { class: "sub" }, t("dq.master.d"))), on ? chip("ok", t("common.active")) : null),
     h("div", { class: "row-sw" }, h("div", {}, h("b", {}, t("dq.master.sw")), h("span", {}, t("dq.master.sw.d"))), sw(on, t("dq.master.sw"), toggle)));
+}
+
+// "Open for everyone when everyone is out of quota" switch for the Quota page.
+export function freeModeCard(enabled, active, toggle) {
+  return h("section", { class: "card c12" },
+    h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("fm.title")), h("span", { class: "sub" }, t("fm.d"))), active ? chip("warn", t("fm.active")) : null),
+    active ? h("p", { class: "banner warn", role: "status" }, t("fm.active.d")) : null,
+    h("div", { class: "row-sw" }, h("div", {}, h("b", {}, t("fm.sw")), h("span", {}, t("fm.sw.d"))), sw(enabled, t("fm.sw"), toggle)));
 }

@@ -107,7 +107,7 @@ def test_release_workflow_exists_and_parses_as_yaml():
 def test_release_workflow_publishes_to_github_releases():
     text = _read(WORKFLOW)
     assert "softprops/action-gh-release" in text, "the .deb must go to GitHub Releases"
-    assert "files: dist/quota-manager_*.deb" in text
+    assert "dist/quota-manager_*.deb" in text
     assert "permissions:" in text and "contents: write" in text
 
 
@@ -119,8 +119,10 @@ def test_release_workflow_verifies_tag_matches_version():
 
 
 def test_release_workflow_ships_runtime_payload_only():
-    text = _read(WORKFLOW)
-    # payload allowlist: runtime dirs/files, never tests/source-control junk
+    # the payload allowlist lives in the shared build script (release.yml and
+    # the packaging-smoke workflow both call it)
+    assert "packaging/build_packages.sh" in _read(WORKFLOW)
+    text = _read(REPO / "packaging" / "build_packages.sh")
     for needle in ("core quota api web scripts", "requirements-linux.txt"):
         assert needle in text
     assert ".git" not in text.replace(".github", ""), \
@@ -266,10 +268,14 @@ def test_postinst_is_a_root_executable_bash_script():
     text = _read(p)
     assert text.startswith("#!/bin/bash")
     assert "set -euo pipefail" in text
-    assert "QUOTA_NO_APT=1" in text, "postinst must run setup without apt"
-    assert "setup_gateway_kali.sh" in text
-    assert "systemctl" in text
-    assert "/opt/quota-manager" in text
+    # the real work lives in the shared script every installer calls
+    assert "scripts/post_install.sh deb" in text
+    shared = _read(REPO / "scripts" / "post_install.sh")
+    assert "QUOTA_NO_APT=1" in shared, "post-install must run setup without apt"
+    assert "setup_gateway_kali.sh" in shared
+    assert "systemctl" in shared
+    assert "/opt/quota-manager" in shared
+    assert shared.endswith("exit 0\n"), "post-install must end cleanly"
     assert text.endswith("exit 0\n"), "postinst must end cleanly"
     # executable bit is a Debian requirement — enforce the committed blob's mode
     assert _git_index_mode("packaging/DEBIAN/postinst") == "100755", \
@@ -344,10 +350,113 @@ def test_deb_ignored():
 
 
 def test_postinst_keeps_wan_mode_and_never_aborts_on_setup_failure():
-    text = (PACKAGING / "DEBIAN" / "postinst").read_text()
+    text = (REPO / "scripts" / "post_install.sh").read_text()
     # an update must not reset a dashboard-enabled WAN box to LAN
     assert "export QUOTA_TOPOLOGY=wan" in text
     assert "topology_source" in text and "chap-secrets" in text
     # a failing setup step must not leave the package half-configured
     assert "if ! APP_DIR=" in text
     assert text.index("if ! APP_DIR=") < text.index('systemctl enable "$SERVICE"')
+
+
+# --------------------------------------------------------------------------- #
+# multi-distro packaging (issue #15): shared post-install, tarball, rpm, arch
+# --------------------------------------------------------------------------- #
+
+def test_post_install_records_kind_and_restores_selinux_labels():
+    text = _read(REPO / "scripts" / "post_install.sh")
+    assert text.startswith("#!/bin/bash")
+    assert '.install-kind' in text, "the updater picks its asset from this marker"
+    assert "restorecon" in text
+    assert text.index("restorecon") < text.index("QUOTA_NO_APT=1 bash")
+
+
+def test_generic_installer_is_safe_and_calls_shared_post_install():
+    text = _read(PACKAGING / "generic" / "install.sh")
+    assert text.startswith("#!/usr/bin/env bash")
+    assert "set -euo pipefail" in text
+    assert "--no-deps" in text and "--uninstall" in text
+    assert "systemctl" in text and "id -u" in text
+    assert "post_install.sh\" tarball" in text
+    # keeps the venv + data across upgrades: it never deletes them
+    assert ".venv" not in text.replace("keep the venv", "")
+    assert "/var/lib/quota-gateway" in text  # only mentioned in the kept-data message
+    assert "rm -rf /var/lib" not in text
+
+
+def test_rpm_spec_only_stops_service_on_real_erase():
+    text = _read(PACKAGING / "rpm" / "quota-manager.spec.template")
+    assert "BuildArch:      noarch" in text
+    assert "post_install.sh rpm" in text
+    pre = text.split("%preun", 1)[1].split("%postun", 1)[0]
+    assert '"$1" -eq 0' in pre, "upgrade runs new %post before old %preun"
+    for dep in ("dnsmasq", "nftables", "iproute", "ppp", "python3-pip"):
+        assert dep in text
+
+
+def test_arch_install_hooks_and_pkgbuild():
+    hooks = _read(PACKAGING / "arch" / "quota-manager.install")
+    for fn in ("post_install", "post_upgrade", "pre_upgrade", "pre_remove"):
+        assert fn + "()" in hooks
+    assert "post_install.sh arch" in hooks
+    pkgbuild = _read(PACKAGING / "arch" / "PKGBUILD")
+    assert "arch=('any')" in pkgbuild
+    assert "install=quota-manager.install" in pkgbuild
+    assert "iproute2" in pkgbuild and "python-pip" in pkgbuild
+
+
+def test_release_workflow_builds_and_uploads_every_package_kind():
+    wf = _read(REPO / ".github" / "workflows" / "release.yml")
+    build = _read(PACKAGING / "build_packages.sh")
+    for needle in ("quota-manager-${VERSION}.tar.gz", "rpmbuild -bb",
+                   ".pkg.tar.zst", "dpkg-deb --build", "find \"$T\" -type l",
+                   "chmod 755 \"$STAGE/DEBIAN/postinst\""):
+        assert needle in build, needle
+    for needle in ("packaging/build_packages.sh", "dist/quota-manager_*.deb",
+                   "dist/quota-manager-*.tar.gz", "dist/quota-manager-*.rpm",
+                   "dist/quota-manager-*.pkg.tar.zst"):
+        assert needle in wf, needle
+
+
+def test_packaging_smoke_workflow_installs_in_real_distro_containers():
+    wf = yaml.safe_load(_read(REPO / ".github" / "workflows" / "packaging-smoke.yml"))
+    include = wf["jobs"]["smoke"]["strategy"]["matrix"]["include"]
+    images = {m["image"]: m["kind"] for m in include}
+    assert images.get("fedora:latest") == "rpm"
+    assert images.get("archlinux:latest") == "arch"
+    assert images.get("debian:12") == "deb" and images.get("ubuntu:24.04") == "deb"
+    smoke = _read(PACKAGING / "ci" / "smoke.sh")
+    for needle in (".install-kind", "reinstall", "qm_net_pkgs", "removed cleanly"):
+        assert needle in smoke
+    # the build script must have no hidden runtime dependency on the release tag
+    assert "GITHUB_REF" not in _read(PACKAGING / "build_packages.sh")
+
+
+def test_generic_installer_accepts_every_flag_the_updater_passes():
+    """The in-app updater runs `install.sh --upgrade` for tarball installs; an
+    installer that rejects it makes every panel update fail (found in review)."""
+    import re as _re
+    updater = _read(REPO / "quota" / "updater.py")
+    flags = set(_re.findall(r'"(--[a-z-]+)"\]', updater.split("else:  # tarball", 1)[1]
+                            .split("argv =", 1)[0]))
+    assert "--upgrade" in flags
+    installer = _read(PACKAGING / "generic" / "install.sh")
+    for f in flags:
+        assert f + ")" in installer, f"install.sh must accept {f}"
+
+
+def test_openwrt_installer_supports_apk_and_opkg():
+    """OpenWrt 25.12 dropped opkg for apk - the docs/installer must not assume
+    either (community report on the project's video)."""
+    text = _read(REPO / "scripts" / "install_openwrt.sh")
+    assert text.startswith("#!/bin/sh"), "BusyBox ash: no bash on a stock router"
+    assert "apk add" in text and "opkg install" in text
+    assert text.index("command -v apk") < text.index("command -v opkg")
+    assert "bash" not in text.replace("BusyBox", "")
+    for pkg in ("python3-pip", "nftables", "dnsmasq-full", "git-http", "ca-bundle"):
+        assert pkg in text
+    assert "pytest" in text, "dev-only packages must be filtered out on a router"
+    for readme in ("README.md", "README_AR.md"):
+        assert "install_openwrt.sh" in _read(REPO / readme)
+    init = _read(REPO / "scripts" / "quota-manager.openwrt")
+    assert ".venv/bin/python" in init

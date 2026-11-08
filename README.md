@@ -57,7 +57,7 @@ You need **one always-on device** connected to your router **by cable**. Pick yo
 
 ### Linux PC or laptop
 
-Works on **Debian, Kali and Ubuntu**. Run in a terminal:
+Works on **Debian, Kali and Ubuntu** (apt), **Fedora** (rpm), **Arch / Manjaro** (pacman) and any other systemd distro (tarball). Debian-family first. Run in a terminal:
 
 ```bash
 sudo apt-get update
@@ -71,6 +71,21 @@ sudo apt-get install quota-manager
 ```
 
 Prefer a single file? Download `quota-manager_<version>_all.deb` from [Releases](https://github.com/UserJoo9/QuotaManager/releases) and run `sudo apt install ./quota-manager_*_all.deb`.
+
+**Other distros** - download the matching file from [Releases](https://github.com/UserJoo9/QuotaManager/releases):
+
+```bash
+# Fedora / RHEL family
+sudo dnf install ./quota-manager-<version>-1.noarch.rpm
+
+# Arch / Manjaro
+sudo pacman -U quota-manager-<version>-1-any.pkg.tar.zst
+
+# Any other systemd distro
+tar xzf quota-manager-<version>.tar.gz && cd quota-manager-<version> && sudo ./install.sh
+```
+
+The in-app updater picks the right file for how you installed. Fedora and Arch support is new: if your box runs SELinux or firewalld and forwarded traffic is blocked, set `QUOTA_DISABLE_FIREWALLD=1` before installing, or open an issue with the output.
 
 Then continue with [First setup](#first-setup).
 
@@ -118,15 +133,14 @@ Tip: limit charging to 60–70 % (ACC app) so the battery lasts.
 
 OpenWrt 22.03+ with 128 MB+ RAM (on small-flash routers, use a USB drive with ExtRoot).
 
+OpenWrt 25.12 replaced `opkg` with `apk`; the installer below detects which one your router has (22.03-24.10 use `opkg`):
+
 ```bash
-opkg update
-opkg install python3 python3-pip nftables kmod-nft-core ip-full dnsmasq-full
-git clone https://github.com/UserJoo9/QuotaManager.git /opt/QuotaManager
-cd /opt/QuotaManager && pip install -r requirements-linux.txt
-cp scripts/quota-manager.openwrt /etc/init.d/quota-manager
-chmod +x /etc/init.d/quota-manager
-/etc/init.d/quota-manager enable && /etc/init.d/quota-manager start
+wget -O /tmp/install_openwrt.sh https://raw.githubusercontent.com/UserJoo9/QuotaManager/main/scripts/install_openwrt.sh
+sh /tmp/install_openwrt.sh
 ```
+
+> OpenWrt support is **experimental**: x86_64 and aarch64 routers/PCs work best (the Python packages ship ready-made binaries for them). If it fails, open an issue with the full output.
 
 ---
 

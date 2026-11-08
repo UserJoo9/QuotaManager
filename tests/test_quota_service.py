@@ -35,6 +35,9 @@ def database(tmp_path):
 
     async def _connect():
         await d.connect()
+        # these tests check plain quota blocking; "open when everyone is out of
+        # quota" has its own tests (tests/test_free_mode.py)
+        await d.set_setting("free_when_exhausted", "0")
         return d
     return _connect
 

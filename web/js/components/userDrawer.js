@@ -30,7 +30,7 @@ function settingsBlock(kind, o, run, withQuota) {
     h("h4", {}, t("dr.limits")),
     h("div", { class: "form-row" }, h("div", { class: "field" }, h("label", {}, t("dr.limit.down")), down), h("div", { class: "field" }, h("label", {}, t("dr.limit.up")), up)),
     h("span", { class: "sub" }, t("dr.limit.hint")),
-    withQuota ? [h("h4", {}, t("dr.quota")), h("div", { class: "form-row" }, h("div", { class: "field" }, h("label", {}, t("dr.quota")), mode), h("div", { class: "field" }, h("label", {}, t("dr.quota.gb")), gb))] : null,
+    withQuota ? [h("h4", {}, t("dr.quota")), h("div", { class: "form-row" }, h("div", { class: "field" }, h("label", {}, t("dr.quota.mode")), mode), h("div", { class: "field" }, h("label", {}, t("dr.quota.gb")), gb))] : null,
     row(t("dr.unlimited"), t("dr.unlimited.sub"), exempt, flag(isUser ? "exempt_quota" : "bypass", !exempt)),
     row(t("dr.vpnbypass"), t("dr.vpnbypass.sub"), o.vpn_bypass, flag("vpn_bypass", !o.vpn_bypass)),
     h("div", { class: "field" }, h("label", {}, t("dr.dns")), dns, h("span", { class: "sub" }, t("dr.dns.hint"))),
