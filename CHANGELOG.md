@@ -9,7 +9,7 @@ match it. Release notes are composed from a version's section below.)_
 ## [0.5.4] — 2026-11-08
 
 Added:
-- Fedora (.rpm), Arch / Manjaro (.pkg.tar.zst) and a generic tarball with `install.sh` for any systemd distro, built on every release next to the .deb. The updater installs the right file for how the box was set up (issue #15). Debian behaviour is unchanged.
+- Fedora (.rpm), Arch / Manjaro (.pkg.tar.zst) and a generic tarball with `install.sh` for any systemd distro, built on every release next to the .deb. The updater installs the right file for how the box was set up (issue #15). Debian behaviour is unchanged. Fedora/Arch/tarball are new in this release and have only been tested in containers so far - please report anything odd on a real box.
 - When everyone runs out of quota and nobody has an add-on pack, the internet now opens for all instead of staying cut (the speed is poor anyway, but better than nothing). It is on by default; you can switch it off under Quota > Open when everyone is out.
 - The moment an add-on pack, a top-up or a bigger bundle adds GB, the box closes again for the people who are out. What was used while it was open is not deducted from the new GB.
 - /share and /milestone have an Arabic / English switch (remembered per browser).
