@@ -1582,7 +1582,8 @@ def test_dashboard_surfaces_rogue_snapshot(tmp_path):
     with TestClient(app) as c:
         c.post("/api/login", json={"password": "admin"})
         expected = [{"ip": "192.168.2.250", "mac": "11:22:33:44:55:66",
-                     "vendor": "TestCo", "online": True}]
+                     "vendor": "TestCo", "online": True,
+                     "blocked": True, "allowed": False}]
         assert c.get("/api/rogue").json() == expected
         assert c.get("/api/dashboard").json()["rogue"] == expected
     _get_loop().run_until_complete(database.close())

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as _dt
+import json
 import logging
 import os
 import shutil
@@ -583,6 +584,45 @@ class QuotaService:
             used_gb = (u["up"] + u["down"]) / GB
             out[uid] = self.user_quota_blocked(user, allowance, used_gb)
         return out
+
+    # -- unmanaged hosts: static-IP devices that skip this box's DHCP -----------------
+
+    BLOCK_UNMANAGED_KEY = "block_unmanaged"
+    STATIC_HOSTS_KEY = "static_hosts"
+
+    async def block_unmanaged_enabled(self) -> bool:
+        """Cut every unmanaged host automatically (default ON): a device that
+        sets its own IP is invisible to quotas, so until the admin adopts it
+        ("Manage") it gets no internet."""
+        return (await self.db.get_setting(self.BLOCK_UNMANAGED_KEY, "1")) == "1"
+
+    async def set_block_unmanaged(self, on: bool) -> None:
+        await self.db.set_setting(self.BLOCK_UNMANAGED_KEY, "1" if on else "0")
+
+    async def static_hosts(self) -> dict[str, str]:
+        """MAC -> IP of adopted static-IP devices (they have no DHCP lease, so
+        the box keeps their binding itself)."""
+        raw = await self.db.get_setting(self.STATIC_HOSTS_KEY, "")
+        try:
+            data = json.loads(raw) if raw else {}
+        except ValueError:
+            return {}
+        return {str(m).lower(): str(i) for m, i in data.items()} if isinstance(data, dict) else {}
+
+    async def _save_static_hosts(self, hosts: dict[str, str]) -> None:
+        await self.db.set_setting(self.STATIC_HOSTS_KEY, json.dumps(hosts, sort_keys=True))
+
+    async def adopt_static_host(self, mac: str, ip: str) -> None:
+        hosts = await self.static_hosts()
+        hosts[mac.lower()] = ip
+        await self._save_static_hosts(hosts)
+
+    async def release_static_host(self, mac: str) -> bool:
+        hosts = await self.static_hosts()
+        if hosts.pop(mac.lower(), None) is None:
+            return False
+        await self._save_static_hosts(hosts)
+        return True
 
     # -- free mode: everyone is out of quota ---------------------------------------
 

@@ -1180,7 +1180,7 @@ def test_holder_carries_rogue_scan(tmp_path):
         assert r.online is True
         # the rogue event is written so the Activity tab tells the story
         events = loop.run_until_complete(gw.database.list_events())
-        assert any("Rogue device on network" in e["message"] for e in events)
+        assert any("Unmanaged device on network" in e["message"] for e in events)
     finally:
         loop.run_until_complete(gw.shutdown())
         loop.close()

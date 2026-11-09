@@ -6,6 +6,15 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## [0.5.5] — 2026-11-09
+
+Added:
+- A device that sets its own (static) IP is now cut off automatically. Before, it only showed under "Unmanaged devices" and kept its internet. It stays cut until you act on it, from the People page > Unmanaged devices:
+  - **Manage** adds it as a normal device that keeps its IP (it starts at 0 GB, so give it an allowance to connect it). It is then counted and controlled per person like everyone else.
+  - **Allow** lets it keep its internet without managing it.
+  - A switch there turns the automatic cut-off off.
+- The cut takes up to about 1.5 minutes after the device appears (the network is scanned every minute).
+
 ## [0.5.4] — 2026-11-08
 
 Added:
