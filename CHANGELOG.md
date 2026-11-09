@@ -14,6 +14,7 @@ Added:
   - **Allow** lets it keep its internet without managing it.
   - A switch there turns the automatic cut-off off.
 - The cut takes up to about 1.5 minutes after the device appears (the network is scanned every minute).
+- Heads-up: any device you set up with its own fixed IP (printer, camera, NAS...) is cut after this update until you press **Allow** (or **Manage**) on it in People > Unmanaged devices.
 
 ## [0.5.4] — 2026-11-08
 
