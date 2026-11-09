@@ -227,6 +227,18 @@ class MilestoneNotify(BaseModel):
     milestone: int
 
 
+class PasskeyFinish(BaseModel):
+    """Second half of a passkey ceremony: the browser's PublicKeyCredential as JSON."""
+    token: str = Field(..., min_length=8, max_length=64)
+    credential: dict[str, Any]
+    #: friendly label for a new passkey ("Kareem's iPhone")
+    name: Optional[str] = Field(None, max_length=60)
+
+
+class PasskeyRename(BaseModel):
+    name: str = Field(..., min_length=1, max_length=60)
+
+
 class LoginRequest(BaseModel):
     password: str
     #: Optional TOTP code (quota/totp.py). Required when 2FA is enabled; the
