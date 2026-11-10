@@ -7,6 +7,7 @@ web/index.html + web/app/* (hashed names). web/js/ keeps only the shared diction
 from __future__ import annotations
 
 import asyncio
+import gzip
 import re
 from pathlib import Path
 
@@ -296,3 +297,12 @@ def test_public_pages_have_a_language_switch():
         for key in re.findall(r"QMI\.t\((['\"])((?:\\.|(?!\1).)*)\1", html):
             k = key[1].replace('\\"', '"').replace("\\'", "'")
             assert f'"{k}"'.replace('"', '"') in d or k in d.replace('\\"', '"'), f"{page}: missing Arabic for {k!r}"
+
+
+def test_precompressed_assets_are_portable_and_lossless():
+    compressed = list((UI / "app").glob("*.gz"))
+    assert compressed, "production build has no precompressed assets"
+    for path in compressed:
+        data = path.read_bytes()
+        assert data[9] == 255, f"{path.name}: gzip header depends on the build OS"
+        assert gzip.decompress(data) == path.with_suffix("").read_bytes(), path.name

@@ -27,7 +27,10 @@ const precompress = (): Plugin => ({
       if (!/\.(js|css|svg|json)$/.test(f)) continue;
       const raw = readFileSync(resolve(dir, f));
       if (raw.length < 1024) continue;
-      writeFileSync(resolve(dir, f + ".gz"), gzipSync(raw, { level: 9 }));
+      const compressed = gzipSync(raw, { level: 9 });
+      // RFC 1952 OS marker: unknown, so Windows and Linux emit identical headers.
+      compressed[9] = 255;
+      writeFileSync(resolve(dir, f + ".gz"), compressed);
     }
   },
 });
