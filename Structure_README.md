@@ -1358,7 +1358,7 @@ first paint. Peers on the same IP as this browser are hidden (same device).
   browser is idle (skipped on Save-Data, 2G, ≤2 CPU cores, hidden tab); hovering
   or focusing a sidebar link prefetches that page.
 - `/app/*` = content-hashed → `Cache-Control: public, max-age=31536000,
-  immutable`, served from the precompressed `.gz` (no gzip CPU on the gateway).
+  immutable`, served from the precompressed `.gz` (no gzip CPU on the gateway). The build sets the gzip OS header byte to 255 so Windows and Linux produce identical committed assets; the asset regression test verifies that each gzip stream decompresses to its source file.
   `index.html` and all `/api` stay `no-store`; authenticated data lives in memory
   only (TanStack Query) and is cleared on logout/401 — never localStorage or a
   service worker.

@@ -38,8 +38,9 @@ Historical fork comparison/synchronization reports and repository-specific agent
 - Completed-stack frontend suite: **29 passed**.
 - Python lint passed using `python -m pyflakes api core quota tests run.py`.
 - Passkey API: **8 tests passed**, including a software-authenticator ceremony, TOTP interaction, replay rejection and removed credentials.
-- Dashboard/static-security activation checks: **59 passed**.
+- Dashboard/static-security activation checks: **60 passed** after the portable-gzip fix.
 - Token/contrast contract: **26 passed**, including after carrying the exporter dependency through the stack.
+- Compressed asset regression: all 25 gzip twins use a platform-independent OS marker and decompress to the exact source bytes. This fixes the Linux CI comparison failure caused by Windows-specific gzip headers.
 - Rebuilding the completed stack produced no changes in committed `web/index.html` or `web/app` assets.
 - The complete stack matches the fork dashboard and English/Arabic translation sources, allowing only whitespace normalization.
 - The upstream 0.5.5 Manage/Allow controls and automatic cut-off switch have three frontend request/interaction regression tests.
