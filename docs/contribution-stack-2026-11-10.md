@@ -4,22 +4,24 @@ The fork main branch and all 12 contribution branches include upstream 0.5.5 at 
 
 ## Pull requests and order
 
-The passkey API is submitted upstream. Dashboard PRs are drafts in the fork, each targeting its preceding contribution branch so its diff contains only that slice. Submit those changes upstream in order after their dependencies land. Do not merge the staged PRs out of order.
+All 12 contributions are submitted upstream as non-draft PRs ready for review. The 11 fork PRs are also non-draft and retain focused diffs against their preceding contribution branches.
 
-| Order | Contribution | PR | Target branch |
+Upstream PRs target `main` because this account cannot create base branches in the upstream repository. Their Files changed views include earlier contributions until those dependencies land. Each upstream description links its predecessor, focused comparison and fork review. Review the focused delta and land the series in order. Ready for review does not mean dependencies or maintainer approval can be skipped.
+
+| Order | Contribution | Upstream PR | Focused fork review |
 | --- | --- | --- | --- |
-| 1 | Passkey authentication API | [upstream #17](https://github.com/UserJoo9/QuotaManager/pull/17) | upstream `main` |
-| 2 | Add React and TypeScript build tooling and API data layer | [fork #2](https://github.com/iomarsuleiman/QuotaManager/pull/2) | `contrib/passkey-auth-api` |
-| 3 | Add dashboard design tokens, themes and Arabic support | [fork #3](https://github.com/iomarsuleiman/QuotaManager/pull/3) | `contrib/react-tooling` |
-| 4 | Add validated form controls and mobile editing overlays | [fork #4](https://github.com/iomarsuleiman/QuotaManager/pull/4) | `contrib/design-system` |
-| 5 | Add responsive navigation, reorderable sidebar and Help | [fork #5](https://github.com/iomarsuleiman/QuotaManager/pull/5) | `contrib/forms-mobile` |
-| 6 | Migrate Overview, People and device management to React | [fork #6](https://github.com/iomarsuleiman/QuotaManager/pull/6) | `contrib/navigation-help` |
-| 7 | Migrate quota, daily plans and Insights to React | [fork #7](https://github.com/iomarsuleiman/QuotaManager/pull/7) | `contrib/people-overview` |
-| 8 | Migrate Internet, Network, VPN and Security to React | [fork #8](https://github.com/iomarsuleiman/QuotaManager/pull/8) | `contrib/quota-insights` |
-| 9 | Migrate Share and System to React | [fork #9](https://github.com/iomarsuleiman/QuotaManager/pull/9) | `contrib/network-vpn-security` |
-| 10 | Add passkey sign-in and account management to the dashboard | [fork #10](https://github.com/iomarsuleiman/QuotaManager/pull/10) | `contrib/share-system` |
-| 11 | Activate the React dashboard with hashed assets and recovery screens | [fork #11](https://github.com/iomarsuleiman/QuotaManager/pull/11) | `contrib/passkey-frontend` |
-| 12 | Add dashboard CI, operator guides and development documentation | [fork #12](https://github.com/iomarsuleiman/QuotaManager/pull/12) | `contrib/dashboard-activation` |
+| 1 | Passkey authentication API | [#17](https://github.com/UserJoo9/QuotaManager/pull/17) | Five-file API contribution |
+| 2 | Add React and TypeScript build tooling and API data layer | [#18](https://github.com/UserJoo9/QuotaManager/pull/18) | [fork #2](https://github.com/iomarsuleiman/QuotaManager/pull/2) |
+| 3 | Add dashboard design tokens, themes and Arabic support | [#19](https://github.com/UserJoo9/QuotaManager/pull/19) | [fork #3](https://github.com/iomarsuleiman/QuotaManager/pull/3) |
+| 4 | Add validated form controls and mobile editing overlays | [#20](https://github.com/UserJoo9/QuotaManager/pull/20) | [fork #4](https://github.com/iomarsuleiman/QuotaManager/pull/4) |
+| 5 | Add responsive navigation, reorderable sidebar and Help | [#21](https://github.com/UserJoo9/QuotaManager/pull/21) | [fork #5](https://github.com/iomarsuleiman/QuotaManager/pull/5) |
+| 6 | Migrate Overview, People and device management to React | [#22](https://github.com/UserJoo9/QuotaManager/pull/22) | [fork #6](https://github.com/iomarsuleiman/QuotaManager/pull/6) |
+| 7 | Migrate quota, daily plans and Insights to React | [#23](https://github.com/UserJoo9/QuotaManager/pull/23) | [fork #7](https://github.com/iomarsuleiman/QuotaManager/pull/7) |
+| 8 | Migrate Internet, Network, VPN and Security to React | [#24](https://github.com/UserJoo9/QuotaManager/pull/24) | [fork #8](https://github.com/iomarsuleiman/QuotaManager/pull/8) |
+| 9 | Migrate Share and System to React | [#25](https://github.com/UserJoo9/QuotaManager/pull/25) | [fork #9](https://github.com/iomarsuleiman/QuotaManager/pull/9) |
+| 10 | Add passkey sign-in and account management to the dashboard | [#26](https://github.com/UserJoo9/QuotaManager/pull/26) | [fork #10](https://github.com/iomarsuleiman/QuotaManager/pull/10) |
+| 11 | Activate the React dashboard with hashed assets and recovery screens | [#27](https://github.com/UserJoo9/QuotaManager/pull/27) | [fork #11](https://github.com/iomarsuleiman/QuotaManager/pull/11) |
+| 12 | Add dashboard CI, operator guides and development documentation | [#28](https://github.com/UserJoo9/QuotaManager/pull/28) | [fork #12](https://github.com/iomarsuleiman/QuotaManager/pull/12) |
 
 ## Scope and dependencies
 
@@ -45,8 +47,8 @@ Historical fork comparison/synchronization reports and repository-specific agent
 - The complete stack matches the fork dashboard and English/Arabic translation sources, allowing only whitespace normalization.
 - The upstream 0.5.5 Manage/Allow controls and automatic cut-off switch have three frontend request/interaction regression tests.
 
-Physical gateway forwarding, VPN connectivity, package installation and real biometric hardware were not exercised. GitHub-hosted CI and maintainer review remain separate from these local results.
+Physical gateway forwarding, VPN connectivity, package installation and real biometric hardware were not exercised. Fork CI passed for the published contribution heads, including the completed-stack frontend build consistency check and package smoke tests. Upstream checks and maintainer review remain separate from these results.
 
 ## Publishing
 
-The connected GitHub integration rejected upstream PR creation with HTTP 403. The authenticated GitHub CLI successfully opened upstream #17 and the 11 fork draft PRs. No upstream PR was merged, no official release was published, and no existing release tag was changed or pushed.
+The connected GitHub integration rejected upstream PR creation with HTTP 403. The authenticated GitHub CLI successfully opened upstream PRs #17 through #28. All upstream contributions and fork reviews are non-draft. No upstream PR was merged, no official release was published, and no existing release tag was changed or pushed.
