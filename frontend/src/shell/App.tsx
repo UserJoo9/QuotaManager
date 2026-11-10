@@ -1,4 +1,4 @@
-import { Suspense, createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { Suspense, lazy, createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import * as DialogP from "@radix-ui/react-dialog";
 import clsx from "clsx";
@@ -14,6 +14,7 @@ import { Welcome } from "./Welcome";
 import { PageErrorBoundary, NotFound, ErrorView } from "../components/ui/ErrorView";
 
 
+const TransferOverlay = lazy(() => import("./TransferOverlay"));
 const hashId = () => location.hash.replace(/^#\/?/, "");
 const routeOf = (): RouteId => (routeById(hashId()) ? hashId() : "overview") as RouteId;
 /** A typed or old bookmarked address that is not a page: say so instead of silently showing Overview. */
@@ -148,6 +149,7 @@ function Shell() {
         </main>
       </div>
       <Welcome />
+      <Suspense fallback={null}><TransferOverlay /></Suspense>
     </SlotCtx.Provider>
   );
 }

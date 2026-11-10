@@ -17,8 +17,8 @@ export const ROUTES: RouteDef[] = [
   { id: "network", icon: "network", group: "net", load: () => import("../pages/Network") },
   { id: "vpn", icon: "vpn", group: "net", load: () => import("../pages/Vpn") },
   { id: "security", icon: "security", group: "net", load: () => import("../pages/Security") },
-  { id: "share", icon: "share", group: "tools", load: () => import("../pages/LegacyPage") /* Share */ },
-  { id: "system", icon: "system", group: "settings", load: () => import("../pages/LegacyPage") /* System */ },
+  { id: "share", icon: "share", group: "tools", load: () => import("../pages/Share") },
+  { id: "system", icon: "system", group: "settings", load: () => import("../pages/System") },
   { id: "help", icon: "help", group: "settings", load: () => import("../pages/Help") },
 ];
 export const PAGES = Object.fromEntries(ROUTES.map((r) => [r.id, lazy(r.load)])) as Record<RouteId, LazyExoticComponent<ComponentType>>;
