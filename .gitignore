@@ -45,3 +45,8 @@ Desktop.ini
 
 TASKS.md
 quota-manager-secret.asc
+# Temporary output while the React dashboard is staged
+.contrib-build/
+
+# Temporary output while the React dashboard is staged
+.contrib-build/
