@@ -187,7 +187,7 @@ Many internet lines block or drop connections coming from outside, so opening a 
 | **VPN** | Add servers, choose who goes through the VPN |
 | **Insights** | Daily usage, top devices, most visited domains |
 | **Share** | Send files and folders between devices, even straight to a nearby device |
-| **System** | Language, light/dark, colour themes, password and 2FA, updates, logs |
+| **System** | Language, light/dark/auto, density, animation, sidebar, password and 2FA, updates, logs |
 
 Handy to know:
 
@@ -198,7 +198,12 @@ Handy to know:
 - The dashboard opens at the same address as always (`http://<gateway>:8080/`). Old bookmarks to `/ui/` forward there automatically.
 - **WAN | LAN switch** above the Overview chart: the same live speed, daily usage and top devices, for the internet or for traffic inside your home (NAS, router, the gateway itself).
 - **Sharing**: drop files or folders on the Share page, or send them straight to another device on the WiFi (up to 50 MB; several files or folders arrive as one ZIP).
-- Risky buttons (kick, blacklist, enable HTTPS, remove an allow/block entry, clear all) ask you to **tap twice** — the second tap confirms.
+- **Editing on a phone** opens a sheet from the bottom that stays above the keyboard; it keeps what you typed while the numbers update and asks before discarding unsaved changes.
+- **Reorder the sidebar**: drag the ⠿ handle next to a page (long-press on a phone), or use **Customize sidebar** at the bottom. **Reset to default** brings the original order back. The order is kept in that browser.
+- **Passkeys**: in System > Account, add a passkey on each phone or computer you use, then choose "Sign in with a passkey" (Face ID, Touch ID, Windows Hello, Android screen lock). Open the dashboard by name over HTTPS for this — for example the Tailscale address — browsers don't allow passkeys on `http://192.168.2.1`.
+- **Help** (bottom of the sidebar) explains WAN, LAN, DNS, MAC and other words; dotted words anywhere open their explanation.
+- Blocking, removing, starting a new period and similar actions show **what changes, who is affected and how to undo it** before you confirm. On the Security, VPN and Share pages some buttons still ask you to **tap twice** — the second tap confirms.
+- If the gateway can't be reached, a banner says so with the time of the last update.
 
 ---
 

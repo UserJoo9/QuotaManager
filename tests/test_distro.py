@@ -1,6 +1,7 @@
 """scripts/distro.sh: package-manager detection + per-distro package names."""
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -11,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 LIB = ROOT / "scripts" / "distro.sh"
 BASH = shutil.which("bash")
 
-pytestmark = pytest.mark.skipif(BASH is None, reason="bash not available")
+pytestmark = pytest.mark.skipif(os.name == "nt" or BASH is None, reason="requires a POSIX host with bash")
 
 
 def _run(script: str, tmp_path: Path, tools=(), extra_env=None) -> str:

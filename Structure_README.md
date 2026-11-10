@@ -1100,7 +1100,7 @@ filtering running directly on top of `dnsmasq`:
 
 ## Local Share Subsystem (LAN Direct Transfer & In-Memory/Disk Streaming Engine)
 
-The Local Share subsystem (`quota/local_share.py`, `web/share.html`, and the dashboard's Share page `web/js/pages/share.js` + `shareLive.js` + `core/live.js`) provides a high-speed, private, zero-configuration local file and text/clipboard sharing portal across any client device (smartphones, PCs, laptops, tablets, and smart TVs) connected to the local home network.
+The Local Share subsystem (`quota/local_share.py`, `web/share.html`, and the dashboard's Share page `frontend/src/pages/Share.tsx` + `lib/liveTransfer.ts`) provides a high-speed, private, zero-configuration local file and text/clipboard sharing portal across any client device (smartphones, PCs, laptops, tablets, and smart TVs) connected to the local home network.
 
 ### 1. Architectural Highlights & Zero-Dependency Streaming
 
@@ -1244,16 +1244,176 @@ When a new device connects to the network as a guest before administrative appro
 
 ## The dashboard (web UI)
 
-The one and only dashboard, served at `/` (the former `/ui/` address and any old `/ui/...` path answer `307` → the same path at the root; the classic single-file UI and its gauge styles were removed). **No build step**: plain ES modules directly under `web/` — `index.html` loads `js/main.js?v=N` (bump `N` when shipping JS so browsers refetch), plus `css/`, `fonts/`, `js/` and `logo.svg`. Static files outside `/assets/` are served `Cache-Control: no-cache` (`/js/`, `/css/`, `/fonts/`, `/logo.svg`); the page itself is `no-store`.
+Served at `/` (old `/ui/...` paths answer `307` to the root). Since 0.6 the whole
+dashboard is **React 18 + TypeScript**, built by **Vite** into static files that the
+Python server serves. **Node is a build tool only** — the gateway never runs Node.
+The migration was done page by page (each vanilla page was hosted inside the React
+shell until its React version replaced it); `web/js/` now only keeps the dictionaries.
 
-- **Shell** (`js/main.js`): hash router (`#/overview` … `#/system`), a tiny store (`core/store.js`) fed by the `/ws` dashboard snapshot, `core/api.js` (cookie session + `X-QM-CSRF`; 401 → login; English server messages that users meet — wrong password, wrong 2FA code, bare `HTTP nnn` — are mapped to the UI language in `nice()`), `core/i18n.js` (`t(key)`, AR/EN dictionaries in `js/i18n/`, numbers/MACs wrapped in LRI/PDI so RTL never reorders them), `core/prefs.js` (theme, accent, fx, density, language → `data-*` on `<html>`), the privacy eye (`quota_privacy_hide`, shared with the classic UI).
-- **Redraw rule** (`drawChanged`): a live snapshot rebuilds the page **except while an `input/select/textarea` has focus** (typing is never wiped). Consequence: after an Enter-submit that leaves the field focused, call `ctx.rerender()` and re-focus (see Share → text), otherwise the list stays stale until blur.
-- **Confirm convention**: destructive buttons are *armed* on the first tap (`.armed`, label "Tap again to confirm", auto-disarm after 4 s) and act on the second: kick/blacklist, enable/remove HTTPS, MAC allow/deny entries, Share "clear" / "delete all", firewall apply/revert, VPN node delete, 2FA off.
-- **Pages** (`js/pages/`): overview, people, quota, network, internet (+`internetWan`), security (+`securityDns`), vpn, insights, share (+`shareLive`), system (+`systemTabs`). DNS preset names/descriptions are translated client-side by preset id (`dns.cat.<id>.n|d`, falling back to the server text for unknown ids).
-- **Live transfer client** (`core/live.js`): one WebSocket to `/api/share/live/ws` opened at sign-in so an incoming request pops up on any page; protocol identical to the classic dashboard and `/share` (JSON control + 16-byte transfer-id framed binary).
-- **Public pages** (`/share`, `/milestone`, `/report`, guest portal, `spoof.html`) share `web/assets/pub.css` + `pub-theme.js` and follow the dashboard's light/dark choice.
-- **Limits**: no speedometer gauge (bundle ring + system themes replace it). The anti-DevTools script (`assets/detector.js`) closes headless browsers — abort that request in browser tests. There is a single admin session (`session_token`): signing in elsewhere, or changing the password, invalidates the others.
-- **Tests**: `tests/test_new_ui.py` (static serving, no inline scripts/external URLs, AR↔EN key parity, every used key exists). End-to-end behaviour was verified with Playwright against a real gateway inside network namespaces (client / "internet" / NAS veth pairs, real nftables); anything needing real PPPoE, sing-box, `tc` cake/fq_codel, a real Tailscale or phones must be tried on the box.
+```
+frontend/                 source (npm, Vite, Tailwind v4, Radix primitives, TanStack Query, dnd-kit)
+  src/main.tsx            entry: prefs → load ONE dictionary → render
+  src/shell/              App (login + 2FA, layout, title-bar action slot, connection banner,
+                          help glossary), Sidebar (+ SortableNav, lazy), routes (lazy chunks,
+                          prefetch, saved order), Welcome (first-run, 2 steps)
+  src/pages/              Overview, People, Quota, Insights, Internet, Network, VPN, Security,
+                          Share, System (+ SystemTabs: account, updates, logs)
+  src/components/ui/      design-system parts: primitives (Button, IconButton, Badge, Meter,
+                          Card, Banner, Term, KV, Stat, Loading/Empty), forms (Field, TextField,
+                          NumberField, Segmented, Select, Combobox, Switch/SwitchRow), slider,
+                          checkbox, menu, overlays (Dialog, ConfirmDialog, adaptive Sheet,
+                          toasts), charts (LineChart, BarChart, RankList), Icon
+  src/components/domain/  PersonSheet/DeviceSheet, DailyPlan, AddDialogs, TopUp, Renewal
+  src/lib/                api (CSRF, plain-language errors, AbortSignal), session (memory-only
+                          query cache, one socket, first-data path), live (WebSocket + poll
+                          fallback, hidden-tab buffering), actions (non-optimistic mutations),
+                          queries, prefs, i18n bridge, format, types
+web/index.html + web/app/ BUILD OUTPUT (committed): hashed files + .gz twins
+web/css/tokens.css        the ONE token file
+web/js/i18n/              en.js + ar.js (the dictionaries, AR/EN parity tested)
+web/404.html              server-side "page not found" (static, bilingual)
+```
+
+**Build**: `cd frontend && npm ci && npm run build` writes `web/index.html` and
+`web/app/*` (old hashed files are removed first; every `.js/.css` ≥ 1 KB gets a
+`.gz` twin). Commit the result. CI (`frontend` job) type-checks, runs the Vitest
+unit tests, rebuilds and fails if the committed build differs. Dev: run the
+gateway on 8080 and `npm run dev` (Vite proxies `/api`, `/ws`, `/js`, `/css`, `/fonts`).
+
+### Design system (tokens)
+`web/css/tokens.css`, OKLCH, dark tuned separately from light:
+4 surfaces (`--bg-frame` sidebar · `--bg-canvas` page · `--bg-surface` cards ·
+`--bg-raised` popovers/dialogs), 2 strokes (`--stroke-subtle`, `--stroke-strong` =
+input borders, ≥3:1), 3 text tiers, one calm slate-blue accent ramp
+`--accent-50…900` (light uses 600 for buttons, dark 400), semantic
+`--success/--warning/--danger/--info` (+ `-soft` chip backgrounds) and a 6-hue
+chart ramp. (The legacy variable aliases were removed once the last vanilla page was migrated.)
+`tests/test_design_tokens.py` computes the real WCAG contrast of every text/state
+pair in both themes (AA), focus/borders/chart marks (3:1) and the dark elevation
+ladder. Tailwind maps the tokens (`bg-surface`, `text-fg-2`, `border-line-strong`,
+`bg-accent`…); never hard-code a hex value in a component.
+Rules: color only where the data warrants it (status, risk); badges always carry
+an icon + words; download/upload are solid vs dashed (not green/red); no
+decorative blobs/particles/glows (removed); motion = short transform/opacity,
+reduced by the OS setting or Appearance → Animation.
+
+### Inputs (use the control the value deserves)
+`NumberField`: visible unit, string draft while typing (empty never becomes 0),
+validated on blur (`min/max/integer/decimals`, Arabic-Indic digits and `,` accepted,
+exponent/hex rejected), no mouse-wheel changes, optional −/+ stepper and preset
+chips. `SliderField`: bounded values only (VPN % 0–100), synced number box, nothing
+applied while dragging. `Segmented` for 2–6 fixed modes (renewal, theme, window),
+`Select` (styled native) for short lists, `Combobox` (searchable listbox) for
+people/devices. Identifiers (MAC/IP/DNS) are `TextField mono` (LTR, no spellcheck)
+with inline validation. Renewal: mode (day / month end / manual / bill day) +
+day 1–31, mapped to the backend's `(period_type, reset_day)`; "0" is never shown.
+
+### Saving, confirming, invisible states
+- **Never optimistic for the gateway**: `useAction` waits for the server, re-reads
+  the dashboard, then toasts. Shaping shows *Applying → Applied* only when the
+  snapshot reports `shaping.applied`. Only appearance prefs and the sidebar order
+  apply instantly (local).
+- **Risky actions** use `ConfirmDialog`: what changes / who is affected (names,
+  device counts) / how to undo / connection impact, then a literal CTA
+  ("Block Kareem", "Start new period"). Block is a visible text button, never
+  hover-only. Bulk block/unblock on People lists every affected person.
+- **Connection**: one WebSocket for the whole app; when it drops a persistent
+  banner says *Reconnecting* / *Can't reach the gateway* with the last update
+  time and Retry. A hidden tab never re-renders; it applies the newest snapshot
+  once when visible again.
+- **Drafts**: sheets/forms keep a local draft and follow the server only while
+  untouched (the old "never rebuild under the cursor" rule, now structural).
+
+### Mobile editing sheet (`Sheet`)
+Bottom sheet below 768 px (side panel above), Radix Dialog underneath (focus trap,
+Escape, focus restore, scroll lock). Height follows `visualViewport` (`--qm-vvh`,
+`--qm-kb`), so the footer (Save/Cancel) stays above the on-screen keyboard; the
+focused field and its helper/error text are scrolled into view inside the sheet's
+own scroller (again after the keyboard animation). Inputs are 16 px on phones (no
+iOS zoom), safe-area padding at the bottom, swipe-down only on the grip, and
+unsaved edits ask "Keep editing / Discard" on close, Escape, backdrop or swipe.
+
+### Sidebar
+Groups Main · Network & security · Tools, then System/Help pinned at the bottom.
+Each row has a six-dot handle (visible on hover/focus, always in *Customize*):
+drag with mouse, long-press on touch, Space + arrows on the keyboard (screen-reader
+announcements), or the explicit ↑/↓ buttons in Customize mode. Order is saved per
+browser as `{v:1, groups:{…}}` of stable route IDs in the existing prefs key
+(`qm.ui.prefs.v2`); new routes slot into their default place; one-click reset.
+Collapsed rail = icons with tooltips. Phones get a drawer.
+
+### Device-to-device transfer (`frontend/src/lib/liveTransfer.ts`)
+TypeScript port of the previous engine, same wire protocol as the public `/share` portal (JSON
+control + 16-byte-id binary frames over `/api/share/live/ws`, receivers stream from
+`/api/share/live/download/<id>`, multi-file sends as a streaming ZIP with CRC-32). The overlay
+(`shell/TransferOverlay.tsx`) is mounted outside the routed page and starts the engine after
+sign-in, so an incoming request pops up on any page; both load as their own chunk after the
+first paint. Peers on the same IP as this browser are hidden (same device).
+
+### Performance and caching
+- First paint loads the shell chunk (~104 KB gzip), one dictionary (~20 KB) and
+  the current page; every page is its own chunk; drag-and-drop (~16 KB) loads on
+  first sidebar interaction; the slider/menu code only with their pages.
+- After the first page, one or two likely next pages are prefetched when the
+  browser is idle (skipped on Save-Data, 2G, ≤2 CPU cores, hidden tab); hovering
+  or focusing a sidebar link prefetches that page.
+- `/app/*` = content-hashed → `Cache-Control: public, max-age=31536000,
+  immutable`, served from the precompressed `.gz` (no gzip CPU on the gateway). The build sets the gzip OS header byte to 255 so Windows and Linux produce identical committed assets; the asset regression test verifies that each gzip stream decompresses to its source file.
+  `index.html` and all `/api` stay `no-store`; authenticated data lives in memory
+  only (TanStack Query) and is cleared on logout/401 — never localStorage or a
+  service worker.
+- Live speeds poll only while a page that shows them is open and the tab is
+  visible (5 s, Insights live 3 s); history queries are cached 60 s and cancelled
+  when the selection changes. The dashboard itself is never polled while the
+  socket is healthy.
+- Measured (Playwright, headless Chromium, 13 seeded devices; old → new):
+  first contentful paint 152 → 84 ms (LAN) and 2.9 → 1.5 s (1.6 Mbps/150 ms);
+  cold load 52 → 20 requests, 558 → 312 KB transferred (incl. fonts);
+  warm reload 42 → 10 KB; DOM nodes 10.5k → 3.2k; idle main-thread 0.6 % → 0.4 %
+  (old default animated background: 7.4 %); route switch → painted ≈ 30 ms in
+  both; heap flat over a 3-minute soak (9.5 MB). Server snapshot
+  (`/api/dashboard`): 8.5 ms at 0 devices, 10.7 ms / 145 KB at 100.
+
+### Passkeys (`quota/passkeys.py`)
+WebAuthn via `py_webauthn` (`webauthn` in `requirements-linux.txt`). Registration asks for a
+**platform** authenticator, a discoverable credential and **required user verification**, so a
+passkey is Face ID / Touch ID / Windows Hello / an Android screen lock on the device itself; the
+private key never leaves it. The gateway stores `{id, public_key, sign_count, rp_id, name,
+created, last_used, backed_up}` as JSON in `settings.passkeys` (DB, survives updates).
+Challenges live in memory for 120 s, are single-use and bound to the request's rp id + origin.
+**Constraint**: the relying-party id must be a *name* and the page a secure context —
+`localhost` or an HTTPS hostname (e.g. the Tailscale address). A bare IP such as
+`http://192.168.2.1:8080` can never use passkeys (browser rule); the API reports
+`reason: ip-address | not-https`, and the Account card explains what to do. A passkey works only
+on the address (rp id) it was created on. A passkey sign-in counts as two factors (device +
+biometric/PIN) and skips the TOTP step. If the `webauthn` package is missing (folder-copy update
+without `pip install`), the import is optional: the gateway boots, `/api/passkeys` says
+`server-missing`. Tests: `tests/test_passkeys.py` runs real ceremonies with a software ES256
+authenticator (register, sign in, counter, replay, wrong origin, UV missing, removed key, IP host).
+
+### Error, empty and offline states
+- `components/ui/Illustration.tsx`: one family of line-art spot illustrations (tokens only, no
+  files); `Empty` picks the illustration for its icon automatically, so every empty list has art,
+  an explanation and a next step.
+- `components/ui/ErrorView.tsx`: `PageErrorBoundary` wraps every routed page (a crash keeps the
+  shell, sheets and banners alive; Retry / Go to Overview / copyable details). A failed lazy chunk
+  after an update shows "A newer version was installed → Reload" instead of a crash. Unknown
+  `#/…` routes show an in-app 404.
+- Boot: when `/api/me` fails at the network level the shell shows "Can't reach the gateway"
+  with checks and a 10 s auto-retry instead of the login form.
+- Server: `web/404.html` (static, bilingual, no script) is what Starlette serves for unknown paths.
+
+### Lessons learned (0.6)
+- Tailwind 4.0.0's Vite plugin crashed on `@layer` + `@theme inline`; 4.1.x works.
+- A sheet's form state must be created when the item exists (mount the body keyed
+  by id), not from an empty object first — it crashed on `undefined.trim()`.
+- Translation keys are global: `sh.*` already belonged to Share; the sheet uses `sheet.*`.
+
+**Tests**: `tests/test_new_ui.py` (serving, immutable+gzip assets, CSP-clean, no
+external URLs, no raw-HTML sinks, AR↔EN parity, every key used exists, draft and
+keyboard contracts, non-optimistic actions, transfer engine), `tests/test_design_tokens.py`
+(contrast), `frontend/src/**/*.test.ts` (Vitest: number parsing, sidebar order merge,
+renewal mapping, prefs migration, identifiers, chart helpers).
 
 ---
 
@@ -1725,6 +1885,10 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/dashboard` | full bundle + users + devices + usage snapshot |
+| GET | `/api/passkeys` | the admin's passkeys (name, rp_id, created, last used, synced) + `usable_here`/`reason` for this address (never key material) |
+| POST | `/api/passkeys/register/options` · `/register/verify` | create a passkey on THIS device (signed-in admin; platform authenticator, user verification required) |
+| PATCH/DELETE | `/api/passkeys/{id}` | rename / remove a passkey |
+| POST | `/api/passkeys/login/options` · `/login/verify` | sign in with a passkey (no password, no TOTP step; shares the login rate limiter and failed-login log) |
 | GET/POST/PATCH/DELETE | `/api/users` & `/api/users/{id}` | list / create / update / delete users (allowance, block, speed caps; `exempt_quota: true` lifts the quota gate — the user is never quota-blocked, manual admin cuts still apply). **DELETE `?blacklist=true` blacklists every device MAC it owns** (permanent deny list — see the quota-model section), while `?blacklist=false` kicks them for 5s without blacklist |
 | POST | `/api/users/{id}/kick` | kick/disconnect all devices owned by user for 5s (flushes lease & drops state; device can reconnect) |
 | POST | `/api/users/{id}/block-blacklist` | permanently block and blacklist all device MACs owned by user |
@@ -1896,13 +2060,14 @@ QuotaManager/
 ├── api/
 │   ├── app.py                # FastAPI factory: REST + /ws + static mount
 │   └── schemas.py            # pydantic request models
+├── frontend/               # dashboard SOURCE: React + TypeScript + Vite (build → web/)
+│   ├── package.json, package-lock.json, vite.config.ts, tsconfig.json, index.html
+│   └── src/                  # shell/, pages/, components/{ui,domain}/, lib/, styles/app.css
 ├── web/
-│   ├── index.html            # the dashboard shell (loads js/main.js)
-│   ├── css/  fonts/  js/     # tokens/base/layout/components CSS, self-hosted fonts,
-│   │                         #   js/core (api, ws, i18n, prefs, store, live), js/components,
-│   │                         #   js/pages (overview, people, quota, network, internet,
-│   │                         #   security, vpn, insights, share, system + sub-pages),
-│   │                         #   js/i18n ar+en; see "The dashboard (web UI)"
+│   ├── index.html            # BUILT entry (from frontend/index.html)
+│   ├── app/                  # BUILT hashed chunks + .gz twins (served immutable)
+│   ├── css/  fonts/  js/     # tokens.css (design tokens), self-hosted fonts, js/i18n ar+en
+│   ├── 404.html              # server-side not-found page
 │   ├── logo.svg
 │   ├── milestone.html        # public household page: own usage + per-device split,
 │   │                         #   one-time 50/75/100% milestone acknowledge
@@ -1932,7 +2097,8 @@ QuotaManager/
     ├── test_topology.py      # detect_ppp / check_internet probes (fake `ip`)
     ├── test_vpn.py           # VpnManager, link parsing, config generation, and REST API
     ├── test_tailscale.py     # Tailscale status/states/install/connect, API routes, firewall rule
-    ├── test_new_ui.py        # dashboard at /, /ui/ redirect, no inline script/external URL, AR/EN key parity
+    ├── test_new_ui.py        # dashboard at /, immutable+gzip /app, no inline script/external URL, AR/EN key parity
+    ├── test_design_tokens.py # WCAG contrast of the OKLCH tokens, both themes
     ├── test_flows.py         # live-traffic destination naming (DNS names, RDAP owners)
     ├── test_ipv6_setup.py    # dual-stack host setup (SLAAC/DHCPv6 on a ULA, NAT66)
     ├── test_ipv6_probe.py    # IPv6 reachability probe + fallback state
@@ -2210,3 +2376,117 @@ flag) and subtracted in `get_period_usage*`, `get_usage_before_and_on` and
 `get_user_usage_on`, so the GB added later is never eaten by it. Reports still show
 the real usage. Switch: setting `free_when_exhausted` (`/api/free-mode`, Quota page);
 the transition is logged as an event.
+
+
+## Fork synchronization and local testing (2026-11-09)
+
+The fork merges upstream `UserJoo9/QuotaManager` through `ed31b08`, including
+`73be78c` (0.5.4 features), `f397755` (RPM packaging fix) and `ed31b08`
+(release notes). The fork retains the React dashboard from `699e0ba`,
+`b8ae2d6` and `8dbead7`. Conflicts in the dashboard entry point and UI tests
+were resolved in favor of React; the legacy daily-plan, person-drawer and
+quota-page JavaScript modules remain deleted. Both changelog sections remain.
+
+The Quota page reads `free_mode` and `free_mode_enabled` from
+`GET /api/dashboard` and writes `POST /api/free-mode` through the existing
+mutation/refresh flow. Both dictionaries contain its labels. The disabled
+spread plan shows the reset-day requirement beside its option. Vite output
+and precompressed assets are regenerated; HTML input/output use LF endings
+so Windows builds match Linux CI. Backend release version is upstream 0.5.4;
+frontend package version stays 0.6.0 for the fork's redesign. No release tag
+is created or rewritten.
+
+For a local dashboard and API without network enforcement:
+
+```powershell
+python -m venv .venv
+.venv/Scripts/python -m pip install -r requirements-linux.txt tzdata
+.venv/Scripts/python scripts/run_local.py --port 8080
+```
+
+Open `http://127.0.0.1:8080` and use password `admin` on first start.
+The runner binds only loopback and stores SQLite and shared files below
+`data/local-test/`. It uses the real API and database, but does not start
+`Gateway`, DHCP, nftables, shaping or VPN networking. Stop with Ctrl+C.
+Use `.venv/bin/python` on Linux. Data persists between runs. This verifies
+dashboard/API behavior, not packet forwarding or physical gateway performance.
+
+Verification commands:
+
+```text
+python -m pyflakes api core quota tests run.py scripts/run_local.py
+python -m pytest tests -q --timeout=60
+cd frontend
+npm ci
+npm test
+npm run build
+```
+
+Linux checks use Python 3.12 with bash, nftables, iproute2, dnsmasq and
+arp-scan installed, matching the backend CI environment. The full change
+inventory and validation results are recorded in `docs/fork-sync-2026-11-09.md`.
+
+The dashboard's shared `Select` uses Radix DropdownMenu radio items, with
+keyboard navigation, typeahead, disabled options, selected indicators, RTL
+placement and trigger focus restoration. MAC-list suggestions use themed
+buttons instead of browser datalists. Scrollbars use theme tokens, rounded
+thumbs and no arrow buttons; Firefox uses thin colored scrollbars. React
+interaction tests cover selection and Escape, and `test_new_ui.py` rejects
+native select/datalist elements anywhere in dashboard source.
+
+
+### Sidebar and field alignment follow-up
+
+`Sidebar` uses one flexing scroll region for navigation, with non-shrinking
+header/footer controls. The quota summary is pinned outside the scroller and
+retains a compact percentage/meter in rail mode. System and Help are ordinary
+page routes in the settings group; Help is lazy-loaded at `#/help` and retains
+the searchable glossary. The old footer Help callback and modal are removed.
+Route/mode changes reveal the active item inside that region without scrolling
+the document. Reordering is an explicit local mode; its lazy DnD module is
+loaded on request, with retry feedback on failure. Handles occupy their own
+in-row slot. Collapsed links retain accessible names, tooltips follow text
+direction, and each rendered sidebar has unique group-heading IDs. The mobile
+drawer includes its own close action.
+
+`Field.labelHidden` applies the screen-reader-only style to the label itself,
+so it leaves no flex gap above the input. `Field.action` and the corresponding
+`TextField` prop put an inline action on the control row, before helper/error
+text. Share submission, firewall bans and passkey registration use this slot.
+All previous screen-reader-only span labels in field components were migrated.
+`NumberField` puts its input and unit in separate flex items instead of an
+absolute overlay, so RTL text and longer unit translations cannot cover values.
+The number remains LTR internally, with its text alignment matching the UI.
+
+Follow-up verification includes 24 frontend tests, 50 Python UI/token tests,
+and 60 automated Chromium layouts across all dashboard routes, English/Arabic,
+light/dark themes and desktop/mobile sizes. The full inventory is in
+`docs/fork-sync-2026-11-09.md`.
+
+
+### Complete fork comparison
+
+`docs/fork-vs-original.md` records the current fork-specific changes against
+original commit `ed31b088247cbb13a0b202b215ac84cb66de0622`, separately from the
+upstream changes imported during synchronization. Its complete net file
+inventory is `docs/fork-vs-original-files.tsv`, generated with Git rename
+detection disabled so every added, modified or deleted path appears explicitly.
+
+
+### Local test sessions
+
+The inherited authentication implementation stores a single `session_token`
+setting and rotates it in `_issue_session` on each successful password/passkey
+login. A login by another client invalidates the earlier client's cookie.
+Repeated browser-audit logins against the user's development database caused
+the reported sign-outs; this behavior is not Windows-specific.
+
+Run automated browser checks against a separate instance and data directory:
+
+```powershell
+.venv/Scripts/python scripts/run_local.py --port 8081 --data-dir data/layout-test
+```
+
+Keep the user-facing instance on port 8080 with data/local-test. Cookies are
+not port-scoped, so automated checks must also use their own browser context.
+This isolates login/session rotation without changing production auth policy.
