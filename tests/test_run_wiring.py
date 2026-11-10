@@ -378,7 +378,7 @@ def test_full_server_boot(tmp_path):
 
         # UI served
         assert c.get("/").status_code == 200
-        assert c.get("/js/main.js").status_code == 200
+        assert c.get("/js/i18n/en.js").status_code == 200
 
     loop.run_until_complete(gw.shutdown())
     loop.close()

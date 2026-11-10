@@ -10,3 +10,9 @@ packaging/DEBIAN/* text eol=lf
 *.conf text eol=lf
 *.nft text eol=lf
 packaging/** text eol=lf
+
+# Keep Vite HTML input/output identical on Windows and Linux.
+frontend/index.html text eol=lf
+web/index.html text eol=lf
+web/app/*.js text eol=lf whitespace=-blank-at-eol
+web/app/*.css text eol=lf
