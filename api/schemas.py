@@ -104,6 +104,13 @@ class DailyToggle(BaseModel):
     enabled: bool
 
 
+class RogueAction(BaseModel):
+    """An action on an unmanaged (static-IP) host: adopt it or allow it."""
+    mac: str
+    ip: str = ""
+    name: str = ""
+
+
 class MilestoneDailyPlan(BaseModel):
     """What a person may change about their own daily plan (never the total)."""
 

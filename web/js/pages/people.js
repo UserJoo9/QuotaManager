@@ -6,6 +6,7 @@ import { ov, loadLive } from "../core/overviewData.js";
 import { actions } from "../core/actions.js";
 import { toast } from "../components/toast.js";
 import { openAddUser, openAddDevice } from "../components/peopleDialogs.js";
+import { api } from "../core/api.js";
 
 let query = "", filter = "all", timer = null;
 const openIds = new Set();
@@ -75,10 +76,15 @@ export default function people(ctx) {
     h("section", { class: "card list-card" },
       h("div", { class: "lhead" }, h("span"), h("span", {}, t("pp.col.user")), h("span", {}, t("pp.col.usage")), h("span", {}, t("pp.col.status")), h("span", {}, t("pp.col.access"))),
       body),
-    (d.rogue || []).length ? h("section", { class: "card", style: { "margin-top": "16px" } },
-      h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("pp.rogue")), h("span", { class: "sub" }, t("pp.rogue.d"))), chip("warn", `${num(d.rogue.length, 0)}`)),
-      d.rogue.map((r) => h("div", { class: "crow", style: { "grid-template-columns": "36px 1fr auto" } },
+    (d.rogue || []).length || d.unmanaged_block === false ? h("section", { class: "card", style: { "margin-top": "16px" } },
+      h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("pp.rogue")), h("span", { class: "sub" }, t("pp.rogue.d"))), chip("warn", `${num((d.rogue || []).length, 0)}`)),
+      h("div", { class: "row-sw" }, h("div", {}, h("b", {}, t("pp.rogue.sw")), h("span", {}, t("pp.rogue.sw.d"))),
+        sw(d.unmanaged_block !== false, t("pp.rogue.sw"), act(() => api.post("/api/unmanaged-policy", { enabled: d.unmanaged_block === false })))),
+      (d.rogue || []).map((r) => h("div", { class: "crow", style: { "grid-template-columns": "36px 1fr auto" } },
         h("span", { class: "d-ic" }, icon("alert", 16)),
         h("div", { class: "c-name" }, r.ip ? iso(r.ip) : "", h("span", { class: "mono" }, [iso(r.mac || ""), r.vendor && r.vendor !== "Unknown" ? r.vendor : ""].filter(Boolean).join(" · "))),
-        chip(r.online ? "ok" : "", r.online ? t("pp.st.online") : t("pp.st.offline"))))) : null);
+        chip(r.blocked ? "danger" : r.allowed ? "ok" : "warn", r.blocked ? t("pp.rogue.cut") : r.allowed ? t("pp.rogue.allowed") : t("pp.rogue.open")),
+        h("div", { class: "row-acts", style: { "grid-column": "2 / -1" } },
+          h("button", { type: "button", class: "btn primary sm", onclick: act(async () => { await api.post("/api/rogue/adopt", { mac: r.mac, ip: r.ip }); toast(t("pp.rogue.adopted")); }) }, t("pp.rogue.manage")),
+          r.allowed ? null : h("button", { type: "button", class: "btn sm", onclick: act(async () => { await api.post("/api/rogue/allow", { mac: r.mac }); toast(t("pp.rogue.allowed.done")); }) }, t("pp.rogue.allow")))))) : null);
 }

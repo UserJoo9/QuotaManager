@@ -18,6 +18,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -39,7 +40,7 @@ from contextlib import asynccontextmanager
 from api.schemas import (BundleUpdate, ConsumptionSpoofRequest, DeviceCreate,
                          DeviceUpdate, DnsImportRequest, DnsPresetEnable,
                          DnsQuickRule,
-                         DailyPreview, DailyToggle,
+                         DailyPreview, DailyToggle, RogueAction,
                          DnsServerUpdate, DomainRuleCreate, DomainRuleUpdate,
                          FirewallBanRequest, FirewallConfigUpdate,
                          FirewallGeoUpdate, FirewallUnbanRequest,
@@ -54,6 +55,8 @@ from api.schemas import (BundleUpdate, ConsumptionSpoofRequest, DeviceCreate,
                          VpnRoutingUpdateRequest, VpnSettingsUpdate,
                          WanRenewConfig, WanTest, WanUpdate, TailscaleDisconnect)
 from api import waf as _waf
+
+_MAC_RE_API = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
 from core import passwords as _passwords
 from core import timeutil
 from core.config import WafConfig, WebConfig
@@ -649,6 +652,8 @@ def create_app(
         # Optional daily quota: today's cap per person (empty when disabled).
         daily_on = await service.daily_enabled()
         free_on = await service.refresh_free_mode()   # everyone out of quota -> open
+        unmanaged_on = await service.block_unmanaged_enabled()
+        allow_macs = {m.lower() for m in await database.get_mac_list("allow")}
         daily = await service.daily_state()
         daily_cut = set() if free_on else service.daily_blocked_devices(daily, devices)
 
@@ -762,10 +767,13 @@ def create_app(
             "daily_enabled": daily_on,
             "free_mode": free_on,
             "free_mode_enabled": await service.free_mode_enabled(),
+            "unmanaged_block": unmanaged_on,
             "users": [user_views[u.id] for u in users],
             "devices": devices_view,
             "rogue": [
-                {"ip": r.ip, "mac": r.mac, "vendor": r.vendor, "online": r.online}
+                {"ip": r.ip, "mac": r.mac, "vendor": r.vendor, "online": r.online,
+                 "blocked": unmanaged_on and (r.mac or "").lower() not in allow_macs,
+                 "allowed": (r.mac or "").lower() in allow_macs}
                 for r in live.rogue
             ],
             # The box's OWN enforcement: what the protected Gateway user's
@@ -2320,6 +2328,68 @@ def create_app(
             "Open-when-everyone-is-out-of-quota " + ("enabled" if body.enabled else "disabled"), "info")
         return {"enabled": await service.free_mode_enabled(),
                 "active": service.free_mode}
+
+    # -- unmanaged (static-IP) hosts ------------------------------------------
+
+    @app.get("/api/unmanaged-policy", dependencies=[Depends(_require_auth)])
+    async def get_unmanaged_policy() -> dict[str, Any]:
+        return {"enabled": await service.block_unmanaged_enabled()}
+
+    @app.post("/api/unmanaged-policy", dependencies=[Depends(_require_auth)])
+    async def set_unmanaged_policy(body: DailyToggle) -> dict[str, Any]:
+        await service.set_block_unmanaged(body.enabled)
+        await database.add_event(
+            "Automatic cut-off of unmanaged devices " + ("enabled" if body.enabled else "disabled"), "info")
+        return {"enabled": await service.block_unmanaged_enabled()}
+
+    def _rogue_target(body: RogueAction) -> tuple[str, str]:
+        """Validate the MAC + resolve the IP (body, else the live scan)."""
+        mac = body.mac.strip().lower()
+        if not _MAC_RE_API.match(mac) or mac == GATEWAY_MAC:
+            raise HTTPException(400, "invalid MAC address")
+        ip = body.ip.strip()
+        if not ip:
+            for r in holder.get().rogue:
+                if (r.mac or "").lower() == mac:
+                    ip = r.ip
+                    break
+        try:
+            if ipaddress.ip_address(ip).version != 4:
+                raise ValueError
+        except ValueError:
+            raise HTTPException(400, "this device's IPv4 address is unknown yet - wait for the next scan") from None
+        return mac, ip
+
+    @app.post("/api/rogue/adopt", status_code=201, dependencies=[Depends(_require_auth)])
+    async def adopt_rogue(body: RogueAction) -> dict[str, Any]:
+        """Turn an unmanaged static-IP host into a managed device.
+
+        It is registered like any new device (0 GB, still cut until the admin
+        gives it an allowance) and keeps its static IP, so it is counted and
+        controlled per person from now on.
+        """
+        mac, ip = _rogue_target(body)
+        if await database.get_device(mac=mac) is not None:
+            raise HTTPException(409, "this device is already managed")
+        dev = await database.upsert_device(mac, body.name.strip(), _db.QUOTA_DISABLED, 0.0)
+        await service.adopt_static_host(mac, ip)
+        await database.upsert_lease(mac, ip, 24)
+        await service.recompute_allowances()
+        await database.add_event(
+            f"Unmanaged device adopted: {body.name.strip() or mac} ({ip}) - "
+            f"quota unassigned (0 GB, awaiting admin)", "info", dev.id)
+        _schedule_shaping_sync()
+        return {"id": dev.id, "mac": dev.mac, "user_id": dev.user_id, "ip": ip}
+
+    @app.post("/api/rogue/allow", dependencies=[Depends(_require_auth)])
+    async def allow_rogue(body: RogueAction) -> dict[str, Any]:
+        """Let an unmanaged host keep its internet without managing it."""
+        mac = body.mac.strip().lower()
+        if not _MAC_RE_API.match(mac):
+            raise HTTPException(400, "invalid MAC address")
+        await database.add_mac_list("allow", [mac])
+        await database.add_event(f"Unmanaged device allowed: {mac}", "info")
+        return {"mac": mac, "allowed": True}
 
     @app.get("/api/users/{user_id}/daily-plan", dependencies=[Depends(_require_auth)])
     async def get_daily_plan(user_id: int) -> dict[str, Any]:

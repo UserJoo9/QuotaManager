@@ -676,6 +676,22 @@ The lock is self-sustaining (dropped traffic makes the bypasser re-ARP, and it
 is re-answered) and scoped to the client subnet, so legitimate uplink-subnet
 hosts (NAS, the router) keep resolving the router normally.
 
+**Auto-cut + adopt (0.5.5).** Detection alone left a static-IP device online, so
+every rogue is now cut by default: `run.py::_apply_unmanaged_block` adds a
+row-less BLOCKED entry for it to the enforcement state (the same path a
+deleted/deny-listed device uses), so the kernel `blocked` / `blocked_macs` sets
+drop it. Policy lives in the `block_unmanaged` setting (default on, switch on
+People > Unmanaged devices, `GET/POST /api/unmanaged-policy`); MACs on the
+Network-tab allow list are skipped. **Manage** (`POST /api/rogue/adopt`)
+registers it like a new DHCP device (disabled, 0 GB) and stores its static IP in
+the `static_hosts` setting; `_sync_static_hosts` keeps that binding in the
+`leases` table every tick (the dnsmasq-lease prune skips it) and drops it when
+the device row is deleted or the device starts using DHCP. **Allow**
+(`POST /api/rogue/allow`) adds the MAC to the allow list. Latency: scan every
+60 s + the 15 s tick. This works for devices whose traffic crosses the box; a
+device that bypasses it through the router is still caught only by the ARP
+lock below.
+
 Residual limits, stated honestly: a device with a **static ARP entry** still
 evades it, and a device that picks a static IP on the **uplink** subnet
 (colliding with the real LAN) is detected but not captured — for those, enable

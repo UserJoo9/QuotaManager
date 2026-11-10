@@ -1032,9 +1032,14 @@ class Gateway:
         # every binding — that would un-account every device until its DHCP
         # renew and mis-count the month.
         if seen:
+            statics = await self.service.static_hosts()
+            for mac in seen & set(statics):
+                # the device switched to DHCP: its lease is the truth again
+                await self.service.release_static_host(mac)
+                statics.pop(mac, None)
             db_leases = await self.database.list_leases()
             for lease in db_leases:
-                if lease.mac not in seen:
+                if lease.mac not in seen and lease.mac not in statics:
                     await self.database.delete_lease(lease.mac)
             # The deny list is NOT pruned here: a blacklisted MAC stays
             # blacklisted until the admin removes it in the Network tab, even
@@ -1261,6 +1266,7 @@ class Gateway:
         try:
             leases = await self.database.list_leases()
             known = {l.mac for l in leases}
+            known |= set(await self.service.static_hosts())  # adopted static-IP devices
             rogues = await asyncio.to_thread(self.arp_scanner.scan, known)
         except Exception:  # noqa: BLE001
             log.exception("rogue LAN scan failed")
@@ -1269,12 +1275,66 @@ class Gateway:
         seen = {r.mac for r in rogues}
         for r in rogues:
             if r.mac not in self._known_rogue_macs:
+                if await self.service.block_unmanaged_enabled():
+                    tail = ("it is cut off automatically until you manage it "
+                            "(People > Unmanaged devices)")
+                else:
+                    tail = ("automatic cut-off is OFF, so quota cannot count "
+                            "or block it")
                 await self.database.add_event(
-                    f"Rogue device on network: {r.mac} ({r.ip}) — active but "
-                    f"not a DHCP client (static IP / router-gateway bypass); "
-                    f"quota cannot count or block it",
+                    f"Unmanaged device on network: {r.mac} ({r.ip}) — active "
+                    f"but not a DHCP client (static IP / router-gateway "
+                    f"bypass); {tail}",
                     "warning", None)
         self._known_rogue_macs = seen
+
+    async def _sync_static_hosts(self) -> None:
+        """Keep adopted static-IP devices bound to their IP.
+
+        They never appear in dnsmasq's lease file, so without this their IP
+        would be unknown (no counting, no per-person cut). A binding whose
+        device row was deleted is dropped here, so a deleted device becomes an
+        unmanaged host again (and is cut off by the policy).
+        """
+        try:
+            hosts = await self.service.static_hosts()
+            for mac, ip in hosts.items():
+                if await self.database.get_device(mac=mac) is None:
+                    await self.service.release_static_host(mac)
+                    continue
+                if await self.database.get_ip_for_mac(mac) != ip:
+                    await self.database.upsert_lease(
+                        mac, ip, self.cfg.dhcp.lease_hours)
+        except Exception:  # noqa: BLE001 - never stall the tick
+            log.exception("static host sync failed")
+
+    async def _apply_unmanaged_block(self, state: dict) -> None:
+        """Cut every unmanaged (rogue) host: add a row-less BLOCKED entry for it.
+
+        Same path the deny list uses for a deleted device, so the existing
+        kernel drop (by IP and by MAC) applies. Skipped when the policy is off,
+        for MACs on the Network-tab allow list, and for anything that already
+        has a state row (a managed device is controlled by its own state).
+        """
+        if not self._rogues:
+            return
+        try:
+            if not await self.service.block_unmanaged_enabled():
+                return
+            allow = {m.lower() for m in await self.database.get_mac_list("allow")}
+            for r in self._rogues:
+                mac = (getattr(r, "mac", "") or "").lower()
+                ip = getattr(r, "ip", "") or ""
+                if (not _LEASE_MAC_RE.match(mac) or not ip or ":" in ip
+                        or mac in state or mac in allow or mac == GATEWAY_MAC):
+                    continue
+                state[mac] = {
+                    "ip": ip, "name": "", "mode": "", "allowance_gb": 0.0,
+                    "used_gb": 0.0, "blocked": True,
+                    "block_state": _db.BLOCK_ADMIN, "unmanaged": True,
+                }
+        except Exception:  # noqa: BLE001 - never stall the tick
+            log.exception("unmanaged-host block failed")
 
     async def _dns_history_tick(self) -> None:
         """Drain the DNS-history queue into per-device buckets, then prune.
@@ -1524,7 +1584,9 @@ class Gateway:
             log.warning("device %s (%s) -> %s", ch["device_id"], ch["mac"], ch["state"])
 
         # 4. Push fresh enforcement maps into the engine + holder.
+        await self._sync_static_hosts()
         state = await self.service.snapshot_state()
+        await self._apply_unmanaged_block(state)
         ip_to_mac = {v["ip"]: mac for mac, v in state.items() if v.get("ip")}
         # IPv6: the engine counts/cuts each known device's tracked IPv6
         # addresses exactly like its IPv4 lease (static reservations + the
