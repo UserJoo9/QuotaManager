@@ -168,7 +168,7 @@ export default function People() {
       {((d.rogue || []).length > 0 || d.unmanaged_block === false) && (
         <Card title={<Term k="rogue">{t("pp.rogue")}</Term>} sub={t("pp.rogue.d")} actions={<Badge tone="warning">{num(d.rogue.length, 0)}</Badge>}>
           <SwitchRow title={t("pp.rogue.sw")} desc={t("pp.rogue.sw.d")} checked={d.unmanaged_block !== false} pending={pending === "unmanaged-policy"} disabled={pending !== null}
-            onChange={(enabled) => { void run("unmanaged-policy", () => api.post("/api/unmanaged-policy", { enabled }), t("act.applied")); }} />
+            onChange={(enabled) => { void run("unmanaged-policy", () => api.post("/api/unmanaged-policy", { enabled }), t("act.done")); }} />
           <ul className="divide-y divide-line">
             {d.rogue.map((r, i) => (
               <li key={(r.mac || "") + i} className="flex flex-wrap items-center gap-3 py-2.5">
