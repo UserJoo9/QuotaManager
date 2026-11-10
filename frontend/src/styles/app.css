@@ -1,0 +1,119 @@
+@import "tailwindcss";
+
+/* The variables themselves live in /css/tokens.css (the one token file, OKLCH). */
+@theme inline {
+  --font-sans: var(--font);
+  --font-mono: var(--mono);
+  --color-frame: var(--bg-frame);
+  --color-canvas: var(--bg-canvas);
+  --color-surface: var(--bg-surface);
+  --color-raised: var(--bg-raised);
+  --color-line: var(--stroke-subtle);
+  --color-line-strong: var(--stroke-strong);
+  --color-fg: var(--text-primary);
+  --color-fg-2: var(--text-secondary);
+  --color-fg-3: var(--text-tertiary);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-pressed: var(--accent-pressed);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-fg: var(--accent-fg);
+  --color-focus: var(--focus);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-danger-solid: var(--danger-solid);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-grid: var(--chart-grid);
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius);
+  --radius-lg: var(--radius-lg);
+  --shadow-raised: var(--shadow-raised);
+}
+
+@layer base {
+  * { scrollbar-width: thin; scrollbar-color: var(--stroke-strong) transparent; }
+  @supports selector(::-webkit-scrollbar) {
+    * { scrollbar-width: auto; scrollbar-color: auto; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--stroke-strong); border: 2px solid transparent; border-radius: 999px; background-clip: padding-box; }
+    ::-webkit-scrollbar-thumb:hover { background-color: var(--text-tertiary); }
+    ::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+    ::-webkit-scrollbar-corner { background: transparent; }
+  }
+  html { scrollbar-gutter: stable; }
+  body {
+    background: var(--bg-canvas); color: var(--text-primary); font-family: var(--font);
+    font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased;
+    font-variant-numeric: tabular-nums; overflow-x: hidden;
+  }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  ::selection { background: var(--accent-soft); }
+  /* iOS Safari zooms into any focused field under 16px: keep phones at 16px. */
+  @media (max-width: 767px) { input, select, textarea { font-size: 16px !important; } }
+  button { cursor: pointer; }
+  button:disabled { cursor: not-allowed; }
+}
+
+@layer components {
+  .qm-num { font-variant-numeric: tabular-nums; }
+  /* Identifiers (IP, MAC, domains) stay left-to-right inside Arabic text. */
+  .qm-ltr { direction: ltr; unicode-bidi: isolate; }
+  .qm-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+  /* Adaptive editing sheet: bottom sheet on phones, side panel on wide screens. */
+  .qm-sheet-overlay { position: fixed; inset: 0; background: var(--scrim); z-index: 60; }
+  .qm-sheet {
+    position: fixed; z-index: 61; background: var(--bg-raised); color: var(--text-primary);
+    display: flex; flex-direction: column; box-shadow: var(--shadow-raised); outline: none;
+  }
+  @media (max-width: 767px) {
+    .qm-sheet {
+      inset-inline: 0; bottom: var(--qm-kb, 0px);
+      max-height: calc(var(--qm-vvh, 100dvh) - 12px);
+      border-radius: 16px 16px 0 0; border-top: 1px solid var(--stroke-subtle);
+      padding-bottom: env(safe-area-inset-bottom);
+      transition: bottom 120ms linear;
+    }
+    .qm-sheet[data-size=full] { height: calc(var(--qm-vvh, 100dvh) - 12px); }
+    .qm-sheet[data-state=open] { animation: qm-sheet-up var(--dur-sheet) var(--ease); }
+    .qm-sheet[data-state=closed] { animation: qm-sheet-down 200ms ease-in forwards; }
+  }
+  @media (min-width: 768px) {
+    .qm-sheet {
+      top: 0; bottom: 0; inset-inline-end: 0; width: min(460px, 100vw);
+      border-inline-start: 1px solid var(--stroke-subtle);
+    }
+    .qm-sheet[data-state=open] { animation: qm-sheet-side var(--dur-sheet) var(--ease); }
+    .qm-sheet[data-state=closed] { animation: qm-fade-out 160ms ease-in forwards; }
+  }
+  .qm-overlay-anim[data-state=open] { animation: qm-fade-in var(--dur) ease-out; }
+  .qm-overlay-anim[data-state=closed] { animation: qm-fade-out 160ms ease-in forwards; }
+  .qm-pop[data-state=open] { animation: qm-pop-in 140ms var(--ease); }
+
+  .qm-skel { background: linear-gradient(90deg, var(--bg-surface), var(--bg-raised), var(--bg-surface)); background-size: 200% 100%; animation: qm-shimmer 1.4s infinite; border-radius: var(--radius); }
+  .qm-route-enter { animation: qm-fade-in 160ms ease-out; }
+  .qm-drop-line { box-shadow: inset 0 2px 0 var(--accent); }
+}
+
+@keyframes qm-sheet-up { from { transform: translateY(100%); } to { transform: none; } }
+@keyframes qm-sheet-down { from { transform: none; } to { transform: translateY(100%); } }
+@keyframes qm-sheet-side { from { transform: translateX(calc(24px * var(--dir))); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes qm-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes qm-fade-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes qm-pop-in { from { opacity: 0; transform: scale(.97); } to { opacity: 1; transform: none; } }
+@keyframes qm-shimmer { to { background-position: -200% 0; } }
+
+/* Reduced motion: from the OS, or chosen in Appearance (data-motion=reduced). */
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; } }
+:root[data-motion=reduced] *, :root[data-motion=reduced] *::before, :root[data-motion=reduced] *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; }
