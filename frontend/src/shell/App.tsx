@@ -11,9 +11,11 @@ import { api } from "../lib/api";
 import { Button, IconButton, Banner, Loading, Spinner } from "../components/ui/primitives";
 import { TextField } from "../components/ui/forms";
 import { Welcome } from "./Welcome";
+import { passkeyBlocker, signInWithPasskey, isCancel } from "../lib/passkey";
 import { PageErrorBoundary, NotFound, ErrorView } from "../components/ui/ErrorView";
 
 
+// Device-to-device transfers: engine + overlay load after first paint (own chunk).
 const TransferOverlay = lazy(() => import("./TransferOverlay"));
 const hashId = () => location.hash.replace(/^#\/?/, "");
 const routeOf = (): RouteId => (routeById(hashId()) ? hashId() : "overview") as RouteId;
@@ -58,6 +60,14 @@ function Login() {
   const { signedIn } = useSession();
   const [step, setStep] = useState<"password" | "totp">("password");
   const [pw, setPw] = useState(""), [code, setCode] = useState(""), [err, setErr] = useState<string | null>(null), [busy, setBusy] = useState(false);
+  // Passkey button only where the browser + address can actually do it (HTTPS name, built-in authenticator).
+  const [pkOk, setPkOk] = useState(false), [pkBusy, setPkBusy] = useState(false);
+  useEffect(() => { passkeyBlocker().then((b) => setPkOk(b === null)).catch(() => {}); }, []);
+  const withPasskey = async () => {
+    setPkBusy(true); setErr(null);
+    try { await signInWithPasskey(); setPw(""); signedIn(); }
+    catch (ex) { if (!isCancel(ex)) setErr(/invalid credentials|401/i.test((ex as Error).message) ? t("pk.login.unknown") : (ex as Error).message); setPkBusy(false); }
+  };
   const submit = async (e: React.FormEvent) => {
     e.preventDefault(); if (busy) return; setBusy(true); setErr(null);
     try {
@@ -80,6 +90,10 @@ function Login() {
           : <TextField label={t("login.code")} hint={t("login.code.hint")} inputMode="numeric" autoComplete="one-time-code" value={code} onChange={setCode} autoFocus mono maxLength={8} />}
         {err && <p role="alert" className="text-[13px] text-danger">{err}</p>}
         <Button type="submit" variant="primary" pending={busy} pendingText={t("login.wait")}>{step === "totp" ? t("login.verify") : t("login.submit")}</Button>
+        {pkOk && step === "password" && <>
+          <div className="flex items-center gap-3 text-[12px] text-fg-3" aria-hidden><span className="h-px flex-1 bg-line" />{t("pk.or")}<span className="h-px flex-1 bg-line" /></div>
+          <Button icon="lock" onClick={withPasskey} pending={pkBusy} pendingText={t("pk.login.wait")}>{t("pk.login")}</Button>
+        </>}
         <p className="text-[12px] leading-relaxed text-fg-3">{t("login.trust")}</p>
       </form>
     </main>
@@ -149,6 +163,7 @@ function Shell() {
         </main>
       </div>
       <Welcome />
+      {/* incoming transfers must pop up on every page, from sign-in on */}
       <Suspense fallback={null}><TransferOverlay /></Suspense>
     </SlotCtx.Provider>
   );

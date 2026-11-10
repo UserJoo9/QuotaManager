@@ -10,6 +10,7 @@ import { Segmented, SwitchRow, TextField, controlClass } from "../components/ui/
 import { ConfirmDialog, Dialog, useToast } from "../components/ui/overlays";
 import { Icon } from "../components/ui/Icon";
 import { drawQr } from "../lib/qr";
+import { passkeyBlocker, createPasskey, deviceLabel, isCancel } from "../lib/passkey";
 
 /* Release notes are Markdown: render the few constructs they use as React nodes (never raw HTML).
    Each line gets dir="auto" so English notes read left-to-right inside the Arabic UI. */
@@ -43,6 +44,7 @@ export function AccountTab() {
         {!tp ? <Loading what={t("acct.2fa.loading")} h={40} /> : tp.enabled ? <Button variant="danger" onClick={() => setOff(true)}>{t("acct.2fa.disable")}</Button>
           : <Button variant="primary" icon="shield" onClick={() => setEnroll(true)}>{tp.pending ? t("acct.2fa.resume") : t("acct.2fa.enable")}</Button>}
       </Card>
+      <Passkeys />
       {sec.failed_logins_1h != null && <Card className="col-span-12" title={t("acct.activity")}><KV items={[[t("acct.failed"), num(sec.failed_logins_1h, 0)], [t("acct.waf"), num(sec.waf_blocks_1h ?? 0, 0)]]} /></Card>}
       {pw && <PasswordDialog onClose={() => setPw(false)} />}
       {enroll && <TotpDialog current={tp} onClose={() => setEnroll(false)} />}
@@ -52,6 +54,49 @@ export function AccountTab() {
     </div>
   );
 }
+interface Pk { id: string; name: string; rp_id: string; created: number; last_used: number | null; backed_up: boolean }
+/** Passkeys: sign in with Face ID / Touch ID / Windows Hello. The key stays on the device. */
+function Passkeys() {
+  const q = useQuery({ queryKey: ["passkeys"], queryFn: () => api.get<{ passkeys: Pk[]; usable_here: boolean; reason: string; rp_id: string }>("/api/passkeys") });
+  const qc = useQueryClient(); const { run } = useAction(); const toast = useToast();
+  const [blocker, setBlocker] = useState<string | null | undefined>(undefined);
+  const [name, setName] = useState(deviceLabel()), [adding, setAdding] = useState(false), [del, setDel] = useState<Pk | null>(null);
+  useEffect(() => { passkeyBlocker().then(setBlocker).catch(() => setBlocker("browser")); }, []);
+  const why = q.data && !q.data.usable_here ? q.data.reason : blocker;
+  const date = (s: number | null) => (s ? new Date(s * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : t("pk.never"));
+  const add = async () => {
+    setAdding(true);
+    try { await createPasskey(name.trim() || deviceLabel()); await qc.invalidateQueries({ queryKey: ["passkeys"] }); toast({ kind: "success", title: t("pk.added"), sub: t("pk.added.sub") }); }
+    catch (e) { if (!isCancel(e)) toast({ kind: "error", title: t("pk.add.fail"), sub: (e as Error).message }); }
+    finally { setAdding(false); }
+  };
+  const list = q.data?.passkeys || [];
+  return (
+    <Card className="col-span-12" title={t("pk.title")} sub={t("pk.sub")} actions={<Badge tone={list.length ? "success" : "neutral"}>{list.length ? tf("pk.count", { n: num(list.length, 0) }) : t("pk.none.badge")}</Badge>}>
+      {why ? <Banner tone="info" title={t("pk.why." + why + ".t")}>{t("pk.why." + why)}</Banner> : (
+        <TextField label={t("pk.name")} hint={t("pk.name.h")} value={name} onChange={setName} maxLength={60}
+          action={<Button variant="primary" icon="plus" onClick={add} pending={adding} pendingText={t("pk.adding")}>{t("pk.add")}</Button>} />
+      )}
+      {!q.data ? <Loading what={t("pk.loading")} h={60} /> : !list.length ? (
+        <Empty icon="vpn" title={t("pk.none")} sub={t("pk.none.sub")} />
+      ) : (
+        <ul className="mt-4 divide-y divide-line">{list.map((p) => (
+          <li key={p.id} className="flex flex-wrap items-center gap-3 py-2.5">
+            <Icon name="lock" size={17} className="text-fg-3" />
+            <span className="min-w-0 flex-1"><b className="block truncate text-[13px] text-fg">{p.name}</b>
+              <span className="text-[12px] text-fg-3">{tf("pk.meta", { c: date(p.created), u: date(p.last_used) })} · <span className="qm-ltr">{p.rp_id}</span></span></span>
+            {p.backed_up && <Badge tone="info" icon={false}>{t("pk.synced")}</Badge>}
+            <Button size="sm" variant="ghost" className="text-danger" onClick={() => setDel(p)}>{t("pk.remove")}</Button>
+          </li>))}</ul>
+      )}
+      <p className="mt-3 text-[12px] text-fg-3">{t("pk.privacy")}</p>
+      <ConfirmDialog open={!!del} onOpenChange={(v) => !v && setDel(null)} title={tf("pk.remove.t", { n: del?.name || "" })} confirmLabel={t("pk.remove")}
+        consequences={{ changes: t("pk.remove.changes"), affected: del?.name, undo: t("pk.remove.undo") }}
+        onConfirm={async () => { if (del && !(await run("del", async () => { await api.del(`/api/passkeys/${encodeURIComponent(del.id)}`); await qc.invalidateQueries({ queryKey: ["passkeys"] }); }, t("pk.removed")))) throw new Error(t("act.failed")); }} />
+    </Card>
+  );
+}
+
 function PasswordDialog({ onClose }: { onClose: () => void }) {
   const [cur, setCur] = useState(""), [nw, setNw] = useState(""), [cf, setCf] = useState(""), [err, setErr] = useState<string | null>(null), [busy, setBusy] = useState(false);
   const toast = useToast();
