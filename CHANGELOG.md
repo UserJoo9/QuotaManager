@@ -6,6 +6,35 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## [Unreleased]
+
+Added:
+- Local testing can use separate data folders, allowing automated checks without signing the person testing the dashboard out.
+- Sign in with a passkey: Face ID, Touch ID, Windows Hello or your Android screen lock instead of typing the password. Add one per device from System > Account. The key stays on your device; the gateway keeps only a public key. Passkeys need the dashboard opened by name over HTTPS (for example the Tailscale address) — the Account page explains this when you open it by its number.
+- Clear pages for when something goes wrong: "page not found", "can't reach the gateway" (with checks and automatic retry), "a newer version was installed — reload", and a recoverable error screen if a page fails.
+- Every empty list now has a small illustration, a short explanation and the next step.
+
+Changed:
+- The monthly quota summary now stays visible while the sidebar scrolls, including a compact meter when collapsed. System and Help are regular navigation pages; Help has its own searchable glossary.
+- The sidebar has a mobile close button and shows drag handles only after choosing Reorder.
+- Input buttons now line up across the dashboard, including Share, security controls and passkeys. Arabic number fields keep values separate from their units.
+- Dashboard choice menus and scrollbars now follow the selected theme, with keyboard-friendly menus and matching device-address suggestions.
+- The redesigned dashboard now includes the option to open internet access when everyone runs out of quota, with a clear status while it is active.
+- A redesigned dashboard: calm neutral colours in light and dark, one quiet accent, and colour used only where it means something (online, warning, blocked). The moving background and glows are gone, so the panel is lighter on the gateway laptop.
+- The Overview answers three questions first: is the internet working, how much is left (with the reset date and the pace), and what needs your attention.
+- People is now a proper list: search, filters with counts, sorting, "Clear filters", and selecting several people to block or restore them together (it always shows who will be affected before doing it).
+- Editing a person or device opens a sheet from the bottom on phones (a side panel on computers). It stays above the keyboard, keeps what you typed while live numbers update, and asks before throwing away unsaved changes.
+- Number boxes show their unit (GB, Mbps, days, %), have − / + buttons and common values, and explain mistakes next to the box instead of silently turning them into 0. The renewal day is now "On a day / Month end / Manually" plus the day.
+- Blocking, removing, starting a new period and other risky actions now say what changes, who is affected and how to undo it before you confirm.
+- Saving gateway settings says "Applying…" and only says "Applied" once the gateway confirms.
+- The sidebar can be reordered: drag the ⠿ handle, long-press on a phone, use the keyboard, or "Customize sidebar". Your order is kept in this browser and can be reset.
+- A Help glossary explains WAN, LAN, DNS, MAC, quota period and more; dotted words open their explanation anywhere.
+- When the gateway can't be reached, a banner says so with the time of the last update, instead of showing old numbers as if they were live.
+- Faster: the first screen appears about twice as fast on slow Wi-Fi, and later visits download only a few KB.
+- Arabic: new and reworded text in plain, natural Egyptian Arabic.
+- Internet, Security, VPN, Share and System (account, updates, logs) use the same new design: numbers with units and limits, checked addresses and ports, search and "Clear filters" on rules and logs, and a clear warning before switching the line mode, renewing the IP, applying the firewall, turning off ad blocking, disconnecting the VPN or installing an update.
+- "VPN nodes" are now called "VPN servers".
+
 ## [0.5.5] — 2026-11-09
 
 Added:

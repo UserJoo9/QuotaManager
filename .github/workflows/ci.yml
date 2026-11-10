@@ -63,3 +63,42 @@ jobs:
           PYTHONPATH: .
         run: |
           pytest -v --timeout=60
+
+  frontend:
+    name: Dashboard (React + TypeScript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'frontend/package-lock.json'
+
+      - name: Install (exact lockfile)
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc -b
+
+      - name: Unit tests
+        run: npx vitest run
+
+      - name: Build
+        run: npx vite build
+
+      # The gateway serves the committed web/app build (no Node on the box), so the
+      # committed files must be exactly what this source builds to.
+      - name: Committed build is up to date
+        working-directory: .
+        run: |
+          git add -N web/app
+          git diff --stat --exit-code -- web/index.html web/app || {
+            echo "::error::web/app is stale - run 'cd frontend && npm run build' and commit the result"; exit 1; }

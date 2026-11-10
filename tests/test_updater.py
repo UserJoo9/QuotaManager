@@ -149,7 +149,7 @@ def test_check_finds_update_and_persists():
     db = FakeDb()
     calls = {"json": 0}
     up = Updater(
-        db, current_version="0.2.0",
+        db, current_version="0.2.0", install_kind="deb",
         fetch_json=lambda url, timeout=20: calls.__setitem__("json", calls["json"] + 1) or RELEASE,
         fetch_text=lambda url, timeout=20: CHANGELOG)
     st = run(up.check_now())
@@ -208,7 +208,7 @@ def test_auto_install_fires_after_check():
     db.settings["updates_auto_install"] = "1"
     installed = []
     up = Updater(
-        db, current_version="0.2.0",
+        db, current_version="0.2.0", install_kind="deb",
         fetch_json=lambda url, timeout=20: RELEASE,
         fetch_text=lambda url, timeout=20: CHANGELOG,
         download=lambda url, dest, timeout=120: None,
@@ -357,7 +357,7 @@ def test_tarball_install_unpacks_and_runs_install_sh(tmp_path):
                  run_command=lambda argv, timeout=15: calls.append(argv) or (0, ""))
     ok, _ = up._install_package("tarball", str(tgz))
     assert ok
-    assert calls[0][-3] == "bash" and calls[0][-2].endswith("quota-manager-0.3.1/install.sh")
+    assert calls[0][-3] == "bash" and calls[0][-2].replace("\\", "/").endswith("quota-manager-0.3.1/install.sh")
     assert calls[0][-1] == "--upgrade"
 
 
