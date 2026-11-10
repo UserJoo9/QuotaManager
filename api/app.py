@@ -47,7 +47,7 @@ from api.schemas import (BundleUpdate, ConsumptionSpoofRequest, DeviceCreate,
                          GuestUpdate,
                          LoginRequest, MacListsUpdate,
                          MilestoneNotify, MilestoneDailyPlan,
-                         NetworkUpdate, PasswordUpdate, RechargeCreate, SetupComplete,
+                         NetworkUpdate, PasskeyFinish, PasskeyRename, PasswordUpdate, RechargeCreate, SetupComplete,
                          StaticLeaseCreate,
                          TopUpRequest, TotpEnableRequest,
                          UpdateSettings, UserCreate, UserUpdate,
@@ -64,6 +64,10 @@ from quota import daily_plan as _dp
 from quota import db as _db
 from quota import dns_rules as _dns_rules
 from quota import totp as _totp
+try:  # Optional for existing installations that have not installed the new dependency.
+    from quota import passkeys as _passkeys
+except ImportError:
+    _passkeys = None  # type: ignore[assignment]
 from quota.tailscale import TailscaleManager
 from quota.engine import GATEWAY_MAC, EngineSnapshot, SnapshotHolder
 from quota.history_analytics import get_history_analytics, get_live_traffic_analytics
@@ -3714,11 +3718,94 @@ def create_app(
                 raise HTTPException(401, "invalid credentials")
             login_limiter.success(ip_key)
             login_limiter.success(acct_key)
+        await _issue_session(response)
+        return {"ok": True}
+
+    async def _issue_session(response: Response) -> None:
         token = secrets.token_hex(24)
         await database.set_setting("session_token", token)
         response.set_cookie(COOKIE_NAME, token, httponly=True,
                             samesite="lax", secure=_secure_cookies(),
                             max_age=SESSION_TTL_SEC)
+
+    # -- passkeys (WebAuthn, platform authenticators only) ----------------------
+    passkeys = _passkeys.PasskeyManager(database.get_setting, database.set_setting) if _passkeys else None
+
+    def _rp(request: Request) -> tuple[str, str]:
+        if _passkeys is None or passkeys is None:
+            raise HTTPException(503, "passkey-unavailable:server-missing")
+        try:
+            return _passkeys.relying_party(request.headers.get("host", ""), request.url.scheme)
+        except _passkeys.PasskeyError as e:
+            raise HTTPException(400, f"passkey-unavailable:{e}")
+
+    @app.get("/api/passkeys", dependencies=[Depends(_require_auth)])
+    async def passkey_list(request: Request) -> dict[str, Any]:
+        if _passkeys is None or passkeys is None:
+            return {"passkeys": [], "rp_id": "", "usable_here": False, "reason": "server-missing"}
+        try:
+            rp_id, _ = _passkeys.relying_party(request.headers.get("host", ""), request.url.scheme)
+            usable, reason = True, ""
+        except _passkeys.PasskeyError as e:
+            rp_id, usable, reason = "", False, str(e)
+        return {"passkeys": await passkeys.public_list(), "rp_id": rp_id, "usable_here": usable, "reason": reason}
+
+    @app.post("/api/passkeys/register/options", dependencies=[Depends(_require_auth)])
+    async def passkey_register_options(request: Request) -> dict[str, Any]:
+        rp_id, origin = _rp(request)
+        try:
+            return await passkeys.registration_options(rp_id, origin)
+        except _passkeys.PasskeyError as e:
+            raise HTTPException(400, f"passkey:{e}")
+
+    @app.post("/api/passkeys/register/verify", dependencies=[Depends(_require_auth)])
+    async def passkey_register_verify(body: PasskeyFinish) -> dict[str, Any]:
+        try:
+            pk = await passkeys.register(body.token, body.credential, body.name or "")
+        except _passkeys.PasskeyError as e:
+            raise HTTPException(400, f"passkey:{e}")
+        await database.add_event(f"Passkey added: {pk['name']}", "info")
+        return {"ok": True, "passkey": pk}
+
+    @app.patch("/api/passkeys/{cred_id}", dependencies=[Depends(_require_auth)])
+    async def passkey_rename(cred_id: str, body: PasskeyRename) -> dict[str, Any]:
+        if not await passkeys.rename(cred_id, body.name):
+            raise HTTPException(404, "passkey not found")
+        return {"ok": True}
+
+    @app.delete("/api/passkeys/{cred_id}", dependencies=[Depends(_require_auth)])
+    async def passkey_delete(cred_id: str) -> dict[str, Any]:
+        if not await passkeys.remove(cred_id):
+            raise HTTPException(404, "passkey not found")
+        await database.add_event("Passkey removed", "info")
+        return {"ok": True}
+
+    @app.post("/api/passkeys/login/options")
+    async def passkey_login_options(request: Request) -> dict[str, Any]:
+        host = request.client.host if request.client else ""
+        retry = login_limiter.check(f"ip:{host}")
+        if retry > 0:
+            raise HTTPException(429, "too many failed logins — try again later", headers={"Retry-After": f"{int(retry) + 1}"})
+        rp_id, origin = _rp(request)
+        return await passkeys.authentication_options(rp_id, origin)
+
+    @app.post("/api/passkeys/login/verify")
+    async def passkey_login_verify(body: PasskeyFinish, request: Request, response: Response) -> dict[str, Any]:
+        """A verified passkey (device + biometric/PIN) is two factors: no TOTP step."""
+        host = request.client.host if request.client else ""
+        ip_key, acct_key = f"ip:{host}", "account:admin"
+        retry = max(login_limiter.check(ip_key), login_limiter.check(acct_key))
+        if retry > 0:
+            raise HTTPException(429, "too many failed logins — try again later", headers={"Retry-After": f"{int(retry) + 1}"})
+        if await passkeys.authenticate(body.token, body.credential) is None:
+            login_limiter.fail(ip_key)
+            login_limiter.fail(acct_key)
+            await _record_failed_login(database, host)
+            log.warning("passkey sign-in rejected from %s", host)
+            raise HTTPException(401, "invalid credentials")
+        login_limiter.success(ip_key)
+        login_limiter.success(acct_key)
+        await _issue_session(response)
         return {"ok": True}
 
     @app.post("/api/logout")
