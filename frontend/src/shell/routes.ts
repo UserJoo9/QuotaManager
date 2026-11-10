@@ -9,8 +9,8 @@ export const GROUPS: { id: GroupId; label: string }[] = [
 ];
 // Each page is its own chunk: the first paint only downloads the shell + the current page.
 export const ROUTES: RouteDef[] = [
-  { id: "overview", icon: "overview", group: "main", load: () => import("../pages/LegacyPage") /* Overview */ },
-  { id: "people", icon: "people", group: "main", load: () => import("../pages/LegacyPage") /* People */ },
+  { id: "overview", icon: "overview", group: "main", load: () => import("../pages/Overview") },
+  { id: "people", icon: "people", group: "main", load: () => import("../pages/People") },
   { id: "quota", icon: "quota", group: "main", load: () => import("../pages/LegacyPage") /* Quota */ },
   { id: "insights", icon: "insights", group: "main", load: () => import("../pages/LegacyPage") /* Insights */ },
   { id: "internet", icon: "internet", group: "net", load: () => import("../pages/LegacyPage") /* Internet */ },
