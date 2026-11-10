@@ -3718,12 +3718,15 @@ def create_app(
                 raise HTTPException(401, "invalid credentials")
             login_limiter.success(ip_key)
             login_limiter.success(acct_key)
+        await _issue_session(response)
+        return {"ok": True}
+
+    async def _issue_session(response: Response) -> None:
         token = secrets.token_hex(24)
         await database.set_setting("session_token", token)
         response.set_cookie(COOKIE_NAME, token, httponly=True,
                             samesite="lax", secure=_secure_cookies(),
                             max_age=SESSION_TTL_SEC)
-        return {"ok": True}
 
     # -- passkeys (WebAuthn, platform authenticators only) ----------------------
     passkeys = _passkeys.PasskeyManager(database.get_setting, database.set_setting) if _passkeys else None
