@@ -17,6 +17,7 @@ import hmac
 import ipaddress
 import json
 import logging
+import mimetypes
 import os
 import re
 import secrets
@@ -4222,6 +4223,28 @@ def create_app(
     @app.get("/ui/{rest:path}", include_in_schema=False)
     async def _legacy_ui_path(rest: str = "") -> RedirectResponse:
         return RedirectResponse("/" + rest.lstrip("/"), status_code=307)
+
+    # Built dashboard (frontend/ → web/app/). Every file name carries a content
+    # hash, so the browser may keep it for a year without asking again: a new
+    # build gets new names (and index.html, never cached, points at them).
+    # The build also writes a .gz twin; serving it costs the gateway no CPU.
+    _asset_name = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+    @app.get("/app/{name}", include_in_schema=False)
+    async def _app_asset(name: str, request: Request) -> FileResponse:
+        if not _asset_name.match(name) or name.endswith(".gz"):
+            raise HTTPException(status_code=404)
+        f = WEB_DIR / "app" / name
+        if not f.is_file():
+            raise HTTPException(status_code=404)
+        headers = {"Cache-Control": "public, max-age=31536000, immutable",
+                   "Vary": "Accept-Encoding"}
+        media = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        gz = f.with_name(name + ".gz")
+        if "gzip" in request.headers.get("accept-encoding", "") and gz.is_file():
+            headers["Content-Encoding"] = "gzip"
+            return FileResponse(gz, media_type=media, headers=headers)
+        return FileResponse(f, media_type=media, headers=headers)
 
     # static UI
     if WEB_DIR.exists():

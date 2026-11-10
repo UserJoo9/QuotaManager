@@ -1,4 +1,8 @@
-"""Dashboard (web/) guards: served, cache-safe, CSP-clean, self-contained, i18n parity."""
+"""Dashboard guards: served, cache-safe, CSP-clean, self-contained, i18n parity.
+
+Since 0.6 the whole dashboard is React + TypeScript (frontend/src), built by Vite into
+web/index.html + web/app/* (hashed names). web/js/ keeps only the shared dictionaries
+(web/js/i18n/{en,ar}.js) and web/css/ only the design tokens."""
 
 from __future__ import annotations
 
@@ -16,6 +20,17 @@ from quota.service import QuotaService
 
 ROOT = Path(__file__).resolve().parent.parent
 UI = ROOT / "web"
+SRC = ROOT / "frontend" / "src"
+
+
+def test_dashboard_uses_themed_choices_and_scrollbars():
+    for path in SRC.rglob("*.tsx"):
+        if path.name.endswith(".test.tsx"):
+            continue
+        assert not re.search(r"<(?:select|datalist)\b", path.read_text(encoding="utf-8")), path
+    css = (SRC / "styles/app.css").read_text(encoding="utf-8")
+    assert "::-webkit-scrollbar-thumb" in css
+    assert "::-webkit-scrollbar-button" in css and "scrollbar-color:" in css
 
 
 def _css():
@@ -24,6 +39,17 @@ def _css():
 
 def _js():
     return list((UI / "js").rglob("*.js"))
+
+
+def _tsx():
+    return [p for p in SRC.rglob("*") if p.suffix in (".ts", ".tsx", ".css")]
+
+
+def _entry() -> str:
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    m = re.search(r'<script type="module"[^>]*src="(/app/index-[\w-]+\.js)"', html)
+    assert m, "web/index.html has no built entry - run: cd frontend && npm run build"
+    return m.group(1)
 
 
 @pytest.fixture
@@ -41,13 +67,32 @@ def client(tmp_path):
 
 def test_ui_index_served_with_revalidation(client):
     r = client.get("/")
-    assert r.status_code == 200 and "QuotaManager" in r.text and "js/main.js" in r.text
+    assert r.status_code == 200 and "QuotaManager" in r.text and _entry() in r.text
     assert "no-store" in r.headers["cache-control"]  # the page itself is never cached
     assert "script-src 'self'" in r.headers["content-security-policy"]
 
 
+def test_hashed_app_files_are_immutable_and_precompressed(client):
+    """Regression (stale UI after update): only content-hashed files may be cached
+    long-term; a new build changes every name and index.html is never cached."""
+    entry = _entry()
+    r = client.get(entry, headers={"Accept-Encoding": "gzip"})
+    assert r.status_code == 200
+    assert r.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert r.headers.get("content-encoding") == "gzip"  # served from the build's .gz twin
+    assert "javascript" in r.headers["content-type"]
+    plain = client.get(entry, headers={"Accept-Encoding": "identity"})
+    assert plain.status_code == 200 and "content-encoding" not in plain.headers
+    assert client.get(entry + ".gz").status_code == 404
+    assert client.get("/app/..%2Fapi.py").status_code == 404
+    assert client.get("/app/nope-12345.js").status_code == 404
+    for f in (UI / "app").iterdir():
+        if f.suffix in (".js", ".css") and f.stat().st_size >= 1024:
+            assert f.with_name(f.name + ".gz").exists(), f.name
+
+
 def test_ui_js_and_fonts_served(client):
-    r = client.get("/js/main.js")
+    r = client.get("/js/i18n/en.js")
     assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"  # revalidate after an update
     f = client.get("/fonts/inter-latin.woff2")
     assert f.status_code == 200 and f.content[:4] == b"wOF2"
@@ -77,7 +122,7 @@ def test_index_has_no_inline_script_or_handlers():
 
 def test_no_external_urls_in_ui_sources():
     # strict CSP: fonts/scripts/styles must all be self-hosted
-    for p in _css() + _js() + [UI / "index.html"]:
+    for p in _css() + _js() + _tsx() + [UI / "index.html", ROOT / "frontend" / "index.html"]:
         txt = p.read_text(encoding="utf-8")
         for m in re.finditer(r"https?://[^\s\"')]+", txt):
             assert m.group(0).startswith("http://www.w3.org/"), f"{p.name}: {m.group(0)}"
@@ -89,13 +134,13 @@ def test_relative_references_resolve():
             ref = m.group(1).strip("\"'")
             if ref.startswith("#") or ref.startswith("data:"):
                 continue  # in-document SVG fragment, not a file
-            assert (p.parent / ref).resolve().exists(), f"{p.name}: {ref}"
+            assert (p.parent / ref.split("?")[0]).resolve().exists(), f"{p.name}: {ref}"
     for p in _js():
         for m in re.finditer(r"from \"(\.[^\"]+)\"", p.read_text(encoding="utf-8")):
             assert (p.parent / m.group(1)).resolve().exists(), f"{p.name}: {m.group(1)}"
     html = (UI / "index.html").read_text(encoding="utf-8")
     for ref in re.findall(r"(?:href|src)=\"([^\"#]+)\"", html):
-        assert (UI / ref.split("?")[0]).exists(), ref
+        assert (UI / ref.lstrip("/").split("?")[0]).exists(), ref
 
 
 def _keys(lang: str) -> set[str]:
@@ -117,6 +162,9 @@ def test_every_translation_key_used_exists():
         if "i18n" in p.parts:
             continue
         used |= set(re.findall(r"\bt\(\"([\w.]+)\"\)", p.read_text(encoding="utf-8")))
+    for p in _tsx():
+        txt = p.read_text(encoding="utf-8")
+        used |= set(re.findall(r"\bt\(\"([\w.]+)\"\)", txt)) | set(re.findall(r"\btf\(\"([\w.]+)\"", txt))
     assert not (used - en), f"undefined keys: {used - en}"
 
 
@@ -124,9 +172,9 @@ def test_vpn_page_only_calls_endpoints_that_exist():
     """The new VPN page must hit the exact routes the gateway exposes (no drift)."""
     app_src = (ROOT / "api" / "app.py").read_text(encoding="utf-8")
     routes = {re.sub(r"\{\w+\}", "{}", m) for m in re.findall(r"@app\.\w+\(\"(/api/vpn[^\"]*)\"", app_src)}
-    js = (UI / "js" / "core" / "vpn.js").read_text(encoding="utf-8")
+    js = (SRC / "lib" / "vpn.ts").read_text(encoding="utf-8")
     used = {re.sub(r"\$\{[^}]+\}", "{}", m).split("?")[0] for m in re.findall(r"[\"`](/api/vpn[^\"`]*)[\"`]", js)}
-    assert used, "no VPN endpoints found in core/vpn.js"
+    assert used, "no VPN endpoints found in frontend/src/lib/vpn.ts"
     assert used <= routes, f"unknown endpoints: {used - routes}"
 
 
@@ -145,42 +193,95 @@ def test_usage_daily_requires_login(client):
 
 
 def test_daily_plan_ui_is_wired_and_guarded():
-    """The optional daily plan: drawer section, device share, master switch on
+    """The optional daily plan: sheet section, device share, master switch on
     the Quota page, a today line in the people list, and the milestone editor
     that must send the CSRF header."""
-    from pathlib import Path
-    web = Path(__file__).resolve().parents[1] / "web"
-    dp = (web / "js/components/dailyPlan.js").read_text()
-    assert "daily-plan/preview" in dp and "dailyMasterCard" in dp
-    # unsaved heavy-day edits must survive the drawer's live rebuilds
+    dp = (SRC / "components/domain/DailyPlan.tsx").read_text()
+    assert "daily-plan/preview" in dp and "export function DeviceShare" in dp
+    # unsaved heavy-day edits must survive live updates of the sheet
     assert "heavyDraft" in dp
-    ud = (web / "js/components/userDrawer.js").read_text()
-    assert "dailySection(" in ud and "deviceShare(" in ud
-    assert "dailyMasterCard(" in (web / "js/pages/quota.js").read_text()
-    assert "u.daily" in (web / "js/pages/people.js").read_text()
-    ms = (web / "milestone.html").read_text()
+    ps = (SRC / "components/domain/PersonSheet.tsx").read_text()
+    assert "<DailySection" in ps and "<DeviceShare" in ps
+    assert '"/api/daily"' in (SRC / "pages/Quota.tsx").read_text()
+    assert "u.daily" in (SRC / "pages/People.tsx").read_text()
+    ms = (UI / "milestone.html").read_text()
     assert "/api/milestone/daily-plan" in ms and "'X-QM-CSRF': '1'" in ms
     # the daily editor builds nodes with textContent, never innerHTML of server text
     seg = ms[ms.index("function renderDaily"):ms.index("function ack")]
     assert "innerHTML = '" not in seg.replace("box.innerHTML = '';", "").replace("list.innerHTML = '';", "")
 
 
+def test_react_never_injects_raw_html():
+    """Device names/hostnames are user-controlled: React text only, no raw HTML sinks."""
+    for p in _tsx():
+        txt = p.read_text(encoding="utf-8")
+        assert "dangerouslySetInnerHTML" not in txt and ".innerHTML" not in txt, p.name
+
+
+def test_live_snapshot_never_overwrites_a_draft():
+    """Regression (drawer rebuilt under the cursor): forms keep a local draft and only
+    follow the server while untouched; number fields keep the typed STRING."""
+    ps = (SRC / "components/domain/PersonSheet.tsx").read_text()
+    assert "if (!dirty) { setDraft(server)" in ps
+    forms = (SRC / "components/ui/forms.tsx").read_text()
+    assert "if (!focused.current)" in forms  # a server value never replaces the box being typed in
+    assert "never turns\n * an empty box into 0" in forms or "never turns" in forms
+
+
+def test_mobile_sheet_keyboard_contract():
+    ov = (SRC / "components/ui/overlays.tsx").read_text()
+    assert "visualViewport" in ov and "--qm-kb" in ov and "focusin" in ov
+    css = (SRC / "styles/app.css").read_text()
+    assert "font-size: 16px" in css  # iOS zooms into smaller focused fields
+    assert "env(safe-area-inset-bottom)" in css and "prefers-reduced-motion" in css
+
+
+def test_network_changes_are_never_optimistic():
+    """Only appearance/sidebar prefs may update before the server answers; gateway
+    changes re-read the dashboard before reporting success."""
+    act = (SRC / "lib/actions.ts").read_text()
+    assert "await fn();" in act and "await refresh()" in act
+    assert act.index("await fn();") < act.index('kind: "success"')
+    assert "setQueryData" not in act
+
+
+def test_transfer_engine_starts_at_sign_in_on_every_page():
+    """Regression: the old shell opened the live-transfer socket at boot, so an incoming
+    request popped up on ANY page. The React shell mounts the overlay (which starts the
+    engine) outside the routed page, and the wire protocol is unchanged."""
+    app = (SRC / "shell/App.tsx").read_text()
+    assert "<TransferOverlay />" in app and app.index("<TransferOverlay />") > app.index("</Suspense>")
+    ov = (SRC / "shell/TransferOverlay.tsx").read_text()
+    assert "startLiveShare()" in ov and "acceptIncoming" in ov and "declineIncoming" in ov
+    eng = (SRC / "lib/liveTransfer.ts").read_text()
+    for needle in ("/api/share/live/ws", "/api/share/live/download/", "transfer-request", "transfer-response",
+                   "transfer-done", "transfer-cancel", "0x04034b50", "0x02014b50", "0x06054b50", "http_stream: true"):
+        assert needle in eng, needle
+    assert not (UI / "js" / "pages").exists() and not (UI / "js" / "core").exists(), "every page is React now"
+
+
+def test_sidebar_order_uses_stable_ids_and_survives_new_routes():
+    rt = (SRC / "shell/routes.ts").read_text()
+    assert "export function mergeOrder" in rt and "v: 1" in (SRC / "lib/prefs.ts").read_text()
+    sb = (SRC / "shell/Sidebar.tsx").read_text()
+    assert '"navOrder", null' in (SRC / "pages/System.tsx").read_text()  # one-click reset
+    dnd = (SRC / "shell/SortableNav.tsx").read_text()
+    assert "KeyboardSensor" in dnd and "TouchSensor" in dnd  # keyboard + long-press, not pointer-only
+    assert "nav.reorder" in sb  # the handle has an accessible name
+
+
 def test_release_notes_are_rendered_not_dumped_as_raw_markdown():
     """The "What's new" dialog turns **bold**, `code`, ### headings and - bullets
-    into nodes (never innerHTML) and lets each line pick its own direction."""
-    from pathlib import Path
-    root = Path(__file__).resolve().parents[1]
-    js = (root / "web/js/pages/systemTabs.js").read_text(encoding="utf-8")
-    assert "export function mdLite" in js and 'dir: "auto"' in js
-    assert "mdLite(c.body)" in js and "pre-wrap" not in js[js.index("const details"):js.index("const details") + 600]
-    assert ".cl-li" in (root / "web/css/components.css").read_text(encoding="utf-8")
+    into nodes (never raw HTML) and lets each line pick its own direction."""
+    js = (SRC / "pages/SystemTabs.tsx").read_text(encoding="utf-8")
+    assert "export function mdLite" in js and 'dir="auto"' in js
+    assert "mdLite(c.body)" in js and "pre-wrap" not in js[js.index("upd.details"):js.index("upd.details") + 900]
 
 
 def test_read_only_dialogs_have_one_close_button():
-    from pathlib import Path
-    root = Path(__file__).resolve().parents[1] / "web/js"
-    assert "infoOnly ? null" in (root / "components/dialog.js").read_text(encoding="utf-8")
-    assert "infoOnly: true" in (root / "pages/systemTabs.js").read_text(encoding="utf-8")
+    js = (SRC / "pages/SystemTabs.tsx").read_text(encoding="utf-8")
+    notes = js[js.index("<Dialog open={notes}"):js.index("</Dialog>", js.index("<Dialog open={notes}"))]
+    assert 't("common.close")' in notes and 't("common.cancel")' not in notes
 
 
 def test_public_pages_have_a_language_switch():
