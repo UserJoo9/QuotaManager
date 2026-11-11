@@ -57,11 +57,14 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 from ipaddress import ip_address, ip_network
 from typing import Any, Callable
 
 from quota.engine import EngineCounters, EngineSnapshot, GATEWAY_MAC
+from quota.guest_portal_ipv6 import (IPv6PendingGuestPortal,
+                                     split_guest_addresses)
 
 log = logging.getLogger("quota.nftables")
 
@@ -267,6 +270,7 @@ class NftablesEngine:
 
         self.available = True
         self._warned = False
+        self._update_state_lock = threading.RLock()
         self._ip_to_mac: dict[str, str] = {}
         self._blocked: dict[str, bool] = {}
         #: IPs most recently programmed into the kernel `blocked` set.
@@ -275,6 +279,7 @@ class NftablesEngine:
         self._ipv6_prefix = ipv6_pfx
         self._local_networks6 = sorted({"fe80::/10", "fd00::/8", "ff00::/8", ipv6_pfx})
         self._last_blocked6_ips: list[str] = []
+        self._last_blocked6_macs: list[str] = []
         #: Is the ISP's IPv6 reachable (probe verdict)? None = never programmed.
         #: While False the ``v6gate`` chain answers every client IPv6 packet
         #: bound for the internet with ICMPv6 "no route", so apps fall back to
@@ -310,10 +315,17 @@ class NftablesEngine:
         self._web_port: int = int(getattr(web_cfg, "port", 8080) if web_cfg is not None else 8080)
         #: IPs of pending guests programmed into the `pending_guests` captive portal set
         self._last_pending_guests: list[str] = []
+        self._ipv6_pending_portal = IPv6PendingGuestPortal(
+            self.table, self._web_port)
 
     # -- lifecycle ----------------------------------------------------------
 
     def start(self) -> None:
+        """Serialize table rebuilds with concurrent API and tick updates."""
+        with self._update_state_lock:
+            self._start_locked()
+
+    def _start_locked(self) -> None:
         """Ensure the table + base block hook exist. Idempotent, best-effort."""
         if not self.available:
             return
@@ -328,7 +340,10 @@ class NftablesEngine:
         self._last_lan = {}
         self._last_blocked_ips = []
         self._last_blocked6_ips = []
+        self._last_blocked6_macs = []
         self._last_blocked_macs = []
+        self._last_pending_guests = []
+        self._ipv6_pending_portal.reset()
         self._ipv6_wan_active = None
         self._run(["add", "table", f"{FAMILY} {self.table}"])
         self._run(["flush", "table", f"{FAMILY} {self.table}"])
@@ -338,6 +353,8 @@ class NftablesEngine:
                    "{ type ipv4_addr; }"])
         self._run(["add", "set", f"{FAMILY} {self.table} blocked6",
                    "{ type ipv6_addr; }"])
+        self._run(["add", "set", f"{FAMILY} {self.table} blocked6_macs",
+                   "{ type ether_addr; }"])
         # MAC-keyed blocked set: drops devices whose IP is not in the lease
         # file (static-IP / lease-less quota-blocked devices). Matched by
         # ethernet address on both directions; LAN-excluded like the IP set.
@@ -400,6 +417,16 @@ class NftablesEngine:
                    mac6_saddr_drop])
         self._run(["add", "rule", f"{FAMILY} {self.table} forward",
                    mac6_daddr_drop])
+        overflow6_saddr_drop = _match(
+            "ether saddr @blocked6_macs", "ip6 daddr",
+            self._local_networks6) + " drop"
+        overflow6_daddr_drop = _match(
+            "ether daddr @blocked6_macs", "ip6 saddr",
+            self._local_networks6) + " drop"
+        self._run(["add", "rule", f"{FAMILY} {self.table} forward",
+                   overflow6_saddr_drop])
+        self._run(["add", "rule", f"{FAMILY} {self.table} forward",
+                   overflow6_daddr_drop])
         # Clamp TCP MSS to Path MTU on forwarded traffic (prevents VPN/PPPoE packet fragmentation)
         self._run_best_effort(["add", "rule", f"{FAMILY} {self.table} forward",
                                "tcp flags syn tcp option maxseg size set rt mtu"])
@@ -415,6 +442,7 @@ class NftablesEngine:
                               "{ type nat hook prerouting priority -50; policy accept; }"])
         self._run_best_effort(["add", "rule", f"{FAMILY} {self.table} prerouting",
                               f"ip saddr @pending_guests tcp dport 80 redirect to :{self._web_port}"])
+        self._ipv6_pending_portal.install(self._run_best_effort)
         # `flush table` removes rules but NOT named counter objects. After a
         # restart the per-device counters keep their cumulative totals and the
         # in-memory delta baseline (_last) is gone, so the first drain would
@@ -438,7 +466,17 @@ class NftablesEngine:
 
     def update_state(self, ip_to_mac: dict[str, str],
                      blocked: dict[str, bool],
-                     pending_guests: list[str] | None = None) -> None:
+                     pending_guests: list[str] | None = None,
+                     blocked_ipv6_macs: list[str] | None = None) -> None:
+        """Serialize full blocked/guest reconciliations from API and tick."""
+        with self._update_state_lock:
+            self._update_state(ip_to_mac, blocked, pending_guests,
+                               blocked_ipv6_macs)
+
+    def _update_state(self, ip_to_mac: dict[str, str],
+                      blocked: dict[str, bool],
+                      pending_guests: list[str] | None = None,
+                      blocked_ipv6_macs: list[str] | None = None) -> None:
         """Reconcile per-device counters + the blocked set with the service."""
         self._ip_to_mac = dict(ip_to_mac)
         self._blocked = dict(blocked)
@@ -472,7 +510,11 @@ class NftablesEngine:
         blocked_v4 = [ip for ip in blocked_ips if ":" not in ip]
         blocked_v6 = [ip for ip in blocked_ips if ":" in ip]
         self._sync_blocked_ips(blocked_v4)
-        self._sync_blocked6_ips(blocked_v6)
+        self._sync_blocked6_ips(sorted(set(blocked_v6)))
+        # Overflow/ambiguous-owner devices keep IPv4, but their IPv6 Internet
+        # traffic is quarantined by MAC so unaccountable addresses cannot
+        # bypass the quota or create unbounded sets/counter rules.
+        self._sync_blocked6_macs(blocked_ipv6_macs or [])
         # MAC-based drops are the SECOND enforcement channel, keyed by the
         # device's ethernet address instead of its lease: they cut devices
         # whose IP never entered ``ip_to_mac`` — a lease-less quota-blocked
@@ -482,7 +524,13 @@ class NftablesEngine:
         # forward chain with its real saddr/daddr).
         self._sync_blocked_macs(blocked)
         if pending_guests is not None:
-            self._sync_pending_guests(pending_guests)
+            pending_v4, pending_v6 = split_guest_addresses(pending_guests)
+            self._sync_pending_guests(pending_v4)
+            self._ipv6_pending_portal.sync(pending_v6, self._run_best_effort)
+
+    def ipv6_portal_status(self) -> dict[str, object]:
+        """Expose IPv6 portal rule and pending-set apply health."""
+        return self._ipv6_pending_portal.status(self.available)
 
     def _sync_pending_guests(self, pending_guests: list[str]) -> None:
         """Program the kernel ``pending_guests`` set for captive portal redirect."""
@@ -560,6 +608,24 @@ class NftablesEngine:
                     break
             if ok:
                 self._last_blocked6_ips = blocked6_ips
+
+    def _sync_blocked6_macs(self, macs: list[str]) -> None:
+        """Keep over-cap IPv6 devices out of the Internet by source MAC."""
+        desired = sorted({mac.strip().lower() for mac in macs
+                          if _MAC_RE.match(mac.strip())})
+        if desired and desired == self._last_blocked6_macs:
+            return
+        self._last_blocked6_macs = None
+        if self._run(["flush", "set", f"{FAMILY} {self.table} blocked6_macs"]):
+            ok = True
+            for mac in desired:
+                if not self._run(["add", "element",
+                                  f"{FAMILY} {self.table} blocked6_macs",
+                                  f"{{ {mac} }}"]):
+                    ok = False
+                    break
+            if ok:
+                self._last_blocked6_macs = desired
 
     def _sync_blocked_macs(self, blocked: dict[str, bool]) -> None:
         """Program the kernel ``blocked_macs`` set for every blocked device.
@@ -919,14 +985,17 @@ class NftablesEngine:
         self._fail(f"nft {args[0]} failed: {out.strip()}", command=args)
         return False
 
-    def _run_best_effort(self, args: list[str]) -> None:
+    def _run_best_effort(self, args: list[str]) -> bool:
         """Run ``nft <args>``; a failure only logs, never disables the engine."""
         if not self.available:
-            return
+            return False
         code, out = self._run_command(["nft", *args])
-        if code != 0:
-            log.warning("nft %s failed (best-effort, ignoring): %s",
-                        args[0], out.strip())
+        if code == 0 or (args[0] == "add" and
+                         any(s in out for s in ("File exists", "already exists"))):
+            return True
+        log.warning("nft %s failed (best-effort, ignoring): %s",
+                    args[0], out.strip())
+        return False
 
     def _add_counter(self, name: str) -> bool:
         """Create a named counter; report whether it already existed.

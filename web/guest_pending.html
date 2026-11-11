@@ -2,7 +2,7 @@
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>بانتظار موافقة المسؤول · Awaiting Admin Approval</title>
   <meta name="theme-color" content="#07090E">
   <script src="/assets/pub-theme.js"></script>
@@ -309,6 +309,80 @@
     .notice strong {
       color: var(--text);
     }
+    .voucher-form {
+      margin-top: 18px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line-2);
+      text-align: start;
+    }
+    .voucher-label {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--text);
+      font-size: 0.92rem;
+      font-weight: 600;
+    }
+    .voucher-controls {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+    }
+    .voucher-input {
+      width: 100%;
+      min-width: 0;
+      min-height: 48px;
+      padding: 10px 12px;
+      border: 1px solid var(--line-2);
+      border-radius: 12px;
+      background: var(--surface-2);
+      color: var(--text);
+      direction: ltr;
+      text-align: left;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 1rem;
+      letter-spacing: 0.06em;
+    }
+    .voucher-input::placeholder { color: var(--text-2); opacity: 1; }
+    .voucher-input:focus-visible, .btn:focus-visible {
+      outline: 3px solid var(--accent-2);
+      outline-offset: 3px;
+    }
+    .voucher-submit {
+      width: auto;
+      min-height: 48px;
+      padding-inline: 18px;
+      white-space: nowrap;
+    }
+    .voucher-submit:disabled { cursor: wait; opacity: 0.65; transform: none; }
+    .voucher-feedback {
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--text) 5%, transparent);
+      color: var(--text);
+      font-size: 0.88rem;
+      text-align: start;
+      overflow-wrap: anywhere;
+    }
+    .voucher-feedback[data-kind="error"] { color: var(--danger); }
+    .voucher-feedback[data-kind="success"] { color: var(--ok); }
+    .voucher-feedback[hidden], .voucher-form[hidden] { display: none; }
+    .voucher-feedback-en {
+      display: block;
+      direction: ltr;
+      margin-top: 3px;
+      color: var(--text-2);
+    }
+    @media (max-width: 420px) {
+      .glass-card { padding: 26px 16px; }
+      .voucher-controls { grid-template-columns: 1fr; }
+      .voucher-submit { width: 100%; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto !important; }
+      .pulse-ring, .live-indicator { animation: none !important; }
+      .glass-card, .icon-badge, .btn { transition: none !important; }
+    }
   </style>
 </head>
 <body>
@@ -361,8 +435,32 @@
         <span id="live-text">يتم الفحص التلقائي للحالة كل 3 ثوانٍ...</span>
       </div>
 
+      <form class="voucher-form" id="voucher-form" method="post"
+            action="/api/guest/voucher/redeem" autocomplete="off">
+        <label class="voucher-label" for="voucher-code">
+          <span lang="ar">رمز القسيمة</span> · <span lang="en" dir="ltr">Voucher code</span>
+        </label>
+        <div class="voucher-controls">
+          <input class="voucher-input" id="voucher-code" name="code" type="text"
+                 inputmode="text" autocapitalize="characters" spellcheck="false"
+                 autocomplete="one-time-code" maxlength="64" required
+                 aria-describedby="voucher-hint" placeholder="ABCD-EFGH-JKLM-NPQR">
+          <button class="btn btn-primary voucher-submit" id="voucher-submit" type="submit">
+            <span lang="ar">تفعيل القسيمة</span> · <span lang="en" dir="ltr">Redeem</span>
+          </button>
+        </div>
+        <span class="notice" id="voucher-hint" style="display:block;margin-top:8px;text-align:start">
+          أدخل الرمز الذي أعطاك مسؤول الشبكة · Enter the code from your network administrator.
+        </span>
+      </form>
+      <p class="voucher-feedback" id="voucher-feedback" role="status"
+         aria-live="polite" aria-atomic="true" hidden>
+        <span id="voucher-feedback-ar" lang="ar" dir="rtl"></span>
+        <span class="voucher-feedback-en" id="voucher-feedback-en" lang="en" dir="ltr"></span>
+      </p>
+
       <div id="action-container">
-        <button class="btn btn-secondary" id="check-btn" onclick="checkStatus(true)">
+        <button class="btn btn-secondary" id="check-btn" type="button">
           🔄 تحقق من الحالة الآن (Check Now)
         </button>
       </div>
@@ -376,11 +474,107 @@
     </div>
   </div>
 
-  <script>
+  <script type="module">
+    import ar from "/js/i18n/ar.js?v=19";
+    import en from "/js/i18n/en.js?v=19";
+
     const urlParams = new URLSearchParams(window.location.search);
-    const continueUrl = urlParams.get('continue') || 'https://www.google.com';
+    function safeContinueUrl(value) {
+      try {
+        const url = new URL(value || 'https://www.google.com', window.location.origin);
+        return ['http:', 'https:'].includes(url.protocol)
+          ? url.href : 'https://www.google.com';
+      } catch (_) {
+        return 'https://www.google.com';
+      }
+    }
+    const continueUrl = safeContinueUrl(urlParams.get('continue'));
     let pollInterval = null;
     let isApproved = false;
+    let redirectTimer = null;
+
+    const voucherForm = document.getElementById('voucher-form');
+    const voucherCode = document.getElementById('voucher-code');
+    const voucherSubmit = document.getElementById('voucher-submit');
+    const voucherFeedback = document.getElementById('voucher-feedback');
+    let lastRenderedStatus = null;
+
+    function localizedText(language, key, values = {}) {
+      const dictionary = language === 'ar' ? ar : en;
+      const fallback = en[key] || key;
+      return (dictionary[key] || fallback).replace(/\{(\w+)\}/g, (_, name) =>
+        String(values[name] ?? ''));
+    }
+
+    function showVoucherFeedback(kind, key, values = {}) {
+      voucherFeedback.dataset.kind = kind;
+      document.getElementById('voucher-feedback-ar').textContent =
+        localizedText('ar', key, values.ar || values);
+      document.getElementById('voucher-feedback-en').textContent =
+        localizedText('en', key, values.en || values);
+      voucherFeedback.hidden = false;
+    }
+
+    function formatCooldown(seconds) {
+      const minutes = Math.max(1, Math.ceil(seconds / 60));
+      const isolatedMinutes = `\u2068${minutes}\u2069`;
+      const arabicTime = minutes === 1 ? 'دقيقة واحدة'
+        : minutes === 2 ? 'دقيقتين'
+        : `${isolatedMinutes} ${minutes <= 10 ? 'دقائق' : 'دقيقة'}`;
+      const englishTime = `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`;
+      showVoucherFeedback('error', 'guest.voucher.cooldown', {
+        ar: { time: arabicTime }, en: { time: englishTime }
+      });
+    }
+
+    voucherForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (!voucherCode.value.trim() || voucherSubmit.disabled) return;
+      voucherSubmit.disabled = true;
+      voucherSubmit.setAttribute('aria-busy', 'true');
+      showVoucherFeedback('info', 'guest.voucher.checking');
+      try {
+        const response = await fetch('/api/guest/voucher/redeem', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: voucherCode.value.trim() })
+        });
+        const errorBody = !response.ok
+          ? await response.json().catch(() => ({})) : {};
+        if (response.status === 429) {
+          const retrySeconds = Number(response.headers.get('Retry-After'));
+          formatCooldown(Number.isFinite(retrySeconds) && retrySeconds > 0
+            ? retrySeconds : 60);
+        } else if (response.status === 403) {
+          const reason = errorBody?.detail?.code;
+          const feedback = {
+            guest_mode_disabled: 'guest.voucher.unavailable',
+            new_guests_paused: 'guest.voucher.paused',
+            device_unrecognized: 'guest.voucher.unrecognized',
+            guest_not_pending: 'guest.voucher.not_pending',
+            device_blocked: 'guest.voucher.blocked',
+            guest_account_shared: 'guest.voucher.shared'
+          }[reason] || 'guest.voucher.unavailable';
+          showVoucherFeedback('error', feedback);
+        } else if (response.status === 422) {
+          showVoucherFeedback('error', 'guest.voucher.request_invalid');
+        } else if (response.status >= 500) {
+          showVoucherFeedback('error', 'guest.voucher.service_error');
+        } else if (!response.ok) {
+          showVoucherFeedback('error', 'guest.voucher.invalid');
+        } else {
+          voucherCode.value = '';
+          showVoucherFeedback('success', 'guest.voucher.success');
+          await checkStatus(true);
+        }
+      } catch (_) {
+        showVoucherFeedback('error', 'guest.voucher.network');
+      } finally {
+        voucherSubmit.disabled = false;
+        voucherSubmit.removeAttribute('aria-busy');
+      }
+    });
 
     async function checkStatus(manual = false) {
       const checkBtn = document.getElementById('check-btn');
@@ -406,6 +600,13 @@
     }
 
     function renderStatus(data) {
+      if (data.status !== lastRenderedStatus) {
+        if (data.status === 'pending') {
+          voucherFeedback.hidden = true;
+          delete voucherFeedback.dataset.kind;
+        }
+        lastRenderedStatus = data.status;
+      }
       if (data.ip) document.getElementById('val-ip').textContent = data.ip;
       if (data.mac) document.getElementById('val-mac').textContent = data.mac;
       if (data.device_name) document.getElementById('val-device').textContent = data.device_name;
@@ -420,11 +621,37 @@
       const msgEn = document.getElementById('msg-en');
       const liveBox = document.getElementById('live-status-box');
       const actionBox = document.getElementById('action-container');
+      document.getElementById('notice-text').hidden = data.status === 'limited';
 
-      if (data.approved || (!data.blocked && data.is_guest) || (data.status === 'ok' && !data.is_guest)) {
+      if (data.status === 'limited') {
+        // Approval is saved, but this client's IPv6 is quarantined until its
+        // address ownership can be tracked safely. Never redirect as ready.
+        isApproved = false;
+        if (redirectTimer) clearInterval(redirectTimer);
+        voucherForm.hidden = true;
+        card.classList.remove('rejected', 'approved');
+        badge.textContent = '!';
+        brandDot.style.background = 'var(--amber)';
+        brandDot.style.boxShadow = '';
+        statusBadge.className = 'badge badge-amber';
+        statusBadge.textContent = 'الوصول محدود (Limited)';
+        headlineAr.textContent = 'تم قبول الجهاز؛ IPv6 محدود مؤقتاً';
+        headlineEn.textContent = 'Device approved; IPv6 is limited';
+        msgAr.textContent = 'تم حفظ موافقة الجهاز. اتصال IPv6 متوقف مؤقتاً لأن عناوينه لا يمكن متابعتها بأمان؛ يظل اتصال IPv4 متاحاً.';
+        msgEn.textContent = 'Approval is saved. IPv6 is temporarily restricted because this device’s addresses cannot be tracked safely; IPv4 access remains available.';
+        liveBox.style.color = 'var(--amber)';
+        const limitedLiveText = document.createElement('span');
+        limitedLiveText.id = 'live-text';
+        limitedLiveText.textContent = 'تم حفظ الموافقة مع تقييد IPv6.';
+        liveBox.replaceChildren(limitedLiveText);
+        actionBox.replaceChildren();
+      } else if (data.status === 'approved' ||
+                 (data.approved && data.internet_ready !== false) ||
+                 (data.status === 'ok' && !data.is_guest)) {
         // --- Approved State ---
+        if (isApproved) return;
         isApproved = true;
-        clearInterval(pollInterval);
+        voucherForm.hidden = true;
         card.classList.remove('rejected');
         card.classList.add('approved');
 
@@ -438,49 +665,151 @@
         headlineAr.textContent = '🎉 تمت الموافقة بنجاح!';
         headlineEn.textContent = 'Access Approved Successfully!';
 
-        const quotaText = data.quota_gb ? ` بسعة <strong>${data.quota_gb} GB</strong>` : '';
-        msgAr.innerHTML = `تم قبول اتصالك بالشبكة${quotaText}! تم تفعيل الإنترنت لجهازك الآن.<br>جاري تحويلك تلقائياً خلال <span id="countdown">3</span> ثوانٍ...`;
-        msgEn.innerHTML = `Your connection has been approved! Internet is now active.<br>Redirecting automatically in <span id="countdown-en">3</span>s...`;
+        const quota = Number(data.quota_gb);
+        msgAr.replaceChildren(document.createTextNode('تم قبول اتصالك بالشبكة'));
+        if (Number.isFinite(quota) && quota > 0) {
+          msgAr.append(document.createTextNode(' بسعة '));
+          const allowance = document.createElement('strong');
+          allowance.textContent = `${quota} GB`;
+          msgAr.append(allowance);
+        }
+        msgAr.append(document.createTextNode('! تم تفعيل الإنترنت لجهازك الآن.'));
+        msgAr.append(document.createElement('br'));
+        msgAr.append(document.createTextNode('جاري تحويلك تلقائياً خلال '));
+        const countdownAr = document.createElement('span');
+        countdownAr.id = 'countdown';
+        countdownAr.textContent = '3';
+        msgAr.append(countdownAr, document.createTextNode(' ثوانٍ...'));
+
+        msgEn.replaceChildren(
+          document.createTextNode('Your connection has been approved! Internet is now active.'),
+          document.createElement('br'),
+          document.createTextNode('Redirecting automatically in '));
+        const countdownEn = document.createElement('span');
+        countdownEn.id = 'countdown-en';
+        countdownEn.textContent = '3';
+        msgEn.append(countdownEn, document.createTextNode('s...'));
 
         liveBox.style.color = 'var(--green)';
-        liveBox.innerHTML = '<span class="live-indicator" style="background:var(--green)"></span> <span>الإنترنت نشط وجاهز للاستخدام</span>';
+        const liveIndicator = document.createElement('span');
+        liveIndicator.className = 'live-indicator';
+        liveIndicator.style.background = 'var(--green)';
+        const liveText = document.createElement('span');
+        liveText.id = 'live-text';
+        liveText.textContent = 'الإنترنت نشط وجاهز للاستخدام';
+        liveBox.replaceChildren(liveIndicator, liveText);
 
-        actionBox.innerHTML = `
-          <a href="${continueUrl}" class="btn btn-success" id="browse-btn">
-            🌐 تصفح الإنترنت الآن (Start Browsing)
-          </a>
-        `;
+        const browseLink = document.createElement('a');
+        browseLink.href = continueUrl;
+        browseLink.className = 'btn btn-success';
+        browseLink.id = 'browse-btn';
+        browseLink.textContent = '🌐 تصفح الإنترنت الآن (Start Browsing)';
+        actionBox.replaceChildren(browseLink);
 
         // Start countdown to redirect
         let sec = 3;
-        const timer = setInterval(() => {
+        redirectTimer = setInterval(() => {
           sec--;
           const cd1 = document.getElementById('countdown');
           const cd2 = document.getElementById('countdown-en');
           if (cd1) cd1.textContent = sec;
           if (cd2) cd2.textContent = sec;
           if (sec <= 0) {
-            clearInterval(timer);
+            clearInterval(redirectTimer);
             window.location.href = continueUrl;
           }
         }, 1000);
 
-      } else if (data.status === 'blocked' && !data.is_guest) {
-        // Regular user blocked (quota exceeded or admin blocked)
+      } else if (data.status === 'activating') {
+        isApproved = false;
+        if (redirectTimer) clearInterval(redirectTimer);
+        voucherForm.hidden = true;
+        card.classList.remove('rejected', 'approved');
+        badge.textContent = '⏳';
+        brandDot.style.background = 'var(--amber)';
+        statusBadge.className = 'badge badge-amber';
+        statusBadge.textContent = 'جاري التفعيل (Applying)';
+        headlineAr.textContent = 'تم قبول الطلب؛ جاري التفعيل';
+        headlineEn.textContent = 'Approval saved; applying access';
+        msgAr.textContent = 'بنحدّث اتصال الشبكة الآن. سيبدأ الإنترنت تلقائياً خلال لحظات.';
+        msgEn.textContent = 'The network is updating your access. Internet should start shortly.';
+        liveBox.style.color = 'var(--amber)';
+        brandDot.style.boxShadow = '';
+        const activatingLiveText = document.createElement('span');
+        activatingLiveText.id = 'live-text';
+        activatingLiveText.textContent = '⏳ جاري تفعيل الاتصال...';
+        liveBox.replaceChildren(activatingLiveText);
+
+      } else if (data.status === 'blocked') {
+        // A previously pending guest can also be explicitly blocked by admin.
+        isApproved = false;
+        if (redirectTimer) clearInterval(redirectTimer);
+        voucherForm.hidden = true;
+        card.classList.remove('approved');
         card.classList.add('rejected');
         badge.textContent = '🚫';
+        brandDot.style.background = 'var(--red)';
+        brandDot.style.boxShadow = '';
         statusBadge.className = 'badge badge-red';
         statusBadge.textContent = 'محظور (Blocked)';
-        headlineAr.textContent = 'تم إيقاف الاتصال';
-        headlineEn.textContent = 'Connection Blocked';
-        msgAr.innerHTML = 'تم إيقاف اتصال هذا الجهاز بالإنترنت (ربما بسبب انتهاء باقة الرصيد أو حظر بواسطة المسؤول).';
-        msgEn.innerHTML = 'Internet access for this device is blocked (quota exceeded or manual block).';
+        headlineAr.textContent = data.is_guest ? 'تم حظر جهاز الضيف' : 'تم إيقاف الاتصال';
+        headlineEn.textContent = data.is_guest ? 'Guest Device Blocked' : 'Connection Blocked';
+        msgAr.textContent = data.is_guest
+          ? 'تم إيقاف هذا الجهاز بواسطة مسؤول الشبكة. يُرجى التواصل معه للمساعدة.'
+          : 'تم إيقاف اتصال هذا الجهاز بالإنترنت (ربما بسبب انتهاء باقة الرصيد أو حظر بواسطة المسؤول).';
+        msgEn.textContent = data.is_guest
+          ? 'This guest device was blocked by the network administrator. Contact them for help.'
+          : 'Internet access for this device is blocked (quota exceeded or manual block).';
+        liveBox.style.color = 'var(--red)';
+        const blockedLiveText = document.createElement('span');
+        blockedLiveText.id = 'live-text';
+        blockedLiveText.textContent = data.is_guest
+          ? 'هذا الجهاز محظور؛ تواصل مع مسؤول الشبكة.'
+          : 'الاتصال غير متاح لهذا الجهاز.';
+        liveBox.replaceChildren(blockedLiveText);
       } else {
         // Pending State
+        isApproved = false;
+        if (redirectTimer) clearInterval(redirectTimer);
+        voucherForm.hidden = false;
+        card.classList.remove('rejected', 'approved');
+        badge.textContent = '⏳';
+        brandDot.style.background = 'var(--amber)';
+        brandDot.style.boxShadow = '';
         statusBadge.className = 'badge badge-amber';
         statusBadge.textContent = 'بانتظار الموافقة (Pending)';
+        headlineAr.textContent = 'طلب اتصال ضيف جديد';
+        headlineEn.textContent = 'New Guest Connection Request';
+        msgAr.replaceChildren(
+          document.createTextNode('لا تغلق هذه الصفحة، وسيتم تفعيل الإنترنت وتحويلك تلقائياً فور الموافقة.'),
+          document.createElement('br'),
+          document.createTextNode('تقدر كمان تفعّل الاتصال برمز قسيمة من مسؤول الشبكة.'));
+        msgEn.replaceChildren(
+          document.createTextNode('Keep this page open. You will be redirected once access is approved.'),
+          document.createElement('br'),
+          document.createTextNode('You can also activate access with a voucher from your administrator.'));
+        liveBox.style.color = '';
+        const pendingIndicator = document.createElement('span');
+        pendingIndicator.className = 'live-indicator';
+        const pendingText = document.createElement('span');
+        pendingText.id = 'live-text';
+        pendingText.textContent = 'يتم الفحص التلقائي للحالة كل 3 ثوانٍ...';
+        liveBox.replaceChildren(pendingIndicator, pendingText);
+        if (!document.getElementById('check-btn')) {
+          const checkBtn = document.createElement('button');
+          checkBtn.className = 'btn btn-secondary';
+          checkBtn.id = 'check-btn';
+          checkBtn.type = 'button';
+          checkBtn.textContent = '🔄 تحقق من الحالة الآن (Check Now)';
+          checkBtn.addEventListener('click', () => checkStatus(true));
+          actionBox.replaceChildren(checkBtn);
+        }
       }
     }
+
+    document.getElementById('check-btn').addEventListener('click', () => {
+      checkStatus(true);
+    });
 
     // Initial check
     checkStatus();

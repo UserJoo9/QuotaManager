@@ -5,6 +5,10 @@ belongs, and which mistakes already cost a real outage. Deep technical detail li
 `Structure_README.md`; the old v0.2.1 audit is archived in
 `docs/legacy-system-audit-v0.2.1.md` (historical, partly stale).
 
+Read .specify/memory/constitution.md for project-wide engineering invariants. This
+guide and AGENTS.md add operational detail; reconcile any apparent conflict before
+implementation.
+
 ## 1. What this is
 
 A Linux gateway (old laptop, Kali/Debian) that splits ONE metered internet bundle
@@ -110,9 +114,11 @@ nftables.conf, IPv6 host config).
 | `quota/db.py` | SQLite schema, migrations (`ALTER TABLE … ADD COLUMN` guarded), all queries | policy |
 | `quota/service.py` | quota math, allowances, block fan-out/bypass precedence, top-ups, recharge, guest/shaping/VPN settings | kernel |
 | `quota/engine.py` | `EngineSnapshot`, `SnapshotHolder`, `GATEWAY_MAC`, counters types | |
-| `quota/nftables.py` | `NftablesEngine`: table/chains/sets/counters, blocked sets (v4/v6/MAC), `v6gate`, `in6guard`, flush/drain | tc, dnsmasq |
+| `quota/guest_vouchers.py`, `quota/guest_portal_ipv6.py` | voucher code/cooldown policy; IPv6 pending portal set and health | web serving |
+| `quota/web_listener.py` | configured-host IPv4/IPv6 socket binding for Uvicorn | HTTP routes |
+| `quota/nftables.py` | `NftablesEngine`: table/chains/sets/counters, blocked sets (v4/v6/MAC), pending guest redirects (v4/v6), `v6gate`, `in6guard`, flush/drain | tc, dnsmasq |
 | `quota/shaping.py` | `TcShaper`: HTB/ifb tree, per-device & per-user caps, v4+v6 filters | |
-| `quota/firewall.py` | `quota_firewall` table: posture, rules, bans, port-forward, geo (**IPv4 only**) | |
+| `quota/firewall.py`, `quota/ipv6_firewall.py` | `quota_firewall` table: IPv4/IPv6 address policy, bans, scan detection; publishing/forwarding stays IPv4-only | |
 | `quota/arp_lock.py`, `arp_scan.py`, `latency_probe.py`, `wifi_probe.py` | rogue detection, ARP gateway-lock, WiFi/LAN + LED probe | |
 | `quota/dns_rules.py` | domain rules/presets/per-client DNS → generated dnsmasq conf (`render_tags`, `[ip6]` in dhcp-host) | |
 | `quota/flows.py` | conntrack per-destination byte deltas, IP→name resolution (dnsmasq → reverse DNS → RDAP owner → IP; feeds Live traffic `top_destinations`) | guess app names |
@@ -161,7 +167,7 @@ dataclass field with a default there, then the commented line in `config.yaml`, 
 | New value pushed to the engine each tick | `run.py` tick step 4 + `EngineSnapshot` (`engine.py`) + consumers (`history_analytics`, `api/app.py`) |
 | New background probe/subsystem | module in `quota/` (start/stop, injected `run`) → start in `Gateway.startup_subsystems`, stop in `shutdown`, tick hook if periodic → config dataclass → tests |
 | Host-level requirement (sysctl, dnsmasq option, NAT rule, address) | `startup_health.py` / `ipv6_setup.py` (idempotent, never raises) → hooked in `_startup_self_heal` → ALSO the setup script → test the "second run is a no-op" case |
-| IPv6 behaviour | `ipv6_probe.py` (state), `nftables.py` (`v6gate`, `in6guard`, counters, `blocked6`), `shaping.py` (prio 7/5), `run.py` (`_collect_neigh_active`, `_ipv6_wan_wanted`, `_tracked_ipv6`, cap `IPV6_MAX_PER_MAC`), `ipv6_setup.py` (host), UI `renderWan`/device card |
+| IPv6 behaviour | `ipv6_probe.py` (state), `nftables.py` (`v6gate`, `in6guard`, counters, `blocked6`), `shaping.py` (prio 7/5), `ipv6_addresses.py` (`build_ipv6_ownership`, capped tracking and overflow handling), `run.py` (`_collect_neigh_active`, `_ipv6_wan_wanted`), `ipv6_setup.py` (host), UI `renderWan`/device card |
 | VPN behaviour | config text → `vpn_parser.generate_sing_box_config`; process/state → `vpn_manager.py`; who goes through the tunnel → `vpnshare.py` + `run.py::_sync_vpn_share`; node editing UI → `app.js` `loadVpn*/renderVpn*` |
 | DNS filtering | `dns_rules.py` (render) + `run.py::_sync_dns_rules`; never write dnsmasq files from the API layer |
 | Quota/blocking rule | `service.py` (`compute_allowances`, `evaluate_blocks`) — kernel gets the result via tick step 4 |
@@ -216,7 +222,11 @@ and `tests/test_packaging.py` guard repo hygiene — read their failure messages
 
 ## 9. Known limits (keep honest)
 
-`quota_firewall` bans/geo and the captive portal are IPv4 only; static IPv6 reservations only
-bind DHCPv6 clients (Android/iOS use SLAAC); the dashboard binds IPv4; counting is read every
+`quota_firewall` address policy, bans, geo, and the captive portal support both families for
+traffic that crosses the gateway. The portal redirects HTTP port 80 only; it does not intercept
+HTTPS. A wildcard or dual-family web host binds both listener families, while a family-specific
+configured host remains scoped to that family. Public service publishing, port forwards, and DMZ
+remain IPv4-only.
+Static IPv6 reservations only bind DHCPv6 clients (Android/iOS use SLAAC); counting is read every
 ~15 s (approximate); IPv6 has not been validated against a real IPv6 ISP yet (the probe keeps
 the gate closed → IPv4 fallback when the ISP has none).

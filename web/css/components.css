@@ -86,6 +86,12 @@
 .crow{display:grid;grid-template-columns:36px minmax(120px,1fr) minmax(130px,1.2fr) auto;gap:14px;align-items:center;padding:12px 8px;border-radius:12px;width:100%;transition:background .15s}
 .crow:hover{background:var(--surface-2)}
 .crow+.crow{margin-top:2px}
+.voucher-row{grid-template-columns:minmax(150px,1.3fr) minmax(105px,.7fr) minmax(100px,.65fr) minmax(145px,1fr) minmax(145px,1fr) minmax(145px,1fr) auto;gap:12px}
+.voucher-row>*{min-width:0}
+.voucher-detail{display:flex;flex-direction:column;gap:3px;min-width:0;overflow-wrap:anywhere}
+.voucher-detail .mono{font-size:12px;color:var(--text-2);overflow-wrap:anywhere}
+.voucher-code code{overflow-wrap:anywhere;white-space:normal}
+.voucher-action{justify-self:start}
 .c-name{font-weight:600;line-height:1.25;min-width:0}
 .c-name span{display:block;font-weight:400;font-size:12px;color:var(--text-3)}
 .c-use{display:flex;flex-direction:column;gap:7px;min-width:0}
@@ -100,7 +106,8 @@
 .fb b{font-size:13.5px;font-weight:600;line-height:1.35}
 .fb span{font-size:12px;color:var(--text-3)}
 .fa{display:flex;gap:8px;margin-top:9px;flex-wrap:wrap}
-@media (max-width:640px){.crow{grid-template-columns:36px 1fr auto}.c-use{grid-column:2/-1;order:5}}
+@media (max-width:900px){.voucher-row{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.voucher-code,.voucher-action{grid-column:1/-1}}
+@media (max-width:640px){.crow{grid-template-columns:36px 1fr auto}.c-use{grid-column:2/-1;order:5}.voucher-row{grid-template-columns:repeat(2,minmax(0,1fr))}.voucher-code,.voucher-action{grid-column:1/-1}}
 
 /* ---------- people ---------- */
 .search{display:flex;align-items:center;gap:10px;height:40px;padding:0 14px;min-width:240px;flex:0 1 340px;border-radius:12px;background:var(--surface);border:1px solid var(--line);color:var(--text-3)}

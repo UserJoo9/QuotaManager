@@ -208,7 +208,7 @@ def test_auto_install_fires_after_check():
     db.settings["updates_auto_install"] = "1"
     installed = []
     up = Updater(
-        db, current_version="0.2.0",
+        db, current_version="0.2.0", install_kind="deb",
         fetch_json=lambda url, timeout=20: RELEASE,
         fetch_text=lambda url, timeout=20: CHANGELOG,
         download=lambda url, dest, timeout=120: None,

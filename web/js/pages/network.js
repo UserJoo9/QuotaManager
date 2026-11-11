@@ -6,14 +6,14 @@ import { openDialog } from "../components/dialog.js";
 import { toast } from "../components/toast.js";
 
 let macArmed = "";
-const net = { cfg: null, guest: null, leases: [], macs: { allow: [], deny: [] }, loading: false, at: 0, failAt: 0 };
+const net = { cfg: null, guest: null, leases: [], vouchers: [], macs: { allow: [], deny: [] }, loading: false, at: 0, failAt: 0 };
 const macDraft = { allow: "", deny: "" };
-let draft = null, gdraft = null, armedDel = null, busy = false;
+let draft = null, gdraft = null, voucherDraft = { quota_gb: 1, expires_at: "", comment: "" }, armedDel = null, voucherArmed = "", voucherBusy = false, busy = false;
 
 async function load(ctx, force) {
   if (net.loading || (!force && net.cfg && Date.now() - net.at < 30000)) return;
   net.loading = true;
-  try { const [cfg, leases, macs, guest] = await Promise.all([api.get("/api/network"), api.get("/api/network/static-leases"), api.get("/api/mac-lists"), api.get("/api/guest")]); net.cfg = cfg; net.guest = guest; gdraft = null; net.leases = leases; net.macs = { allow: macs.allow || [], deny: macs.deny || [] }; net.at = Date.now(); }
+  try { const [cfg, leases, macs, guest, vouchers] = await Promise.all([api.get("/api/network"), api.get("/api/network/static-leases"), api.get("/api/mac-lists"), api.get("/api/guest"), api.get("/api/guest/vouchers")]); net.cfg = cfg; net.guest = guest; gdraft = null; net.leases = leases; net.vouchers = vouchers.vouchers || []; net.macs = { allow: macs.allow || [], deny: macs.deny || [] }; net.at = Date.now(); }
   catch { net.failAt = Date.now(); } finally { net.loading = false; ctx.touch(); }
 }
 
@@ -78,6 +78,66 @@ export default function network(ctx) {
         h("button", { type: "button", class: "btn danger sm", "aria-label": t("q.pack.del"), onclick: (ev) => { const k = kind + m; if (macArmed !== k) { macArmed = k; ev.currentTarget.classList.add("armed"); ev.currentTarget.textContent = t("dr.confirm"); setTimeout(() => { if (macArmed === k) { macArmed = ""; ctx.touch(); } }, 4000); return; } macArmed = ""; set(list.filter((x) => x !== m)); } }, macArmed === kind + m ? t("dr.confirm") : icon("x", 15)))))
         : h("div", { class: "empty" }, t("n.mac.none")));
   };
+  const submitVoucher = async (event) => {
+    event.preventDefault();
+    if (voucherBusy) return;
+    const quota = Number(voucherDraft.quota_gb);
+    if (!Number.isFinite(quota) || quota <= 0) { toast(t("n.voucher.quota.bad"), "bad"); return; }
+    const body = { quota_gb: quota, comment: voucherDraft.comment.trim() };
+    if (voucherDraft.expires_at) {
+      const expiresAt = Date.parse(voucherDraft.expires_at) / 1000;
+      if (!Number.isFinite(expiresAt) || expiresAt <= Date.now() / 1000) { toast(t("n.voucher.expiry.bad"), "bad"); return; }
+      body.expires_at = expiresAt;
+    }
+    voucherBusy = true; ctx.touch();
+    try {
+      await api.post("/api/guest/vouchers", body);
+      voucherDraft = { quota_gb: 1, expires_at: "", comment: "" };
+      await load(ctx, true);
+      toast(t("n.voucher.created"));
+    } catch (e) { toast(`${t("dr.failed")}: ${e.message}`, "bad"); }
+    finally { voucherBusy = false; ctx.touch(); }
+  };
+  const revokeVoucher = async (voucher) => {
+    if (voucherBusy) return;
+    if (voucherArmed !== voucher.code) {
+      voucherArmed = voucher.code; ctx.touch();
+      setTimeout(() => { if (voucherArmed === voucher.code) { voucherArmed = ""; ctx.touch(); } }, 4000);
+      return;
+    }
+    voucherArmed = ""; voucherBusy = true; ctx.touch();
+    try {
+      await api.post(`/api/guest/vouchers/${encodeURIComponent(voucher.code)}/revoke`, {});
+      await load(ctx, true);
+      toast(t("n.voucher.revoked"));
+    } catch (e) { toast(`${t("dr.failed")}: ${e.message}`, "bad"); }
+    finally { voucherBusy = false; ctx.touch(); }
+  };
+  const voucherStatusKey = (status) => `n.voucher.status.${status || "unused"}`;
+  const voucherDate = (value) => value
+    ? new Date(Number(value) * 1000).toLocaleString(
+      document.documentElement.lang === "ar" ? "ar-EG" : "en-GB") : "—";
+  const voucherDetail = (label, value, valueClass = "") => h("div", { class: "voucher-detail" },
+    h("span", { class: "sub" }, label), h("span", { class: valueClass }, value));
+  const voucherRows = net.vouchers.length ? net.vouchers.map((v) => h("div", { class: "crow voucher-row" },
+    h("div", { class: "c-name voucher-code" }, h("code", { class: "mono", dir: "ltr" }, v.code), v.comment ? h("span", { class: "sub" }, v.comment) : null),
+    voucherDetail(t("n.voucher.quota"), `${num(v.quota_gb, 2)} ${t("common.gb")}`),
+    voucherDetail(t("n.voucher.status_label"), chip(v.status === "unused" ? "warn" : v.status === "used" ? "ok" : "danger", t(voucherStatusKey(v.status)))),
+    voucherDetail(t("n.voucher.expiry_time"), v.expires_at ? voucherDate(v.expires_at) : t("n.voucher.no_expiry")),
+    voucherDetail(t("n.voucher.redeemed_by"), v.used_mac || t("n.voucher.not_redeemed"), "mono"),
+    voucherDetail(t("n.voucher.redeemed_at"), voucherDate(v.used_at)),
+    h("button", { type: "button", class: "btn danger sm voucher-action", disabled: voucherBusy || v.status !== "unused", onclick: () => revokeVoucher(v) }, voucherArmed === v.code ? t("dr.confirm") : t("n.voucher.revoke"))))
+    : h("div", { class: "empty" }, t("n.voucher.none"));
+  const vouchersPanel = () => h("section", { class: "card c12" },
+    h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("n.voucher.title")), h("span", { class: "sub" }, t("n.voucher.desc")))),
+    h("form", { onsubmit: submitVoucher },
+      h("div", { class: "form-row" },
+        h("div", { class: "field" }, h("label", {}, t("n.voucher.quota")), h("input", { class: "input", type: "number", min: "0.01", max: "100000", step: "0.01", required: true, value: String(voucherDraft.quota_gb), oninput: (e) => { voucherDraft.quota_gb = e.target.value; } })),
+        h("div", { class: "field" }, h("label", {}, t("n.voucher.expires")), h("input", { class: "input", type: "datetime-local", value: voucherDraft.expires_at, oninput: (e) => { voucherDraft.expires_at = e.target.value; } }))),
+      h("div", { class: "form-row", style: { "margin-top": "12px" } },
+        h("div", { class: "field" }, h("label", {}, t("n.voucher.comment")), h("input", { class: "input", type: "text", maxlength: "200", value: voucherDraft.comment, oninput: (e) => { voucherDraft.comment = e.target.value; } })),
+        h("div", { class: "fa", style: { "align-items": "end" } }, h("button", { type: "submit", class: "btn primary", disabled: voucherBusy }, voucherBusy ? t("n.voucher.working") : t("n.voucher.create")))),
+    h("div", { style: { "margin-top": "16px" } }, voucherRows));
   return h("div", { class: "page" }, h("div", { class: "grid" },
     h("section", { class: "card c7" },
       h("header", { class: "card-h" }, h("h3", {}, t("n.shape")), sw(c.enabled, t("n.enabled"), run(() => post({ enabled: !c.enabled })))),
@@ -109,7 +169,7 @@ export default function network(ctx) {
         h("div", {}, h("div", { class: "form-row" }, gfield(t("n.guest.quota"), "quota_gb"), gfield(t("n.guest.speed"), "speed_limit_mbps", t("n.guest.speed.h"))),
           h("div", { class: "form-row", style: { "margin-top": "12px" } }, gfield(t("n.guest.max"), "limit", t("n.guest.max.h"))),
           h("div", { class: "fa", style: { "margin-top": "14px" } }, h("button", { type: "button", class: "btn primary", onclick: gsave }, t("n.save")))))),
-    macCard("allow"), macCard("deny"), h("datalist", { id: "qm-macs2" }, [...known].map(([m, n]) => h("option", { value: m }, n))),
+    vouchersPanel(), macCard("allow"), macCard("deny"), h("datalist", { id: "qm-macs2" }, [...known].map(([m, n]) => h("option", { value: m }, n))),
     h("section", { class: "card c12" },
       h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("n.leases")), h("span", { class: "sub" }, t("n.leases.d"))), h("button", { type: "button", class: "btn primary sm", onclick: leaseDialog }, icon("plus", 15), t("n.leases.new"))),
       net.leases.length ? h("div", {}, net.leases.map((l) => h("div", { class: "crow", style: { "grid-template-columns": "36px minmax(140px,1fr) minmax(160px,1.2fr) auto" } },

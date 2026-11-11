@@ -947,9 +947,13 @@ class TcShaper:
                     cmds.append(["tc", "qdisc", "add", "dev", dev, "parent",
                                  dev_cid, "handle", _device_qdisc(int(e["device_id"])),
                                  *aqm_args])
-                cmds.append(["tc", "filter", "add", "dev", dev, "parent", "1:",
-                             "protocol", "ip", "prio", "2", "u32", "match",
-                             "ip", match_field, str(e["ip"]), "flowid", dev_cid])
+                ipv4_addresses = sorted(set(e.get("ip4") or
+                                            ([e.get("ip")] if e.get("ip") else [])))
+                for address in ipv4_addresses:
+                    cmds.append(["tc", "filter", "add", "dev", dev,
+                                 "parent", "1:", "protocol", "ip", "prio",
+                                 "2", "u32", "match", "ip", match_field,
+                                 str(address), "flowid", dev_cid])
                 # same class for the device's IPv6 addresses (prio is per
                 # protocol, so IPv6 gets its own prio — never reuse 2)
                 for a6 in sorted(e.get("ip6") or ()):

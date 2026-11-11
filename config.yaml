@@ -194,7 +194,8 @@ vpn_share:
   download_sha256: ""
 
 web:
-  host: 0.0.0.0
+  # "*" listens on IPv4 and IPv6. Use 0.0.0.0 or :: to choose one family.
+  host: "*"
   port: 8080
   # Mark session cookies Secure (HTTPS only). Forced on automatically when
   # tls_certfile/tls_keyfile are set. Keep False on a plain-HTTP LAN box.
