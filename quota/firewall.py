@@ -444,8 +444,7 @@ def render_commands(
         if str(r.get("chain", "forward")).lower() != "input":
             continue
         _render_custom(add_rule, r, i)
-    add_rule(CHAIN_INPUT, f"ip saddr @{SET_BANS} "
-                          f"counter name {COUNTER_BAN_DROP} drop")
+    _render_bans_drop(add_rule, CHAIN_INPUT)
     # Tailscale's WireGuard port: lets the phone reach the box DIRECTLY instead
     # of through a slow relay (authenticated + encrypted, nothing else listens).
     # After the deny/ban drops, so a banned address still cannot reach it.
@@ -470,17 +469,7 @@ def render_commands(
                  f"tcp dport {web_port} ct state new "
                  f"{_neg(client_nets, 'ip saddr')} "
                  f"counter name {COUNTER_WAN_IN_DROP} drop")
-    if scan_enabled:
-        add_rule(CHAIN_INPUT,
-                 f"tcp flags syn ct state new "
-                 f"update @{SET_SCAN} {{ ip saddr timeout 60s }}")
-    add_rule(CHAIN_INPUT,
-             f"tcp flags & (fin|syn|rst|ack) == syn ct state new "
-             f"limit rate {flood_rate}/second burst {flood_burst} packets "
-             f"counter name {COUNTER_SYN_PASS} accept")
-    add_rule(CHAIN_INPUT,
-             f"tcp flags & (fin|syn|rst|ack) == syn ct state new "
-             f"counter name {COUNTER_SYN_DROP} drop")
+    _render_syn_flood(add_rule, CHAIN_INPUT, scan_enabled, flood_rate, flood_burst)
 
     # -- fw_forward --------------------------------------------------------
     add_rule(CHAIN_FORWARD, "ct state established,related accept")
@@ -518,25 +507,14 @@ def render_commands(
             add_rule(CHAIN_FORWARD,
                      f'iifname "ppp0" ip daddr {dmz} ct state new '
                      f"counter name fw_dmz accept")
-    add_rule(CHAIN_FORWARD, f"ip saddr @{SET_BANS} "
-                            f"counter name {COUNTER_BAN_DROP} drop")
+    _render_bans_drop(add_rule, CHAIN_FORWARD)
     # WAN-mode ppp0 drop MUST come before the SYN flood guard below —
     # same ordering fix as fw_input (see comment there).
     if wan:
         add_rule(CHAIN_FORWARD,
                  f'iifname "ppp0" ct state new '
                  f'counter name {COUNTER_WAN_FWD_DROP} drop')
-    if scan_enabled:
-        add_rule(CHAIN_FORWARD,
-                 f"tcp flags syn ct state new "
-                 f"update @{SET_SCAN} {{ ip saddr timeout 60s }}")
-    add_rule(CHAIN_FORWARD,
-             f"tcp flags & (fin|syn|rst|ack) == syn ct state new "
-             f"limit rate {flood_rate}/second burst {flood_burst} packets "
-             f"counter name {COUNTER_SYN_PASS} accept")
-    add_rule(CHAIN_FORWARD,
-             f"tcp flags & (fin|syn|rst|ack) == syn ct state new "
-             f"counter name {COUNTER_SYN_DROP} drop")
+    _render_syn_flood(add_rule, CHAIN_FORWARD, scan_enabled, flood_rate, flood_burst)
 
     # -- fw_dnat (WAN mode only) -------------------------------------------
     if wan:
@@ -583,6 +561,27 @@ def _render_custom(add_rule: Callable[[str, str], None], r: dict[str, Any], i: i
         add_rule(chain, f"{expr} {tail} accept".strip())
     else:
         add_rule(chain, f"{expr} {tail} drop".strip())
+
+
+def _render_bans_drop(add_rule: Callable[[str, str], None], chain: str) -> None:
+    """Kernel ban drop: any source in @fw_bans is dropped and counted."""
+    add_rule(chain, f"ip saddr @{SET_BANS} counter name {COUNTER_BAN_DROP} drop")
+
+
+def _render_syn_flood(add_rule: Callable[[str, str], None], chain: str,
+                      scan_enabled: bool, rate: int, burst: int) -> None:
+    """Port-scan watch + SYN-flood guard for one chain (watch, pass, drop)."""
+    if scan_enabled:
+        add_rule(chain,
+                 f"tcp flags syn ct state new "
+                 f"update @{SET_SCAN} {{ ip saddr timeout 60s }}")
+    add_rule(chain,
+             f"tcp flags & (fin|syn|rst|ack) == syn ct state new "
+             f"limit rate {rate}/second burst {burst} packets "
+             f"counter name {COUNTER_SYN_PASS} accept")
+    add_rule(chain,
+             f"tcp flags & (fin|syn|rst|ack) == syn ct state new "
+             f"counter name {COUNTER_SYN_DROP} drop")
 
 
 # ---------------------------------------------------------------------------
