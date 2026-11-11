@@ -16,6 +16,14 @@ from pathlib import Path
 
 _LOGGER_WRITER_THREAD: threading.Thread | None = None
 
+#: Non-blocking queue capacity; bursts beyond this drop records rather than block.
+QUEUE_MAXSIZE: int = 5000
+#: Rotating file size cap and retention.
+MAX_BYTES: int = 5 * 1024 * 1024
+BACKUP_COUNT: int = 3
+#: Drain-poll interval when the queue is empty.
+QUEUE_GET_TIMEOUT: float = 0.5
+
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 
@@ -53,15 +61,15 @@ def setup_logging(
             if isinstance(h, logging.handlers.QueueHandler):
                 return h.queue  # type: ignore[no-any-return]
 
-    log_q: queue.Queue[logging.LogRecord] = queue.Queue(maxsize=5000)
+    log_q: queue.Queue[logging.LogRecord] = queue.Queue(maxsize=QUEUE_MAXSIZE)
     qh = _NonBlockingQueueHandler(log_q)
     root.addHandler(qh)
     root.setLevel(level)
 
     if _LOGGER_WRITER_THREAD is None or not _LOGGER_WRITER_THREAD.is_alive():
-        target = _writer_loop
         _LOGGER_WRITER_THREAD = threading.Thread(
-            target=target, args=(log_q, log_file, console_level), name="quota-log", daemon=True
+            target=_writer_loop, args=(log_q, log_file, console_level),
+            name="quota-log", daemon=True
         )
         _LOGGER_WRITER_THREAD.start()
 
@@ -82,13 +90,13 @@ def _writer_loop(
     console_errors.setFormatter(logging.Formatter(LOG_FORMAT))
 
     # Simpler: one rotating file handler (if configured) + one console handler.
-    file_handler = None
+    file_handler: logging.handlers.RotatingFileHandler | None = None
     if log_file:
         try:
             path = Path(log_file)
             path.parent.mkdir(parents=True, exist_ok=True)
             file_handler = logging.handlers.RotatingFileHandler(
-                path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+                path, maxBytes=MAX_BYTES, backupCount=BACKUP_COUNT, encoding="utf-8"
             )
             file_handler.setLevel(logging.DEBUG)
             file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
@@ -105,7 +113,7 @@ def _writer_loop(
 
     while True:
         try:
-            record = log_q.get(timeout=0.5)
+            record = log_q.get(timeout=QUEUE_GET_TIMEOUT)
         except queue.Empty:
             continue
         # Route the record to the writer's own handlers (the queue handler on

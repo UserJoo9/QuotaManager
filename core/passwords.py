@@ -18,10 +18,7 @@ the candidate the same way, so case-flipped variants are caught too.
 from __future__ import annotations
 
 #: Minimum length for a NEW admin password (change/setup forms).
-MIN_LENGTH = 12
-
-#: Character classes the policy requires (digit, upper, lower, symbol).
-_REQUIRED_CLASSES = ("lowercase", "uppercase", "digit", "symbol")
+MIN_LENGTH: int = 12
 
 #: Common/weak passwords never allowed, regardless of length. ASCII-lowercase;
 #: ``policy_violations`` lowercases + strips the candidate before matching.
