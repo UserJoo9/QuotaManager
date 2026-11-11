@@ -155,92 +155,122 @@
  * @property {string} action
  */
 
+/** @param {any} a @param {any} b @returns {any} - first non-null/undefined value */
 function coalesce(a, b) { return a !== null && a !== undefined ? a : b; }
 
+/** @param {Object|null|undefined} daily @returns {Object|null} */
+function mapDailyPlan(daily) {
+  if (!daily) return null;
+  return {
+    active: !!daily.active,
+    mode: daily.mode || "off",
+    gb: daily.gb || 0,
+    carry: daily.carry || "next_day",
+    split: daily.split || "open",
+    self_edit: !!daily.self_edit,
+    heavy: daily.heavy || {},
+  };
+}
+
+/** @param {Object} d @returns {Object} */
+function mapDevice(d) {
+  return {
+    id: d.id,
+    name: d.name || "",
+    mac: d.mac || "",
+    ip: d.ip ?? null,
+    ip6: d.ip6 ?? null,
+    vendor: d.vendor ?? null,
+    device_used_gb: d.device_used_gb || 0,
+    lan_used_gb: d.lan_used_gb || 0,
+    device_up_gb: d.device_up_gb || 0,
+    device_down_gb: d.device_down_gb || 0,
+    lan_up_gb: d.lan_up_gb || 0,
+    lan_down_gb: d.lan_down_gb || 0,
+    connected: !!d.connected,
+    blocked: !!d.blocked,
+    gateway: !!d.gateway,
+    daily_share_gb: d.daily_share_gb ?? null,
+    daily_cap_gb: d.daily_cap_gb ?? null,
+    daily_used_gb: d.daily_used_gb ?? null,
+  };
+}
+
+/** @param {Object} u @returns {Object} */
+function mapUser(u) {
+  return {
+    id: u.id,
+    name: u.name || "",
+    used_gb: u.used_gb || 0,
+    allowance_gb: u.allowance_gb || 0,
+    percent: u.percent || 0,
+    blocked: !!u.blocked,
+    guest: !!u.guest,
+    protected: !!u.protected,
+    exempt_quota: !!u.exempt_quota,
+    history_days: u.history_days ?? null,
+    devices: (u.devices || []).map(mapDevice),
+    daily: u.daily ? mapDailyPlan(u.daily) : null,
+  };
+}
+
+/** @param {Object} b @returns {Object} */
+function mapBundle(b) {
+  return {
+    base_total_gb: coalesce(b.base_total_gb, b.total_gb) || 0,
+    total_gb: b.total_gb || 0,
+    used_gb: b.used_gb || 0,
+    remaining_gb: b.remaining_gb || 0,
+    days_left: b.days_left ?? null,
+    period_type: b.period_type || "renew_day",
+    period_start: b.period_start ?? null,
+    period_end: b.period_end ?? null,
+    reset_day: b.reset_day || 0,
+    recharges: (b.recharges || []).map((r) => ({
+      id: r.id,
+      target_type: r.target_type || "all",
+      target_id: r.target_id || 0,
+      gb: r.gb || 0,
+      expires_at: r.expires_at || 0,
+      recurring: !!r.recurring,
+      comment: r.comment || "",
+      created_at: r.created_at || "",
+    })),
+  };
+}
+
+/**
+ * Map the server dashboard response into domain/read models.
+ * @param {Object} raw - raw API dashboard response
+ * @returns {Object} mapped dashboard model
+ */
 export function mapDashboardResponse(raw) {
   const b = raw.bundle || {};
   return {
-    users: (raw.users || []).map((u) => ({
-      id: u.id,
-      name: u.name || "",
-      used_gb: u.used_gb || 0,
-      allowance_gb: u.allowance_gb || 0,
-      percent: u.percent || 0,
-      blocked: !!u.blocked,
-      guest: !!u.guest,
-      protected: !!u.protected,
-      exempt_quota: !!u.exempt_quota,
-      history_days: u.history_days !== null && u.history_days !== undefined ? u.history_days : null,
-      devices: (u.devices || []).map((d) => ({
-        id: d.id,
-        name: d.name || "",
-        mac: d.mac || "",
-        ip: d.ip !== null && d.ip !== undefined ? d.ip : null,
-        ip6: d.ip6 !== null && d.ip6 !== undefined ? d.ip6 : null,
-        vendor: d.vendor !== null && d.vendor !== undefined ? d.vendor : null,
-        device_used_gb: d.device_used_gb || 0,
-        lan_used_gb: d.lan_used_gb || 0,
-        device_up_gb: d.device_up_gb || 0,
-        device_down_gb: d.device_down_gb || 0,
-        lan_up_gb: d.lan_up_gb || 0,
-        lan_down_gb: d.lan_down_gb || 0,
-        connected: !!d.connected,
-        blocked: !!d.blocked,
-        gateway: !!d.gateway,
-        daily_share_gb: d.daily_share_gb !== null && d.daily_share_gb !== undefined ? d.daily_share_gb : null,
-        daily_cap_gb: d.daily_cap_gb !== null && d.daily_cap_gb !== undefined ? d.daily_cap_gb : null,
-        daily_used_gb: d.daily_used_gb !== null && d.daily_used_gb !== undefined ? d.daily_used_gb : null,
-      })),
-      daily: u.daily ? {
-        active: !!u.daily.active,
-        mode: u.daily.mode || "off",
-        gb: u.daily.gb || 0,
-        carry: u.daily.carry || "next_day",
-        split: u.daily.split || "open",
-        self_edit: !!u.daily.self_edit,
-        heavy: u.daily.heavy || {},
-      } : null,
-    })),
-    bundle: {
-      base_total_gb: coalesce(b.base_total_gb, b.total_gb) || 0,
-      total_gb: b.total_gb || 0,
-      used_gb: b.used_gb || 0,
-      remaining_gb: b.remaining_gb || 0,
-      days_left: b.days_left !== null && b.days_left !== undefined ? b.days_left : null,
-      period_type: b.period_type || "renew_day",
-      period_start: b.period_start !== null && b.period_start !== undefined ? b.period_start : null,
-      period_end: b.period_end !== null && b.period_end !== undefined ? b.period_end : null,
-      reset_day: b.reset_day || 0,
-      recharges: (b.recharges || []).map((r) => ({
-        id: r.id,
-        target_type: r.target_type || "all",
-        target_id: r.target_id || 0,
-        gb: r.gb || 0,
-        expires_at: r.expires_at || 0,
-        recurring: !!r.recurring,
-        comment: r.comment || "",
-        created_at: r.created_at || "",
-      })),
-    },
-    vpn: raw.vpn !== null && raw.vpn !== undefined ? raw.vpn : null,
-    vpn_share: raw.vpn_share !== null && raw.vpn_share !== undefined ? raw.vpn_share : null,
+    users: (raw.users || []).map(mapUser),
+    bundle: mapBundle(b),
+    vpn: raw.vpn ?? null,
+    vpn_share: raw.vpn_share ?? null,
     gateway_blocked_desired: !!raw.gateway_blocked_desired,
     gateway_blocked_programmed: !!raw.gateway_blocked_programmed,
     unmanaged_block: raw.unmanaged_block !== false,
     rogue: raw.rogue || [],
-    security: raw.security !== null && raw.security !== undefined ? raw.security : null,
-    version: raw.version !== null && raw.version !== undefined ? raw.version : null,
+    security: raw.security ?? null,
+    version: raw.version ?? null,
   };
 }
 
+/** @param {LoginCommand} cmd @returns {ApiLoginRequest} */
 export function mapLoginRequest(cmd) {
   return { password: cmd.password, code: cmd.code };
 }
 
+/** @param {Object} raw @returns {ApiLoginResponse} */
 export function mapLoginResponse(raw) {
-  return { authed: !!raw.authed, totp: raw.totp !== null && raw.totp !== undefined ? raw.totp : null };
+  return { authed: !!raw.authed, totp: raw.totp ?? null };
 }
 
+/** @param {UpdateBundleCommand} cmd @returns {ApiBundleRequest} */
 export function mapBundleRequest(cmd) {
   return {
     total_gb: cmd.total_gb,
@@ -249,6 +279,7 @@ export function mapBundleRequest(cmd) {
   };
 }
 
+/** @param {AddRechargeCommand} cmd @returns {ApiRechargeRequest} */
 export function mapRechargeRequest(cmd) {
   return {
     gb: cmd.gb,
@@ -260,6 +291,7 @@ export function mapRechargeRequest(cmd) {
   };
 }
 
+/** @param {PatchUserCommand} cmd @returns {ApiPatchUserRequest} */
 export function mapPatchUserRequest(cmd) {
   const req = {};
   if (cmd.name !== undefined) req.name = cmd.name;
@@ -276,6 +308,7 @@ export function mapPatchUserRequest(cmd) {
   return req;
 }
 
+/** @param {PatchDeviceCommand} cmd @returns {ApiPatchDeviceRequest} */
 export function mapPatchDeviceRequest(cmd) {
   const req = {};
   if (cmd.name !== undefined) req.name = cmd.name;
@@ -288,10 +321,12 @@ export function mapPatchDeviceRequest(cmd) {
   return req;
 }
 
+/** @param {number} gb @returns {ApiTopUpRequest} */
 export function mapTopUpCommand(gb) {
   return { add_gb: gb };
 }
 
+/** @param {DailyPlanCommand} cmd @returns {ApiDailyPlanRequest} */
 export function mapDailyPlanRequest(cmd) {
   return {
     mode: cmd.mode,
@@ -302,6 +337,7 @@ export function mapDailyPlanRequest(cmd) {
   };
 }
 
+/** @param {NetworkConfigCommand} cmd @returns {ApiNetworkRequest} */
 export function mapNetworkRequest(cmd) {
   return {
     enabled: cmd.enabled,
@@ -315,6 +351,7 @@ export function mapNetworkRequest(cmd) {
   };
 }
 
+/** @param {GuestConfig} cmd @returns {ApiGuestRequest} */
 export function mapGuestRequest(cmd) {
   return {
     enabled: cmd.enabled,
@@ -325,19 +362,22 @@ export function mapGuestRequest(cmd) {
   };
 }
 
+/** @param {string[]} allow @param {string[]} deny @returns {ApiMacListRequest} */
 export function mapMacListRequest(allow, deny) {
   return { allow, deny };
 }
 
+/** @param {StaticLease} req @returns {ApiStaticLeaseRequest} */
 export function mapStaticLeaseRequest(req) {
   return {
     mac: req.mac,
     ip: req.ip,
-    ip6: req.ip6 !== null && req.ip6 !== undefined ? req.ip6 : "",
-    hostname: req.hostname !== null && req.hostname !== undefined ? req.hostname : "",
+    ip6: req.ip6 ?? "",
+    hostname: req.hostname ?? "",
   };
 }
 
+/** @param {Object} cmd @returns {ApiFirewallRequest} */
 export function mapFirewallRequest(cmd) {
   return {
     enabled: cmd.enabled,
@@ -355,6 +395,7 @@ export function mapFirewallRequest(cmd) {
   };
 }
 
+/** @param {DnsRuleCommand} cmd @returns {ApiDnsRuleRequest} */
 export function mapDnsRuleRequest(cmd) {
   return {
     domain: cmd.domain,
@@ -365,6 +406,7 @@ export function mapDnsRuleRequest(cmd) {
   };
 }
 
+/** @param {Object} cmd @returns {ApiDnsImportRequest} */
 export function mapDnsImportRequest(cmd) {
   return {
     text: cmd.text,

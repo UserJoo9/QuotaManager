@@ -1,6 +1,37 @@
 // Canonical frontend constants — single source of truth for all appearance/runtime values.
 // Owned by config; consumed by stores, services, hooks, and UI. No business decisions here.
 
+/** @typedef {Object} AccentShade
+ * @property {string} a - primary accent color
+ * @property {string} ink - text color on accent
+ * @property {string} b - secondary accent color
+ */
+
+/** @typedef {Object} Accent
+ * @property {AccentShade} dark
+ * @property {AccentShade} light
+ */
+
+/** @typedef {Object} Tone
+ * @property {string} name - display name
+ * @property {string} a - primary color
+ * @property {string} b - secondary color
+ * @property {string} la - light variant of a
+ * @property {string} lb - light variant of b
+ * @property {string[]|null} bg - gradient stops (null = none)
+ */
+
+/** @typedef {Object} Defaults
+ * @property {string} tone - active tone key ("" = system default)
+ * @property {string} particles - active particle preset
+ * @property {string} theme - "dark"|"light"
+ * @property {string} lang - detected UI language ("ar"|"en")
+ * @property {string} accent - active accent key
+ * @property {string} fx - effect level
+ * @property {string} density - UI density
+ * @property {boolean} rail - rail state
+ */
+
 export const STORAGE_KEY_PREFS = "qm.ui.prefs.v2";
 export const STORAGE_KEY_PRIVACY = "quota_privacy_hide";
 export const STORAGE_KEY_LIVE_DEV = "qm_live_dev_name";
@@ -31,7 +62,7 @@ export const DEFAULTS = {
 };
 
 export const QUICK_GB = [10, 25, 50];
-export const DAY_MS = 86400000;
+export const DAY_MS = 86400000; // ms per day
 export const MAX_DIRECT = 50 * 1024 * 1024;
 export const CHUNK_SIZE = 512 * 1024;
 

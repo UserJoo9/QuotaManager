@@ -125,34 +125,42 @@
  * @property {SecurityStatus} security
  */
 
+/** @param {string} password @param {string|null} code @returns {LoginCommand} */
 export function createLoginCommand(password, code) {
   return { password, code: code || null };
 }
 
+/** @param {number} total_gb @param {number} reset_day @param {string} period_type @returns {UpdateBundleCommand} */
 export function createUpdateBundleCommand(total_gb, reset_day, period_type) {
   return { total_gb, reset_day, period_type };
 }
 
+/** @param {number} gb @param {number} expires_at @param {boolean} recurring @param {string} target_type @param {number|null} target_id @param {string} comment @returns {AddRechargeCommand} */
 export function createAddRechargeCommand(gb, expires_at, recurring, target_type, target_id, comment) {
   return { gb, expires_at, recurring, target_type, target_id, comment };
 }
 
+/** @param {number} id @param {Object<string, ?>} fields @returns {PatchUserCommand} */
 export function createPatchUserCommand(id, fields) {
   return { id, ...fields };
 }
 
+/** @param {number} id @param {Object<string, ?>} fields @returns {PatchDeviceCommand} */
 export function createPatchDeviceCommand(id, fields) {
   return { id, ...fields };
 }
 
+/** @param {number} id @param {boolean} isUser @param {number} gb @returns {TopUpCommand} */
 export function createTopUpCommand(id, isUser, gb) {
   return { id, isUser, gb };
 }
 
+/** @param {number} userId @param {string} mode @param {number} gb @param {string} carry @param {string} split @param {Object<string, number>} heavy @returns {DailyPlanCommand} */
 export function createDailyPlanCommand(userId, mode, gb, carry, split, heavy) {
   return { userId, mode, gb, carry, split, heavy };
 }
 
+/** @param {Object} cfg @returns {NetworkConfigCommand} */
 export function createNetworkConfigCommand(cfg) {
   return {
     enabled: cfg.enabled,
@@ -166,18 +174,22 @@ export function createNetworkConfigCommand(cfg) {
   };
 }
 
+/** @param {number} nodeId @returns {VpnConnectCommand} */
 export function createVpnConnectCommand(nodeId) {
   return { nodeId };
 }
 
+/** @param {string} type @param {number} id @param {boolean} routeVpn @returns {VpnRouteCommand} */
 export function createVpnRouteCommand(type, id, routeVpn) {
   return { type, id, route_vpn: routeVpn };
 }
 
+/** @param {string} name @param {string} protocol @param {number} sourcePort @param {number} targetPort @param {string} targetIp @returns {FirewallRuleCommand} */
 export function createFirewallRuleCommand(name, protocol, sourcePort, targetPort, targetIp) {
   return { name, protocol, source_port: sourcePort, target_port: targetPort, target_ip: targetIp };
 }
 
+/** @param {string} domain @param {string} action @param {string|null} targetIp @param {string} scope @param {number|null} scopeId @returns {DnsRuleCommand} */
 export function createDnsRuleCommand(domain, action, targetIp, scope, scopeId) {
   return { domain, action, target_ip: targetIp, scope, scope_id: scopeId };
 }

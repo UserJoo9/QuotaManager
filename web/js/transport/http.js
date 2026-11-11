@@ -4,6 +4,14 @@
 const CSRF_HEADER = "X-QM-CSRF";
 const CSRF_VALUE = "1";
 
+/**
+ * Send one JSON request and parse the JSON response.
+ * @param {"GET"|"POST"|"PATCH"|"DELETE"} method
+ * @param {string} path
+ * @param {any} [body]
+ * @returns {Promise<unknown>} Parsed JSON body (null on empty/unparseable body).
+ * @throws {Error} When `res.ok` is false; message from `detail` or `HTTP <status>`.
+ */
 async function request(method, path, body) {
   const opts = {
     method,
@@ -23,6 +31,7 @@ async function request(method, path, body) {
   return data;
 }
 
+/** @type {{get: function(string): Promise<unknown>, post: function(string, *): Promise<unknown>, patch: function(string, *): Promise<unknown>, del: function(string): Promise<unknown>}} */
 export const http = {
   get:  (path)  => request("GET", path),
   post: (path, body) => request("POST", path, body),

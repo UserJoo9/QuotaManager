@@ -227,6 +227,11 @@
  * @property {number} top_consumer_id
  */
 
+/**
+ * Build a domain User from partial data, filling defaults for missing fields.
+ * @param {Object} partial - partial User fields
+ * @returns {User}
+ */
 export function createUser(partial) {
   return {
     id: partial.id ?? 0,
@@ -244,6 +249,11 @@ export function createUser(partial) {
   };
 }
 
+/**
+ * Build a domain Device from partial data, filling defaults for missing fields.
+ * @param {Object} partial - partial Device fields
+ * @returns {Device}
+ */
 export function createDevice(partial) {
   return {
     id: partial.id ?? 0,
@@ -267,6 +277,12 @@ export function createDevice(partial) {
   };
 }
 
+/**
+ * Build a domain Bundle from partial data, filling defaults for missing fields.
+ * `base_total_gb` falls back to `total_gb` when unset.
+ * @param {Object} partial - partial Bundle fields
+ * @returns {Bundle}
+ */
 export function createBundle(partial) {
   return {
     base_total_gb: partial.base_total_gb ?? partial.total_gb ?? 0,
@@ -282,6 +298,11 @@ export function createBundle(partial) {
   };
 }
 
+/**
+ * Build a domain VpnStatus from partial data, filling defaults for missing fields.
+ * @param {Object} partial - partial VpnStatus fields
+ * @returns {VpnStatus}
+ */
 export function createVpnStatus(partial) {
   return {
     state: partial.state ?? "disconnected",
@@ -299,19 +320,29 @@ export function createVpnStatus(partial) {
   };
 }
 
+/** @param {User} user @returns {boolean} - true when the user is explicitly blocked */
 export function isUserBlocked(user) {
   return user.blocked === true;
 }
 
+/** @param {User} user @returns {boolean} - true when at least one device is connected */
 export function isUserOnline(user) {
   return (user.devices || []).some((d) => d.connected === true);
 }
 
+/**
+ * Bundle usage as a rounded percent of total.
+ * @param {Bundle} bundle @returns {number} - 0 when total is 0, else 0-100
+ */
 export function bundleUsagePercent(bundle) {
   if (bundle.total_gb <= 0) return 0;
   return Math.round((bundle.used_gb / bundle.total_gb) * 100);
 }
 
+/**
+ * Bundle remaining as a rounded percent of total.
+ * @param {Bundle} bundle @returns {number} - 100 when total is 0, else 0-100
+ */
 export function bundleRemainingPercent(bundle) {
   if (bundle.total_gb <= 0) return 100;
   return Math.round((bundle.remaining_gb / bundle.total_gb) * 100);
