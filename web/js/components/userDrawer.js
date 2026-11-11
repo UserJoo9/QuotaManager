@@ -6,10 +6,25 @@ import { toast } from "./toast.js";
 import { bar, sw, chip, userStatus, devIcon, netSplit } from "./ui.js";
 import { dailySection, deviceShare } from "./dailyPlan.js";
 
-const armed = new Set(); // destructive buttons armed by a first tap (confirm-by-second-tap)
+/** Destructive buttons armed by a first tap (confirm-by-second-tap), keyed by button id. */
+const armed = new Set();
 
+/** A label + control row with an optional hint line underneath. `hint` may be a string or a node. */
+const field = (label, control, hint) => {
+  const hHint = hint == null ? null : (typeof hint === "string" ? h("span", { class: "sub" }, hint) : hint);
+  return h("div", { class: "field" }, h("label", {}, label), control, hHint);
+};
+/** kick/blacklist row inside .danger-z: title, sub, then the armed danger button. */
+const dzRow = (title, sub, btn) => h("div", { class: "dz-r" }, h("div", {}, h("b", {}, title), h("span", {}, sub)), btn);
 
-// Editable settings block shared by person + device cards: speed caps, allowance, quota exemption, VPN bypass, DNS.
+/**
+ * Editable settings block shared by person + device cards: speed caps, allowance, quota exemption, VPN bypass, DNS.
+ * @param {"user"|"device"} kind
+ * @param {object} o
+ * @param {(fn:Function, msg?:string) => () => Promise<void>} run
+ * @param {boolean} withQuota
+ * @returns {HTMLElement}
+ */
 function settingsBlock(kind, o, run, withQuota) {
   const isUser = kind === "user";
   const num_ = (v) => h("input", { class: "input", type: "number", min: "0", step: "any", value: String(v || 0), inputmode: "decimal" });
@@ -28,43 +43,47 @@ function settingsBlock(kind, o, run, withQuota) {
   }, t("dr.saved"));
   return h("div", { class: "dr-sec" },
     h("h4", {}, t("dr.limits")),
-    h("div", { class: "form-row" }, h("div", { class: "field" }, h("label", {}, t("dr.limit.down")), down), h("div", { class: "field" }, h("label", {}, t("dr.limit.up")), up)),
+    h("div", { class: "form-row" }, field(t("dr.limit.down"), down), field(t("dr.limit.up"), up)),
     h("span", { class: "sub" }, t("dr.limit.hint")),
-    withQuota ? [h("h4", {}, t("dr.quota")), h("div", { class: "form-row" }, h("div", { class: "field" }, h("label", {}, t("dr.quota.mode")), mode), h("div", { class: "field" }, h("label", {}, t("dr.quota.gb")), gb))] : null,
+    withQuota ? [h("h4", {}, t("dr.quota")), h("div", { class: "form-row" }, field(t("dr.quota.mode"), mode), field(t("dr.quota.gb"), gb))] : null,
     row(t("dr.unlimited"), t("dr.unlimited.sub"), exempt, flag(isUser ? "exempt_quota" : "bypass", !exempt)),
     row(t("dr.vpnbypass"), t("dr.vpnbypass.sub"), o.vpn_bypass, flag("vpn_bypass", !o.vpn_bypass)),
-    h("div", { class: "field" }, h("label", {}, t("dr.dns")), dns, h("span", { class: "sub" }, t("dr.dns.hint"))),
+    field(t("dr.dns"), dns, h("span", { class: "sub" }, t("dr.dns.hint"))),
     h("div", { class: "fa" }, h("button", { type: "button", class: "btn primary sm", onclick: save }, t("dr.save"))));
 }
 
-// Rename / history retention / move / top-up: the classic "Edit" modals, folded into the cards.
+/** Top-up input + button (user or device). */
 function topupRow(id, isUser, run) {
   const gb = h("input", { class: "input", type: "number", min: "0", step: "any", placeholder: t("dr.topup.ph"), inputmode: "decimal", "aria-label": t("dr.topup") });
   const go = run(async () => { const v = +gb.value; if (!(v > 0)) throw new Error(t("dr.topup.bad")); await (isUser ? actions.topupUser : actions.topupDevice)(id, v); gb.value = ""; }, t("dr.topup.done"));
-  return h("div", { class: "field" }, h("label", {}, t("dr.topup")), h("div", { style: { display: "flex", gap: "10px" } }, h("div", { class: "grow" }, gb), h("button", { type: "button", class: "btn primary sm", style: { height: "40px" }, onclick: go }, icon("plus", 15), t("dr.topup.add"))), h("span", { class: "sub" }, t("dr.topup.hint")));
+  return field(t("dr.topup"), h("div", { style: { display: "flex", gap: "10px" } }, h("div", { class: "grow" }, gb), h("button", { type: "button", class: "btn primary sm", style: { height: "40px" }, onclick: go }, icon("plus", 15), t("dr.topup.add"))), h("span", { class: "sub" }, t("dr.topup.hint")));
 }
+
+/** Rename / history retention for a person card. */
 function userDetails(u, run) {
   const name = h("input", { class: "input", value: u.name || "", "aria-label": t("dr.name") });
   const hist = h("input", { class: "input", type: "number", min: "0", max: "365", step: "1", value: u.history_days == null ? "" : String(u.history_days), placeholder: t("dr.hist.ph"), inputmode: "numeric" });
   const save = run(async () => { const b = { name: name.value.trim() }; if (hist.value !== "") b.history_days = Math.max(0, Math.min(365, Math.round(+hist.value || 0))); await actions.patchUser(u.id, b); }, t("dr.saved"));
   return h("div", { class: "dr-sec" }, h("h4", {}, t("dr.details")),
-    h("div", { class: "field" }, h("label", {}, t("dr.name")), name),
-    h("div", { class: "field" }, h("label", {}, t("dr.hist")), hist, h("span", { class: "sub" }, t("dr.hist.hint"))),
+    field(t("dr.name"), name),
+    field(t("dr.hist"), hist, h("span", { class: "sub" }, t("dr.hist.hint"))),
     h("div", { class: "fa" }, h("button", { type: "button", class: "btn primary sm", onclick: save }, t("dr.save"))),
     topupRow(u.id, true, run));
 }
+
+/** Rename / move owner / top-up / kick / blacklist for a device card. */
 function deviceDetails(d, u, users, run, danger) {
   const name = h("input", { class: "input", value: d.name || "", "aria-label": t("dr.name") });
   const owner = h("select", { class: "select" }, users.filter((x) => !x.protected || x.id === u.id).map((x) => h("option", { value: String(x.id), selected: x.id === u.id }, x.name)));
   const save = run(async () => { const b = { name: name.value.trim() }; if (+owner.value !== u.id) b.user_id = +owner.value; await actions.patchDevice(d.id, b); }, t("dr.saved"));
   return h("div", { class: "dr-sec" },
-    h("div", { class: "field" }, h("label", {}, t("dr.name")), name),
-    d.gateway ? null : h("div", { class: "field" }, h("label", {}, t("dr.move")), owner, h("span", { class: "sub" }, t("dr.move.hint"))),
+    field(t("dr.name"), name),
+    d.gateway ? null : field(t("dr.move"), owner, h("span", { class: "sub" }, t("dr.move.hint"))),
     h("div", { class: "fa" }, h("button", { type: "button", class: "btn primary sm", onclick: save }, t("dr.save"))),
     topupRow(d.id, false, run),
     d.gateway ? null : h("div", { class: "danger-z" },
-      h("div", { class: "dz-r" }, h("div", {}, h("b", {}, t("dr.kick")), h("span", {}, t("dr.kick.sub"))), danger(`dkick${d.id}`, t("dr.kick"), () => actions.kickDevice(d.id))),
-      h("div", { class: "dz-r" }, h("div", {}, h("b", {}, t("dr.blacklist")), h("span", {}, t("dr.bl.sub"))), danger(`dbl${d.id}`, t("dr.blacklist"), () => actions.blacklistDevice(d.id)))));
+      dzRow(t("dr.kick"), t("dr.kick.sub"), danger(`dkick${d.id}`, t("dr.kick"), () => actions.kickDevice(d.id))),
+      dzRow(t("dr.blacklist"), t("dr.bl.sub"), danger(`dbl${d.id}`, t("dr.blacklist"), () => actions.blacklistDevice(d.id)))));
 }
 
 const mkRun = (refresh) => (fn, okMsg) => async () => {
@@ -78,7 +97,15 @@ const mkDanger = (run) => (key, label, fn, closeAfter) => h("button", {
     armed.delete(key); await run(fn)(); if (closeAfter) closeDrawer();
   } }, armed.has(key) ? t("dr.confirm") : label);
 
-// One device on its own: usage, access, addresses, limits, rename/move/top-up, kick/blacklist. No owner details.
+/**
+ * One device drawer: usage, access, addresses, limits, rename/move/top-up, kick/blacklist. No owner details.
+ * @param {number} userId
+ * @param {number} deviceId
+ * @param {Function} getDashboard
+ * @param {Function} refresh
+ * @param {object} ctx
+ * @returns {void}
+ */
 export function openDeviceDrawer(userId, deviceId, getDashboard, refresh, ctx) {
   const run = mkRun(refresh), danger = mkDanger(run);
   openDrawer(() => {
@@ -106,6 +133,14 @@ export function openDeviceDrawer(userId, deviceId, getDashboard, refresh, ctx) {
   });
 }
 
+/**
+ * One person drawer: status, usage, access, limits, daily plan, details (non-protected), danger (non-protected).
+ * @param {number} userId
+ * @param {Function} getDashboard
+ * @param {Function} refresh
+ * @param {object} ctx
+ * @returns {void}
+ */
 export function openUserDrawer(userId, getDashboard, refresh, ctx) {
   const find = () => (getDashboard()?.users || []).find((u) => u.id === userId);
   const run = mkRun(refresh), danger = mkDanger(run);
@@ -137,8 +172,8 @@ export function openUserDrawer(userId, getDashboard, refresh, ctx) {
     if (!u.protected) body.push(userDetails(u, run));
     if (!u.protected) body.push(h("div", { class: "dr-sec" }, h("h4", {}, t("dr.danger")),
       h("div", { class: "danger-z" },
-        h("div", { class: "dz-r" }, h("div", {}, h("b", {}, t("dr.kick")), h("span", {}, t("dr.kick.sub"))), danger(`kick${u.id}`, t("dr.kick"), () => actions.kickUser(u.id), true)),
-        h("div", { class: "dz-r" }, h("div", {}, h("b", {}, t("dr.blacklist")), h("span", {}, t("dr.bl.sub"))), danger(`bl${u.id}`, t("dr.blacklist"), () => actions.blacklistUser(u.id), true)))));
+        dzRow(t("dr.kick"), t("dr.kick.sub"), danger(`kick${u.id}`, t("dr.kick"), () => actions.kickUser(u.id), true)),
+        dzRow(t("dr.blacklist"), t("dr.bl.sub"), danger(`bl${u.id}`, t("dr.blacklist"), () => actions.blacklistUser(u.id), true)))));
     return { icon: "people", title: u.name, sub: u.protected ? t("common.protected") : u.guest ? t("common.guest") : t("dr.person_sub"), body, footer: [] };
   });
 }

@@ -1,6 +1,10 @@
-import { h, icon } from "../core/dom.js";
+import { h, icon, FOCUSABLE } from "../core/dom.js";
 import { t } from "../core/i18n.js";
+
+/** The open modal element, and the element that had focus before it opened. */
 let current = null, prevFocus = null;
+
+/** Close the open dialog, restore focus, and unbind the Escape/Tab handler. */
 export function closeDialog() {
   if (current) {
     current.remove(); current = null;
@@ -9,18 +13,29 @@ export function closeDialog() {
     prevFocus = null;
   }
 }
+/** Escape closes; Tab cycles focus inside the modal and never leaves it. */
 function onKey(e) {
   if (e.key === "Escape") { closeDialog(); return; }
   if (e.key === "Tab" && current) {
-    const focusable = current.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])');
+    const focusable = current.querySelectorAll(FOCUSABLE);
     if (!focusable.length) return;
     const first = focusable[0], last = focusable[focusable.length - 1];
     if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   }
 }
-// content: Node[] shown in a <form>. onSubmit(setError) => Promise; return truthy to close.
-// infoOnly: a read-only dialog — the header X plus a single Close button (no redundant Cancel).
+/**
+ * Open a modal dialog rendering `content` inside a <form>.
+ * @typedef {Object} OpenDialogOptions
+ * @property {string} title - dialog title
+ * @property {string} [sub] - subtitle line under the title
+ * @property {Node[]} content - form body nodes
+ * @property {string} submitLabel - primary button label
+ * @property {() => Promise<boolean>} onSubmit - returning truthy closes the dialog
+ * @property {boolean} [wide] - wide variant
+ * @property {boolean} [infoOnly] - read-only: header X plus a single Close button (no redundant Cancel)
+ * @returns {void}
+ */
 export function openDialog({ title, sub, content, submitLabel, onSubmit, wide, infoOnly }) {
   prevFocus = document.activeElement;
   closeDialog();

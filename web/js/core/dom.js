@@ -2,6 +2,9 @@
 // so user-controlled strings (device names, hostnames) can never inject markup.
 import { icons } from "../components/icons.js";
 
+// Focusable elements for Tab cycling inside modals (drawer.js, dialog.js) — one source of truth.
+export const FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+
 export function h(tag, props, ...kids) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(props || {})) {

@@ -1,4 +1,10 @@
 // Stroke icons on a 24x24 grid (ported from the prototype; "|" separates sub-paths).
+/**
+ * Turn a prototype path string ("M..." segments separated by " M") into the "|"-separated form
+ * consumed by dom.icon().
+ * @param {string} s - prototype path data
+ * @returns {string} "|"-separated sub-paths
+ */
 const P = (s) => s.split(" M").map((x, i) => (i ? "M" + x : x)).join("|");
 export const icons = Object.fromEntries(Object.entries({
   dot: "M12 12h.01",
