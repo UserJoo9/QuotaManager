@@ -4,6 +4,9 @@ description: Documentation writing rules and audience targeting for QuotaManager
 
 # Documentation Guidelines
 
+- The project-wide engineering invariants live in .specify/memory/constitution.md.
+  Update it when a durable principle changes; keep the guides below aligned with it.
+
 - **CHANGELOG.md**:
   - Must ALWAYS be written in simple, non-technical language.
   - Explain user-facing improvements, new capabilities, and resolved bugs from the perspective of someone using the dashboard at home.

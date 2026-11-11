@@ -85,6 +85,14 @@ export function openDeviceDrawer(userId, deviceId, getDashboard, refresh) {
     const users = getDashboard()?.users || [], u = users.find((x) => x.id === userId), d = u && (u.devices || []).find((x) => x.id === deviceId);
     if (!d) { closeDrawer(); return { title: "", body: [], footer: [] }; }
     const pct = u.allowance_gb > 0 ? (d.device_used_gb / u.allowance_gb) * 100 : 0;
+    const ipv4Addresses = d.ipv4_addresses?.length ? d.ipv4_addresses : (d.ip ? [d.ip] : []);
+    const ipv6Addresses = d.ipv6_addresses?.length ? d.ipv6_addresses : (d.ip6 ? [d.ip6] : []);
+    const ipv6Status = ["managed", "partial", "unverified"].includes(d.ipv6_enforcement)
+      ? d.ipv6_enforcement : ipv6Addresses.length ? "managed" : "unverified";
+    const ipv6Reason = d.ipv6_enforcement_reason || (ipv6Addresses.length ? "" : "no_ipv6_address_observed");
+    const ipv6StatusColor = ipv6Status === "managed" ? "ok" : ipv6Status === "partial" ? "warn" : "danger";
+    const addressValues = (addresses) => h("span", { class: "v", style: { display: "flex", "flex-wrap": "wrap", gap: "6px", "min-width": "0" } },
+      addresses.map((address) => h("span", { class: "mono", dir: "ltr", style: { "overflow-wrap": "anywhere" } }, iso(address))));
     const body = [
       h("div", { class: "dr-sec" }, h("h4", {}, t("dr.thisperiod")),
         h("div", { class: "big" }, num(d.device_used_gb), h("small", {}, `${t("common.gb")} · ${u.name}`)),
@@ -96,8 +104,10 @@ export function openDeviceDrawer(userId, deviceId, getDashboard, refresh) {
       sw(!d.blocked, t("pp.access"), run(() => actions.blockDevice(d.id, !d.blocked))))));
     body.push(h("div", { class: "dr-sec" }, h("div", { class: "kv" },
       h("div", {}, h("span", { class: "k" }, t("dr.mac")), h("span", { class: "v mono" }, iso(d.mac))),
-      d.ip ? h("div", {}, h("span", { class: "k" }, t("dr.ip")), h("span", { class: "v mono" }, iso(d.ip))) : null,
-      d.ip6 ? h("div", {}, h("span", { class: "k" }, t("dr.ip6")), h("span", { class: "v mono" }, iso(d.ip6))) : null,
+      ipv4Addresses.length ? h("div", {}, h("span", { class: "k" }, t("dr.ip")), addressValues(ipv4Addresses)) : null,
+      h("div", {}, h("span", { class: "k" }, t("dr.ip6")), addressValues(ipv6Addresses)),
+      h("div", {}, h("span", { class: "k" }, t("dr.ipv6.coverage")), chip(ipv6StatusColor, t(`dr.ipv6.${ipv6Status}`))),
+      ipv6Reason ? h("div", {}, h("span", { class: "k" }, t("dr.ipv6.reason")), h("span", { class: "v sub" }, t(`dr.ipv6.reason.${ipv6Reason}`))) : null,
       d.vendor ? h("div", {}, h("span", { class: "k" }, t("dr.vendor")), h("span", { class: "v" }, d.vendor)) : null)));
     if (!d.gateway) body.push(settingsBlock("device", d, run, false));
     const ds = d.gateway ? null : deviceShare(d, u, run); if (ds) body.push(ds);

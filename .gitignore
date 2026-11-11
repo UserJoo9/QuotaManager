@@ -22,6 +22,10 @@ ENV/
 .ruff_cache/
 .coverage
 htmlcov/
+graphify-out/
+.playwright-mcp/
+.serena/
+specs/
 
 # ---- Runtime data (never commit — contains admin password hash + usage) ----
 data/

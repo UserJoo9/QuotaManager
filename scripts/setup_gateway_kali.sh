@@ -962,7 +962,8 @@ history:
   dnsmasq_log_file: $CFG_HISTORY_LOG
   retention_days: 7
 web:
-  host: 0.0.0.0
+  # "*" listens on IPv4 and IPv6. Use 0.0.0.0 or :: to choose one family.
+  host: "*"
   port: 8080
 EOF
 echo "  example config written to $CONF_DIR/config.yaml"
@@ -992,8 +993,26 @@ def sections(text):
     return out, order
 
 old, old_order = sections(open(old_path, encoding="utf-8").read())
-new, _ = sections(open(new_path, encoding="utf-8").read())
+new_text = open(new_path, encoding="utf-8").read()
+new, _ = sections(new_text)
+if "web" in old and "web" in new:
+    lines = new_text.splitlines()
+    web_index = next(i for i, line in enumerate(lines)
+                     if re.match(r"^web:", line))
+    start = web_index
+    while start > 0 and (not lines[start - 1].strip() or
+                         lines[start - 1].startswith("#")):
+        start -= 1
+    end = next((i for i in range(web_index + 1, len(lines))
+                if key_re.match(lines[i])), len(lines))
+    merged = lines[:start] + old["web"] + lines[end:]
+    new_text = "\n".join(merged).rstrip() + "\n"
+    with open(new_path, "w", encoding="utf-8") as f:
+        f.write(new_text)
+    new, _ = sections(new_text)
 extra = [k for k in old_order if k not in new]
+if "web" in old and "web" in new:
+    print("kept existing web listener settings")
 if extra:
     with open(new_path, "a", encoding="utf-8") as f:
         f.write("\n# --- carried over from the previous config.yaml ---\n")

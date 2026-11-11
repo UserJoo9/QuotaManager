@@ -130,6 +130,64 @@ def test_vpn_page_only_calls_endpoints_that_exist():
     assert used <= routes, f"unknown endpoints: {used - routes}"
 
 
+def test_guest_voucher_admin_ui_uses_existing_admin_routes():
+    app_src = (ROOT / "api" / "app.py").read_text(encoding="utf-8")
+    page = (UI / "js" / "pages" / "network.js").read_text(encoding="utf-8")
+    assert 'api.post("/api/guest/vouchers"' in page
+    assert 'api.get("/api/guest/vouchers")' in page
+    assert '/api/guest/vouchers/${' in page
+    assert '@app.post("/api/guest/vouchers"' in app_src
+    assert '@app.get("/api/guest/vouchers"' in app_src
+    assert '@app.post("/api/guest/vouchers/{code}/revoke"' in app_src
+    assert 'class: "crow voucher-row"' in page
+    assert "v.expires_at" in page and "v.used_mac" in page and "v.used_at" in page
+    assert 'grid-template-columns": "minmax(170px' not in page
+    styles = (UI / "css" / "components.css").read_text(encoding="utf-8")
+    assert ".voucher-row{grid-template-columns:repeat(2,minmax(0,1fr))}" in styles
+
+
+def test_guest_voucher_portal_feedback_has_bilingual_recovery_states():
+    root = Path(__file__).resolve().parents[1]
+    portal = (root / "web/guest_pending.html").read_text()
+    english = (root / "web/js/i18n/en.js").read_text()
+    arabic = (root / "web/js/i18n/ar.js").read_text()
+    keys = (
+        "guest.voucher.checking", "guest.voucher.success",
+        "guest.voucher.invalid", "guest.voucher.unavailable",
+        "guest.voucher.paused", "guest.voucher.unrecognized",
+        "guest.voucher.not_pending", "guest.voucher.blocked",
+        "guest.voucher.request_invalid", "guest.voucher.service_error",
+        "guest.voucher.cooldown", "guest.voucher.network",
+    )
+    for key in keys:
+        assert f'"{key}"' in english
+        assert f'"{key}"' in arabic
+    assert "Retry-After" in portal
+    assert 'method="post"' in portal
+    assert 'action="/api/guest/voucher/redeem"' in portal
+    assert "showVoucherFeedback('error', 'guest.voucher.cooldown'" in portal
+    assert "showVoucherFeedback('success', 'guest.voucher.success'" in portal
+    assert "device_unrecognized: 'guest.voucher.unrecognized'" in portal
+    assert "response.status >= 500" in portal
+
+
+def test_guest_portal_keeps_feedback_and_live_region_during_polling():
+    portal = (UI / "guest_pending.html").read_text(encoding="utf-8")
+    pending_branch = portal[portal.index("// Pending State"):]
+    assert "let lastRenderedStatus = null" in portal
+    assert "data.status !== lastRenderedStatus" in portal
+    assert "voucherFeedback.hidden = true" not in pending_branch
+    assert portal.count("id = 'live-text'") >= 5
+    assert "document.getElementById('live-text').textContent" in portal
+
+
+def test_device_drawer_shows_ipv6_addresses_and_coverage():
+    drawer = (UI / "js" / "components" / "userDrawer.js").read_text(encoding="utf-8")
+    assert "d.ipv6_addresses" in drawer
+    assert 't("dr.ipv6.coverage")' in drawer
+    assert 't(`dr.ipv6.reason.${ipv6Reason}`)' in drawer
+
+
 def test_usage_daily_endpoint(client):
     """Read-only per-day totals feeding the Overview chart."""
     client.post("/api/login", json={"password": "admin"})

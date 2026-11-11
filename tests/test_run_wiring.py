@@ -18,11 +18,14 @@ loop ticks and pushes enforcement state.
 
 # import asyncio
 import os
+import socket
 import time
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from core import config as cfg_mod
@@ -32,6 +35,7 @@ from quota.engine import GATEWAY_MAC, EngineCounters, EngineSnapshot
 from quota.tun2socks import Tun2socksStatus
 from quota.vpnshare import VpnShareStatus
 from run import Gateway
+import run as run_module
 
 
 def _cfg(tmp_path) -> cfg_mod.Config:
@@ -384,6 +388,80 @@ def test_full_server_boot(tmp_path):
     loop.close()
 
 
+def test_web_listener_binds_ipv4_and_ipv6_loopback_sockets(monkeypatch):
+    """The dual-stack listener uses explicit loopback sockets on one port."""
+    addresses = [
+        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
+         ("127.0.0.1", 0)),
+        (socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
+         ("::1", 0, 0, 0)),
+    ]
+    monkeypatch.setattr(run_module.socket, "getaddrinfo",
+                        lambda *args, **kwargs: addresses)
+    sockets = run_module._make_web_listener_sockets("test-dual-stack", 0)
+    try:
+        assert {sock.family for sock in sockets} == {
+            socket.AF_INET, socket.AF_INET6}
+        assert len({sock.getsockname()[1] for sock in sockets}) == 1
+        v6 = next(sock for sock in sockets if sock.family == socket.AF_INET6)
+        assert v6.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY) == 1
+        assert {sock.getsockname()[0] for sock in sockets} == {"127.0.0.1", "::1"}
+    finally:
+        for sock in sockets:
+            sock.close()
+
+
+def test_uvicorn_serves_over_both_loopback_listener_sockets():
+    """Uvicorn accepts the prebound IPv4 and IPv6 sockets on the same port."""
+    app = FastAPI()
+
+    @app.get("/")
+    async def root():
+        return {"ok": True}
+
+    ipv4_sockets = run_module._make_web_listener_sockets("127.0.0.1", 0)
+    port = ipv4_sockets[0].getsockname()[1]
+    try:
+        ipv6_sockets = run_module._make_web_listener_sockets("::1", port)
+    except OSError as exc:
+        for sock in ipv4_sockets:
+            sock.close()
+        pytest.skip(f"IPv6 loopback is unavailable: {exc}")
+    sockets = ipv4_sockets + ipv6_sockets
+    server = run_module.uvicorn.Server(run_module.uvicorn.Config(
+        app, host="127.0.0.1", port=port, lifespan="off",
+        log_level="critical", access_log=False))
+
+    async def _serve_and_probe():
+        task = asyncio.create_task(server.serve(sockets=sockets))
+        try:
+            for _ in range(100):
+                if server.started:
+                    break
+                await asyncio.sleep(0.01)
+            assert server.started
+            bodies = await asyncio.gather(
+                asyncio.to_thread(
+                    lambda: urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/", timeout=2).read()),
+                asyncio.to_thread(
+                    lambda: urllib.request.urlopen(
+                        f"http://[::1]:{port}/", timeout=2).read()),
+            )
+            assert bodies == [b'{"ok":true}', b'{"ok":true}']
+        finally:
+            server.should_exit = True
+            await task
+            for sock in sockets:
+                sock.close()
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_serve_and_probe())
+    finally:
+        loop.close()
+
+
 def test_updater_wired_only_when_config_enabled(tmp_path):
     """cfg.updates.enabled gates the whole subsystem (hermetic-tests master
     switch): disabled => ``gw.updater is None`` and a tick stays silent;
@@ -489,7 +567,7 @@ def test_new_device_auto_registers_disabled_until_admin_assigns(tmp_path):
 
 def test_guest_mode_auto_registers_guest_device(tmp_path):
     """With guest mode on, a NEW device joining the network becomes a guest,
-    initially admin-blocked with 0 GB allowance awaiting admin approval.
+    initially marked guest-pending with 0 GB allowance awaiting approval.
     When the admin approves the guest, they receive the guest quota and are unblocked."""
     from quota import db as db_mod
 
@@ -508,9 +586,9 @@ def test_guest_mode_auto_registers_guest_device(tmp_path):
         user = _get_loop().run_until_complete(
             gw.database.get_user(dev.user_id))
         assert user is not None and user.guest, "new device must become a GUEST"
-        # Pending admin approval: device & user are admin-blocked with 0 allowance
-        assert dev.block_state == db_mod.BLOCK_ADMIN
-        assert user.block_state == db_mod.BLOCK_ADMIN
+        # Pending approval is distinct from an explicit administrator rejection.
+        assert dev.block_state == db_mod.BLOCK_GUEST_PENDING
+        assert user.block_state == db_mod.BLOCK_GUEST_PENDING
         assert user.quota_mode == db_mod.QUOTA_FIXED
         assert (user.fixed_gb or 0.0) == 0.0
 
@@ -589,7 +667,7 @@ def test_guest_device_reconnects_keeps_identity(tmp_path):
 
 
 def test_guest_limit_blocks_new_guest_after_cap(tmp_path):
-    """All guests join pending admin approval (admin_off)."""
+    """All guests join pending approval with a distinct guest-pending state."""
     from quota import db as db_mod
 
     cfg = _cfg(tmp_path)
@@ -608,7 +686,7 @@ def test_guest_limit_blocks_new_guest_after_cap(tmp_path):
         assert _get_loop().run_until_complete(
             gw.database.count_guest_users()) == 2
 
-        # brand-new device -> guest and admin-blocked
+        # brand-new device -> guest awaiting approval
         _get_loop().run_until_complete(
             gw._persist_lease("aa:bb:cc:dd:ee:43", "192.168.1.132"))
         dev = _get_loop().run_until_complete(
@@ -617,7 +695,7 @@ def test_guest_limit_blocks_new_guest_after_cap(tmp_path):
         user = _get_loop().run_until_complete(
             gw.database.get_user(dev.user_id))
         assert user is not None and user.guest
-        assert dev.block_state == db_mod.BLOCK_ADMIN
+        assert dev.block_state == db_mod.BLOCK_GUEST_PENDING
     finally:
         _get_loop().run_until_complete(gw.shutdown())
 
@@ -2958,10 +3036,8 @@ def test_dns_history_disabled_does_nothing(tmp_path):
         _get_loop().run_until_complete(gw.shutdown())
 
 
-def test_collect_neigh_ipv6_maps_ula_and_flags_router_global(tmp_path):
-    """IPv6 neighbor rows: ULA addresses map to the client's MAC (STALE is fine
-    for bookkeeping), link-local/FAILED rows are ignored, and a GLOBAL address
-    means the device took IPv6 straight from the ISP router (bypass)."""
+def test_collect_neigh_ipv6_maps_all_non_link_local_addresses(tmp_path):
+    """All valid neighbor IPv6 addresses map to the MAC; global paths are flagged."""
     import json as _json
 
     cfg = _cfg(tmp_path)
@@ -2977,28 +3053,204 @@ def test_collect_neigh_ipv6_maps_ula_and_flags_router_global(tmp_path):
     try:
         loop.run_until_complete(gw.database.connect())
         loop.run_until_complete(gw._collect_neigh_active())
-        assert gw._ipv6_neigh == {"fd00:da7a:2::a1": "aa:bb:cc:dd:ee:01"}
+        assert gw._ipv6_neigh == {
+            "fd00:da7a:2::a1": "aa:bb:cc:dd:ee:01",
+            "2001:db8::55": "aa:bb:cc:dd:ee:03",
+            "fd99::1": "aa:bb:cc:dd:ee:04",
+        }
         assert gw._ipv6_direct_macs == {"aa:bb:cc:dd:ee:03"}
-        assert gw._device_ipv6_map() == {"aa:bb:cc:dd:ee:01": "fd00:da7a:2::a1"}
+        assert gw._device_ipv6_map() == {
+            "aa:bb:cc:dd:ee:01": "fd00:da7a:2::a1",
+            "aa:bb:cc:dd:ee:03": "2001:db8::55",
+            "aa:bb:cc:dd:ee:04": "fd99::1",
+        }
     finally:
         loop.run_until_complete(gw.database.close())
         loop.close()
 
 
-def test_tracked_ipv6_is_capped_and_known_devices_only(tmp_path):
-    """A client spraying random source addresses must not grow the kernel
-    rule set without bound: at most IPV6_MAX_PER_MAC per device, and only for
-    devices the gateway knows."""
-    from run import IPV6_MAX_PER_MAC
+def test_maintenance_tick_maps_multiple_ipv6_addresses_to_engine_and_shaper(tmp_path):
+    cfg = _cfg(tmp_path)
+    gw = Gateway(cfg)
+    _get_loop().run_until_complete(gw.startup())
+    _cancel_maintenance(gw)
+    mac = "aa:bb:cc:dd:ee:56"
+    pushed = {}
+    pushed_pending = set()
 
+    class _FakeEngine:
+        available = True
+        gateway_blocked = None
+        portal_set_applied = True
+        fail_update = False
+
+        def flush(self):
+            return EngineSnapshot()
+
+        def update_state(self, ip_to_mac, blocked, pending_guests=None):
+            if self.fail_update:
+                raise RuntimeError("simulated engine sync failure")
+            pushed.update(ip_to_mac)
+            if pending_guests is not None:
+                pushed_pending.update(pending_guests)
+
+        def set_gateway_blocked(self, blocked):
+            pass
+
+        def ipv6_portal_status(self):
+            return {"pending_set_applied": self.portal_set_applied}
+
+        def set_gateway_allowed(self, allowed):
+            pass
+
+        def stop(self):
+            pass
+
+    try:
+        _get_loop().run_until_complete(gw.service.set_guest_mode(True))
+        _get_loop().run_until_complete(gw._persist_lease(mac, "192.168.1.114"))
+        _get_loop().run_until_complete(gw.database.set_static_lease(
+            mac, "192.168.1.114", ip6="fd00:da7a:2::56"))
+        gw._ipv6_neigh = {
+            "fd00:da7a:2::57": mac,
+            "2606:4700:4700::56": mac,
+        }
+        engine = _FakeEngine()
+        gw.engine = engine
+        _get_loop().run_until_complete(gw._maintenance_tick())
+
+        expected = {
+            "192.168.1.114", "fd00:da7a:2::56", "fd00:da7a:2::57",
+            "2606:4700:4700::56",
+        }
+        assert expected <= {ip for ip, owner in pushed.items() if owner == mac}
+        assert expected <= pushed_pending
+        assert expected <= {ip for ip, owner in gw.holder.get().ip_to_mac.items()
+                            if owner == mac}
+        assert expected <= gw.holder.get().pending_guests
+        assert gw.holder.get().ipv6_pending_set_applied is True
+
+        async def approve_guest():
+            device = await gw.database.get_device(mac=mac)
+            await gw.database.set_device_state(device.id, _db.BLOCK_OK)
+            await gw.database.update_user(
+                device.user_id, block_state=_db.BLOCK_OK)
+
+        _get_loop().run_until_complete(approve_guest())
+        engine.fail_update = True
+        _get_loop().run_until_complete(gw._maintenance_tick())
+        assert gw.holder.get().pending_guests == set()
+        assert gw.holder.get().ipv6_pending_set_applied is False
+        assert gw.holder.get().engine_state_sync_ok is False
+
+        engine.fail_update = False
+        _get_loop().run_until_complete(gw._maintenance_tick())
+        assert gw.holder.get().ipv6_pending_set_applied is True
+    finally:
+        _get_loop().run_until_complete(gw.shutdown())
+
+
+def test_maintenance_tick_bounds_ipv6_accounting_but_keeps_portal_identity(tmp_path):
     gw = Gateway(_cfg(tmp_path))
-    known, stranger = "aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:99"
-    for i in range(IPV6_MAX_PER_MAC + 5):
-        gw._ipv6_neigh[f"fd00:da7a:2::{i + 1:x}"] = known
-    gw._ipv6_neigh["fd00:da7a:2::beef"] = stranger
-    tracked = gw._tracked_ipv6({known})
-    assert len(tracked) == IPV6_MAX_PER_MAC
-    assert set(tracked.values()) == {known}
+    _get_loop().run_until_complete(gw.startup())
+    _cancel_maintenance(gw)
+    mac = "aa:bb:cc:dd:ee:92"
+    pushed: dict[str, str] = {}
+    pending: set[str] = set()
+    quarantined: list[str] = []
+
+    class _FakeEngine:
+        available = True
+        gateway_blocked = None
+
+        def flush(self):
+            return EngineSnapshot()
+
+        def update_state(self, ip_to_mac, blocked, pending_guests=None,
+                         blocked_ipv6_macs=None):
+            pushed.update(ip_to_mac)
+            pending.update(pending_guests or [])
+            quarantined.extend(blocked_ipv6_macs or [])
+
+        def set_gateway_blocked(self, blocked):
+            pass
+
+        def stop(self):
+            pass
+
+    try:
+        async def setup_guest():
+            await gw.service.set_guest_mode(True)
+            await gw._persist_lease(mac, "192.168.2.92")
+            device = await gw.database.get_device(mac=mac)
+            await gw.database.set_device_state(
+                device.id, _db.BLOCK_GUEST_PENDING)
+            await gw.database.update_user(
+                device.user_id, block_state=_db.BLOCK_GUEST_PENDING)
+
+        _get_loop().run_until_complete(setup_guest())
+        addresses = {f"fd00:da7a:2::{n:x}": mac for n in range(1, 12)}
+        gw._ipv6_neigh = addresses
+        gw.engine = _FakeEngine()
+        _get_loop().run_until_complete(gw._maintenance_tick())
+
+        tracked = {address for address, owner in pushed.items()
+                   if owner == mac and ":" in address}
+        identity = {address for address, owner in
+                    gw.holder.get().portal_ip_to_mac.items()
+                    if owner == mac and ":" in address}
+        assert len(tracked) == 8
+        assert len(identity) == 11
+        assert set(addresses) <= pending
+        assert set(addresses) <= gw.holder.get().pending_guests
+        assert quarantined == [mac]
+    finally:
+        _get_loop().run_until_complete(gw.shutdown())
+
+
+def test_ipv6_only_device_with_speed_caps_is_shaped(tmp_path):
+    gw = Gateway(_cfg(tmp_path))
+    _get_loop().run_until_complete(gw.startup())
+    _cancel_maintenance(gw)
+    mac = "aa:bb:cc:dd:ee:74"
+    calls = []
+
+    class _FakeShaper:
+        available = True
+
+        def stop(self):
+            pass
+
+        def update_state(self, rate_map, enabled, total_down, total_up,
+                         lan_rate_mbps=None, fair_sharing=False,
+                         vpn_active=False):
+            calls.append(rate_map)
+
+    try:
+        async def setup():
+            user = await gw.database.create_user(name="IPv6 only")
+            device = await gw.database.upsert_device(mac, user_id=user.id)
+            await gw.database.update_device(
+                device.id, limit_down_mbps=12.0, limit_up_mbps=4.0)
+            await gw.service.set_shaping(
+                enabled=True, total_down_mbps=100.0, total_up_mbps=20.0)
+            return device
+
+        device = _get_loop().run_until_complete(setup())
+        gw.shaper = _FakeShaper()
+        address = "fd00:da7a:2::74"
+        _get_loop().run_until_complete(gw._sync_shaping({address: mac}))
+
+        assert len(calls) == 1
+        assert len(calls[0]) == 1
+        entry = calls[0][0]
+        assert entry["ip"] == ""
+        assert entry["ip4"] == []
+        assert entry["ip6"] == [address]
+        assert entry["device_id"] == device.id
+        assert entry["down"] == 12.0 and entry["up"] == 4.0
+    finally:
+        _get_loop().run_until_complete(gw.shutdown())
 
 
 def test_ipv6_wan_closed_while_vpn_share_is_on(tmp_path):

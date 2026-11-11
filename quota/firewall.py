@@ -17,10 +17,9 @@ policies compose by hook priority:
   forwarding + DMZ (WAN mode only). dnat runs before routing; the existing
   masquerade is postrouting priority 100, so they compose cleanly.
 
-Sets: ``fw_bans`` (``interval, timeout`` — CIDR bans auto-expire at the kernel),
-``fw_scan_watch`` (``dynamic, timeout 60s, counter`` — per-source SYN counting
-that drives the port-scan detector), ``fw_allow`` / ``fw_deny`` (``interval`` —
-allowlist/blocklist, deny wins).
+IPv4 and IPv6 use separate typed sets for bans, scan watches, allowlists, and
+blocklists. Bans auto-expire in the kernel; scan-watch entries count new SYNs
+for the port-scan detector; deny wins over allow within each address family.
 
 Posture is **derived from the deployment topology at render time** — never
 stored. Under ``lan`` the firewall is permissive-out with explicit denies
@@ -37,7 +36,8 @@ box's own IPs), snapshots the current ruleset + config (``data/firewall_snapshot
 + the ``firewall_last_good`` DB setting), programs the new rules, then starts a
 watchdog that re-verifies the ruleset invariant after ``watchdog_seconds`` and
 **auto-reverts** to the last-good config if it failed. Every ban (brute-force,
-port-scan, manual) lands in ``@fw_bans`` with a kernel timeout and a DB event.
+port-scan, manual) lands in the matching address-family set with a kernel
+timeout and a DB event.
 
 Like the packet engine, this module degrades gracefully: no ``nft``/no root =>
 ``available`` becomes False and every kernel op is a no-op. The command runner
@@ -50,11 +50,24 @@ import asyncio
 import json
 import logging
 import re
+import threading
 import time
 from dataclasses import asdict, dataclass, field
-from ipaddress import ip_address, ip_network
 from pathlib import Path
 from typing import Any, Callable
+
+from quota.ip_addresses import (
+    address_family,
+    parse_ip_address,
+    parse_ip_network,
+    split_ip_networks,
+)
+from quota.ipv6_firewall import (
+    RenderContext,
+    SET_BANS6,
+    SET_SCAN6,
+    render_ipv6_commands,
+)
 
 log = logging.getLogger("quota.firewall")
 
@@ -99,29 +112,30 @@ def _default_run_command(argv: list[str]) -> tuple[int, str]:
 
 
 def _cidr(value: str) -> str | None:
-    """Normalize an IPv4 CIDR string (``192.168.2.0/24``); None when invalid."""
-    try:
-        return str(ip_network(value, strict=False))
-    except ValueError:
-        return None
+    """Normalize an IPv4 or IPv6 network string; None when invalid."""
+    network = parse_ip_network(value)
+    return str(network) if network is not None else None
 
 
 def _as_ip(value: str) -> str | None:
-    """Normalize a bare IPv4 address; None when invalid."""
-    try:
-        return str(ip_address(value))
-    except ValueError:
-        return None
+    """Normalize a bare IPv4 or IPv6 address; None when invalid."""
+    address = parse_ip_address(value)
+    return address.compressed.lower() if address is not None else None
+
+
+def _is_ipv6(value: str) -> bool:
+    return address_family(value, network=True) == 6
 
 
 def _net_containing(networks: list[str], host: str) -> str | None:
     """The network in ``networks`` that contains ``host`` (CIDR string)."""
+    address = parse_ip_address(host)
+    if address is None:
+        return None
     for net_str in networks:
-        try:
-            if ip_address(host) in ip_network(net_str, strict=False):
-                return net_str
-        except ValueError:
-            continue
+        network = parse_ip_network(net_str)
+        if network is not None and address in network:
+            return net_str
     return None
 
 
@@ -311,30 +325,36 @@ def _neg(networks: list[str], key: str) -> str:
     return " ".join(f"{key} != {n}" for n in sorted(set(networks)))
 
 
-def render_commands(
+def _render_command_plan(
     cfg: dict[str, Any],
     topology: str,
     local_nets: list[str],
     box_ips: list[str],
-) -> list[list[str]]:
+    *,
+    local_nets6: list[str] | None = None,
+    box_ips6: list[str] | None = None,
+) -> tuple[list[list[str]], int | None, int | None]:
     """Render the full ``nft`` command list for the given config + topology.
 
     Pure and deterministic — the primary unit-test surface. ``cfg`` is the
     sanitized config dict, ``topology`` ``"lan"``/``"wan"``, ``local_nets`` the
-    LAN subnets (client + uplink) that are always accepted, ``box_ips`` the
-    box's own addresses (never denied, dnat-excluded). Returns argv suffix
-    lists each prefixed with ``nft`` by the caller.
+    IPv4 LAN subnets (client + uplink) that are always accepted, and ``box_ips``
+    the IPv4 box addresses. The optional IPv6 arguments provide the LAN prefix
+    and gateway. Returns argv suffix lists each prefixed with ``nft`` by caller.
     """
-    cfg = _merge_defaults(cfg)
+    internal_cfg = {key: value for key, value in cfg.items()
+                    if key.startswith("_")}
+    cfg = {**_merge_defaults(cfg), **internal_cfg}
     cmds: list[list[str]] = []
     table = f"{FAMILY} {TABLE}"
     cmds.append(["add", "table", table])
     cmds.append(["flush", "table", table])
     if not cfg["enabled"]:
-        return cmds
+        return cmds, None, None
 
     wan = topology == "wan"
-    client_nets = [n for n in sorted(set(local_nets)) if n]
+    client_nets = [n for n in sorted(set(local_nets)) if n and
+                   not _is_ipv6(n)]
 
     # -- chains ------------------------------------------------------------
     cmds.append(["add", "chain", table, CHAIN_INPUT,
@@ -344,6 +364,19 @@ def render_commands(
     if wan:
         cmds.append(["add", "chain", table, CHAIN_DNAT,
                      "{ type nat hook prerouting priority -100; policy accept; }"])
+
+    # These family-neutral accepts belong to the common setup, outside the
+    # fallible IPv6 segment. A rejected IPv6 set must not weaken IPv4 stateful,
+    # loopback, or Tailscale access.
+    cmds.extend([
+        ["add", "rule", table, CHAIN_INPUT,
+         "ct state established,related accept"],
+        ["add", "rule", table, CHAIN_INPUT, "iif lo accept"],
+        ["add", "rule", table, CHAIN_INPUT,
+         'iifname "tailscale0" accept'],
+        ["add", "rule", table, CHAIN_FORWARD,
+         "ct state established,related accept"],
+    ])
 
     # -- sets --------------------------------------------------------------
     cmds.append(["add", "set", table, SET_BANS,
@@ -359,8 +392,8 @@ def render_commands(
         cmds.append(["add", "rule", table, chain, expr])
 
     # -- shared building blocks --------------------------------------------
-    allow_elems = [c for c in cfg["allow_cidrs"] if _cidr(c)]
-    deny_elems = [c for c in cfg["deny_cidrs"] if _cidr(c)]
+    allow_elems, _allow6 = split_ip_networks(cfg["allow_cidrs"])
+    deny_elems, _deny6 = split_ip_networks(cfg["deny_cidrs"])
     if allow_elems:
         cmds.append(["add", "element", table, SET_ALLOW,
                      "{ " + ", ".join(allow_elems) + " }"])
@@ -374,7 +407,7 @@ def render_commands(
     flood_rate = int(flood.get("rate", 10) or 10)
     flood_burst = int(flood.get("burst", 20) or 20)
 
-    geo = [c for c in cfg.get("_geo_cidrs", []) if _cidr(c)]
+    geo, _geo6 = split_ip_networks(cfg.get("_geo_cidrs", []))
     services = [s for s in cfg.get("services", []) if isinstance(s, dict)]
     rules = [r for r in cfg.get("rules", []) if isinstance(r, dict)]
     forwards = [f for f in cfg.get("port_forwards", []) if isinstance(f, dict)]
@@ -401,9 +434,9 @@ def render_commands(
         for i, fw in enumerate(forwards):
             tip = _as_ip(str(fw.get("target_ip", "") or ""))
             tport = int(fw.get("target_port", 0) or 0)
-            if tip and tport:
+            if tip and not _is_ipv6(tip) and tport:
                 counter_names.add(f"fw_fwd_{i}")
-        if dmz:
+        if dmz and not _is_ipv6(dmz):
             counter_names.add("fw_dmz")
     for i, r in enumerate(rules):
         if bool(r.get("log", True)):
@@ -411,13 +444,14 @@ def render_commands(
     for name in sorted(counter_names):
         cmds.append(["add", "counter", table, name])
 
+    # IPv6 renders the family-neutral accepts shared by both address families.
+    # Keep this anchor explicit so family health can be reported independently.
+    ipv6_start = len(cmds)
+
     # -- fw_input ----------------------------------------------------------
-    add_rule(CHAIN_INPUT, "ct state established,related accept")
-    add_rule(CHAIN_INPUT, "iif lo accept")
     add_rule(CHAIN_INPUT, "ip saddr 127.0.0.0/8 accept")
     # Tailscale (built-in remote access): the private, authenticated tailnet
     # reaches the box here in BOTH topologies, never through ppp0 / the router.
-    add_rule(CHAIN_INPUT, f'iifname "{TAILSCALE_IF}" accept')
     for net in client_nets:
         add_rule(CHAIN_INPUT, f"ip saddr {net} accept")
     for ip in box_ips:
@@ -435,6 +469,8 @@ def render_commands(
         proto = _proto(s.get("protocol", "tcp"))
         port = int(s.get("port", 0) or 0)
         src = _cidr(str(s.get("source", "0.0.0.0/0"))) or "0.0.0.0/0"
+        if _is_ipv6(src):
+            continue
         expr = " ".join(x for x in
                         (proto, f"ip saddr {src}" if src else "", _dport(port, s.get("protocol", "")))
                         if x)
@@ -449,16 +485,18 @@ def render_commands(
     # Tailscale's WireGuard port: lets the phone reach the box DIRECTLY instead
     # of through a slow relay (authenticated + encrypted, nothing else listens).
     # After the deny/ban drops, so a banned address still cannot reach it.
-    add_rule(CHAIN_INPUT, f"udp dport {TAILSCALE_PORT} accept")
+    add_rule(CHAIN_INPUT,
+             f"meta nfproto ipv4 udp dport {TAILSCALE_PORT} accept")
     # WAN-mode ppp0 drop MUST come before the SYN flood guard below —
     # otherwise the flood-accept matches new SYNs from any interface and
     # external connections slip through before the ppp0 drop is reached.
     if wan:
         if wan_expose:
             add_rule(CHAIN_INPUT,
-                     f'iifname "ppp0" tcp dport {web_port} accept')
+                     f'meta nfproto ipv4 iifname "ppp0" '
+                     f'tcp dport {web_port} accept')
         add_rule(CHAIN_INPUT,
-                 f'iifname "ppp0" ct state new '
+                 f'meta nfproto ipv4 iifname "ppp0" ct state new '
                  f'counter name {COUNTER_WAN_IN_DROP} drop')
     elif lan_guard:
         # Behind a router the "WAN" is whatever the router forwards in (a port
@@ -467,23 +505,24 @@ def render_commands(
         # connections to the dashboard port from any source outside the home
         # networks (local nets / box IPs were accepted above).
         add_rule(CHAIN_INPUT,
-                 f"tcp dport {web_port} ct state new "
+                 f"meta nfproto ipv4 tcp dport {web_port} ct state new "
                  f"{_neg(client_nets, 'ip saddr')} "
                  f"counter name {COUNTER_WAN_IN_DROP} drop")
     if scan_enabled:
         add_rule(CHAIN_INPUT,
-                 f"tcp flags syn ct state new "
+                 f"meta nfproto ipv4 tcp flags syn ct state new "
                  f"update @{SET_SCAN} {{ ip saddr timeout 60s }}")
     add_rule(CHAIN_INPUT,
-             f"tcp flags & (fin|syn|rst|ack) == syn ct state new "
+             f"meta nfproto ipv4 tcp flags & (fin|syn|rst|ack) == syn "
+             f"ct state new "
              f"limit rate {flood_rate}/second burst {flood_burst} packets "
              f"counter name {COUNTER_SYN_PASS} accept")
     add_rule(CHAIN_INPUT,
-             f"tcp flags & (fin|syn|rst|ack) == syn ct state new "
+             f"meta nfproto ipv4 tcp flags & (fin|syn|rst|ack) == syn "
+             f"ct state new "
              f"counter name {COUNTER_SYN_DROP} drop")
 
     # -- fw_forward --------------------------------------------------------
-    add_rule(CHAIN_FORWARD, "ct state established,related accept")
     for net in client_nets:
         add_rule(CHAIN_FORWARD, f"ip saddr {net} accept")
     if geo:
@@ -504,7 +543,7 @@ def render_commands(
             proto = _proto(fw.get("protocol", "tcp"))
             tport = int(fw.get("target_port", 0) or 0)
             tip = _as_ip(str(fw.get("target_ip", "") or ""))
-            if not tip or not tport:
+            if not tip or _is_ipv6(tip) or not tport:
                 continue
             expr = " ".join(x for x in
                             ('iifname "ppp0"', proto,
@@ -514,7 +553,7 @@ def render_commands(
                              f"counter name fw_fwd_{i}", "accept")
                             if x)
             add_rule(CHAIN_FORWARD, expr)
-        if dmz:
+        if dmz and not _is_ipv6(dmz):
             add_rule(CHAIN_FORWARD,
                      f'iifname "ppp0" ip daddr {dmz} ct state new '
                      f"counter name fw_dmz accept")
@@ -524,18 +563,20 @@ def render_commands(
     # same ordering fix as fw_input (see comment there).
     if wan:
         add_rule(CHAIN_FORWARD,
-                 f'iifname "ppp0" ct state new '
+                 f'meta nfproto ipv4 iifname "ppp0" ct state new '
                  f'counter name {COUNTER_WAN_FWD_DROP} drop')
     if scan_enabled:
         add_rule(CHAIN_FORWARD,
-                 f"tcp flags syn ct state new "
+                 f"meta nfproto ipv4 tcp flags syn ct state new "
                  f"update @{SET_SCAN} {{ ip saddr timeout 60s }}")
     add_rule(CHAIN_FORWARD,
-             f"tcp flags & (fin|syn|rst|ack) == syn ct state new "
+             f"meta nfproto ipv4 tcp flags & (fin|syn|rst|ack) == syn "
+             f"ct state new "
              f"limit rate {flood_rate}/second burst {flood_burst} packets "
              f"counter name {COUNTER_SYN_PASS} accept")
     add_rule(CHAIN_FORWARD,
-             f"tcp flags & (fin|syn|rst|ack) == syn ct state new "
+             f"meta nfproto ipv4 tcp flags & (fin|syn|rst|ack) == syn "
+             f"ct state new "
              f"counter name {COUNTER_SYN_DROP} drop")
 
     # -- fw_dnat (WAN mode only) -------------------------------------------
@@ -545,7 +586,7 @@ def render_commands(
             sport = int(fw.get("source_port", 0) or 0)
             tport = int(fw.get("target_port", 0) or 0)
             tip = _as_ip(str(fw.get("target_ip", "") or ""))
-            if not tip or not sport or not tport:
+            if not tip or _is_ipv6(tip) or not sport or not tport:
                 continue
             expr = " ".join(x for x in
                             ('iifname "ppp0"', proto,
@@ -554,12 +595,47 @@ def render_commands(
                              f"dnat to {tip}:{tport}")
                             if x)
             add_rule(CHAIN_DNAT, expr)
-        if dmz:
+        if dmz and not _is_ipv6(dmz):
             excludes = " ".join(f"ip daddr != {n}" for n in client_nets)
             add_rule(CHAIN_DNAT,
                      f'iifname "ppp0" {excludes} counter name fw_dmz '
                      f"dnat to {dmz}".strip())
-    return cmds
+    ipv6_commands = render_ipv6_commands(RenderContext(
+        cfg=cfg,
+        table=table,
+        chain_input=CHAIN_INPUT,
+        chain_forward=CHAIN_FORWARD,
+        local_nets=local_nets6 or [],
+        box_ips=box_ips6 or [],
+        wan=wan,
+        lan_guard=lan_guard,
+        web_port=web_port,
+        tailscale_port=TAILSCALE_PORT,
+        counter_ban_drop=COUNTER_BAN_DROP,
+        counter_deny_drop=COUNTER_DENY_DROP,
+        counter_wan_in_drop=COUNTER_WAN_IN_DROP,
+        counter_wan_fwd_drop=COUNTER_WAN_FWD_DROP,
+        counter_syn_pass=COUNTER_SYN_PASS,
+        counter_syn_drop=COUNTER_SYN_DROP,
+    ))
+    ipv6_end = ipv6_start + len(ipv6_commands)
+    cmds[ipv6_start:ipv6_start] = ipv6_commands
+    return cmds, ipv6_start, ipv6_end
+
+
+def render_commands(
+    cfg: dict[str, Any],
+    topology: str,
+    local_nets: list[str],
+    box_ips: list[str],
+    *,
+    local_nets6: list[str] | None = None,
+    box_ips6: list[str] | None = None,
+) -> list[list[str]]:
+    """Render the complete nft command list with the stable legacy signature."""
+    return _render_command_plan(
+        cfg, topology, local_nets, box_ips,
+        local_nets6=local_nets6, box_ips6=box_ips6)[0]
 
 
 def _render_custom(add_rule: Callable[[str, str], None], r: dict[str, Any], i: int) -> None:
@@ -569,14 +645,15 @@ def _render_custom(add_rule: Callable[[str, str], None], r: dict[str, Any], i: i
     action = str(r.get("action", "deny")).lower()
     src = _cidr(str(r.get("src", "") or ""))
     dst = _cidr(str(r.get("dst", "") or ""))
+    if (src and _is_ipv6(src)) or (dst and _is_ipv6(dst)):
+        return
     proto = _proto(r.get("protocol", ""))
     sport = _sport(int(r.get("src_port", 0) or 0), r.get("protocol", ""))
     dport = _dport(int(r.get("dst_port", 0) or 0), r.get("protocol", ""))
-    expr = " ".join(x for x in
-                    (f"ip saddr {src}" if src else "",
-                     f"ip daddr {dst}" if dst else "",
-                     proto, sport, dport)
-                    if x)
+    parts = ["meta nfproto ipv4",
+             f"ip saddr {src}" if src else "",
+             f"ip daddr {dst}" if dst else "", proto, sport, dport]
+    expr = " ".join(part for part in parts if part)
     counter = f"fw_custom_{i}" if bool(r.get("log", True)) else None
     tail = f"counter name {counter}" if counter else ""
     if action == "allow":
@@ -633,6 +710,16 @@ class FirewallManager:
         self._client_gw = getattr(dhcp_cfg, "gateway_ip", "") if dhcp_cfg else ""
         self._router_ip = getattr(dhcp_cfg, "router_ip", "") if dhcp_cfg else ""
         self._box_ips = [self._client_gw, self._router_ip]
+        ipv6_prefix = _cidr(str(getattr(dhcp_cfg, "ipv6_prefix", "") or "")) \
+            if dhcp_cfg is not None else None
+        self._local_nets6 = ([ipv6_prefix] if ipv6_prefix and
+                             _is_ipv6(ipv6_prefix) else [])
+        self._client_net6 = self._local_nets6[0] if self._local_nets6 else None
+        ipv6_gateway = _as_ip(str(getattr(dhcp_cfg, "ipv6_gateway", "") or "")) \
+            if dhcp_cfg is not None else None
+        self._ipv6_gateway = ipv6_gateway if ipv6_gateway and \
+            _is_ipv6(ipv6_gateway) else ""
+        self._box_ips6 = [self._ipv6_gateway] if self._ipv6_gateway else []
 
         self.available = True
         self._warned = False
@@ -643,6 +730,11 @@ class FirewallManager:
         self._applied_sig: str | None = None
         self._last_apply_ok = False
         self._last_error = ""
+        self._ipv4_apply_ok = False
+        self._ipv4_last_error = ""
+        self._ipv6_available = False
+        self._ipv6_apply_ok = False
+        self._ipv6_last_error = ""
         self._bans: dict[str, dict[str, Any]] = {}
         self._scan_last: dict[str, int] = {}
         self._counters_last: dict[str, tuple[int, int]] = {}
@@ -654,6 +746,11 @@ class FirewallManager:
         self._counter_stats: list[dict[str, Any]] = []
         self._log_ring: list[dict[str, Any]] = []
         self._watchdog_tasks: set[asyncio.Task[Any]] = set()
+        # All ruleset rebuilds and live set edits share this lock: nft flush +
+        # add sequences must never interleave. Async entry points also hold a
+        # loop lock across config persistence and the corresponding apply.
+        self._apply_thread_lock = threading.RLock()
+        self._async_apply_lock = asyncio.Lock()
 
     # -- topology / helpers --------------------------------------------------
 
@@ -684,15 +781,22 @@ class FirewallManager:
             return cfg_ip
         return self._client_gw or self._router_ip
 
-    def _fail(self, message: str) -> None:
+    def _fail(self, message: str, *, preserve_ipv6: bool = False) -> None:
         self.available = False
         self._fail_mono = time.monotonic()
         self._last_error = message
+        self._last_apply_ok = False
+        self._applied_sig = None
+        self._ipv4_apply_ok = False
+        if not preserve_ipv6:
+            self._ipv6_apply_ok = False
         if not self._warned:
             self._warned = True
             log.warning("firewall unavailable: %s", message)
 
-    def _run(self, args: list[str]) -> bool:
+    def _run(self, args: list[str], *, degrade: bool = True,
+             preserve_ipv6: bool = False,
+             exists_ok: bool = True) -> bool:
         """Run ``nft <args>``; True on success or benign "File exists"."""
         if not self.available:
             return False
@@ -701,8 +805,19 @@ class FirewallManager:
             return True
         if args[0] == "add" and any(s in out for s in ("File exists",
                                                        "already exists")):
-            return True
-        self._fail(f"nft {args[0]} failed: {out.strip()}")
+            if exists_ok:
+                return True
+            self._last_error = f"nft {args[0]} failed: {out.strip()}"
+            return False
+        message = f"nft {args[0]} failed: {out.strip()}"
+        environment_failure = (
+            code in (127, 124) or
+            any(term in out.lower() for term in (
+                "operation not permitted", "permission denied")))
+        if degrade or environment_failure:
+            self._fail(message, preserve_ipv6=preserve_ipv6)
+        else:
+            self._last_error = message
         return False
 
     # -- config persistence --------------------------------------------------
@@ -780,25 +895,39 @@ class FirewallManager:
         returned ``_warnings`` list (popped by the API layer into the response).
         """
         warnings: list[str] = []
-        protected = [self.probe_ip(), self._client_gw, self._router_ip]
-        protected_nets = [self._client_net] if self._client_net else []
+        protected = [self.probe_ip(), self._client_gw, self._router_ip,
+                     self._ipv6_gateway]
+        protected_nets = [n for n in (self._client_net, self._client_net6) if n]
 
         def is_protected(ip_or_cidr: str) -> bool:
             net = _cidr(ip_or_cidr)
             if net is not None:
+                candidate_network = parse_ip_network(net)
+                if candidate_network is None:
+                    return False
                 for pn in protected_nets:
-                    try:
-                        if ip_network(net, strict=False).subnet_of(ip_network(pn, strict=False)) \
-                                or ip_network(pn, strict=False).subnet_of(ip_network(net, strict=False)):
-                            return True
-                    except ValueError:
+                    protected_network = parse_ip_network(pn)
+                    if protected_network is None or \
+                            candidate_network.version != protected_network.version:
                         continue
+                    if (candidate_network.subnet_of(protected_network)
+                            or protected_network.subnet_of(candidate_network)):
+                        return True
                 for p in protected:
-                    if _as_ip(p) and ip_address(p) in ip_network(net, strict=False):
+                    protected_address = parse_ip_address(p)
+                    if (protected_address is not None
+                            and protected_address.version == candidate_network.version
+                            and protected_address in candidate_network):
                         return True
                 return False
-            ip = _as_ip(ip_or_cidr)
-            return ip is not None and ip in protected
+            address = parse_ip_address(ip_or_cidr)
+            if address is None:
+                return False
+            return any(
+                (protected_address := parse_ip_address(p)) is not None
+                and protected_address.version == address.version
+                and protected_address == address
+                for p in protected)
 
         data = dict(data or {})
         # allow_cidrs / deny_cidrs — drop protected overlaps from DENY only.
@@ -838,6 +967,14 @@ class FirewallManager:
                     warnings.append(f"{kind} {r.get('name', '?')}: bad {field_} "
                                     f"{val!r} — ignored")
                     return None
+            src_network = parse_ip_network(src) if src else None
+            dst_network = parse_ip_network(dst) if dst else None
+            src_family = src_network.version if src_network else None
+            dst_family = dst_network.version if dst_network else None
+            if src_family and dst_family and src_family != dst_family:
+                warnings.append(f"{kind} {r.get('name', '?')}: src and dst address families "
+                                "must match — ignored")
+                return None
             if r["action"] == "deny":
                 # The one failure mode worth refusing: a deny rule that is
                 # UNCONDITIONAL for the admin's own traffic (no dst/port
@@ -846,10 +983,10 @@ class FirewallManager:
                 # client subnet cuts the whole household's internet. Port-
                 # scoped denies (torrent blocks, blocking a specific server)
                 # are fine and common.
-                src_any = not src or src in ("0.0.0.0/0", "")
+                src_any = not src or _cidr(src) in ("0.0.0.0/0", "::/0")
                 src_hits = src_any or is_protected(src)
                 if r["chain"] == "input":
-                    dst_any = not dst or dst in ("0.0.0.0/0", "")
+                    dst_any = not dst or _cidr(dst) in ("0.0.0.0/0", "::/0")
                     if src_hits and dst_any and not r.get("dst_port"):
                         warnings.append(
                             f"{kind} {r.get('name', '?')}: input deny with no "
@@ -857,7 +994,7 @@ class FirewallManager:
                             f"ignored")
                         return None
                 else:  # forward
-                    dst_any = not dst or dst in ("0.0.0.0/0", "")
+                    dst_any = not dst or _cidr(dst) in ("0.0.0.0/0", "::/0")
                     if src_hits and dst_any and not r.get("dst_port"):
                         warnings.append(
                             f"{kind} {r.get('name', '?')}: forward deny with "
@@ -895,12 +1032,22 @@ class FirewallManager:
                 port = int(s.get("port", 0) or 0)
             except (TypeError, ValueError):
                 port = 0
+            source = str(s.get("source", "0.0.0.0/0") or "0.0.0.0/0")
+            source_net = _cidr(source)
+            if not source_net:
+                warnings.append(f"service {s.get('name', '?')}: bad source "
+                                f"{source!r} — ignored")
+                continue
+            if _is_ipv6(source_net):
+                warnings.append(f"service {s.get('name', '?')}: IPv6 service "
+                                "publishing is unsupported — ignored")
+                continue
             if port and 1 <= port <= 65535 and \
                     str(s.get("protocol", "tcp")).lower() in ("tcp", "udp"):
                 services.append({"name": str(s.get("name", "") or ""),
                                  "protocol": str(s.get("protocol", "tcp")).lower(),
                                  "port": port,
-                                 "source": str(s.get("source", "0.0.0.0/0"))})
+                                 "source": source_net})
         data["services"] = services
 
         forwards = []
@@ -913,6 +1060,10 @@ class FirewallManager:
                 sp, tp = int(f.get("source_port", 0) or 0), int(f.get("target_port", 0) or 0)
             except (TypeError, ValueError):
                 sp = tp = 0
+            if tip and _is_ipv6(tip):
+                warnings.append(f"port forward {f.get('name', '?')}: IPv6 "
+                                "port forwarding is unsupported — ignored")
+                continue
             if tip and 1 <= sp <= 65535 and 1 <= tp <= 65535 and \
                     str(f.get("protocol", "tcp")).lower() in ("tcp", "udp"):
                 forwards.append({"name": str(f.get("name", "") or ""),
@@ -923,6 +1074,9 @@ class FirewallManager:
         data["port_forwards"] = forwards
 
         dmz = _as_ip(str(data.get("dmz", "") or ""))
+        if dmz and _is_ipv6(dmz):
+            warnings.append("IPv6 DMZ is unsupported — ignored")
+            dmz = None
         data["dmz"] = dmz or ""
 
         try:
@@ -953,6 +1107,10 @@ class FirewallManager:
         only runs on a real change. All kernel work runs off the event loop
         (``asyncio.to_thread``); drained events are persisted to the DB.
         """
+        async with self._async_apply_lock:
+            return await self._reconcile_locked()
+
+    async def _reconcile_locked(self) -> bool:
         cfg = await self.load_config()
         if not self.available:
             # A failed nft call must not switch the firewall off until the next
@@ -976,19 +1134,26 @@ class FirewallManager:
             if changed:
                 if not self.apply(cfg):
                     self._last_sig = sig
+                    if not (self._ipv4_apply_ok or self._ipv6_apply_ok):
+                        self._applied_sig = None
                     return False
                 self._applied_sig = sig
                 self._last_sig = sig
             drained.extend(self._drain())
-            return True
+            return self._last_apply_ok
 
         ok = await asyncio.to_thread(_work)
-        if ok:
+        if drained:
             for level, message in drained:
                 await self._event(message, level)
         return ok
 
     def apply(self, cfg: dict[str, Any] | None = None) -> bool:
+        """Serialize a complete nft rebuild against every other writer."""
+        with self._apply_thread_lock:
+            return self._apply_unlocked(cfg)
+
+    def _apply_unlocked(self, cfg: dict[str, Any] | None = None) -> bool:
         """Program the kernel ruleset for ``cfg`` (or the current config).
 
         Sync (subprocess — callers wrap in ``asyncio.to_thread``). Reseeds the
@@ -999,32 +1164,147 @@ class FirewallManager:
         cfg = _merge_defaults(cfg if cfg is not None else self._config)
         topology = self.topology
         geo = self._geo_cidrs()
-        cfg = _merge_defaults({**cfg, "_geo_cidrs": geo,
-                               "_web_port": self._web_port})
+        cfg = _merge_defaults(cfg)
+        cfg["_geo_cidrs"] = geo
+        cfg["_web_port"] = self._web_port
+        self._last_apply_ok = False
+        self._applied_sig = None
+        self._ipv4_apply_ok = False
+        self._ipv4_last_error = ""
+        self._ipv6_apply_ok = False
+        self._ipv6_last_error = ""
+        self._ipv6_available = False
         try:
-            cmds = render_commands(cfg, topology, self._local_nets, self._box_ips)
+            cmds, ipv6_start, ipv6_end = _render_command_plan(
+                cfg, topology, self._local_nets, self._box_ips,
+                local_nets6=self._local_nets6,
+                box_ips6=self._box_ips6)
         except Exception as exc:  # noqa: BLE001 — never crash the tick
             self._last_error = f"render failed: {exc}"
+            self._ipv4_last_error = self._last_error
+            self._ipv6_last_error = self._last_error
             log.exception("firewall: render failed")
             return False
-        for cmd in cmds:
-            if not self._run(cmd):
-                self._last_apply_ok = False
-                if not self._last_error:
-                    self._last_error = (f"nft {cmd[0]} {cmd[1]} failed — "
-                                        f"firewall unavailable")
-                return False
-        self._config = cfg
-        self._last_apply_ok = True
         self._last_error = ""
-        self._counters_last = {}
-        self._scan_last = {}
-        self._reseed_bans()
-        log.info("firewall: applied (%s mode, %d commands)",
-                 topology, len(cmds))
-        return True
+        ipv6_failed = False
+        for index, cmd in enumerate(cmds):
+            in_ipv6_block = (ipv6_start is not None and ipv6_end is not None
+                             and ipv6_start <= index < ipv6_end)
+            if in_ipv6_block and ipv6_failed:
+                continue
+            preserve_ipv6 = (ipv6_end is not None and index >= ipv6_end)
+            if not self._run(cmd, degrade=not in_ipv6_block,
+                             preserve_ipv6=preserve_ipv6):
+                message = self._last_error or (
+                    f"nft {cmd[0]} {cmd[1]} failed — firewall unavailable")
+                if in_ipv6_block:
+                    self._ipv6_available = False
+                    self._ipv6_last_error = message
+                    ipv6_failed = True
+                    # IPv4 rules remain independent. Skip the failed IPv6
+                    # block and continue with the IPv4 rules after it.
+                    if self.available:
+                        continue
+                    self._ipv4_last_error = message
+                elif ipv6_end is not None and index >= ipv6_end:
+                    self._ipv4_last_error = message
+                else:
+                    self._ipv4_last_error = message
+                    self._ipv6_last_error = message
+                self._last_apply_ok = False
+                if in_ipv6_block and self.available:
+                    continue
+                return self._finish_apply(
+                    cfg, topology=topology, command_count=index + 1)
+            if in_ipv6_block and index == ipv6_end - 1 and not ipv6_failed:
+                self._ipv6_available = True
+                self._ipv6_apply_ok = True
+                self._ipv6_last_error = ""
+        self._ipv4_apply_ok = self.available
+        if not self._ipv4_apply_ok and not self._ipv4_last_error:
+            self._ipv4_last_error = self._last_error
+        return self._finish_apply(cfg, topology=topology,
+                                  command_count=len(cmds))
+
+    def _finish_apply(self, cfg: dict[str, Any], *, topology: str,
+                      command_count: int) -> bool:
+        """Restore active bans and record full or safely partial family state."""
+        if not cfg.get("enabled", True):
+            self._config = cfg
+            self._last_apply_ok = self.available
+            if self._last_apply_ok:
+                self._last_error = ""
+                self._applied_sig = self._last_sig = self._signature(cfg)
+                return True
+            self._applied_sig = None
+            if not self._last_error:
+                self._last_error = "firewall disable failed"
+            return False
+
+        for family in (4, 6):
+            family_applied = (self._ipv4_apply_ok if family == 4
+                              else self._ipv6_apply_ok)
+            if not family_applied:
+                continue
+            ok, error = self._reseed_bans(family)
+            if ok:
+                continue
+            if family == 4:
+                self._ipv4_apply_ok = False
+                self._ipv4_last_error = error
+            else:
+                self._ipv6_apply_ok = False
+                self._ipv6_available = False
+                self._ipv6_last_error = error
+
+        self._config = cfg
+        self._last_apply_ok = self._ipv4_apply_ok and self._ipv6_apply_ok
+        if self._last_apply_ok:
+            self._last_error = ""
+            self._counters_last = {}
+            self._scan_last = {}
+            self._applied_sig = self._last_sig = self._signature(cfg)
+            log.info("firewall: applied (%s mode, %d commands)",
+                     topology, command_count)
+            return True
+
+        errors = [message for message in
+                  (self._ipv4_last_error, self._ipv6_last_error) if message]
+        self._last_error = errors[0] if errors else "firewall family apply failed"
+        signature = self._signature(cfg)
+        # Keep a healthy family's installed rules stable across unchanged
+        # reconcile ticks. A config change or missing table triggers a retry.
+        if self._ipv4_apply_ok or self._ipv6_apply_ok:
+            self._applied_sig = self._last_sig = signature
+        else:
+            self._applied_sig = None
+            self._last_sig = signature
+        return False
 
     async def safe_apply(self, data: dict[str, Any], reason: str = "dashboard") -> dict[str, Any]:
+        async with self._async_apply_lock:
+            return await self._safe_apply_locked(data, reason)
+
+    async def safe_apply_partial(
+            self, changes: dict[str, Any], reason: str = "dashboard", *,
+            require_wan: bool = False) -> dict[str, Any]:
+        """Merge a partial update and apply it under the same config lock."""
+        async with self._async_apply_lock:
+            current = dict(await self.load_config())
+            current.update(changes)
+            if (require_wan and self.topology != "wan" and
+                    (current.get("port_forwards") or current.get("dmz"))):
+                return {
+                    "ok": False,
+                    "applied": False,
+                    "conflict": True,
+                    "error": "port forwards and DMZ are WAN-mode only — apply "
+                             "them after switching to Strong (WAN) mode",
+                }
+            return await self._safe_apply_locked(current, reason)
+
+    async def _safe_apply_locked(self, data: dict[str, Any],
+                                 reason: str) -> dict[str, Any]:
         """Sanitize -> snapshot -> apply -> watchdog. Returns a status dict.
 
         The previous good config is preserved as ``firewall_last_good`` (DB)
@@ -1044,7 +1324,12 @@ class FirewallManager:
             return {"ok": False, "applied": False, "error": "firewall unavailable",
                     "warnings": warnings}
         if not clean.get("enabled"):
-            self.apply(clean)
+            ok = await asyncio.to_thread(self.apply, clean)
+            if not ok:
+                await self._event(f"FW: disable failed ({reason}) — {self._last_error}",
+                                  "error")
+                return {"ok": False, "applied": False,
+                        "error": self._last_error, "warnings": warnings}
             await self._event(f"FW: firewall disabled ({reason})", "warn")
             return {"ok": True, "applied": True, "warnings": warnings}
 
@@ -1075,6 +1360,10 @@ class FirewallManager:
                 "warnings": warnings}
 
     async def revert_last_good(self) -> dict[str, Any]:
+        async with self._async_apply_lock:
+            return await self._revert_last_good_locked()
+
+    async def _revert_last_good_locked(self) -> dict[str, Any]:
         """Re-apply the stored last-good config (manual / watchdog rollback)."""
         good: dict[str, Any] | None = None
         if self._db is not None:
@@ -1088,7 +1377,11 @@ class FirewallManager:
             good = self._last_good or self._config
         if not good.get("enabled", True):
             good = {**good, "enabled": True}
-        await asyncio.to_thread(self.apply, good)
+        applied = await asyncio.to_thread(self.apply, good)
+        if not applied:
+            await self._event(
+                f"FW: revert failed — {self._last_error}", "error")
+            return {"ok": False, "applied": False, "error": self._last_error}
         # The reverted rules become the stored config too, otherwise the next
         # restart (reconcile) would bring the reverted-away rules back.
         try:
@@ -1097,6 +1390,16 @@ class FirewallManager:
             log.exception("firewall: could not persist the reverted config")
         await self._event("FW: reverted to last-good firewall config", "warn")
         return {"ok": True, "applied": True}
+
+    async def apply_topology(self, topology: str) -> bool:
+        """Apply a temporary topology while excluding concurrent reconciles."""
+        async with self._async_apply_lock:
+            previous = self._topology_override
+            self._topology_override = (topology or "").strip().lower() or None
+            try:
+                return await asyncio.to_thread(self.apply)
+            finally:
+                self._topology_override = previous
 
     # -- watchdog ------------------------------------------------------------
 
@@ -1133,29 +1436,50 @@ class FirewallManager:
         if code != 0 or code2 != 0:
             return True  # nft broken is not a firewall lockout
         text = out + "\n" + out2
-        protected = [self.probe_ip(), self._client_gw, self._router_ip]
+        protected = [self.probe_ip(), self._client_gw, self._router_ip,
+                     self._ipv6_gateway]
         for ip in protected:
             if _as_ip(ip):
-                if re.search(rf"ip saddr {re.escape(_as_ip(ip))}.*(drop|@fw_bans)",
-                             text, re.I):
+                family_key = "ip6 saddr" if _is_ipv6(ip) else "ip saddr"
+                ban_set = SET_BANS6 if _is_ipv6(ip) else SET_BANS
+                if re.search(rf"{family_key} {re.escape(_as_ip(ip))}.*"
+                             rf"(drop|@{ban_set})", text, re.I):
                     return False
-        client_ok = any(n in text for n in self._local_nets)
+        client_ok = any(n in text for n in
+                        [*self._local_nets, *self._local_nets6])
         return client_ok
 
     # -- bans ----------------------------------------------------------------
 
-    def _reseed_bans(self) -> None:
-        """Re-add still-active bans after a flush (bans outlive a re-apply)."""
-        if not self.available:
-            return
+    def _reseed_bans(self, family: int) -> tuple[bool, str]:
+        """Restore active bans for one successfully rebuilt address family."""
         now = time.time()
         active = [ip for ip, b in self._bans.items()
-                  if b.get("until", 0) > now]
-        if not active:
-            return
+                  if b.get("until", 0) > now and address_family(ip) == family]
         for ip in active:
-            self._run(["add", "element", f"{FAMILY} {TABLE} {SET_BANS}",
-                       f"{{ {ip} timeout {max(60, int(self._bans[ip]['until'] - now))}s }}"])
+            set_name = SET_BANS6 if _is_ipv6(ip) else SET_BANS
+            if not self._run(
+                    ["add", "element", f"{FAMILY} {TABLE} {set_name}",
+                     f"{{ {ip} timeout {max(60, int(self._bans[ip]['until'] - now))}s }}"],
+                    degrade=False, preserve_ipv6=(family == 4)):
+                return False, self._last_error or f"IPv{family} ban restore failed"
+        return True, ""
+
+    def validate_ban_target(self, ip: str) -> str:
+        """Return a client-facing reason when an IP cannot be banned."""
+        ip = _as_ip(str(ip))
+        if not ip:
+            return "invalid IP address"
+        for protected in [self.probe_ip(), self._client_gw, self._router_ip,
+                          self._ipv6_gateway]:
+            if _as_ip(protected) == ip:
+                return "refusing to ban the box itself"
+        address = parse_ip_address(ip)
+        for network_text in (self._client_net, self._client_net6):
+            network = parse_ip_network(network_text) if network_text else None
+            if network is not None and address is not None and address in network:
+                return "refusing to ban the client subnet"
+        return ""
 
     async def ban_ip(self, ip: str, seconds: int, reason: str) -> bool:
         """Kernel-ban an IP in @fw_bans (auto-expiring) + persist + event.
@@ -1164,38 +1488,89 @@ class FirewallManager:
         that would be a self-DoS / lockout.
         """
         ip = _as_ip(str(ip))
-        if not ip:
+        rejection = self.validate_ban_target(ip)
+        if rejection:
+            if rejection.startswith("refusing"):
+                log.warning("firewall: %s (%s)", rejection, ip)
             return False
-        for protected in [self.probe_ip(), self._client_gw, self._router_ip]:
-            if _as_ip(protected) == ip:
-                log.warning("firewall: refusing to ban the box itself (%s)", ip)
-                return False
-        if self._client_net:
-            try:
-                if ip_address(ip) in ip_network(self._client_net, strict=False):
-                    log.warning("firewall: refusing to ban the client subnet (%s)", ip)
-                    return False
-            except ValueError:
-                pass
         seconds = max(60, int(seconds))
-        self._bans[ip] = {"until": time.time() + seconds, "reason": reason,
-                          "seconds": seconds}
-        self._run(["add", "element", f"{FAMILY} {TABLE} {SET_BANS}",
-                   f"{{ {ip} timeout {seconds}s }}"])
-        await self._event(
-            f"FW: banned {ip} for {seconds}s ({reason})", "warn")
+        async with self._async_apply_lock:
+            applied, changed = await asyncio.to_thread(
+                self._change_ban, ip, seconds=seconds,
+                reason=reason, remove=False)
+        if not applied:
+            return False
+        if changed:
+            await self._event(
+                f"FW: banned {ip} for {seconds}s ({reason})", "warn")
         return True
 
     async def unban_ip(self, ip: str) -> bool:
         ip = _as_ip(str(ip))
         if not ip:
             return False
-        self._bans.pop(ip, None)
-        if self.available:
-            self._run(["delete", "element", f"{FAMILY} {TABLE} {SET_BANS}",
-                       f"{{ {ip} }}"])
+        async with self._async_apply_lock:
+            applied, _ = await asyncio.to_thread(
+                self._change_ban, ip, seconds=0, reason="", remove=True)
+        if not applied:
+            return False
         await self._event(f"FW: unbanned {ip}", "info")
         return True
+
+    def _change_ban(self, ip: str, *, seconds: int, reason: str,
+                    remove: bool) -> tuple[bool, bool]:
+        """Apply one family-scoped ban edit without degrading the other family."""
+        family = address_family(ip)
+        if family not in (4, 6):
+            return False, False
+        set_name = SET_BANS6 if family == 6 else SET_BANS
+        # Exclusive creation makes a repeated ban observable as EEXIST. nft's
+        # non-exclusive `add element` can return success without refreshing an
+        # existing timeout, which would make the application overstate expiry.
+        verb = "delete" if remove else "create"
+        with self._apply_thread_lock:
+            existing = self._bans.get(ip)
+            existing_active = bool(
+                existing and existing.get("until", 0) > time.time())
+            if not self.available:
+                return False, False
+            previous_error = self._last_error
+            if not self._run(
+                    [verb, "element", f"{FAMILY} {TABLE} {set_name}",
+                     f"{{ {ip} }}" if remove else
+                     f"{{ {ip} timeout {seconds}s }}"], degrade=False,
+                    exists_ok=remove):
+                if (not remove and existing_active and
+                        any(term in self._last_error.lower() for term in
+                            ("file exists", "already exists"))):
+                    # The cached ban is still present in the kernel. nft does
+                    # not refresh an element timeout on EEXIST, so keep its
+                    # current deadline and do not claim a new duration.
+                    self._last_error = previous_error
+                    return True, False
+                message = self._last_error or "firewall unavailable"
+                if family == 4:
+                    self._ipv4_apply_ok = False
+                    self._ipv4_last_error = message
+                else:
+                    self._ipv6_available = False
+                    self._ipv6_apply_ok = False
+                    self._ipv6_last_error = message
+                self._last_apply_ok = False
+                self._last_error = message
+                self._applied_sig = None
+                return False, False
+
+            if remove:
+                self._bans.pop(ip, None)
+            else:
+                self._bans[ip] = {
+                    "until": time.time() + seconds,
+                    "reason": reason,
+                    "seconds": seconds,
+                }
+            self._last_apply_ok = self._ipv4_apply_ok and self._ipv6_apply_ok
+            return True, True
 
     def list_bans(self) -> list[dict[str, Any]]:
         now = time.time()
@@ -1234,25 +1609,49 @@ class FirewallManager:
             return []
         threshold = int(scan.get("syn_threshold", 200) or 200)
         ban_seconds = int(scan.get("ban_seconds", 3600) or 3600)
-        code, out = self._run_command(
-            ["nft", "-j", "list", "set", f"{FAMILY} {TABLE} {SET_SCAN}"])
-        if code != 0:
-            return []
-        current = self._parse_scan_set(out)
         events: list[str] = []
+        current: dict[str, int] = {}
+        previous_scan = dict(self._scan_last)
+        failed_bans: set[str] = set()
+        successful_families: set[int] = set()
+        for set_name, family in ((SET_SCAN, 4), (SET_SCAN6, 6)):
+            code, out = self._run_command(
+                ["nft", "-j", "list", "set", f"{FAMILY} {TABLE} {set_name}"])
+            if code != 0:
+                continue
+            successful_families.add(family)
+            current.update(self._parse_scan_set(out))
         for ip, count in current.items():
             prev = self._scan_last.get(ip, 0)
             delta = max(0, count - prev)
             if delta >= threshold:
-                self._bans[ip] = {"until": time.time() + ban_seconds,
-                                  "reason": f"port-scan ({delta} SYNs)",
-                                  "seconds": ban_seconds}
-                self._run(["add", "element", f"{FAMILY} {TABLE} {SET_BANS}",
-                           f"{{ {ip} timeout {ban_seconds}s }}"])
+                address = parse_ip_address(ip)
+                if address is None:
+                    continue
+                reason = f"port-scan ({delta} SYNs)"
+                applied, changed = self._change_ban(
+                    ip, seconds=ban_seconds, reason=reason, remove=False)
+                if not applied:
+                    failed_bans.add(ip)
+                    continue
+                if not changed:
+                    continue
                 msg = f"FW: banned {ip} for {ban_seconds}s (port-scan, {delta} SYNs)"
                 events.append(msg)
                 log.warning("firewall: %s", msg)
-        self._scan_last = current
+        if len(successful_families) == 2:
+            self._scan_last = current
+        else:
+            self._scan_last = {
+                ip: count for ip, count in self._scan_last.items()
+                if (address := parse_ip_address(ip)) is not None
+                and address.version not in successful_families}
+            self._scan_last.update(current)
+        for ip in failed_bans:
+            if ip in previous_scan:
+                self._scan_last[ip] = previous_scan[ip]
+            else:
+                self._scan_last.pop(ip, None)
         return events
 
     def _parse_counters(self, out: str) -> dict[str, tuple[int, int]]:
@@ -1334,14 +1733,26 @@ class FirewallManager:
         return list(reversed(self._log_ring[-limit:]))
 
     def status(self) -> dict[str, Any]:
+        firewall_enabled = bool(self._config.get("enabled", True))
+        ipv6_applied = bool(firewall_enabled and self._ipv6_apply_ok)
+        ipv4_applied = bool(firewall_enabled and self._ipv4_apply_ok)
         return {
-            "enabled": bool(self._config.get("enabled", True)),
+            "enabled": firewall_enabled,
             "available": self.available,
             "topology": self.topology,
             "mode": "wan" if self.topology == "wan" else "lan",
-            "applied": self._applied_sig is not None,
+            "applied": self._last_apply_ok,
             "apply_ok": self._last_apply_ok,
             "last_error": self._last_error,
+            "ipv4_available": self.available,
+            "ipv4_applied": ipv4_applied,
+            "ipv4_healthy": ipv4_applied,
+            "ipv4_last_error": "" if ipv4_applied else self._ipv4_last_error,
+            "ipv6_available": self._ipv6_available,
+            "ipv6_enabled": firewall_enabled,
+            "ipv6_applied": ipv6_applied,
+            "ipv6_healthy": ipv6_applied,
+            "ipv6_last_error": "" if ipv6_applied else self._ipv6_last_error,
             "bans": self.list_bans(),
             "counters": self._counter_stats,
             "probe_ip": self.probe_ip(),

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import ipaddress
+import math
 from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+from quota.ip_addresses import canonical_ip_address
 
 
 def _cap_field() -> Field:
@@ -182,6 +185,27 @@ class GuestUpdate(BaseModel):
     speed_limit_mbps: Optional[float] = Field(None, ge=0, le=100000)
     #: Refuse brand-new devices while allowing already-registered ones.
     stop_new: Optional[bool] = None
+
+
+class GuestVoucherCreate(BaseModel):
+    """Issue a single-use guest voucher."""
+
+    quota_gb: float = Field(..., ge=0.01, le=100000)
+    expires_at: Optional[float] = None
+    comment: str = Field("", max_length=200)
+
+    @field_validator("expires_at")
+    @classmethod
+    def _finite_expiry(cls, value: Optional[float]) -> Optional[float]:
+        if value is not None and not math.isfinite(value):
+            raise ValueError("expires_at must be a finite timestamp")
+        return value
+
+
+class GuestVoucherRedeem(BaseModel):
+    """A guest's submitted voucher code; requester identity comes from the server."""
+
+    code: str = Field(..., min_length=1, max_length=64)
 
 
 class MacListsUpdate(BaseModel):
@@ -573,13 +597,12 @@ class StaticLeaseCreate(BaseModel):
     def validate_ip6(cls, v: Optional[str]) -> str:
         if not v:
             return ""
-        clean = v.strip().lower().lstrip("[").rstrip("]")
-        try:
-            addr = ipaddress.IPv6Address(clean)
-            if addr.is_loopback or addr.is_multicast:
-                raise ValueError("IPv6 address must be a usable unicast IPv6 host address")
-        except ipaddress.AddressValueError:
+        clean = canonical_ip_address(v)
+        if clean is None or ":" not in clean:
             raise ValueError("Invalid IPv6 address") from None
+        addr = ipaddress.IPv6Address(clean)
+        if addr.is_loopback or addr.is_multicast:
+            raise ValueError("IPv6 address must be a usable unicast IPv6 host address")
         return clean
 
 

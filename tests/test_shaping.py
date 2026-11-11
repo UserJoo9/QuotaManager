@@ -1069,7 +1069,7 @@ def test_ipv6_traffic_is_redirected_and_shaped_per_device():
     shaper = TcShaper(make_cfg(), run_command=fake)
     shaper.start()
     e = entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)
-    e["ip6"] = ["fd00:da7a:2::100"]
+    e["ip6"] = ["fd00:da7a:2::100", "fd00:da7a:2::101"]
     shaper.update_state([e], True, 100.0, 20.0, True)
     assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "ffff:",
                     "protocol", "ipv6", "prio", "7", "u32", "match", "ip6",
@@ -1082,6 +1082,31 @@ def test_ipv6_traffic_is_redirected_and_shaped_per_device():
     assert fake.has("tc", "filter", "add", "dev", "ifb0", "parent", "1:",
                     "protocol", "ipv6", "prio", "5", "u32", "match", "ip6",
                     "src", "fd00:da7a:2::100/128", "flowid", "1:0x8001")
+    assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
+                    "protocol", "ipv6", "prio", "5", "u32", "match", "ip6",
+                    "dst", "fd00:da7a:2::101/128", "flowid", "1:0x8001")
+    assert fake.has("tc", "filter", "add", "dev", "ifb0", "parent", "1:",
+                    "protocol", "ipv6", "prio", "5", "u32", "match", "ip6",
+                    "src", "fd00:da7a:2::101/128", "flowid", "1:0x8001")
+
+
+def test_ipv6_only_rate_entry_builds_ipv6_filters_without_empty_ipv4_match():
+    fake = FakeTc()
+    shaper = TcShaper(make_cfg(), run_command=fake)
+    shaper.start()
+    shaper.update_state([{
+        "ip": "", "ip4": [], "ip6": ["fd00:da7a:2::74"],
+        "device_id": 74, "user_id": 7, "down": 12.0, "up": 4.0,
+        "user_down": 0.0, "user_up": 0.0,
+    }], True, 100.0, 20.0, True)
+
+    assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
+                    "protocol", "ipv6", "prio", "5", "u32", "match",
+                    "ip6", "dst", "fd00:da7a:2::74/128", "flowid", "1:0x804a")
+    assert not any(call[:8] == ["tc", "filter", "add", "dev", "eth0",
+                                "parent", "1:", "protocol"] and
+                   len(call) > 9 and call[8] == "ip" and call[9] == "prio" and
+                   call[10] == "2" for call in fake.calls)
 
 
 def test_new_ipv6_address_rebuilds_the_tree():

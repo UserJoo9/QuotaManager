@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 _cached_loop = None
 def _get_loop():
     global _cached_loop
@@ -80,11 +81,18 @@ class FakeNft:
         self.rules: list[str] = []
         self.elements: dict[str, set[str]] = {SET_ALLOW: set(), SET_DENY: set()}
         self.bans: dict[str, int] = {}   # ip -> timeout seconds
+        self.ban_sets: dict[str, str] = {}
         self.counters: dict[str, int] = {}  # name -> packets
         self.scan_set: dict[str, int] = {}  # ip -> syn packets
+        self.scan_set6: dict[str, int] = {}  # ip -> syn packets
         self.chain_rules: dict[str, list[str]] = {}  # hook -> [expr]
         #: persistent write failure (add/flush/delete/reset all return 1).
         self.reject_writes = False
+        self.reject_ipv6_sets = False
+        self.reject_ipv4_rules = False
+        self.reject_ban_restore = False
+        self.reject_ban6_add = False
+        self.reject_ban6_delete = False
         #: simulates `nft flush ruleset` having wiped the table
         self.table_gone = False
 
@@ -93,18 +101,36 @@ class FakeNft:
                    for name, packets in self.counters.items()]
         return 0, json.dumps({"counters": entries})
 
-    def _scan_json(self) -> tuple[int, str]:
+    def _scan_json(self, name: str) -> tuple[int, str]:
+        scan_set = self.scan_set6 if name == "fw_scan_watch6" else self.scan_set
         return 0, json.dumps({
             "set": {"elem": {ip: {"counter": {"packets": n}}
-                             for ip, n in self.scan_set.items()}}})
+                             for ip, n in scan_set.items()}}})
 
     def __call__(self, argv: list[str]) -> tuple[int, str]:
         self.calls.append(list(argv))
         if argv[0] != "nft":
             return 1, f"unknown binary {argv[0]}"
         args = argv[1:]
-        if self.reject_writes and args[0] in ("add", "flush", "delete", "reset"):
+        if self.reject_writes and args[0] in (
+                "add", "create", "flush", "delete", "reset"):
             return 1, "fake: write rejected"
+        if self.reject_ipv6_sets and args[:2] == ["add", "set"] and \
+                args[3] in ("fw_bans6", "fw_allow6", "fw_deny6", "fw_scan_watch6"):
+            return 1, "fake: IPv6 set rejected"
+        if (self.reject_ban_restore and args[:2] in (
+                ["add", "element"], ["create", "element"])
+                and args[2].split()[-1] == SET_BANS):
+            return 1, "fake: IPv4 ban set rejected"
+        if (args[:2] in (["add", "element"], ["create", "element"],
+                         ["delete", "element"])
+                and args[2].split()[-1] == "fw_bans6"
+                and ((args[0] in ("add", "create") and self.reject_ban6_add) or
+                     (args[0] == "delete" and self.reject_ban6_delete))):
+            return 1, "fake: IPv6 ban write rejected"
+        if (self.reject_ipv4_rules and args[:2] == ["add", "rule"] and
+                args[-1].startswith("meta nfproto ipv4")):
+            return 1, "fake: IPv4 rule rejected"
         if args[:2] == ["list", "table"]:
             return (1, "Error: No such file or directory") if self.table_gone else (0, "")
         if args[:2] == ["add", "table"]:
@@ -113,7 +139,7 @@ class FakeNft:
             if args[1] == "list" and args[2] == "counters":
                 return self._counters_json()
             if args[1] == "list" and args[2] == "set":
-                return self._scan_json()
+                return self._scan_json(args[3].split()[-1])
             return 0, ""
         if args[0] == "list":
             if args[1] == "chain":
@@ -126,7 +152,7 @@ class FakeNft:
             if args[1] == "ruleset":
                 return 0, "table inet quota_firewall { }"
             return 0, ""
-        if args[0] == "add":
+        if args[0] in ("add", "create"):
             if args[1] == "rule":
                 expr = args[-1]
                 self.rules.append(expr)
@@ -141,16 +167,27 @@ class FakeNft:
             if args[1] == "element":
                 # ban_ip/scan/seed use "inet quota_firewall fw_bans" (one arg);
                 # render uses ["inet quota_firewall", "fw_allow", "{...}"] (split).
-                if len(args) >= 4 and args[3] in (SET_ALLOW, SET_DENY, SET_BANS):
+                if len(args) >= 4 and args[3] in (
+                        SET_ALLOW, SET_DENY, SET_BANS,
+                        "fw_allow6", "fw_deny6", "fw_bans6"):
                     name = args[3]
                 else:
                     name = args[2].split()[-1]
                 members = {m.strip()
                            for m in args[-1].strip("{}").split(",") if m.strip()}
-                if name == SET_BANS:
+                if name in (SET_BANS, "fw_bans6"):
                     for m in members:
                         ip, _, timeout = m.partition("timeout")
-                        self.bans[ip.strip()] = int(timeout.strip().rstrip("s"))
+                        ip = ip.strip()
+                        if ip in self.bans:
+                            # `add element` is non-exclusive on nftables: a
+                            # duplicate may succeed without refreshing timeout.
+                            # `create element` is exclusive and reports EEXIST.
+                            if args[0] == "create":
+                                return 1, "Error: element already exists"
+                            continue
+                        self.bans[ip] = int(timeout.strip().rstrip("s"))
+                        self.ban_sets[ip] = name
                 else:
                     self.elements.setdefault(name, set()).update(members)
                 return 0, ""
@@ -159,13 +196,16 @@ class FakeNft:
             self.rules = []
             self.chain_rules = {}
             self.bans = {}
+            self.ban_sets = {}
             return 0, ""
         if args[0] == "delete" and args[1] == "element":
             name = args[2].split()[-1]
             members = {m.strip() for m in args[-1].strip("{}").split(",") if m.strip()}
-            if name == SET_BANS:
+            if name in (SET_BANS, "fw_bans6"):
                 for m in members:
-                    self.bans.pop(m, None)
+                    ip = m.strip()
+                    self.bans.pop(ip, None)
+                    self.ban_sets.pop(ip, None)
             return 0, ""
         if args[0] == "reset":
             return 0, ""
@@ -186,7 +226,8 @@ def _make_env(tmp_path, *, fake=None, probe=None, topology="lan") -> Env:
     cfg.engine.topology = topology
     cfg.dhcp.gateway_ip = "192.168.2.1"
     cfg.dhcp.router_ip = "192.168.1.1"
-    db = _db.Database(tmp_path / "fw.db")
+    cfg.db_path = str(tmp_path / "fw.db")
+    db = _db.Database(cfg.db_path)
     _run(db.connect())
     fake = fake or FakeNft()
     fw = FirewallManager(cfg, db, run_command=fake, probe=probe,
@@ -246,8 +287,10 @@ def test_wan_render_adds_default_deny_on_ppp0():
     cmds = render_commands(_base_cfg(), "wan", LOCAL_NETS, BOX_IPS)
     joined = " | ".join(_rules(cmds))
     # input + forward both default-deny NEW inbound on ppp0 with named counters
-    assert f'iifname "ppp0" ct state new counter name {COUNTER_WAN_IN_DROP} drop' in joined
-    assert f'iifname "ppp0" ct state new counter name {COUNTER_WAN_FWD_DROP} drop' in joined
+    assert (f'meta nfproto ipv4 iifname "ppp0" ct state new '
+            f'counter name {COUNTER_WAN_IN_DROP} drop') in joined
+    assert (f'meta nfproto ipv4 iifname "ppp0" ct state new '
+            f'counter name {COUNTER_WAN_FWD_DROP} drop') in joined
     # fw_dnat chain exists in WAN
     assert any(c[1] == "chain" and CHAIN_DNAT in c for c in cmds)
     # dashboard is NOT exposed without wan_confirmed
@@ -259,7 +302,8 @@ def test_wan_render_adds_default_deny_on_ppp0():
 
 def test_wan_confirmed_exposes_dashboard_only_when_explicit():
     cmds = render_commands(_base_cfg(wan_confirmed=True), "wan", LOCAL_NETS, BOX_IPS)
-    assert 'iifname "ppp0" tcp dport 8080 accept' in " | ".join(_rules(cmds))
+    assert ('meta nfproto ipv4 iifname "ppp0" tcp dport 8080 accept'
+            in " | ".join(_rules(cmds)))
 
 
 def test_all_named_counters_declared_before_use():
@@ -294,7 +338,8 @@ def test_all_named_counters_declared_before_use():
     assert declared >= used, f"undeclared counters: {used - declared}"
     # Declarations are emitted BEFORE the first rule that uses them.
     rule_pos = {i for i, c in enumerate(cmds)
-                if c[0] == "add" and c[1] == "rule"}
+                if c[0] == "add" and c[1] == "rule"
+                and "counter name" in c[-1]}
     counter_pos = {i for i, c in enumerate(cmds)
                    if c[0] == "add" and c[1] == "counter"}
     assert counter_pos and max(counter_pos) < min(rule_pos)
@@ -321,6 +366,77 @@ def test_reconcile_converges_on_topology_change(env):
     assert after != before
     assert any('iifname "ppp0"' in r for r in after)
     assert not any('iifname "ppp0"' in r for r in before)
+
+
+def test_safe_apply_and_reconcile_serialize_config_and_ruleset_writes(env):
+    _run(env.fw.reconcile())
+    rule_a = {"name": "first", "chain": "forward", "action": "deny",
+              "protocol": "tcp", "dst_port": 1111}
+    rule_b = {"name": "second", "chain": "forward", "action": "deny",
+              "protocol": "tcp", "dst_port": 2222}
+    config_a = _base_cfg(rules=[rule_a])
+    config_b = _base_cfg(rules=[rule_b])
+    _run(env.fw.persist_config(config_a))
+
+    first_apply_done = threading.Event()
+    release_first = threading.Event()
+    original_apply = env.fw.apply
+
+    def pause_after_first_apply(cfg=None):
+        result = original_apply(cfg)
+        if not first_apply_done.is_set():
+            first_apply_done.set()
+            release_first.wait(timeout=3)
+        return result
+
+    env.fw.apply = pause_after_first_apply
+
+    async def run_concurrently():
+        reconcile_task = asyncio.create_task(env.fw.reconcile())
+        safe_apply_task = None
+        try:
+            assert await asyncio.to_thread(first_apply_done.wait, 3)
+            safe_apply_task = asyncio.create_task(env.fw.safe_apply(config_b))
+            await asyncio.sleep(0.05)
+            persisted = json.loads(await env.db.get_setting("firewall_config"))
+            assert len(persisted["rules"]) == 1
+            assert persisted["rules"][0]["dst_port"] == 1111
+            release_first.set()
+            assert await reconcile_task is True
+            result = await safe_apply_task
+            assert result["ok"] is True
+        finally:
+            release_first.set()
+            tasks = [reconcile_task]
+            if safe_apply_task is not None:
+                tasks.append(safe_apply_task)
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    try:
+        _run(run_concurrently())
+    finally:
+        release_first.set()
+
+    assert any("dport 2222" in rule for rule in env.fake.rules)
+    assert not any("dport 1111" in rule for rule in env.fake.rules)
+    assert env.fw._applied_sig == env.fw._signature(env.fw._config)
+
+
+def test_concurrent_partial_config_updates_merge_under_firewall_lock(env):
+    async def apply_updates():
+        return await asyncio.gather(
+            env.fw.safe_apply_partial({
+                "deny_cidrs": ["203.0.113.0/24"]}, require_wan=True),
+            env.fw.safe_apply_partial({
+                "scan_detect": {"enabled": False, "syn_threshold": 200,
+                                "ban_seconds": 3600}}, require_wan=True),
+        )
+
+    results = _run(apply_updates())
+    assert all(result["ok"] for result in results)
+    config = _run(env.fw.load_config())
+    assert config["deny_cidrs"] == ["203.0.113.0/24"]
+    assert config["scan_detect"]["enabled"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -467,6 +583,37 @@ def test_apply_failure_degrades_gracefully(env):
     assert any("apply failed" in e["message"] for e in env.fw.recent_log(20))
 
 
+def test_disabled_apply_reports_kernel_failure(env):
+    env.fake.reject_writes = True
+    result = _run(env.fw.safe_apply(_base_cfg(enabled=False)))
+    assert result["ok"] is False
+    assert result["applied"] is False
+    assert "write rejected" in result["error"]
+
+
+def test_revert_reports_kernel_apply_failure(env):
+    assert _run(env.fw.safe_apply(_base_cfg()))["ok"]
+    env.fake.reject_writes = True
+    result = _run(env.fw.revert_last_good())
+    assert result["ok"] is False
+    assert result["applied"] is False
+
+
+def test_render_failure_clears_family_health(env, monkeypatch):
+    assert _run(env.fw.reconcile())
+
+    def fail_render(*args, **kwargs):
+        raise ValueError("bad render input")
+
+    monkeypatch.setattr("quota.firewall._render_command_plan", fail_render)
+    assert env.fw.apply() is False
+    status = env.fw.status()
+    assert status["apply_ok"] is False
+    assert status["ipv4_healthy"] is False
+    assert status["ipv6_healthy"] is False
+    assert "bad render input" in status["ipv6_last_error"]
+
+
 # ---------------------------------------------------------------------------
 # 4. bans / SYN-flood guard / brute-force hook / port-scan detection
 # ---------------------------------------------------------------------------
@@ -480,7 +627,11 @@ def test_render_syn_flood_guard():
     assert f"counter name {COUNTER_SYN_PASS} accept" in joined
     assert f"counter name {COUNTER_SYN_DROP} drop" in joined
     # SYN guard is placed AFTER the local accepts so LAN SYN is never limited
-    assert joined.index("ip saddr 192.168.2.0/24 accept") < joined.index("== syn")
+    rules = _rules(cmds)
+    v4_syn = next(i for i, rule in enumerate(rules)
+                  if rule.startswith("meta nfproto ipv4 tcp flags & "
+                                     "(fin|syn|rst|ack) == syn"))
+    assert rules.index("ip saddr 192.168.2.0/24 accept") < v4_syn
 
 
 def test_ban_ip_adds_kernel_element_and_tracks(env):
@@ -510,6 +661,43 @@ def test_unban_removes_kernel_element(env):
     assert any("unbanned" in e["message"] for e in env.fw.recent_log(20))
 
 
+def test_repeated_ban_preserves_existing_kernel_expiry(env):
+    assert _run(env.fw.reconcile())
+    ip = "203.0.113.11"
+    assert _run(env.fw.ban_ip(ip, 60, "first request"))
+    first_expiry = env.fw._bans[ip]["until"]
+    calls_before = len(env.fake.calls)
+
+    # `create element` returns EEXIST if the element already exists; the
+    # manager must preserve the earlier kernel timeout.
+    assert _run(env.fw.ban_ip(ip, 3600, "repeat request"))
+
+    assert env.fw._bans[ip]["until"] == first_expiry
+    assert env.fake.bans[ip] == 60
+    assert any(call[1:3] == ["create", "element"] and
+               call[-1] == f"{{ {ip} timeout 3600s }}"
+               for call in env.fake.calls[calls_before:])
+
+
+def test_repeated_ban_repairs_missing_kernel_element_and_fails_when_unavailable(env):
+    assert _run(env.fw.reconcile())
+    ip = "203.0.113.12"
+    assert _run(env.fw.ban_ip(ip, 60, "first request"))
+    first_expiry = env.fw._bans[ip]["until"]
+
+    # Simulate the element being lost while the application cache is stale.
+    env.fake.bans.pop(ip)
+    env.fake.ban_sets.pop(ip)
+    assert _run(env.fw.ban_ip(ip, 3600, "retry"))
+    assert env.fake.bans[ip] == 3600
+    assert env.fw._bans[ip]["until"] > first_expiry
+
+    env.fw.available = False
+    previous_expiry = env.fw._bans[ip]["until"]
+    assert _run(env.fw.ban_ip(ip, 7200, "firewall unavailable")) is False
+    assert env.fw._bans[ip]["until"] == previous_expiry
+
+
 def test_scan_detect_bans_threshold_source(env):
     _run(env.fw.reconcile())
     env.fake.scan_set = {"203.0.113.7": 250}
@@ -525,11 +713,168 @@ def test_scan_detect_counts_deltas_only(env):
     env.fw.scan_detect_tick()
     assert env.fake.bans["203.0.113.7"]
     env.fake.bans.clear()  # simulate ban expiry in the kernel
+    env.fw._bans.pop("203.0.113.7", None)  # align the manager's expiry cache
     env.fw.scan_detect_tick()  # same absolute count -> delta 0 -> no new ban
     assert env.fake.bans == {}
     env.fake.scan_set = {"203.0.113.7": 500}
     env.fw.scan_detect_tick()  # delta 250 >= threshold -> banned again
     assert env.fake.bans["203.0.113.7"]
+
+
+def test_ipv6_ban_unban_and_reseed_after_apply(env):
+    _run(env.fw.reconcile())
+    ip = "2001:db8:77::9"
+    assert _run(env.fw.ban_ip(ip, 1800, "manual"))
+    assert env.fake.bans[ip] == 1800
+    assert env.fake.ban_sets[ip] == "fw_bans6"
+
+    _run(env.fw.safe_apply(_base_cfg()))
+    assert env.fake.bans[ip] > 0
+    assert env.fake.ban_sets[ip] == "fw_bans6"
+    assert _run(env.fw.unban_ip(ip))
+    assert ip not in env.fake.bans
+
+
+def test_ipv6_scan_detection_uses_ipv6_scan_and_ban_sets(env):
+    _run(env.fw.reconcile())
+    ip = "2001:db8:88::7"
+    env.fake.scan_set6 = {ip: 250}
+    drained = env.fw.scan_detect_tick()
+    assert any("port-scan" in message and ip in message for message in drained)
+    assert env.fake.bans[ip] > 0
+    assert env.fake.ban_sets[ip] == "fw_bans6"
+
+
+def test_ipv6_scan_ban_failure_is_not_reported_as_success(env):
+    assert _run(env.fw.reconcile()) is True
+    ip = "2001:db8:88::8"
+    env.fake.scan_set6 = {ip: 250}
+    env.fake.reject_ban6_add = True
+
+    events = env.fw.scan_detect_tick()
+
+    assert events == []
+    assert ip not in env.fake.bans
+    status = env.fw.status()
+    assert status["ipv4_healthy"] is True
+    assert status["ipv6_healthy"] is False
+
+    env.fake.reject_ban6_add = False
+    retried = env.fw.scan_detect_tick()
+    assert any(ip in event for event in retried)
+    assert ip in env.fake.bans
+
+
+def test_ipv6_management_addresses_are_protected_and_reachable(env):
+    gateway6 = "fd00:da7a:2::1"
+    assert not _run(env.fw.ban_ip(gateway6, 1800, "self"))
+
+    clean = env.fw.sanitize(_base_cfg(deny_cidrs=["fd00:da7a:2::/64"]))
+    assert clean["deny_cidrs"] == []
+    assert any("protected IP" in warning
+               for warning in clean.pop("_warnings", []))
+
+    assert _run(env.fw.reconcile())
+    assert env.fw._management_reachable()
+    assert any("ip6 saddr fd00:da7a:2::/64 accept" in rule
+               for rules in env.fake.chain_rules.values() for rule in rules)
+
+
+def test_ipv6_firewall_health_requires_successful_family_apply(env):
+    before = env.fw.status()
+    assert before["ipv6_healthy"] is False
+
+    assert _run(env.fw.reconcile())
+    healthy = env.fw.status()
+    assert healthy["ipv6_available"] is True
+    assert healthy["ipv6_enabled"] is True
+    assert healthy["ipv6_applied"] is True
+    assert healthy["ipv6_healthy"] is True
+
+    env.fake.reject_ipv6_sets = True
+    _run(env.fw.persist_config(_base_cfg(allow_cidrs=["2001:db8:10::/48"])))
+    assert _run(env.fw.reconcile()) is False
+    unhealthy = env.fw.status()
+    assert unhealthy["ipv6_available"] is False
+    assert unhealthy["ipv6_applied"] is False
+    assert unhealthy["ipv6_healthy"] is False
+    assert unhealthy["ipv4_healthy"] is True
+    assert unhealthy["applied"] is False
+    assert "IPv6 set rejected" in unhealthy["ipv6_last_error"]
+
+
+def test_ipv6_setup_failure_preserves_ipv4_rules_bans_and_reconcile(env):
+    assert _run(env.fw.ban_ip("203.0.113.9", 1800, "manual"))
+    env.fake.reject_ipv6_sets = True
+
+    assert _run(env.fw.reconcile()) is False
+    status = env.fw.status()
+    assert status["ipv4_healthy"] is True
+    assert status["ipv6_healthy"] is False
+    assert status["applied"] is False
+    assert "203.0.113.9" in env.fake.bans
+    rules = env.fake.chain_rules[CHAIN_INPUT]
+    assert rules.count("ct state established,related accept") == 1
+    assert rules.count("iif lo accept") == 1
+    assert rules.count('iifname "tailscale0" accept') == 1
+
+    flushes = sum(call[:3] == ["nft", "flush", "table"]
+                  for call in env.fake.calls)
+    assert _run(env.fw.reconcile()) is False
+    assert sum(call[:3] == ["nft", "flush", "table"]
+               for call in env.fake.calls) == flushes
+    assert "203.0.113.9" in env.fake.bans
+
+
+def test_ipv4_ban_restore_failure_is_not_reported_as_success(env):
+    assert _run(env.fw.ban_ip("203.0.113.10", 1800, "manual"))
+    env.fake.reject_ban_restore = True
+    _run(env.fw.persist_config(_base_cfg(allow_cidrs=["198.51.100.0/24"])))
+
+    assert _run(env.fw.reconcile()) is False
+    status = env.fw.status()
+    assert status["apply_ok"] is False
+    assert status["ipv4_healthy"] is False
+    assert status["ipv6_healthy"] is True
+    assert "ban set rejected" in status["ipv4_last_error"]
+
+
+def test_dynamic_ipv6_ban_failures_are_truthful_and_family_scoped(env):
+    assert _run(env.fw.reconcile()) is True
+    env.fake.reject_ban6_add = True
+
+    assert _run(env.fw.ban_ip("2001:db8::91", 1800, "manual")) is False
+    status = env.fw.status()
+    assert status["applied"] is False
+    assert status["ipv4_available"] is True
+    assert status["ipv4_healthy"] is True
+    assert status["ipv6_available"] is False
+    assert status["ipv6_healthy"] is False
+    assert "ban write rejected" in status["ipv6_last_error"]
+    assert all(item["ip"] != "2001:db8::91" for item in status["bans"])
+
+    env.fake.reject_ban6_add = False
+    assert _run(env.fw.ban_ip("2001:db8::92", 1800, "manual")) is True
+    env.fake.reject_ban6_delete = True
+    assert _run(env.fw.unban_ip("2001:db8::92")) is False
+    status = env.fw.status()
+    assert status["applied"] is False
+    assert status["ipv4_healthy"] is True
+    assert status["ipv6_healthy"] is False
+    assert any(item["ip"] == "2001:db8::92" for item in status["bans"])
+
+
+def test_ipv6_health_survives_a_later_ipv4_rule_failure(env):
+    assert _run(env.fw.reconcile())
+    env.fake.reject_ipv4_rules = True
+    _run(env.fw.persist_config(_base_cfg(allow_cidrs=["198.51.100.0/24"])))
+
+    assert _run(env.fw.reconcile()) is False
+    status = env.fw.status()
+    assert status["ipv6_available"] is True
+    assert status["ipv6_healthy"] is True
+    assert status["ipv4_healthy"] is False
+    assert "IPv4 rule rejected" in status["ipv4_last_error"]
 
 
 def test_counter_drains_emit_drop_events(env):
@@ -553,7 +898,8 @@ def test_deny_before_allow_and_before_bans():
         chain_rules = [c[-1] for c in cmds
                        if c[0] == "add" and c[1] == "rule" and c[3] == chain]
         order = [i for i, r in enumerate(chain_rules)
-                 if f"@{SET_DENY}" in r or f"@{SET_ALLOW}" in r or f"@{SET_BANS}" in r]
+                 if f"@{SET_DENY} " in r or f"@{SET_ALLOW} " in r or
+                 f"@{SET_BANS} " in r]
         deny_i, allow_i, bans_i = order
         assert deny_i < allow_i < bans_i, "deny > allow > bans ordering"
     assert any(c[1] == "element" and c[3] == SET_ALLOW for c in cmds)
@@ -567,7 +913,7 @@ def test_allow_bypasses_wan_default_deny():
     # @fw_allow accept sits before the WAN default-deny, so a whitelisted
     # source reaches the box / is forwarded even though NEW is otherwise denied
     assert joined.index(f"ip saddr @{SET_ALLOW} accept") < \
-        joined.index('iifname "ppp0" ct state new')
+        joined.index('meta nfproto ipv4 iifname "ppp0" ct state new')
 
 
 def test_custom_rules_rendered_ordered_with_counters():
@@ -584,6 +930,89 @@ def test_custom_rules_rendered_ordered_with_counters():
     assert "tcp dport 6881 counter name fw_custom_1 drop" in joined
     assert "meta l4proto udp udp dport 9" in joined  # log=False -> no counter
     assert "counter name fw_custom_2" not in joined
+
+
+def test_firewall_renderer_splits_ipv4_and_ipv6_policy_without_changing_ipv4_rules():
+    cfg = _base_cfg(
+        allow_cidrs=["10.0.0.0/8", "2001:db8:1::/48"],
+        deny_cidrs=["203.0.113.0/24", "2001:db8:2::/48"],
+        _geo_cidrs=["198.51.100.0/24", "2001:db8:3::/48"],
+        rules=[
+            {"name": "v4-custom", "chain": "forward", "action": "deny",
+             "src": "198.51.100.0/24", "dst": "203.0.113.8", "protocol": "tcp",
+             "dst_port": 443},
+            {"name": "v6-custom", "chain": "forward", "action": "deny",
+             "src": "2001:db8:4::/48", "dst": "2001:db8:5::/48",
+             "protocol": "icmp"},
+        ])
+    cmds = render_commands(cfg, "lan", LOCAL_NETS, BOX_IPS,
+                           local_nets6=["fd00:da7a:2::/64"],
+                           box_ips6=["fd00:da7a:2::1"])
+    sets = {cmd[3]: cmd[4] for cmd in cmds
+            if cmd[0] == "add" and cmd[1] == "set"}
+    assert sets["fw_bans6"] == "{ type ipv6_addr; flags interval, timeout; }"
+    assert sets["fw_allow6"] == "{ type ipv6_addr; flags interval; }"
+    assert sets["fw_deny6"] == "{ type ipv6_addr; flags interval; }"
+    assert sets["fw_scan_watch6"] == (
+        "{ type ipv6_addr; flags dynamic, timeout; timeout 60s; counter; }")
+
+    elements = {cmd[3]: cmd[4] for cmd in cmds
+                if cmd[0] == "add" and cmd[1] == "element"}
+    assert elements[SET_ALLOW] == "{ 10.0.0.0/8 }"
+    assert elements[SET_DENY] == "{ 203.0.113.0/24 }"
+    assert elements["fw_allow6"] == "{ 2001:db8:1::/48 }"
+    assert elements["fw_deny6"] == "{ 2001:db8:2::/48 }"
+
+    rules = _rules(cmds)
+    joined = " | ".join(rules)
+    assert "ip6 saddr fd00:da7a:2::/64 accept" in joined
+    assert "ip6 saddr fd00:da7a:2::1 accept" in joined
+    assert "ip6 saddr != 2001:db8:3::/48" in joined
+    assert "ip6 saddr @fw_deny6" in joined
+    assert "ip6 saddr @fw_allow6 accept" in joined
+    assert ("ip6 saddr 2001:db8:4::/48 ip6 daddr 2001:db8:5::/48 "
+            "meta l4proto ipv6-icmp counter name fw_custom_1 drop") in joined
+    assert "ip saddr != 198.51.100.0/24" in joined
+    assert "ip saddr 198.51.100.0/24 ip daddr 203.0.113.8" in joined
+    assert "ip saddr 2001:db8:" not in joined
+    assert "ip daddr 2001:db8:" not in joined
+
+
+def test_family_neutral_accept_rules_are_emitted_once_per_chain():
+    rules = _rules(render_commands(_base_cfg(), "lan", LOCAL_NETS, BOX_IPS))
+    assert rules.count("ct state established,related accept") == 2
+    assert rules.count("iif lo accept") == 1
+    assert rules.count('iifname "tailscale0" accept') == 1
+    assert sum("udp dport 41641 accept" in rule for rule in rules) == 2
+    assert any(rule.startswith("meta nfproto ipv4 tcp flags") for rule in rules)
+    assert any(rule.startswith("meta nfproto ipv6 tcp flags") for rule in rules)
+
+
+def test_firewall_sanitize_rejects_mixed_family_custom_rule(env):
+    clean = env.fw.sanitize(_base_cfg(rules=[
+        {"name": "mixed", "chain": "forward", "action": "deny",
+         "src": "192.0.2.0/24", "dst": "2001:db8::/32", "protocol": "tcp"},
+    ]))
+    assert clean["rules"] == []
+    assert any("address families" in warning
+               for warning in clean.pop("_warnings", []))
+
+
+def test_firewall_sanitize_keeps_ipv6_out_of_ipv4_publishing_paths(env):
+    clean = env.fw.sanitize(_base_cfg(
+        services=[{"name": "web6", "protocol": "tcp", "port": 443,
+                   "source": "2001:db8::/32"}],
+        port_forwards=[{"name": "forward6", "protocol": "tcp",
+                        "source_port": 443, "target_ip": "2001:db8::9",
+                        "target_port": 443}],
+        dmz="2001:db8::9"))
+    assert clean["services"] == []
+    assert clean["port_forwards"] == []
+    assert clean["dmz"] == ""
+    warnings = clean.pop("_warnings", [])
+    assert any("IPv6 service publishing is unsupported" in w for w in warnings)
+    assert any("IPv6 port forwarding is unsupported" in w for w in warnings)
+    assert any("IPv6 DMZ is unsupported" in w for w in warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -791,6 +1220,28 @@ def test_api_firewall_geo(env):
         assert c.post("/api/firewall", json=_base_cfg(geo_block=False)).status_code == 200
 
 
+def test_api_firewall_ban_and_unban_report_kernel_failures(env):
+    assert _run(env.fw.reconcile()) is True
+    assert _run(env.fw.ban_ip("2001:db8::92", 1800, "manual"))
+    service = QuotaService(env.db, timezone=TZ)
+    app = create_app(env.db, service, SnapshotHolder(), firewall=env.fw)
+    with TestClient(app) as c:
+        assert c.post("/api/login", json={"password": "admin"}).status_code == 200
+        env.fake.reject_ban6_add = True
+        failed_ban = c.post("/api/firewall/ban", json={
+            "ip": "2001:db8::91", "seconds": 1800, "reason": "manual"})
+        assert failed_ban.status_code == 500
+
+        env.fake.reject_ban6_delete = True
+        failed_unban = c.post("/api/firewall/unban", json={
+            "ip": "2001:db8::92"})
+        assert failed_unban.status_code == 500
+        assert "2001:db8::92" in env.fake.bans
+        status = env.fw.status()
+        assert status["ipv4_healthy"] is True
+        assert status["ipv6_healthy"] is False
+
+
 def test_login_brute_force_triggers_firewall_ban(tmp_path):
     env = _make_env(tmp_path)
     try:
@@ -842,12 +1293,14 @@ def test_lan_mode_closes_dashboard_to_the_internet_by_default():
     connections from anything outside the home networks."""
     cmds = render_commands(_base_cfg(), "lan", LOCAL_NETS, BOX_IPS)
     joined = " | ".join(_rules(cmds))
-    assert ("tcp dport 8080 ct state new ip saddr != 192.168.1.0/24 "
+    assert ("meta nfproto ipv4 tcp dport 8080 ct state new "
+            "ip saddr != 192.168.1.0/24 "
             f"ip saddr != 192.168.2.0/24 counter name {COUNTER_WAN_IN_DROP} drop") in joined
     # the counter it references is declared, and home networks are accepted first
     assert any(c[:2] == ["add", "counter"] and c[-1] == COUNTER_WAN_IN_DROP for c in cmds)
     rules = _rules(cmds)
-    drop_i = next(i for i, r in enumerate(rules) if "tcp dport 8080 ct state new" in r)
+    drop_i = next(i for i, r in enumerate(rules)
+                  if r.startswith("meta nfproto ipv4 tcp dport 8080 ct state new"))
     for net in LOCAL_NETS:
         assert rules.index(f"ip saddr {net} accept") < drop_i
 

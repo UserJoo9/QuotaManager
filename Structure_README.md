@@ -1184,61 +1184,78 @@ The Local Share subsystem (`quota/local_share.py`, `web/share.html`, and the das
 
 ---
 
-## Guest Captive Portal & Search Interception Engine
+## Guest Captive Portal & Vouchers
 
-When a new device connects to the network as a guest before administrative approval, it must be prevented from accessing general internet traffic while providing immediate visual feedback when the guest attempts any search query or web browsing.
+New guest devices can remain blocked pending administrator approval or redeem a
+single-use voucher for its exact allowance. Voucher codes are generated and
+stored by `quota/guest_vouchers.py` and `quota/db.py`; the submitted code is not
+returned by public status, logged in events, or exposed in failure messages.
 
-### 1. Packet Path & NAT Redirection
-- **Kernel nftables Set (`@pending_guests`)**:
-  - In `quota/nftables.py`, table `inet quota_gateway` (or `inet quota_nat`) defines an IPv4 set:
-    ```nft
-    set pending_guests {
-        type ipv4_addr;
-        flags interval;
-    }
-    ```
-  - Port 80 HTTP traffic from any client whose IP is currently in `@pending_guests` is redirected at line rate in `prerouting`:
-    ```nft
-    ip saddr @pending_guests tcp dport 80 redirect to :<web_port>
-    ```
-  - The destination rewrite diverts the flow from the forward path into local input, directing requests straight to the FastAPI gateway server.
-- **State Synchronization (`run.py` & `EngineSnapshot`)**:
-  - The maintenance loop identifies pending guests:
-    ```python
-    pending_guests = {
-        v["ip"] for mac, v in state.items()
-        if v.get("ip") and v.get("guest") and v.get("blocked")
-    }
-    ```
-  - Synchronized via `engine.update_state(ip_to_mac, blocked, list(pending_guests))` and surfaced in `EngineSnapshot.pending_guests`.
+### 1. Packet path and IPv4/IPv6 redirect
 
-### 2. HTTP Interception Middleware & Probe Handlers (`api/app.py`)
-- **OS Captive Network Probes**:
-  Mobile operating systems automatically emit HTTP probes when associating with a Wi-Fi network:
-  - Android / ChromeOS: `GET /generate_204`, `/gen_204`
-  - Apple iOS / iPadOS / macOS: `GET /hotspot-detect.html`
-  - Microsoft Windows: `GET /connecttest.txt`, `GET /ncsi.txt`
-  - Mozilla Firefox: `GET /canonical.html`
-  When a pending guest triggers any probe, the server returns a `302 Redirect` to `/guest/pending`. When approved or non-guest, standard captive probe success codes (e.g. `204 No Content` or `Microsoft NCSI`) are returned immediately.
-- **Search & Browsing Interception (`_security_middleware`)**:
-  - If incoming `client.host` is present in `snapshot.pending_guests`:
-  - Static assets (`/assets/*`, `/favicon.ico`) and status checks (`/api/guest/status`, `/guest/pending`) pass through unhindered.
-  - All other HTTP requests (search engine queries, direct domain browsing, etc.) are intercepted with `302 Found` redirecting to:
-    ```
-    /guest/pending?continue=<original_url>
-    ```
+- `quota/nftables.py` maintains the IPv4 `pending_guests` set; the IPv6 policy
+  helper in `quota/guest_portal_ipv6.py` maintains `pending_guests6`. Both redirect
+  pending-client **HTTP port 80 only** in the shared prerouting chain to the
+  configured web port. IPv6 uses `ip6 saddr @pending_guests6`; HTTPS is not
+  intercepted.
+- Every 15-second maintenance tick builds the pending address list from blocked
+  guests. It includes the current IPv4 address and every tracked IPv6 owner
+  mapping for those guest MACs (`blocked_guest_addresses`), then updates the
+  engine and `EngineSnapshot.pending_guests` with both families. The IPv6 set
+  sync cache is committed only after nftables commands succeed so failed updates
+  are retried. A failed set/chain prerequisite stops that install attempt before
+  it can append a redirect rule; the next tick retries the prerequisite sequence.
+- `quota/web_listener.py` resolves the configured web host into explicit sockets.
+  The default `*` and dual-family hostnames bind IPv4 and IPv6 on the same port,
+  with IPv6-only sockets to avoid mapped-address overlap. Numeric `0.0.0.0`
+  means IPv4 only; `::` means IPv6 only. An optional IPv6 socket failure for a
+  dual-stack listener leaves its IPv4 socket available. Setup preserves an
+  existing `web` section so a rerun does not replace an operator's listener
+  choice.
 
-### 3. Reactive UI & Auto-Redirect Lifecycle (`web/guest_pending.html`)
-- **Interface Structure**:
-  - Dark-themed, RTL-native glassmorphic page displaying detected device hostname/name, IP, MAC address, and live approval status badge.
-  - Includes a pulsing radar indicator indicating pending status (amber ⏳).
-- **Polling Loop & Zero-Click Reconnection**:
-  - The browser queries `GET /api/guest/status` every 3 seconds.
-  - As soon as the network administrator clicks "Accept" in the Quota Manager dashboard:
-    1. The device state transitions from blocked guest to active approved user.
-    2. `@pending_guests` removes the client IP in kernel nftables.
-    3. `/api/guest/status` returns `{"status": "approved", "quota_gb": ...}`.
-    4. The page instantly switches to emerald green (✅), plays a success animation, displays the granted quota slice, and initiates a 3-second countdown redirect to the guest's original requested URL or Google search.
+### 2. Pending-client access policy (`api/app.py`)
+
+When the source address is in `EngineSnapshot.pending_guests`, middleware permits
+only `/guest/pending`, `/api/guest/status`, the public
+`POST /api/guest/voucher/redeem`, `/assets/*`, `/js/*`, `/css/*`, `/fonts/*`, and
+`/favicon.ico`. Other paths redirect to `/guest/pending?continue=<original_url>`.
+This lets the page load its localized modules and redeem a code while the guest
+cannot use the gateway's other HTTP endpoints. The dashboard voucher endpoints
+(`GET/POST /api/guest/vouchers` and `POST /api/guest/vouchers/{code}/revoke`)
+require an authenticated administrator session.
+
+The public route binds a request to the current maintenance snapshot's
+source-address-to-MAC map; a stale DHCP lease alone cannot identify a guest.
+`is_pending_guest` is the shared state predicate used by state resolution, the
+API, and the SQLite redemption transaction. The transaction claims the code and
+updates both user and device under `BEGIN IMMEDIATE`, after checking the deny
+list again. Either the user or device may still be `guest_pending` while the
+other is already `ok`; `admin_off`, quota blocks, kicks, and MAC deny entries
+prevent redemption without consuming the voucher. Validation errors redact the
+submitted bearer code.
+
+`GET /api/network/ipv6/status` reports `firewall_ipv6` apply health and
+`portal_ipv6` availability, redirect configuration, pending-set application,
+listener binding, aggregate health, and the last error. These fields distinguish
+working gateway enforcement from merely having IPv6 enabled on the host.
+
+`GET /api/guest/status` stays `activating` for an IPv6 client until the pending
+guest set is confirmed applied, so a failed flush cannot leave a stale redirect
+while the page claims Internet is ready. An approved client whose IPv6 is
+quarantined for overflow or ambiguous ownership reports `limited`; its approval
+remains saved, `internet_ready` stays false, and IPv4 remains available. The
+guest page does not auto-redirect in this state.
+
+### 3. Voucher and status UI (`web/guest_pending.html`)
+
+The page polls `GET /api/guest/status` and submits codes to the public redemption
+route. Success reports the granted allowance without claiming internet access
+before the normal state sync completes. Invalid, expired, revoked, or already
+used codes receive the same generic response; repeated failures use the server's
+`Retry-After` value to show a cooldown. Arabic feedback is RTL and English is
+LTR. IPv6 approval waits for the kernel pending-set update before redirecting;
+ownership-quarantined clients see a limited-access explanation instead. Once
+approved, the pending address is removed on the next maintenance sync.
 
 ---
 
@@ -1549,7 +1566,7 @@ bundle:
                               #   drives the reset, 0 = calendar end)
 
 web:
-  host: 0.0.0.0               # listen on all interfaces (reachable from the LAN)
+  host: "*"                   # explicit IPv4 + IPv6 listeners when IPv6 is available
   port: 8080
 
 dhcp:
@@ -1749,6 +1766,11 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | GET/POST | `/api/bundle` | read / update bundle (`total_gb`, `reset_day`, or `add_gb` to recharge mid-month). A POST makes the dashboard the bundle owner (`bundle_source=dashboard`) |
 | POST | `/api/reset-month` | force an early period roll-over |
 | GET/POST | `/api/guest` | guest mode: auto-register new devices with their own small allowance; also the **guest-limit** cap (`limit`, default 2 — stops MAC-spoofing spam; **lowering it immediately admin-cuts the NEWEST over-cap guest users' devices**, oldest stay, raising never un-blocks), a default **guest speed limit** (`speed_limit_mbps`, 0 = unlimited — the tc shaper applies it as every guest account's aggregate ceiling, `min` with an explicit user cap) and the **STOP NEW CONNECTIONS** gate (`stop_new`) — dnsmasq *refuses* brand-new devices outright (app-owned `dhcp-host=<mac>,ignore` fragment, persisted refuse list, row-less kernel cut) while registered ones keep joining |
+| GET | `/api/guest/status` | **public, source-address scoped** — current guest approval state and allowance; `activating` waits for IPv6 portal-set application, while `limited` means IPv6 is quarantined and approval is saved but `internet_ready` is false; does not reveal voucher code or administrative voucher data |
+| POST | `/api/guest/voucher/redeem` | **public, source-address scoped** — redeem a single-use voucher for the pending guest; invalid, expired, revoked, used, and ineligible cases share a generic response; per-device failures can return `Retry-After` cooldown |
+| GET/POST | `/api/guest/vouchers` | **authenticated admin** — list voucher codes and status / create a one-time code with allowance and optional expiry; codes are never returned by public endpoints |
+| POST | `/api/guest/vouchers/{code}/revoke` | **authenticated admin** — revoke an unused voucher while retaining its administrative row |
+| GET | `/api/network/ipv6/status` | **authenticated** — IPv6 probe and coverage plus `firewall_ipv6` apply health and `portal_ipv6` redirect/set/listener health fields |
 | GET/POST | `/api/network` | speed-shaping settings: `enabled`, `total_down_mbps`, `total_up_mbps`, `aqm` — plus `vpn_share: {enabled, interface, status?}` from the DB (status = the cached applied state, present only when a manager is wired — `vpn_share.enabled: false` in config.yaml means boot without one) and `decline_random_macs` (a brand-new device with a randomized MAC is **refused at the DHCP level** — `dhcp-host=<mac>,ignore`, no device row; the POST accepts a one-shot `decline_random_macs_existing: true` to sweep devices already joined — only MACs with no vendor OUI, so legacy locally-administered products are never touched) |
 | GET/POST | `/api/mac-lists` | the operator MAC whitelist/blacklist: `{"allow": [...], "deny": [...]}` (each key optional, MACs lowercased/deduped/sorted on save, stored in the `mac_lists` table with a `(mac, kind)` key so a MAC can sit in BOTH lists). Enforcement is resolved, never persisted: `resolve_device_state` precedence = **deny list > user admin cut > device admin cut > allow list > quota (unless bypass) > ok** — a blacklisted MAC is always blocked even with `bypass` or an allow-list entry; a whitelisted MAC is never quota-blocked (manual cuts still win). Removing a MAC from a list restores it on the next 15 s tick. **Deletes write to the deny list**: `DELETE /api/users/{id}` / `DELETE /api/devices/{id}` blacklist every involved MAC permanently (see the quota-model section) |
 | GET/POST | `/api/updates` | self-update state + toggles: read `{enabled, auto_install, checked_at, latest_version, error, changelog, last_install}` / write `{enabled}` (`set_enabled` — a disabled box never dials GitHub, even a forced check refuses; re-enabling clears the last error). **404 when the updater isn't wired** (`updates.enabled: false` in config.yaml) |
@@ -1834,6 +1856,7 @@ QuotaManager/
 │   ├── db.py                 # SQLite schema + async access (aiosqlite); users table,
 │   │                         #   devices.user_id/bypass, speed-cap columns,
 │   │                         #   dns_history table + per-user history_days
+│   │                         #   guest_vouchers issue/redeem/revocation state
 │   ├── service.py            # per-user quota math, block fan-out + bypass precedence,
 │   │                         #   top-ups, bundle recharge, reset_day=0, period roll,
 │   │                         #   shaping settings (get/set)
@@ -1881,7 +1904,14 @@ QuotaManager/
 │   │                         #   ip forwarding, ULA gateway address, nftables.conf, DNS routing
 │   ├── flows.py              # FlowSampler: conntrack byte deltas -> per-device top remote destinations
 │   │                         #   (+ dnsmasq reply IP->name cache, off-thread reverse DNS)
+│   ├── guest_state.py        # shared interpretation of pending guest approval state
+│   ├── guest_vouchers.py     # secure one-time code generation + bounded per-device failure cooldown
+│   ├── guest_portal_ipv6.py # IPv6 pending guest set, address-family split, and redirect health
+│   ├── web_listener.py     # explicit same-port IPv4/IPv6 Uvicorn listener sockets
 │   ├── ipv6_probe.py         # Ipv6Probe: ISP IPv6 reachability probe (600 s, hysteresis)
+│   ├── ipv6_addresses.py     # canonical neighbor/static ownership, ambiguity, cap, coverage status
+│   ├── ipv6_firewall.py      # pure family-split IPv6 firewall renderer
+│   ├── firewall.py           # quota_firewall policy, safe apply, dual-stack bans and scan detection
 │   ├── ipv6_setup.py         # app-owned IPv6 host config: dnsmasq RA fragment, sysctl fragment,
 │   │                         #   box-DNS fix (nmcli), dnsmasq rollback, kill-switch
 │   ├── topology.py           # WAN-topology detection: is ppp0 up (for the WAN tab)?
@@ -1917,13 +1947,17 @@ QuotaManager/
     │                         #   + bypass, recharge
     ├── test_api.py           # REST API integration (incl. user CRUD, recharge,
     │                         #   reset-day-0, bundle_source ownership)
+    ├── test_guest_vouchers.py # voucher migration, redemption, and device-scoped cooldown
+    ├── test_guest_captive.py  # pending guest access policy, voucher page, and IPv6 portal status
+    ├── test_ipv6_addresses.py # canonical IPv6 ownership, ambiguity, global-path and cap coverage
+    ├── test_firewall.py      # fake nft renderer/apply, family policy, bans, scan and lockout
     ├── test_web_ui.py        # static UI served (top-bar tabs, Network panel)
     ├── test_shaping.py       # TcShaper vs a fake `tc` binary (command generation)
     ├── test_packaging.py     # GitHub-Actions release workflow + Debian control/
     │                         #   postinst/prerm + QUOTA_NO_APT guard (contract)
     ├── test_users_migration.py # legacy device-only DB -> users backfill
     ├── test_vendor.py        # OUI -> vendor lookup (MA-L/MA-M/MA-S longest-prefix)
-    ├── test_nftables.py      # NftablesEngine vs a fake `nft` binary (incl. ARP lock)
+    ├── test_nftables.py      # fake `nft` coverage for counters, ARP lock, and IPv6 portal retries
     ├── test_arp_scan.py      # ArpScanner + ARP frame build/parse
     ├── test_arp_lock.py      # ARP gateway-lock responder (fake frames/socket)
     ├── test_dnslog.py        # dnsmasq query-log parser + tailer + dns_history DB
@@ -1947,8 +1981,8 @@ QuotaManager/
     ├── test_wifi_probe.py    # airodump CSV parse + probe snapshot + thread smoke
     ├── test_updater.py       # version math + CHANGELOG parse + GitHub check +
     │                         #   systemd-run/apt install (fakes, no network)
-    └── test_run_wiring.py    # run.py wiring + live boot + bundle reconcile +
-                              #   dnsmasq lease sync + live-counter regression
+    └── test_run_wiring.py    # run.py wiring + dual-stack listener sockets + tick/engine address mapping +
+                              # live boot + bundle reconcile + dnsmasq lease sync
 ```
 
 Dependencies point downward only: `api → quota/core`, `quota → core`. The engine
@@ -2128,9 +2162,9 @@ fragments, so fresh installs and updates converge; no manual script re-run is ne
 
 **VPN share + IPv6.** VPN share policy-routes only the IPv4 client subnet, so `Gateway._ipv6_wan_wanted()` keeps `v6gate` closed while it is on (IPv6 would otherwise leak around the tunnel).
 
-**Box protection.** `in6guard` (input, priority -10) drops NEW inbound tcp/udp from outside `::1`/ULA/link-local — the box gets a global IPv6 address from the ISP router (`accept_ra=2`) and `quota_firewall` is IPv4-only. ICMPv6 (ND/RA) and DHCPv6 stay open. The dashboard binds `0.0.0.0` (IPv4), so it is not reachable over IPv6 at all.
+**Box protection.** `quota_firewall` runs at input priority -100 and now applies IPv6 address policy before `in6guard` (priority -10). `in6guard` still drops NEW inbound tcp/udp from outside `::1`/ULA/link-local — the box may get a global IPv6 address from the ISP router (`accept_ra=2`). ICMPv6 (ND/RA) and DHCPv6 stay open. The configured dashboard listener binds explicit IPv4 and IPv6 sockets when its host is wildcard or resolves to both families; a family-specific host remains family-specific.
 
-**Not covered yet.** `quota_firewall` bans/deny/geo rules and the captive-portal redirect are IPv4-only (blocked/pending guests are still cut over IPv6 via `@blocked6`).
+**Not covered yet.** Captive redirection handles HTTP port 80 only; it does not intercept HTTPS. The gateway can only enforce tracked IPv6 addresses for traffic that traverses it; upstream-router RA/default-route bypass remains outside this box. IPv6 quota-firewall policy does not publish box services or implement DNAT/DMZ.
 
 ### Lessons learned (IPv6 rollout, v0.4.x) — read before touching this area
 
@@ -2192,7 +2226,13 @@ Each item below was a real outage on a live gateway; the regression test is name
 ### Firewall persistence & self-heal (`quota/firewall.py`)
 - Runtime master = DB setting `firewall_config`; every `persist_config` also writes `<db dir>/firewall_config.json` and `load_config` restores the DB from it when the DB value is empty. Snapshots default to `<db dir>/firewall_snapshots` (never the app folder, which deploys replace).
 - **Revert semantics**: `safe_apply` captures the config that was running *before* persisting the new one (falling back to `firewall_last_good`, then the sanitized new config when it is the very first apply since boot), and `revert_last_good` re-applies it **and persists it**, so a restart never resurrects the reverted rules. A second apply followed by Revert goes back exactly one step, not to the first apply since boot. [`tests/test_firewall.py`]
-- LAN mode: `fw_forward` accepts the local subnets before custom rules, so custom *deny* rules whose source is a local subnet cannot match (the UI says so on the rules card); `sanitize` also refuses client-subnet-wide denies and bans of protected IPs.
+- `fw_allow`, `fw_deny`, `fw_bans`, and `fw_scan_watch` are IPv4 sets; `fw_allow6`, `fw_deny6`, `fw_bans6`, and `fw_scan_watch6` are their `ipv6_addr` counterparts. CIDR lists and geo prefixes are split by family. IPv6 custom rules use `ip6 saddr`/`ip6 daddr`, and an `icmp` protocol rule maps to `meta l4proto ipv6-icmp`.
+- The IPv6 rule builder receives one `RenderContext`. Family-neutral established, loopback, and Tailscale accepts are emitted once per applicable chain; address and TCP policy stays family-scoped, including separate IPv4/IPv6 SYN budgets.
+- LAN IPv6 policy accepts the configured `dhcp.ipv6_prefix` and gateway before applying address rules. The safe-apply sanitizer protects the configured IPv6 gateway/prefix and rejects custom rules whose source and destination use different address families. Ban and scan-detection state survives a ruleset apply in the matching family set.
+- IPv6 is deliberately not added to public box-service publishing, DNAT port-forwards, or DMZ. The sanitizer discards those IPv6 publishing inputs with a warning; WAN IPv6 remains default-deny for new inbound traffic unless an address-list or custom rule explicitly permits it.
+- `status.ipv4_*` and `status.ipv6_*` report family-specific availability, apply success, health, and last error. A failure in one family's rules does not erase a completed apply for the other family; a shared prerequisite or render failure leaves both unhealthy. `GET /api/network/ipv6/status` exposes the IPv6 fields under `firewall_ipv6`. Address-discovery coverage counts are separate from firewall apply health.
+- IPv6 accounting installs per-address counter rules for up to `IPV6_MAX_PER_MAC` known addresses per device. When a device exceeds the cap or has an ambiguous address owner, its IPv6 Internet traffic is quarantined by source/destination MAC in a bounded `blocked6_macs` set; IPv4 remains available and pending guests still receive captive-portal handling. This prevents unmetered traffic without assigning a conflicting address or building an unbounded per-address block set.
+- LAN mode: `fw_forward` accepts the local IPv4 subnets before custom rules; IPv6 uses the configured LAN prefix. `sanitize` also refuses client-subnet-wide denies and bans of protected addresses. [`tests/test_firewall.py`, `tests/test_api.py`]
 - `reconcile` (every tick) re-applies when `nft list table inet quota_firewall` fails (external `flush ruleset`), and clears a sticky `available=False` after 60 s (not when nft is missing).
 
 ## Open when everyone is out of quota (on by default)

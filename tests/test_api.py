@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import datetime
 import time
 from zoneinfo import ZoneInfo
@@ -45,6 +46,24 @@ def _login_wan(c: TestClient) -> None:
                   json={"password": "Str0ng!Passw0rd42"}).status_code == 200
 
 
+def _guest_snapshot(c: TestClient, ip_to_mac: dict[str, str], *,
+                    portal_ip_to_mac: dict[str, str] | None = None,
+                    pending_guests: set[str] | None = None,
+                    engine_available: bool = True,
+                    engine_state_sync_ok: bool = True,
+                    ipv6_pending_set_applied: bool = True,
+                    blocked_ipv6_macs: list[str] | None = None) -> None:
+    c.app.state.test_snapshot_holder.swap(EngineSnapshot(
+        ip_to_mac=ip_to_mac,
+        portal_ip_to_mac=(portal_ip_to_mac if portal_ip_to_mac is not None
+                          else dict(ip_to_mac)),
+        pending_guests=pending_guests or set(),
+        engine_available=engine_available,
+        engine_state_sync_ok=engine_state_sync_ok,
+        ipv6_pending_set_applied=ipv6_pending_set_applied,
+        blocked_ipv6_macs=blocked_ipv6_macs or []))
+
+
 @pytest.fixture
 def client(tmp_path):
     """A TestClient wired to a temp database and quota service."""
@@ -63,6 +82,7 @@ def client(tmp_path):
     _get_loop().run_until_complete(_init())
 
     app = create_app(database, service, holder)
+    app.state.test_snapshot_holder = holder
     with TestClient(app) as c:
         yield c, database, service
     _get_loop().run_until_complete(database.close())
@@ -810,6 +830,471 @@ def test_guest_speed_limit_round_trip(client):
     # negative values are rejected by the schema
     r = c.post("/api/guest", json={"speed_limit_mbps": -1})
     assert r.status_code == 422
+
+
+def test_guest_voucher_admin_create_list_revoke(client):
+    c, _, _ = client
+    body = {"quota_gb": 2.5, "comment": "Weekend visitor"}
+    assert c.post("/api/guest/vouchers", json=body).status_code == 401
+    assert c.get("/api/guest/vouchers").status_code == 401
+
+    _login(c)
+    created = c.post("/api/guest/vouchers", json=body)
+    assert created.status_code == 201, created.text
+    voucher = created.json()
+    code = voucher["code"]
+    assert voucher["status"] == "unused"
+    assert voucher["quota_gb"] == 2.5
+
+    listed = c.get("/api/guest/vouchers")
+    assert listed.status_code == 200
+    assert listed.json()["vouchers"][0]["code"] == code
+    assert listed.json()["vouchers"][0]["status"] == "unused"
+
+    revoked = c.post(f"/api/guest/vouchers/{code}/revoke")
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json() == {"ok": True, "status": "revoked"}
+    assert c.get("/api/guest/vouchers").json()["vouchers"][0]["status"] == "revoked"
+    assert c.post(f"/api/guest/vouchers/{code}/revoke").status_code == 409
+    assert c.post("/api/guest/vouchers", json={"quota_gb": 0}).status_code == 422
+    assert c.post("/api/guest/vouchers", json={"quota_gb": 0.001}).status_code == 422
+    for expiry in ("Infinity", "-Infinity", "NaN"):
+        assert c.post(
+            "/api/guest/vouchers",
+            content=(f'{{"quota_gb":1.0,"expires_at":{expiry}}}').encode(),
+            headers={"content-type": "application/json"},
+        ).status_code == 422
+
+
+def test_guest_voucher_redeems_for_one_pending_guest(client):
+    c, db, service = client
+    _login(c)
+    assert c.post("/api/guest", json={"enabled": True}).status_code == 200
+    code = c.post("/api/guest/vouchers", json={"quota_gb": 2.75}).json()["code"]
+
+    async def setup_guest():
+        dev = await db.upsert_device(
+            "aa:bb:cc:dd:ee:81", name="Visitor", quota_mode=_db.QUOTA_FIXED,
+            fixed_gb=0.0, guest=True)
+        await db.set_device_state(dev.id, "guest_pending")
+        await db.update_user(dev.user_id, block_state="guest_pending")
+        await db.set_lease(dev.mac, "192.168.2.81")
+        return dev
+
+    dev = _get_loop().run_until_complete(setup_guest())
+    _guest_snapshot(c, {"192.168.2.81": dev.mac},
+                    pending_guests={"192.168.2.81"})
+    with TestClient(c.app, client=("192.168.2.81", 45000)) as guest:
+        redeemed = guest.post("/api/guest/voucher/redeem", json={"code": f"  {code.lower()}  "})
+        assert redeemed.status_code == 200, redeemed.text
+        assert redeemed.json() == {"ok": True, "status": "approved", "quota_gb": 2.75}
+        status = guest.get("/api/guest/status").json()
+        assert status["status"] == "activating"
+        assert status["approved"] is False
+        assert status["enforcement_pending"] is True
+        assert code not in str(status)
+        _guest_snapshot(c, {"192.168.2.81": dev.mac}, pending_guests=set())
+        assert guest.get("/api/guest/status").json()["status"] == "approved"
+
+    user = _get_loop().run_until_complete(db.get_user(dev.user_id))
+    device = _get_loop().run_until_complete(db.get_device(device_id=dev.id))
+    assert user.fixed_gb == device.fixed_gb == 2.75
+    assert user.block_state == device.block_state == _db.BLOCK_OK
+
+
+def test_guest_voucher_failures_are_rate_limited_per_device(client):
+    c, db, _ = client
+    _login(c)
+    assert c.post("/api/guest", json={"enabled": True}).status_code == 200
+    valid_code = c.post("/api/guest/vouchers", json={"quota_gb": 1.5}).json()["code"]
+
+    async def setup_guest(mac, ip):
+        dev = await db.upsert_device(mac, name="Visitor", quota_mode=_db.QUOTA_FIXED,
+                                     fixed_gb=0.0, guest=True)
+        await db.set_device_state(dev.id, "guest_pending")
+        await db.update_user(dev.user_id, block_state="guest_pending")
+        await db.set_lease(mac, ip)
+
+    _get_loop().run_until_complete(setup_guest("aa:bb:cc:dd:ee:82", "192.168.2.82"))
+    _get_loop().run_until_complete(setup_guest("aa:bb:cc:dd:ee:83", "192.168.2.83"))
+    _guest_snapshot(c, {
+        "192.168.2.82": "aa:bb:cc:dd:ee:82",
+        "192.168.2.83": "aa:bb:cc:dd:ee:83",
+    })
+
+    with TestClient(c.app, client=("192.168.2.82", 45000)) as first_guest:
+        for _ in range(5):
+            failed = first_guest.post("/api/guest/voucher/redeem", json={"code": "wrong-code"})
+            assert failed.status_code == 400
+            assert "wrong-code" not in failed.text
+        throttled = first_guest.post("/api/guest/voucher/redeem", json={"code": valid_code})
+        assert throttled.status_code == 429
+        assert int(throttled.headers["Retry-After"]) > 0
+
+    with TestClient(c.app, client=("192.168.2.83", 45000)) as other_guest:
+        redeemed = other_guest.post("/api/guest/voucher/redeem", json={"code": valid_code})
+        assert redeemed.status_code == 200, redeemed.text
+
+
+def test_guest_voucher_respects_guest_mode_stop_new_and_admin_block(client):
+    c, db, _ = client
+    _login(c)
+    code = c.post("/api/guest/vouchers", json={"quota_gb": 1.0}).json()["code"]
+
+    async def setup_guest():
+        dev = await db.upsert_device(
+            "aa:bb:cc:dd:ee:84", name="Visitor", quota_mode=_db.QUOTA_FIXED,
+            fixed_gb=0.0, guest=True)
+        await db.set_device_state(dev.id, "guest_pending")
+        await db.update_user(dev.user_id, block_state="guest_pending")
+        await db.set_lease(dev.mac, "192.168.2.84")
+        return dev
+
+    dev = _get_loop().run_until_complete(setup_guest())
+    _guest_snapshot(c, {"192.168.2.84": dev.mac})
+    with TestClient(c.app, client=("192.168.2.84", 45000)) as guest:
+        # Guest mode is disabled by default.
+        denied = guest.post("/api/guest/voucher/redeem", json={"code": code})
+        assert denied.status_code == 403
+
+        assert c.post("/api/guest", json={"enabled": True, "stop_new": True}).status_code == 200
+        denied = guest.post("/api/guest/voucher/redeem", json={"code": code})
+        assert denied.status_code == 403
+
+        assert c.post("/api/guest", json={"stop_new": False}).status_code == 200
+        _get_loop().run_until_complete(db.set_device_state(dev.id, _db.BLOCK_ADMIN))
+        _get_loop().run_until_complete(db.update_user(dev.user_id, block_state=_db.BLOCK_ADMIN))
+        denied = guest.post("/api/guest/voucher/redeem", json={"code": code})
+        assert denied.status_code == 403
+
+    voucher = _get_loop().run_until_complete(db.get_guest_voucher(code))
+    assert voucher.used_at is None
+
+
+def test_guest_voucher_deny_list_does_not_consume_code(client):
+    c, db, service = client
+    _login(c)
+    assert c.post("/api/guest", json={"enabled": True}).status_code == 200
+    code = c.post("/api/guest/vouchers", json={"quota_gb": 1.0}).json()["code"]
+
+    async def setup_guest():
+        dev = await db.upsert_device(
+            "aa:bb:cc:dd:ee:85", name="Blocked visitor",
+            quota_mode=_db.QUOTA_FIXED, fixed_gb=0.0, guest=True)
+        await db.set_device_state(dev.id, _db.BLOCK_GUEST_PENDING)
+        await db.update_user(dev.user_id,
+                             block_state=_db.BLOCK_GUEST_PENDING)
+        await db.set_lease(dev.mac, "192.168.2.85")
+        await db.add_mac_list("deny", [dev.mac])
+        return dev
+
+    dev = _get_loop().run_until_complete(setup_guest())
+    _guest_snapshot(c, {"192.168.2.85": dev.mac})
+    with TestClient(c.app, client=("192.168.2.85", 45000)) as guest:
+        response = guest.post("/api/guest/voucher/redeem", json={"code": code})
+        assert response.status_code == 403
+        assert response.json()["detail"] == {"code": "device_blocked"}
+        _get_loop().run_until_complete(db.set_mac_list("deny", []))
+        service.register_kick_timeout(dev.mac, duration=60)
+        kicked = guest.post("/api/guest/voucher/redeem", json={"code": code})
+    assert kicked.status_code == 403
+    assert kicked.json()["detail"] == {"code": "device_blocked"}
+    voucher = _get_loop().run_until_complete(db.get_guest_voucher(code))
+    assert voucher.used_at is None
+
+
+def test_guest_voucher_requires_current_snapshot_identity_and_redacts_422(client):
+    c, db, _ = client
+    _login(c)
+    assert c.post("/api/guest", json={"enabled": True}).status_code == 200
+    code = c.post("/api/guest/vouchers", json={"quota_gb": 1.0}).json()["code"]
+
+    async def setup_guest():
+        dev = await db.upsert_device(
+            "aa:bb:cc:dd:ee:86", name="Visitor",
+            quota_mode=_db.QUOTA_FIXED, fixed_gb=0.0, guest=True)
+        await db.set_device_state(dev.id, _db.BLOCK_GUEST_PENDING)
+        await db.update_user(dev.user_id,
+                             block_state=_db.BLOCK_GUEST_PENDING)
+        await db.set_lease(dev.mac, "192.168.2.86")
+        return dev
+
+    _get_loop().run_until_complete(setup_guest())
+    # A historical DHCP lease alone is not enough to bind a bearer code to a
+    # current network client; the live snapshot is the identity source.
+    with TestClient(c.app, client=("192.168.2.86", 45000)) as guest:
+        unknown = guest.post("/api/guest/voucher/redeem", json={"code": code})
+    assert unknown.status_code == 403
+    assert unknown.json()["detail"] == {"code": "device_unrecognized"}
+
+    malformed = c.post("/api/guest/voucher/redeem", json={"code": ["secret"]})
+    assert malformed.status_code == 422
+    assert "secret" not in malformed.text
+    voucher = _get_loop().run_until_complete(db.get_guest_voucher(code))
+    assert voucher.used_at is None
+
+
+def test_guest_voucher_can_redeem_from_overflow_ipv6_portal_identity(client):
+    c, db, _ = client
+    _login(c)
+    assert c.post("/api/guest", json={"enabled": True}).status_code == 200
+    code = c.post("/api/guest/vouchers", json={"quota_gb": 1.0}).json()["code"]
+
+    async def setup_guest():
+        dev = await db.upsert_device(
+            "aa:bb:cc:dd:ee:87", name="Many-address visitor",
+            quota_mode=_db.QUOTA_FIXED, fixed_gb=0.0, guest=True)
+        await db.set_device_state(dev.id, _db.BLOCK_GUEST_PENDING)
+        await db.update_user(dev.user_id,
+                             block_state=_db.BLOCK_GUEST_PENDING)
+        return dev
+
+    dev = _get_loop().run_until_complete(setup_guest())
+    address = "fd00:da7a:2::87"
+    _guest_snapshot(c, {}, portal_ip_to_mac={address: dev.mac},
+                    pending_guests={address})
+    expanded = "fd00:da7a:0002:0000:0000:0000:0000:0087"
+    with TestClient(c.app, client=(expanded, 45000)) as guest:
+        status = guest.get("/api/guest/status")
+        assert status.json()["status"] == "pending"
+        redeemed = guest.post("/api/guest/voucher/redeem", json={"code": code})
+        assert redeemed.status_code == 200, redeemed.text
+        assert guest.get("/api/guest/status").json()["status"] == "activating"
+        _guest_snapshot(c, {}, portal_ip_to_mac={address: dev.mac},
+                        pending_guests=set())
+        assert guest.get("/api/guest/status").json()["status"] == "approved"
+
+
+def test_guest_status_uses_snapshot_identity_not_a_stale_lease(client):
+    c, db, _ = client
+    async def setup_guest():
+        dev = await db.upsert_device(
+            "aa:bb:cc:dd:ee:88", name="Stale visitor",
+            quota_mode=_db.QUOTA_FIXED, fixed_gb=0.0, guest=True)
+        await db.set_device_state(dev.id, _db.BLOCK_GUEST_PENDING)
+        await db.update_user(dev.user_id,
+                             block_state=_db.BLOCK_GUEST_PENDING)
+        await db.set_lease(dev.mac, "192.0.2.88")
+    _get_loop().run_until_complete(setup_guest())
+    _guest_snapshot(c, {})
+
+    with TestClient(c.app, client=("192.0.2.88", 45000)) as stale_client:
+        status = stale_client.get("/api/guest/status").json()
+    assert status["is_guest"] is False
+    assert status["mac"] == ""
+
+
+def test_guest_status_waits_for_enforcement_and_honors_deny_list(client):
+    c, db, _ = client
+    _login(c)
+    async def setup_guest():
+        device = await db.upsert_device(
+            "aa:bb:cc:dd:ee:89", name="Approved visitor",
+            quota_mode=_db.QUOTA_FIXED, fixed_gb=1.0, guest=True)
+        await db.set_device_state(device.id, _db.BLOCK_GUEST_PENDING)
+        await db.update_user(device.user_id,
+                             block_state=_db.BLOCK_GUEST_PENDING)
+        await db.set_lease(device.mac, "192.168.2.89")
+        return device
+
+    device = _get_loop().run_until_complete(setup_guest())
+    address = "192.168.2.89"
+    _guest_snapshot(c, {address: device.mac}, pending_guests={address})
+    assert c.post(f"/api/guest/{device.id}/approve").status_code == 200
+
+    with TestClient(c.app, client=(address, 45000)) as guest:
+        pending_activation = guest.get("/api/guest/status").json()
+        assert pending_activation["status"] == "activating"
+        assert pending_activation["approved"] is False
+        assert pending_activation["enforcement_pending"] is True
+
+        _guest_snapshot(c, {address: device.mac}, pending_guests=set(),
+                        engine_state_sync_ok=False)
+        failed_sync = guest.get("/api/guest/status").json()
+        assert failed_sync["status"] == "activating"
+        assert failed_sync["internet_ready"] is False
+
+        _guest_snapshot(c, {address: device.mac}, pending_guests=set(),
+                        engine_state_sync_ok=True)
+        active = guest.get("/api/guest/status").json()
+        assert active["status"] == "approved"
+        assert active["internet_ready"] is True
+
+        _guest_snapshot(c, {address: device.mac}, pending_guests=set(),
+                        engine_available=False)
+        unavailable = guest.get("/api/guest/status").json()
+        assert unavailable["status"] == "activating"
+        assert unavailable["approved"] is False
+
+        _get_loop().run_until_complete(db.add_mac_list("deny", [device.mac]))
+        denied = guest.get("/api/guest/status").json()
+        assert denied["status"] == "blocked"
+        assert denied["approved"] is False
+        assert denied["blocked"] is True
+
+
+def test_ipv6_guest_status_waits_for_portal_apply_and_reports_quarantine(client):
+    c, db, _ = client
+    _login(c)
+    address6 = "2001:db8::89"
+    address4 = "192.168.2.89"
+
+    async def setup_guest():
+        device = await db.upsert_device(
+            "aa:bb:cc:dd:ee:89", name="Approved IPv6 visitor",
+            quota_mode=_db.QUOTA_FIXED, fixed_gb=1.0, guest=True)
+        await db.set_device_state(device.id, _db.BLOCK_GUEST_PENDING)
+        await db.update_user(device.user_id,
+                             block_state=_db.BLOCK_GUEST_PENDING)
+        await db.set_lease(device.mac, address4)
+        return device
+
+    device = _get_loop().run_until_complete(setup_guest())
+    both_addresses = {address4: device.mac, address6: device.mac}
+    _guest_snapshot(c, both_addresses, pending_guests={address6},
+                    ipv6_pending_set_applied=False)
+    assert c.post(f"/api/guest/{device.id}/approve").status_code == 200
+
+    with TestClient(c.app, client=(address6, 45000)) as guest6:
+        # A failed nft flush can leave the old captive redirect installed.
+        _guest_snapshot(c, both_addresses, pending_guests=set(),
+                        ipv6_pending_set_applied=False)
+        failed_apply = guest6.get("/api/guest/status").json()
+        assert failed_apply["status"] == "activating"
+        assert failed_apply["approval_saved"] is True
+        assert failed_apply["internet_ready"] is False
+
+        _guest_snapshot(c, both_addresses, pending_guests=set(),
+                        ipv6_pending_set_applied=True)
+        active = guest6.get("/api/guest/status").json()
+        assert active["status"] == "approved"
+        assert active["internet_ready"] is True
+
+        _guest_snapshot(c, both_addresses, pending_guests=set(),
+                        ipv6_pending_set_applied=True,
+                        blocked_ipv6_macs=[device.mac])
+        limited = guest6.get("/api/guest/status").json()
+        assert limited["status"] == "limited"
+        assert limited["approval_saved"] is True
+        assert limited["internet_ready"] is False
+        assert limited["ipv6_quarantined"] is True
+
+    with TestClient(c.app, client=(address4, 45000)) as guest4:
+        ipv4 = guest4.get("/api/guest/status").json()
+    assert ipv4["status"] == "approved"
+    assert ipv4["internet_ready"] is True
+
+
+def test_immediate_admin_sync_preserves_other_devices_ipv6_quarantine(client):
+    c, db, service = client
+    quarantined_mac = "aa:bb:cc:dd:ee:a1"
+    removed_mac = "aa:bb:cc:dd:ee:a2"
+    async def setup_devices():
+        user_a = await db.create_user(name="IPv6 overflow")
+        device_a = await db.upsert_device(quarantined_mac, user_id=user_a.id)
+        await db.set_lease(quarantined_mac, "192.168.2.161")
+        user_b = await db.create_user(name="Kicked device")
+        device_b = await db.upsert_device(removed_mac, user_id=user_b.id)
+        await db.set_lease(removed_mac, "192.168.2.162")
+        return device_a, device_b
+
+    device_a, device_b = _get_loop().run_until_complete(setup_devices())
+    holder = c.app.state.test_snapshot_holder
+    address6 = "fd00:da7a:2::a1"
+    holder.swap(EngineSnapshot(
+        ip_to_mac={"192.168.2.161": quarantined_mac, address6: quarantined_mac},
+        portal_ip_to_mac={"192.168.2.161": quarantined_mac,
+                          address6: quarantined_mac},
+        blocked_ipv6_macs=[quarantined_mac]))
+    sync_done = threading.Event()
+    updates = []
+
+    class Engine:
+        available = True
+
+        def update_state(self, ip_to_mac, blocked, pending_guests=None,
+                         blocked_ipv6_macs=None):
+            updates.append((dict(ip_to_mac), list(blocked_ipv6_macs or [])))
+            sync_done.set()
+
+    app = create_app(db, service, holder, engine=Engine())
+    with TestClient(app) as admin:
+        _login(admin)
+        response = admin.delete(f"/api/devices/{device_b.id}?blacklist=true")
+        assert response.status_code == 200
+        assert sync_done.wait(timeout=2)
+
+    assert updates
+    assert address6 in updates[-1][0]
+    assert quarantined_mac in updates[-1][1]
+    assert device_a.mac == quarantined_mac
+
+
+@pytest.mark.parametrize(("setting", "value", "expected_code"), [
+    ("stop_new_connections", "1", "new_guests_paused"),
+    ("guest_mode", "0", "guest_mode_disabled"),
+])
+def test_guest_voucher_rechecks_controls_after_request_precheck(
+        client, monkeypatch, setting, value, expected_code):
+    c, db, _ = client
+    _login(c)
+    assert c.post("/api/guest", json={"enabled": True}).status_code == 200
+    code = c.post("/api/guest/vouchers", json={"quota_gb": 1.0}).json()["code"]
+
+    async def setup_guest():
+        dev = await db.upsert_device(
+            "aa:bb:cc:dd:ee:89", name="Queued visitor",
+            quota_mode=_db.QUOTA_FIXED, fixed_gb=0.0, guest=True)
+        await db.set_device_state(dev.id, _db.BLOCK_GUEST_PENDING)
+        await db.update_user(dev.user_id,
+                             block_state=_db.BLOCK_GUEST_PENDING)
+        return dev
+
+    dev = _get_loop().run_until_complete(setup_guest())
+    _guest_snapshot(c, {"192.168.2.89": dev.mac})
+    original = db.redeem_guest_voucher_for_device
+
+    async def change_control_then_redeem(submitted_code, mac):
+        await db.set_setting(setting, value)
+        return await original(submitted_code, mac)
+
+    monkeypatch.setattr(db, "redeem_guest_voucher_for_device",
+                        change_control_then_redeem)
+    with TestClient(c.app, client=("192.168.2.89", 45000)) as guest:
+        response = guest.post("/api/guest/voucher/redeem", json={"code": code})
+    assert response.status_code == 403
+    assert response.json()["detail"] == {"code": expected_code}
+    assert _get_loop().run_until_complete(db.get_guest_voucher(code)).used_at is None
+
+
+def test_guest_voucher_does_not_approve_a_shared_guest_account(client):
+    c, db, _ = client
+    _login(c)
+    assert c.post("/api/guest", json={"enabled": True}).status_code == 200
+    code = c.post("/api/guest/vouchers", json={"quota_gb": 1.0}).json()["code"]
+
+    async def setup_group():
+        user = await db.create_user(
+            name="Shared guest", quota_mode=_db.QUOTA_FIXED,
+            fixed_gb=0.0, guest=True)
+        devices = []
+        for last_octet in (90, 91):
+            dev = await db.upsert_device(
+                f"aa:bb:cc:dd:ee:{last_octet:02x}", name="Shared visitor",
+                quota_mode=_db.QUOTA_FIXED, fixed_gb=0.0,
+                user_id=user.id, guest=True)
+            await db.set_device_state(dev.id, _db.BLOCK_GUEST_PENDING)
+            devices.append(dev)
+        await db.update_user(user.id, block_state=_db.BLOCK_GUEST_PENDING)
+        return devices
+
+    devices = _get_loop().run_until_complete(setup_group())
+    _guest_snapshot(c, {"192.168.2.90": devices[0].mac})
+    with TestClient(c.app, client=("192.168.2.90", 45000)) as guest:
+        response = guest.post("/api/guest/voucher/redeem", json={"code": code})
+    assert response.status_code == 403
+    assert response.json()["detail"] == {"code": "guest_account_shared"}
+    assert _get_loop().run_until_complete(db.get_guest_voucher(code)).used_at is None
 
 
 def test_guest_quota_updates_existing_guest(client):
@@ -2405,6 +2890,61 @@ def test_device_ip6_in_dashboard_and_list(client):
     assert target_dev2["ip6"] == "fd00:1234::77"
 
 
+def test_device_payload_exposes_ipv6_inventory_and_coverage(tmp_path):
+    mac = "aa:bb:cc:dd:ee:66"
+    conflicted_mac = "aa:bb:cc:dd:ee:67"
+    loop = asyncio.new_event_loop()
+    database = _db.Database(tmp_path / "ipv6-inventory.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    loop.run_until_complete(database.connect())
+    loop.run_until_complete(service.ensure_period())
+    device = loop.run_until_complete(database.upsert_device(
+        mac, name="Multi IPv6", quota_mode=_db.QUOTA_FIXED, fixed_gb=4.0))
+    loop.run_until_complete(database.set_lease(mac, "192.168.2.66"))
+    loop.run_until_complete(database.set_static_lease(
+        mac, "192.168.2.66", ip6="fd00:da7a:2::66"))
+    conflicted = loop.run_until_complete(database.upsert_device(
+        conflicted_mac, name="Conflicted IPv6", quota_mode=_db.QUOTA_FIXED,
+        fixed_gb=4.0))
+    loop.run_until_complete(database.set_static_lease(
+        conflicted_mac, "192.168.2.67", ip6="fd00:da7a:2::67"))
+    app = create_app(
+        database, service, SnapshotHolder(),
+        ipv6_addresses_getter=lambda: {mac: [
+            "fd00:da7a:2::67", "2606:4700:4700::66"]},
+        ipv6_coverage_getter=lambda: {
+            mac: ("partial", "address_cap_exceeded"),
+            conflicted_mac: ("partial", "ambiguous_address_owner")})
+    try:
+        with TestClient(app) as c:
+            _login(c)
+            dashboard = c.get("/api/dashboard")
+            assert dashboard.status_code == 200
+            view = next(item for item in dashboard.json()["devices"]
+                        if item["id"] == device.id)
+            assert view["ipv4_addresses"] == ["192.168.2.66"]
+            assert set(view["ipv6_addresses"]) == {
+                "fd00:da7a:2::66", "fd00:da7a:2::67", "2606:4700:4700::66"}
+            assert view["ipv6_enforcement"] == "partial"
+            assert view["ipv6_enforcement_reason"] == "address_cap_exceeded"
+
+            listed = c.get("/api/devices")
+            listed_view = next(item for item in listed.json()
+                               if item["id"] == device.id)
+            assert listed_view["ipv6_addresses"] == view["ipv6_addresses"]
+            assert listed_view["ipv6_enforcement"] == "partial"
+
+            conflicted_view = next(item for item in dashboard.json()["devices"]
+                                   if item["id"] == conflicted.id)
+            assert conflicted_view["ipv6_addresses"] == ["fd00:da7a:2::67"]
+            assert conflicted_view["ipv6_enforcement"] == "partial"
+            assert conflicted_view["ipv6_enforcement_reason"] == \
+                "ambiguous_address_owner"
+    finally:
+        loop.run_until_complete(database.close())
+        loop.close()
+
+
 # -- software updates (Admin tab) ----------------------------------------------
 
 def test_updates_unwired_404_and_snapshot_none(client):
@@ -2439,7 +2979,7 @@ def test_updates_round_trip(tmp_path):
 
     installed = []
     up = Updater(
-        database, current_version="0.2.0",
+        database, current_version="0.2.0", install_kind="deb",
         fetch_json=lambda url, timeout=20: RELEASE,
         fetch_text=lambda url, timeout=20: CHANGELOG,
         download=lambda url, dest, timeout=120: None,
@@ -2847,6 +3387,44 @@ def test_ipv6_status_and_probe_endpoints(tmp_path):
         # 3. Subsequent status check
         st2 = c.get("/api/network/ipv6/status").json()
         assert st2["wan_ipv6_active"] is True
+    _get_loop().run_until_complete(database.close())
+
+
+def test_ipv6_status_reports_firewall_policy_apply_health(tmp_path):
+    class FakeFirewall:
+        def __init__(self):
+            self.applied = True
+            self.last_error = ""
+
+        def status(self):
+            return {
+                "ipv6_available": True,
+                "ipv6_enabled": True,
+                "ipv6_applied": self.applied,
+                "ipv6_healthy": self.applied,
+                "ipv6_last_error": self.last_error,
+            }
+
+    firewall = FakeFirewall()
+    database = _db.Database(tmp_path / "ipv6-firewall-api.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    _get_loop().run_until_complete(database.connect())
+    app = create_app(database, service, SnapshotHolder(), firewall=firewall)
+    with TestClient(app) as c:
+        _login(c)
+        status = c.get("/api/network/ipv6/status").json()
+        assert status["firewall_ipv6"] == {
+            "available": True, "enabled": True, "applied": True,
+            "healthy": True, "last_error": ""}
+
+        firewall.applied = False
+        firewall.last_error = "nft set apply failed"
+        status = c.get("/api/network/ipv6/status").json()["firewall_ipv6"]
+        assert status["available"] is True
+        assert status["enabled"] is True
+        assert status["applied"] is False
+        assert status["healthy"] is False
+        assert status["last_error"] == "nft set apply failed"
     _get_loop().run_until_complete(database.close())
 
 
