@@ -41,7 +41,7 @@ import subprocess
 import time
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, TYPE_CHECKING
 
 import uvicorn
 
@@ -65,6 +65,18 @@ from quota.topology import (check_internet, check_internet_dns, detect_ppp,
                             restart_pppoe)
 from quota.updater import Updater
 
+if TYPE_CHECKING:
+    # Concrete (nullable) types for the optional subsystem managers. These are
+    # imported for type-checking only; the runtime imports stay lazy inside the
+    # factory methods so an optional subsystem's module is never a hard import.
+    from quota.arp_lock import ArpLock
+    from quota.ipv6_probe import Ipv6Probe
+    #: ArpRttProbe is imported at runtime above (line 59) — not repeated here.
+    from quota.shaping import TcShaper
+    from quota.tun2socks import Tun2socksManager
+    from quota.vpnshare import VpnShareManager
+    from quota.wifi_probe import WifiProbe
+
 log = logging.getLogger("quota.run")
 
 
@@ -74,7 +86,6 @@ _VPN_CLIENT_RE = re.compile(r"v2ray|sing[-_ ]?box|xray|tun2socks",
 
 
 def _default_run_command(argv: list[str]) -> tuple[int, str]:
-    import subprocess
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=10)
         return proc.returncode, proc.stdout
@@ -92,6 +103,28 @@ _NEIGH_PRESENT_STATES = frozenset({"REACHABLE"})
 #: number is capped (newest-seen wins is not knowable here; ULA first, stable).
 IPV6_MAX_PER_MAC = 8
 
+#: Seconds between maintenance ticks (the heartbeat that flushes counters,
+#: re-evaluates blocks, and pushes enforcement maps to the engine).
+MAINTENANCE_INTERVAL = 15.0
+#: Clamp for the measured flush interval reported in the snapshot's
+#: ``interval_s`` — keeps it sane when the engine stalls between flushes.
+FLUSH_INTERVAL_MIN = 1.0
+FLUSH_INTERVAL_MAX = 120.0
+#: How many consecutive latency-probe intervals may pass with no fresh sweep
+#: before the responder map is cleared (every LED goes grey).
+LATENCY_STALE_MULTIPLIER = 3
+#: Conservative WAN totals (Mbps) engaged when VPN share is active but the
+#: operator hasn't set measured through-VPN speeds.
+VPN_BASELINE_DOWN_MBPS = 30.0
+VPN_BASELINE_UP_MBPS = 10.0
+#: Seconds allowed to resolve a VPN node's server hostname (cached per name).
+DNS_RESOLVE_TIMEOUT_SEC = 3.0
+#: Cache TTL (seconds) for resolved VPN-node IPs: hits outlive misses.
+NODE_IP_CACHE_TTL_HIT_SEC = 600
+NODE_IP_CACHE_TTL_MISS_SEC = 120
+#: Seconds between network self-heal repair attempts on a maintenance tick.
+NETWORK_HEAL_BACKOFF_SEC = 60.0
+
 
 def _iter_json_neigh(out: str):
     """Yield parsed rows of ``ip -j neigh`` JSON, tolerating junk.
@@ -100,8 +133,6 @@ def _iter_json_neigh(out: str):
     Older versions may interleave plain-text lines — each is skipped. A
     corrupted/partial payload degrades to no rows (never raises).
     """
-    import json as _json
-
     text = (out or "").strip()
     if not text:
         return
@@ -109,7 +140,7 @@ def _iter_json_neigh(out: str):
     if start < 0:
         return
     try:
-        rows = _json.loads(text[start:])
+        rows = json.loads(text[start:])
     except ValueError:
         return
     if not isinstance(rows, list):
@@ -289,18 +320,18 @@ class Gateway:
         self.service = QuotaService(self.database, timezone=cfg.timezone)
         self.holder = SnapshotHolder()
         self.engine: NftablesEngine | None = None
-        self.shaper: object | None = None  # quota.shaping.TcShaper (tc/ifb)
+        self.shaper: TcShaper | None = None
         self.dns_manager: _dns_rules.DnsRuleManager | None = None  # domain filtering
         #: VPN-share policy routing (quota.vpnshare.VpnShareManager); None
         #: when cfg.vpn_share.enabled is false. Reconciles the client-subnet
         #: routing into the box's tunnel + the engine's gateway-meter
         #: suspension on every tick (and right after a Network-tab toggle).
-        self.vpn_manager: object | None = None
-        #: tun2socks auto-provisioner (quota.tun2socks.Tun2socksManager);
-        #: None when cfg.vpn_share.tun2socks is false. Bridges userspace
+        self.vpn_manager: VpnShareManager | None = None
+        #: tun2socks auto-provisioner (quota.tun2socks.Tun2socksManager); None
+        #: when cfg.vpn_share.tun2socks is false. Bridges userspace
         #: VPN clients (v2rayN — no kernel tun) by downloading the pinned
         #: binary on first use and spawning it against the client's SOCKS.
-        self.tun2socks_manager: object | None = None
+        self.tun2socks_manager: Tun2socksManager | None = None
         #: last VPN-share kernel status, surfaced through /api/network's
         #: ``vpn_share.status`` key (no DB/subprocess reads on the request
         #: path — the tick owns the probing).
@@ -314,7 +345,7 @@ class Gateway:
         self._vpn_allowed: set[str] = set()
         #: injectable learner (tests fake the `ss` probe); default _learn_vpn_servers
         self._vpn_learn: Callable[..., set[str]] = _learn_vpn_servers
-        self.arp_lock: object | None = None  # quota.arp_lock.ArpLock (opt-in)
+        self.arp_lock: ArpLock | None = None  # quota.arp_lock.ArpLock (opt-in)
         #: Kernel firewall (quota.firewall.FirewallManager — the separate
         #: ``inet quota_firewall`` nftables table layered BEFORE the quota
         #: engine, forward/input priority -100). Built in startup() AFTER the
@@ -387,7 +418,6 @@ class Gateway:
         self._stop_event = asyncio.Event()
         #: last audit-trail (events table) prune's clock, for the hourly gate
         self._last_events_prune = time.monotonic()
-        self._last_wan_renew = time.monotonic()
         #: last-applied tc state, mirrored out of the shaper for the Network
         #: panel's "applying…" indicator (shaper.applied is a property — read
         #: it once per tick, off the tc call itself). Defaults assume applied
@@ -402,7 +432,7 @@ class Gateway:
         #: air in monitor mode; the snapshot drives the yield check in
         #: _maybe_latency_tick (when the monitor probe is available, the
         #: ARP-RTT probe yields).
-        self.wifi_probe: object | None = None
+        self.wifi_probe: WifiProbe | None = None
         #: probe snapshot mirrored for the API (availability check).
         self._wifi_probe_state: dict[str, object] = {
             "available": False, "ssids": [], "error": ""}
@@ -411,7 +441,7 @@ class Gateway:
         #: fallback the monitor probe hands to when the box's WiFi module can't
         #: sniff the air. Built in __init__ (no sockets opened); tests inject
         #: a fake. None when disabled in config.
-        self.latency_probe: object | None = None
+        self.latency_probe: ArpRttProbe | None = None
         lcfg = getattr(cfg.network, "latency_probe", None)
         if lcfg is not None and getattr(lcfg, "enabled", True):
             self.latency_probe = ArpRttProbe(
@@ -438,7 +468,7 @@ class Gateway:
         #: then is the neighbor table a trustworthy presence source.
         self._neigh_collected = False
         #: IPv6 ISP probe + (ULA/global IPv6 address -> MAC) from `ip -6 neigh`
-        self.ipv6_probe: object | None = None
+        self.ipv6_probe: Ipv6Probe | None = None
         self._ipv6_neigh: dict[str, str] = {}
         #: MACs seen using a router-assigned GLOBAL IPv6 address (they route
         #: around this box — uncounted and uncuttable until the router's RA is off)
@@ -697,7 +727,7 @@ class Gateway:
             if reason == "tick" and not getattr(self, "_net_watch", False):
                 return []          # only after the real startup has built the rules
             now = time.monotonic()
-            if reason == "tick" and now - getattr(self, "_last_heal_mono", -999.0) < 60.0:
+            if reason == "tick" and now - getattr(self, "_last_heal_mono", -999.0) < NETWORK_HEAL_BACKOFF_SEC:
                 return []          # back off after a repair attempt
             problems = self._net_problems()
             if not problems:
@@ -842,134 +872,118 @@ class Gateway:
             self.firewall.set_topology_override(None)
 
     async def _persist_lease(self, mac: str, ip: str) -> None:
+        """Record a DHCP lease and auto-register an unknown device."""
         try:
             await self.database.upsert_lease(mac, ip, self.cfg.dhcp.lease_hours)
-            # Auto-register unknown MACs so they appear in the dashboard. With
-            # guest mode on, a brand-new device becomes a GUEST account instead
-            # of a normal managed user.
             existing = await self.database.get_device(mac=mac)
-            if existing is None:
-                # Blacklisted MACs (manual delete / Network-tab deny list) never
-                # auto-register, whatever their ownership state. Fetched only
-                # for unknown MACs (a tiny query on a ~15 s tick).
-                deny_list = set(await self.database.get_mac_list("deny"))
-                # A manually-deleted device/user stays deleted while its device
-                # is still on the network: the delete wrote the MAC to the
-                # deny list (permanent blacklist), and run.py must NOT
-                # auto-register it again. Checked FIRST, before the guest-mode
-                # branch: gating on guest mode would re-register a blacklisted
-                # device as a NORMAL user the moment guest mode is turned off
-                # while the device is still connected — violating "stays
-                # deleted while present". The lease binding above is kept, so
-                # the engine still sees the IP and keeps dropping the MAC's
-                # packets (snapshot_state's row-less deny pass). Un-blacklisting
-                # the MAC in the Network tab is the ONLY way back in.
-                if mac.lower() in deny_list:
-                    log.info("blacklisted MAC %s stays deleted — not "
-                             "re-registered (%s)", mac, ip)
-                    return
-                if self.service.is_temporarily_kicked(mac):
-                    log.info("kicked MAC %s is in 5s cooldown — not "
-                             "re-registered (%s)", mac, ip)
-                    return
-                if await self.service.stop_new_connections():
-                    # "STOP NEW CONNECTIONS": a brand-new MAC is refused at
-                    # the DHCP level — dnsmasq ignores it, so it never gets
-                    # an IP to block and never registers (no "unsigned user"
-                    # row). The lease just handed out before the box learned
-                    # the MAC is kernel-cut via snapshot_state's row-less
-                    # refused pass until it expires. Already-registered
-                    # devices are untouched (they never reach this branch).
-                    added = await self.service.add_refused_mac(mac)
-                    if added:
-                        ok = await self._sync_refuse_fragment()
-                        if ok:
-                            await self.database.add_event(
-                                f"New connection refused at DHCP: {mac} "
-                                f"({ip}) — STOP NEW CONNECTIONS is on",
-                                "warn")
-                        else:
-                            # Fragment unavailable (no root / no dnsmasq
-                            # dir): fall back to the legacy registered +
-                            # admin-blocked path so the device is still
-                            # controlled.
-                            dev = await self.database.upsert_device(
-                                mac, name="", quota_mode=_db.QUOTA_DISABLED,
-                                fixed_gb=0.0)
-                            await self.database.set_device_state(
-                                dev.id, _db.BLOCK_ADMIN)
-                            await self.database.add_event(
-                                f"New connection blocked: {dev.mac} ({ip}) "
-                                f"— STOP NEW CONNECTIONS is on (DHCP "
-                                f"refusal unavailable)", "warn", dev.id)
-                    return
-                elif (await self.service.decline_random_macs()
-                        and self.service.is_random_mac(mac)):
-                    # "Decline random MACs": a brand-new device with a
-                    # randomized (locally-administered) privacy MAC is refused
-                    # at the DHCP level — dnsmasq ignores it, so it never gets
-                    # an IP to block and never registers (no "unsigned user"
-                    # row). Random MACs carry no vendor OUI, so the box can't
-                    # identify or budget them; the admin gates them until they
-                    # rejoin with their real address. A real (globally-unique)
-                    # MAC never reaches this branch. The lease just handed out
-                    # is kernel-cut via snapshot_state's row-less refused pass.
-                    added = await self.service.add_refused_random_mac(mac)
-                    if added:
-                        ok = await self._sync_refuse_fragment()
-                        if ok:
-                            await self.database.add_event(
-                                f"New connection refused at DHCP: {mac} "
-                                f"({ip}) — randomized (privacy) MAC declined",
-                                "warn")
-                        else:
-                            # Fragment unavailable (no root / no dnsmasq
-                            # dir): fall back to the legacy registered +
-                            # admin-blocked path so the device is still
-                            # controlled.
-                            dev = await self.database.upsert_device(
-                                mac, name="", quota_mode=_db.QUOTA_DISABLED,
-                                fixed_gb=0.0)
-                            await self.database.set_device_state(
-                                dev.id, _db.BLOCK_ADMIN)
-                            await self.database.add_event(
-                                f"New connection blocked: {dev.mac} ({ip}) — "
-                                f"randomized (privacy) MAC declined (DHCP "
-                                f"refusal unavailable)", "warn", dev.id)
-                    return
-                elif await self.service.is_guest_mode():
-                    # Guest mode is active: new guest devices are registered in the
-                    # pending lock (0 GB allowance, admin-cut) until admin approves.
-                    dev = await self.database.upsert_device(
-                        mac, name="", quota_mode=_db.QUOTA_FIXED,
-                        fixed_gb=0.0, guest=True)
-                    await self.database.set_device_state(
-                        dev.id, _db.BLOCK_ADMIN)
-                    if dev.user_id:
-                        await self.database.update_user(
-                            dev.user_id, block_state=_db.BLOCK_ADMIN)
-                    await self.database.add_event(
-                        f"New GUEST on network: {dev.mac} ({ip}) — "
-                        f"awaiting admin approval", "info", dev.id)
-                else:
-                    # Brand-new device: mint its user in the DISABLED
-                    # onboarding lock — 0 GB, no auto share, kernel-cut until
-                    # the admin assigns shared or fixed in the modal.
-                    dev = await self.database.upsert_device(
-                        mac, name="", quota_mode=_db.QUOTA_DISABLED,
-                        fixed_gb=0.0)
-                    await self.database.add_event(
-                        f"New device on network: {dev.mac} ({ip}) — "
-                        f"quota unassigned (0 GB, awaiting admin)",
-                        "info", dev.id)
-                # A brand-new device must receive its allowance BEFORE the
-                # next evaluate_blocks run, or allowances.get(mac) returns 0.0
-                # and the device is instantly blocked for "quota exceeded".
-                await self.service.recompute_allowances()
-                self._new_devices_detected = True
-                log.info("auto-registered new device %s (%s)", mac, ip)
+            if existing is not None:
+                return  # known device: binding refreshed, nothing else to do
+            await self._register_new_device(mac, ip)
         except Exception:  # noqa: BLE001
             log.exception("failed to persist lease %s -> %s", mac, ip)
+
+    async def _register_new_device(self, mac: str, ip: str) -> None:
+        """Register a brand-new DHCP device.
+
+        Branches, in order: blacklist (permanent delete), kick cooldown,
+        STOP-NEW refusal, decline-random refusal, guest-mode pending approval,
+        plain disabled onboarding. Blacklisted / kicked / refused MACs return
+        early (no device row, no allowance recompute). Guest and onboarding
+        fall through to the shared allowance recompute below.
+        """
+        # Blacklisted MACs (manual delete / Network-tab deny list) never
+        # auto-register, whatever their ownership state. Checked FIRST, before
+        # the guest-mode branch: gating on guest mode would re-register a
+        # blacklisted device as a normal user the moment guest mode is turned
+        # off while the device is still connected — violating "stays deleted
+        # while present". The lease binding above is kept, so the engine still
+        # sees the IP and keeps dropping the MAC's packets.
+        deny_list = set(await self.database.get_mac_list("deny"))
+        if mac.lower() in deny_list:
+            log.info("blacklisted MAC %s stays deleted — not "
+                     "re-registered (%s)", mac, ip)
+            return
+        # A kicked MAC is in its 5s cooldown — not re-registered yet.
+        if self.service.is_temporarily_kicked(mac):
+            log.info("kicked MAC %s is in 5s cooldown — not "
+                     "re-registered (%s)", mac, ip)
+            return
+        # "STOP NEW CONNECTIONS": refuse a brand-new MAC at the DHCP level.
+        if await self.service.stop_new_connections():
+            added = await self.service.add_refused_mac(mac)
+            if added:
+                ok = await self._sync_refuse_fragment()
+                if ok:
+                    await self.database.add_event(
+                        f"New connection refused at DHCP: {mac} "
+                        f"({ip}) — STOP NEW CONNECTIONS is on",
+                        "warn")
+                else:
+                    # Fragment unavailable: fall back to registered +
+                    # admin-blocked so the device stays controlled.
+                    await self._refuse_fragment_unavailable(
+                        mac, ip,
+                        "STOP NEW CONNECTIONS is on (DHCP refusal unavailable)")
+            return
+        # "Decline random MACs": refuse a brand-new randomized (privacy) MAC.
+        if (await self.service.decline_random_macs()
+                and self.service.is_random_mac(mac)):
+            added = await self.service.add_refused_random_mac(mac)
+            if added:
+                ok = await self._sync_refuse_fragment()
+                if ok:
+                    await self.database.add_event(
+                        f"New connection refused at DHCP: {mac} "
+                        f"({ip}) — randomized (privacy) MAC declined",
+                        "warn")
+                else:
+                    await self._refuse_fragment_unavailable(
+                        mac, ip,
+                        "randomized (privacy) MAC declined "
+                        "(DHCP refusal unavailable)")
+            return
+        if await self.service.is_guest_mode():
+            # Guest mode is active: new guest devices are registered in the
+            # pending lock (0 GB allowance, admin-cut) until admin approves.
+            dev = await self.database.upsert_device(
+                mac, name="", quota_mode=_db.QUOTA_FIXED,
+                fixed_gb=0.0, guest=True)
+            await self.database.set_device_state(dev.id, _db.BLOCK_ADMIN)
+            if dev.user_id:
+                await self.database.update_user(
+                    dev.user_id, block_state=_db.BLOCK_ADMIN)
+            await self.database.add_event(
+                f"New GUEST on network: {dev.mac} ({ip}) — "
+                f"awaiting admin approval", "info", dev.id)
+        else:
+            # Brand-new device: mint its user in the DISABLED onboarding lock
+            # — 0 GB, no auto share, kernel-cut until the admin assigns shared
+            # or fixed in the modal.
+            dev = await self.database.upsert_device(
+                mac, name="", quota_mode=_db.QUOTA_DISABLED,
+                fixed_gb=0.0)
+            await self.database.add_event(
+                f"New device on network: {dev.mac} ({ip}) — "
+                f"quota unassigned (0 GB, awaiting admin)",
+                "info", dev.id)
+        # A brand-new device must receive its allowance BEFORE the next
+        # evaluate_blocks run, or allowances.get(mac) returns 0.0 and the
+        # device is instantly blocked for "quota exceeded".
+        await self.service.recompute_allowances()
+        self._new_devices_detected = True
+        log.info("auto-registered new device %s (%s)", mac, ip)
+
+    async def _refuse_fragment_unavailable(self, mac: str, ip: str,
+                                           message: str) -> None:
+        """Fallback when the DHCP-refusal fragment can't be written (no root /
+        no dnsmasq dir): register the device disabled + admin-blocked so it
+        stays controlled despite the fragment being unavailable."""
+        dev = await self.database.upsert_device(
+            mac, name="", quota_mode=_db.QUOTA_DISABLED, fixed_gb=0.0)
+        await self.database.set_device_state(dev.id, _db.BLOCK_ADMIN)
+        await self.database.add_event(
+            f"New connection blocked: {dev.mac} ({ip}) — {message}",
+            "warn", dev.id)
 
     async def _purge_phantom_devices(self) -> None:
         """Delete devices/leases whose "MAC" is not a MAC (once per run).
@@ -1246,7 +1260,7 @@ class Gateway:
             self.latency_probe is not None and self._latency_sweep_ran
             and not (self._latency_interval > 0
                      and time.monotonic() - self._last_latency_sweep
-                     > 3 * self._latency_interval))
+                     > LATENCY_STALE_MULTIPLIER * self._latency_interval))
         if probe_fresh:
             return set(self._latency_responders) | traffic
         if self._neigh_collected:
@@ -1416,7 +1430,7 @@ class Gateway:
 
     async def _maintenance_loop(self) -> None:
         """Periodic flush + block re-evaluation + engine state sync."""
-        interval = 15.0
+        interval = MAINTENANCE_INTERVAL
         while not self._stop_event.is_set():
             try:
                 started = time.perf_counter()
@@ -1518,12 +1532,14 @@ class Gateway:
         #    push or the API.
         live_by_ip: dict[str, object] = {}
         live_lan_by_ip: dict[str, object] = {}
-        flush_interval = 15.0
+        flush_interval = MAINTENANCE_INTERVAL
         if self.engine is not None:
             snap = await asyncio.to_thread(self.engine.flush)
             _mono = time.monotonic()
             if self._last_flush_mono is not None:
-                flush_interval = min(120.0, max(1.0, _mono - self._last_flush_mono))
+                flush_interval = min(FLUSH_INTERVAL_MAX,
+                                     max(FLUSH_INTERVAL_MIN,
+                                         _mono - self._last_flush_mono))
             self._last_flush_mono = _mono
             live_by_ip = snap.by_ip
             live_lan_by_ip = getattr(snap, "lan_by_ip", None) or {}
@@ -1803,50 +1819,54 @@ class Gateway:
                                 "Mbps baseline. Run a speed test THROUGH the "
                                 "VPN and set the real numbers.")
                         if total_down <= 0:
-                            total_down = 30.0
+                            total_down = VPN_BASELINE_DOWN_MBPS
                         if total_up <= 0:
-                            total_up = 10.0
+                            total_up = VPN_BASELINE_UP_MBPS
 
                 # A tree rebuild runs ~70-115+ sequential `tc` subprocesses
                 # (~1.5-5 s). Keep it OFF the event loop (WS pushes + API
                 # requests starve during the rebuild otherwise). The lock
                 # still serializes tick vs API-immediate re-syncs, and
                 # update_state's signature gate makes the common no-op free.
-                try:
-                    await asyncio.to_thread(
-                        shaper.update_state,
-                        rate_map, shaping_enabled,
-                        total_down,
-                        total_up,
-                        lan_rate_mbps=config["lan_rate_mbps"],
-                        fair_sharing=fair_sharing,
-                        vpn_active=vpn_active,
-                        rates_measured=rates_measured,
-                        vpn_pct=float(config.get("vpn_pct") or 0))
-                except TypeError:
-                    # Older/narrower update_state signatures: drop the newer
-                    # kwargs progressively instead of losing the shaping call.
-                    try:
-                        await asyncio.to_thread(
-                            shaper.update_state,
-                            rate_map, shaping_enabled,
-                            total_down,
-                            total_up,
-                            lan_rate_mbps=config["lan_rate_mbps"],
-                            fair_sharing=fair_sharing)
-                    except TypeError:
-                        await asyncio.to_thread(
-                            shaper.update_state,
-                            rate_map, shaping_enabled,
-                            total_down,
-                            total_up,
-                            lan_rate_mbps=config["lan_rate_mbps"])
+                await self._apply_shaper_state(
+                    shaper, rate_map, shaping_enabled, total_down, total_up,
+                    config, fair_sharing, vpn_active, rates_measured)
                 self._shaping_applied = bool(getattr(shaper, "applied", True))
                 self._shaping_available = bool(
                     getattr(shaper, "available", False))
         except Exception:  # noqa: BLE001
             log.exception("failed to sync speed-shaping rules")
             self._shaping_applied = False
+
+    async def _apply_shaper_state(
+            self, shaper: TcShaper, rate_map: list[dict[str, object]],
+            shaping_enabled: bool, total_down: float, total_up: float,
+            config: dict[str, object], fair_sharing: bool,
+            vpn_active: bool, rates_measured: bool) -> None:
+        """Push the rate map into the tc shaper off the event loop.
+
+        ``update_state``'s signature varies across tc-shaper versions, so the
+        newer kwargs (``vpn_active``, ``rates_measured``, ``vpn_pct``) are
+        dropped progressively instead of losing the shaping call entirely.
+        Every variant that fails is silently skipped — the outer tick handler
+        logs the shaping-sync failure.
+        """
+        full = dict(rate_map=rate_map, enabled=shaping_enabled,
+                    total_down=total_down, total_up=total_up,
+                    lan_rate_mbps=config["lan_rate_mbps"],
+                    fair_sharing=fair_sharing,
+                    vpn_active=vpn_active, rates_measured=rates_measured,
+                    vpn_pct=float(config.get("vpn_pct") or 0))
+        for drop in ((),
+                     ("vpn_active", "rates_measured", "vpn_pct"),
+                     ("vpn_active", "rates_measured", "vpn_pct",
+                      "fair_sharing")):
+            kwargs = {k: v for k, v in full.items() if k not in drop}
+            try:
+                await asyncio.to_thread(shaper.update_state, **kwargs)
+                return
+            except TypeError:
+                continue
 
     async def _reshaping_now(self) -> None:
         """Apply a speed-limit edit immediately instead of waiting for the next
@@ -2108,11 +2128,14 @@ class Gateway:
             cache = self.__dict__.setdefault("_node_ip_cache", {})
             now = time.monotonic()
             hit = cache.get(srv_str)
-            if hit is not None and now - hit[0] < (600 if hit[1] else 120):
+            if hit is not None and now - hit[0] < (NODE_IP_CACHE_TTL_HIT_SEC
+                                                   if hit[1] else
+                                                   NODE_IP_CACHE_TTL_MISS_SEC):
                 return hit[1]
             try:
                 resolved = await asyncio.wait_for(
-                    asyncio.to_thread(socket.gethostbyname, srv_str), 3.0)
+                    asyncio.to_thread(socket.gethostbyname, srv_str),
+                    DNS_RESOLVE_TIMEOUT_SEC)
             except Exception:  # noqa: BLE001 — timeout or NXDOMAIN
                 resolved = None
             cache[srv_str] = (now, resolved or None)
@@ -2515,7 +2538,6 @@ def main() -> None:
             db_cert = await gateway.database.get_setting("tls_certfile")
             db_key = await gateway.database.get_setting("tls_keyfile")
             if db_cert and db_key:
-                from pathlib import Path
                 if Path(db_cert).is_file() and Path(db_key).is_file():
                     cfg.web.tls_certfile = db_cert
                     cfg.web.tls_keyfile = db_key
