@@ -72,6 +72,14 @@ def sysctl_fragment(iface: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _parse_prefix(prefix: str) -> "ipaddress.IPv4Network | ipaddress.IPv6Network | None":
+    """Parse ``prefix`` into an IPv6 network, or None when invalid."""
+    try:
+        return ipaddress.ip_network(prefix, strict=False)
+    except ValueError:
+        return None
+
+
 def _write_if_changed(path: Path, content: str) -> bool:
     try:
         if path.exists() and path.read_text(encoding="utf-8") == content:
@@ -176,7 +184,7 @@ _RESOLV_CONF = Path("/etc/resolv.conf")
 _V6_TOKEN = re.compile(r"[0-9a-fA-F:]{3,}")
 
 
-def _addresses_in(text: str, net: "ipaddress.IPv6Network") -> bool:
+def _addresses_in(text: str, net: "ipaddress.IPv4Network | ipaddress.IPv6Network") -> bool:
     for tok in _V6_TOKEN.findall(text):
         try:
             if ipaddress.ip_address(tok) in net:
@@ -195,9 +203,8 @@ def box_uses_ula_dns(prefix: str, *, run: RunCommand | None = None,
     Programs on the box (the VPN client resolving its server's hostname) then
     query ``[ula]:53`` and time out — the whole VPN share goes down.
     """
-    try:
-        net = ipaddress.ip_network(prefix, strict=False)
-    except ValueError:
+    net = _parse_prefix(prefix)
+    if net is None:
         return False
     try:
         for line in (resolv_path or _RESOLV_CONF).read_text(encoding="utf-8").splitlines():
@@ -223,9 +230,8 @@ def box_has_usable_dns(prefix: str, *, resolv_path: Path | None = None,
     """True when the box's resolver lists at least one real server: not our ULA
     and not a bare ``::1`` / ``127.0.0.1`` (nothing listens there on the box —
     that is the "connection refused" the VPN client hit)."""
-    try:
-        net = ipaddress.ip_network(prefix, strict=False)
-    except ValueError:
+    net = _parse_prefix(prefix)
+    if net is None:
         return True  # cannot judge -> do not touch anything
     try:
         for line in (resolv_path or _RESOLV_CONF).read_text(encoding="utf-8").splitlines():
