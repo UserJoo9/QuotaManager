@@ -1,7 +1,7 @@
 import { h, icon } from "../core/dom.js";
 import { t, num } from "../core/i18n.js";
 
-export const bar = (pct, neutral) => h("div", { class: "bar" + (!neutral && pct >= 100 ? " over" : "") },
+export const bar = (pct, neutral) => h("div", { class: "bar" + (!neutral && pct >= 100 ? " over" : ""), role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(Math.round(pct)) },
   h("i", { style: { width: Math.min(100, Math.max(0, pct)) + "%" } }));
 
 const hue = (id) => { let x = 0; for (const c of String(id)) x = (x * 31 + c.charCodeAt(0)) % 360; return x; };

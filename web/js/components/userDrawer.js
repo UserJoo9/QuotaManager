@@ -13,7 +13,7 @@ const armed = new Set(); // destructive buttons armed by a first tap (confirm-by
 function settingsBlock(kind, o, run, withQuota) {
   const isUser = kind === "user";
   const num_ = (v) => h("input", { class: "input", type: "number", min: "0", step: "any", value: String(v || 0), inputmode: "decimal" });
-  const down = num_(o.limit_down_mbps), up = num_(o.limit_up_mbps), dns = h("input", { class: "input ltr", value: o.dns_server || "", placeholder: "1.1.1.1", spellcheck: "false", "aria-label": t("dr.dns") });
+  const down = num_(o.limit_down_mbps), up = num_(o.limit_up_mbps), dns = h("input", { class: "input ltr", value: o.dns_server || "", placeholder: "1.1.1.1", spellcheck: "false", autocomplete: "off", "aria-label": t("dr.dns") });
   const mode = h("select", { class: "select" }, ["auto", "fixed"].map((m) => h("option", { value: m, selected: o.quota_mode === m }, t("dr.quota." + m))));
   const gb = h("input", { class: "input", type: "number", min: "0", step: "any", value: String(o.fixed_gb ?? 0) });
   const patch = isUser ? actions.patchUser : actions.patchDevice, dnsFn = isUser ? actions.dnsUser : actions.dnsDevice;

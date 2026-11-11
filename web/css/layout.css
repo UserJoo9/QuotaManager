@@ -61,7 +61,7 @@
 .card{position:relative;background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:var(--pad);box-shadow:var(--shadow);min-width:0}
 :root[data-fx=rich][data-theme=dark] .card::before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(180deg,rgba(255,255,255,.04),transparent 38%)}
 .card-h{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px;flex-wrap:wrap}
-.card-h h3{font-size:14.5px;font-weight:600}
+.card-h h2,.card-h h3{font-size:14.5px;font-weight:600}
 .h-with{display:flex;align-items:center;gap:10px}
 .toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .spacer{flex:1}
@@ -80,4 +80,36 @@
   .menu-btn{display:grid}
   .main{padding:18px 16px 40px}
   .top h1{font-size:21px}
+}
+
+
+/* ===== UI Polish v2: responsive + RTL ===== */
+
+/* Mobile touch targets */
+@media (max-width: 900px) {
+  .icon-btn { width: 44px; height: 44px; }
+  .collapse-btn { width: 44px; height: 44px; }
+  .side-foot .icon-btn { width: 44px; height: 44px; }
+  .nav-i { min-height: 44px; }
+}
+
+/* Mobile card padding */
+@media (max-width: 640px) {
+  .main { padding: 14px 12px 40px; }
+  .card { padding: 16px; }
+  .top h1 { font-size: 20px; }
+}
+
+/* RTL: ensure logical properties are used */
+:root[dir=rtl] .side { border-inline-end: none; border-inline-start: 1px solid var(--line); }
+:root[dir=rtl] .drawer { inset-inline-end: auto; inset-inline-start: 0; border-inline-start: none; border-inline-end: 1px solid var(--line-2); }
+
+/* Logout/exit icon flip in RTL */
+:root[dir=rtl] .ic.flip-exit { transform: scaleX(-1); }
+
+/* Print */
+@media print {
+  .side, .top-actions, .scrim, .toasts, .fx, .nav-scrim { display: none !important; }
+  .main { padding: 0; }
+  .card { box-shadow: none; border: 1px solid #ccc; break-inside: avoid; }
 }

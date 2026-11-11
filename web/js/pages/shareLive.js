@@ -27,7 +27,7 @@ export default function liveCard(ctx) {
       h("button", { type: "button", class: "btn ghost sm", disabled: !!L.xfer, onclick: () => { target = p; fileIn.click(); } }, t("lt.files")),
       h("button", { type: "button", class: "btn ghost sm", disabled: !!L.xfer, onclick: () => { target = p; dirIn.click(); } }, t("lt.folder"))));
   return h("section", { class: "card c12" },
-    h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("lt.title")), h("span", { class: "sub" }, t("lt.sub").replace("{m}", fmtBytes(MAX_DIRECT)))),
+    h("header", { class: "card-h" }, h("div", {}, h("h2", {}, t("lt.title")), h("span", { class: "sub" }, t("lt.sub").replace("{m}", fmtBytes(MAX_DIRECT)))),
       chip(L.ws && L.ws.readyState === 1 ? "ok" : "", `${num(L.peers.length, 0)} ${t("lt.online")}`)),
     stage ? h("div", { class: "banner info" }, h("div", {}, `${t("lt.stage")}: `, h("b", {}, stage.name), ` — ${num(stage.folders.size, 0)} ${t("lt.folders")} · ${num(stage.files.length, 0)} ${t("lt.files.n")} · ${fmtBytes(size)}`),
       h("div", { class: "fa", style: { "margin-top": "8px" } },

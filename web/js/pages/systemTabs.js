@@ -66,14 +66,14 @@ export function accountTab(ctx) {
   };
   return h("div", { class: "grid" },
     h("section", { class: "card c6" },
-      h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("acct.pw")), h("span", { class: "sub" }, t("acct.pw.d"))), sec.default_password ? chip("danger", t("acct.pw.default")) : null),
+      h("header", { class: "card-h" }, h("div", {}, h("h2", {}, t("acct.pw")), h("span", { class: "sub" }, t("acct.pw.d"))), sec.default_password ? chip("danger", t("acct.pw.default")) : null),
       h("div", { class: "fa" }, h("button", { type: "button", class: "btn primary", onclick: passwordDialog }, icon("lock", 15), t("acct.pw.title")))),
     h("section", { class: "card c6" },
-      h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("acct.2fa")), h("span", { class: "sub" }, t("acct.2fa.d"))), tp ? chip(tp.enabled ? "ok" : tp.pending ? "warn" : "", tp.enabled ? t("acct.2fa.enabled") : tp.pending ? t("acct.2fa.pending") : t("acct.2fa.disabled")) : null),
+      h("header", { class: "card-h" }, h("div", {}, h("h2", {}, t("acct.2fa")), h("span", { class: "sub" }, t("acct.2fa.d"))), tp ? chip(tp.enabled ? "ok" : tp.pending ? "warn" : "", tp.enabled ? t("acct.2fa.enabled") : tp.pending ? t("acct.2fa.pending") : t("acct.2fa.disabled")) : null),
       tp ? h("div", { class: "fa" }, tp.enabled ? h("button", { type: "button", class: "btn danger sm", onclick: disable }, t("acct.2fa.disable"))
         : h("button", { type: "button", class: "btn primary", onclick: () => totpDialog(ctx) }, icon("shield", 15), tp.pending ? t("acct.2fa.resume") : t("acct.2fa.enable"))) : h("div", { class: "skeleton", style: { height: "40px" } })),
     sec.failed_logins_1h != null ? h("section", { class: "card c12" },
-      h("header", { class: "card-h" }, h("h3", {}, t("acct.activity"))),
+      h("header", { class: "card-h" }, h("h2", {}, t("acct.activity"))),
       h("div", { class: "kv" }, h("div", {}, h("span", { class: "k" }, t("acct.failed")), h("span", { class: "v" }, iso(sec.failed_logins_1h))), h("div", {}, h("span", { class: "k" }, t("acct.waf")), h("span", { class: "v" }, iso(sec.waf_blocks_1h ?? 0))))) : null);
 }
 
@@ -97,7 +97,7 @@ export function updatesTab(ctx) {
   const row = (title, sub, on, fn) => h("div", { class: "row-sw", style: { padding: "12px 0" } }, h("div", {}, h("b", {}, title), h("span", {}, sub)), sw(on, title, fn));
   return h("div", { class: "grid" },
     h("section", { class: "card c12" },
-      h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("upd.title")), h("span", { class: "sub" }, t("upd.title.d"))), chip(u.available && !off ? "accent" : "", status)),
+      h("header", { class: "card-h" }, h("div", {}, h("h2", {}, t("upd.title")), h("span", { class: "sub" }, t("upd.title.d"))), chip(u.available && !off ? "accent" : "", status)),
       h("div", { class: "kv" },
         h("div", {}, h("span", { class: "k" }, t("upd.current")), h("span", { class: "v mono" }, u.current_version ? "v" + u.current_version : "—")),
         h("div", {}, h("span", { class: "k" }, t("upd.latest")), h("span", { class: "v mono" }, off ? "—" : u.latest_version ? "v" + u.latest_version : u.checking ? t("upd.st.checking") : "—")),
@@ -108,7 +108,7 @@ export function updatesTab(ctx) {
         u.available && !off ? h("button", { type: "button", class: "btn primary", disabled: !!upd.busy || u.installing, onclick: run("install", () => api.post("/api/updates/install"), t("upd.installing")) }, u.installing || upd.busy === "install" ? t("upd.installing") : `${t("upd.install")} v${u.latest_version}`) : null,
         u.available && !off && (u.changelog || []).length ? h("button", { type: "button", class: "btn ghost", onclick: details }, t("upd.details")) : null)),
     h("section", { class: "card c12" },
-      h("header", { class: "card-h" }, h("h3", {}, t("upd.prefs"))),
+      h("header", { class: "card-h" }, h("h2", {}, t("upd.prefs"))),
       row(t("upd.enabled"), t("upd.enabled.d"), !!u.enabled, run("en", () => api.post("/api/updates", { enabled: !u.enabled }))),
       h("div", { style: { "border-top": "1px solid var(--line)" } }, row(t("upd.auto"), t("upd.auto.d"), !!u.auto_install, run("auto", () => api.post("/api/updates", { auto_install: !u.auto_install }))))));
 }
@@ -126,9 +126,9 @@ export function logsTab(ctx) {
   const lines = (lg.data?.lines || []).filter((l) => lvlOk(l) && (!lg.q || l.toLowerCase().includes(lg.q.toLowerCase())));
   const view = h("pre", { class: "logs ltr" }, lines.length ? lines.join("\n") : t("logs.none"));
   const exportLogs = () => { const a = h("a", { href: URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/plain" })), download: `quota-logs-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.txt` }); document.body.append(a); a.click(); a.remove(); };
-  const search = h("input", { type: "search", class: "input", placeholder: t("logs.search"), value: lg.q, "aria-label": t("logs.search"), oninput: (e) => { lg.q = e.target.value; const l2 = (lg.data?.lines || []).filter((l) => lvlOk(l) && (!lg.q || l.toLowerCase().includes(lg.q.toLowerCase()))); view.textContent = l2.length ? l2.join("\n") : t("logs.none"); } });
+  const search = h("input", { type: "search", autocomplete: "off", class: "input", placeholder: t("logs.search"), value: lg.q, "aria-label": t("logs.search"), oninput: (e) => { lg.q = e.target.value; const l2 = (lg.data?.lines || []).filter((l) => lvlOk(l) && (!lg.q || l.toLowerCase().includes(lg.q.toLowerCase()))); view.textContent = l2.length ? l2.join("\n") : t("logs.none"); } });
   return h("section", { class: "card" },
-    h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("logs.title")), h("span", { class: "sub" }, lg.data ? `${lines.length} / ${lg.data.total}${lg.data.truncated ? " · " + t("logs.trunc") : ""}` : t("logs.title.d")))),
+    h("header", { class: "card-h" }, h("div", {}, h("h2", {}, t("logs.title")), h("span", { class: "sub" }, lg.data ? `${lines.length} / ${lg.data.total}${lg.data.truncated ? " · " + t("logs.trunc") : ""}` : t("logs.title.d")))),
     h("div", { class: "toolbar", style: { "margin-bottom": "12px" } },
       h("div", { class: "seg", role: "group" }, ["ALL", "INFO", "WARNING", "ERROR"].map((l) => h("button", { type: "button", class: lg.level === l ? "on" : "", "aria-pressed": String(lg.level === l), onclick: () => { lg.level = l; ctx.touch(); } }, l))),
       h("label", { class: "search", style: { flex: "1", "min-width": "180px" } }, icon("search", 18), search),

@@ -1,6 +1,5 @@
 import { h, icon } from "../core/dom.js";
 import { t, num, iso } from "../core/i18n.js";
-import { api } from "../core/api.js";
 import { chip, devIcon, fmtBps } from "../components/ui.js";
 import { toast } from "../components/toast.js";
 
@@ -13,14 +12,18 @@ async function loadHist(ctx, force) {
   if (st.loading || (!force && key === st.key && Date.now() - st.at < 30000)) return;
   st.loading = true; st.key = key;
   try {
-    const hist = await api.get(`/api/history/${encodeURIComponent(st.device)}?window=${st.win}&limit=200`);
-    if (key !== st.key) return; // selection changed meanwhile
+    const dnsHooks = ctx.hooks.useDns();
+    const hist = await dnsHooks.getHistory(st.device, st.win, 200);
+    if (key !== st.key) return;
     st.hist = hist; st.an = hist.analytics || null; st.at = Date.now(); st.err = "";
   } catch (e) { st.failAt = Date.now(); st.err = e.message; st.hist = null; st.an = null; } finally { st.loading = false; ctx.touch(); }
 }
 async function loadLive(ctx) {
   if (st.liveBusy) return; st.liveBusy = true;
-  try { st.live = await api.get(`/api/history/live?device_id=${encodeURIComponent(st.device)}`); st.liveAt = Date.now(); } catch { /* keep last */ } finally { st.liveBusy = false; if (mine() && st.tab === "live") ctx.touch(); }
+  try {
+    const dnsHooks = ctx.hooks.useDns();
+    st.live = await dnsHooks.getHistoryLive(st.device); st.liveAt = Date.now();
+  } catch { /* keep last */ } finally { st.liveBusy = false; if (mine() && st.tab === "live") ctx.touch(); }
 }
 function poll(ctx) {
   if (st.timer) return;
@@ -54,16 +57,22 @@ function liveView(ctx) {
       h("div", { style: { display: "flex", gap: "12px", "align-items": "center", "flex-wrap": "wrap" } }, h("span", { class: "d-ic" }, icon(devIcon(top), 18)), h("b", { style: { "font-size": "18px" } }, top.name), h("span", { class: "sub" }, `${top.user_name || ""} ${top.ip ? "· " + iso(top.ip) : ""}`), h("span", { style: { "margin-inline-start": "auto" } }, h("b", {}, "↓ " + fmtBps(top.down_bps)), " ", h("b", {}, "↑ " + fmtBps(top.up_bps))), chip("accent", `${num(top.share_pct, 0)}%`)),
       h("div", { class: "ins-chips" }, sites(top)))
       : h("div", { class: "empty" }, h("b", {}, t("ins.live.quiet")), h("span", {}, t("ins.live.quiet.d"))),
-    h("div", { style: { "margin-top": "14px" } }, devs.map((x, i) => h("div", { class: "ins-row", style: { cursor: "pointer" }, onclick: () => { st.device = String(x.id); st.tab = "apps"; st.key = ""; ctx.touch(); } },
+    h("div", { style: { "margin-top": "14px" } }, devs.map((x, i) => h("div", { class: "ins-row", role: "button", tabindex: "0", "aria-label": x.name, style: { cursor: "pointer" }, onclick: () => { st.device = String(x.id); st.tab = "apps"; st.key = ""; ctx.touch(); }, onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); st.device = String(x.id); st.tab = "apps"; st.key = ""; ctx.touch(); } } },
       h("div", { class: "ins-top" }, h("div", { class: "ins-l" }, h("span", { class: "sub" }, `#${num(i + 1, 0)}`), h("span", { class: "d-ic" }, icon(devIcon(x), 16)), h("b", {}, x.name), h("span", { class: "sub" }, `${x.user_name || ""} ${x.ip ? "· " + iso(x.ip) : ""}`)),
         h("div", { class: "ins-r" }, h("span", {}, "↓ " + fmtBps(x.down_bps)), h("span", {}, "↑ " + fmtBps(x.up_bps)), chip("", x.is_idle ? t("ins.idle") : `${num(x.share_pct, 0)}%`))),
       h("div", { class: "ins-chips" }, sites(x)), bar(x.share_pct || 0)))));
 }
 
+let armedQuick = null;
 async function quick(ctx, domain, action, scope) {
-  try { await api.post("/api/dns/rules/quick", { domain, action, scope, device_id: scope === "device" ? +st.device : null }); toast(t("dr.done")); await loadHist(ctx, true); }
-  catch (e) { toast(`${t("dr.failed")}: ${e.message}`, "bad"); }
-}
+  const key = domain + "|" + action;
+  if (armedQuick !== key) { armedQuick = key; ctx.touch(); setTimeout(() => { if (armedQuick === key) armedQuick = null; }, 4000); return; }
+  armedQuick = null;
+  try {
+    const dnsHooks = ctx.hooks.useDns();
+    await dnsHooks.quickDnsRule(domain, action, scope, scope === "device" ? +st.device : null);
+    toast(t("dr.done")); await loadHist(ctx, true);
+  } catch (e) { toast(`${t("dr.failed")}: ${e.message}`, "bad"); } }
 const badge = (s) => chip(s === "blocked" ? "danger" : s === "allowed" ? "ok" : s === "redirected" ? "accent" : "", t("ins.st." + (s || "none")));
 
 function domainsView(ctx, hist) {
@@ -73,17 +82,17 @@ function domainsView(ctx, hist) {
   const maxH = Math.max(1, ...hours.values());
   const nameOf = (id) => { const dev = (ctx.dashboard?.users || []).flatMap((u) => (u.devices || []).map((x) => ({ ...x, owner: u.name }))).find((x) => x.id === id); return dev ? dev.owner || dev.name || dev.mac : "#" + id; };
   return h("div", { class: "grid" },
-    h("section", { class: "card c12" }, h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("ins.top")), h("span", { class: "sub" }, t("ins.top.d")))),
+    h("section", { class: "card c12" }, h("header", { class: "card-h" }, h("div", {}, h("h2", {}, t("ins.top")), h("span", { class: "sub" }, t("ins.top.d")))),
       (hist.top_domains || []).length ? h("div", {}, hist.top_domains.map((r) => h("div", { class: "ins-dom" },
         h("div", { class: "ins-l" }, h("b", { class: "ltr" }, r.domain), badge(r.status)),
         h("div", { class: "ins-r" }, h("span", { class: "sub" }, `${num(r.hits, 0)} · ${total ? num((r.hits / total) * 100, 1) : "0"}%`),
-          specific ? h("button", { type: "button", class: "btn ghost sm", onclick: () => quick(ctx, r.domain, "block", "device") }, t("ins.block.dev")) : null,
-          h("button", { type: "button", class: "btn ghost sm", onclick: () => quick(ctx, r.domain, "block", "global") }, t("ins.block.all")),
-          h("button", { type: "button", class: "btn ghost sm", onclick: () => quick(ctx, r.domain, "allow", "global") }, t("ins.allow"))))))
+          specific ? h("button", { type: "button", class: "btn ghost sm", onclick: (ev) => { if (armedQuick === r.domain + "|block") { ev.currentTarget.classList.remove("armed"); } quick(ctx, r.domain, "block", "device"); } }, t("ins.block.dev")) : null,
+          h("button", { type: "button", class: "btn ghost sm", onclick: (ev) => { if (armedQuick === r.domain + "|block") { ev.currentTarget.classList.remove("armed"); } quick(ctx, r.domain, "block", "global"); } }, t("ins.block.all")),
+          h("button", { type: "button", class: "btn ghost sm", onclick: (ev) => { if (armedQuick === r.domain + "|allow") { ev.currentTarget.classList.remove("armed"); } quick(ctx, r.domain, "allow", "global"); } }, t("ins.allow"))))))
         : empty("ins.empty")),
-    h("section", { class: "card c6" }, h("header", { class: "card-h" }, h("h3", {}, t("ins.activity"))),
+    h("section", { class: "card c6" }, h("header", { class: "card-h" }, h("h2", {}, t("ins.activity"))),
       hours.size ? h("div", { class: "live-body", style: { height: "320px" } }, [...hours.entries()].map(([k, c]) => rankRow(k, "", num(c, 0), (c / maxH) * 100))) : empty("ins.empty")),
-    h("section", { class: "card c6" }, h("header", { class: "card-h" }, h("h3", {}, t("ins.recent"))),
+    h("section", { class: "card c6" }, h("header", { class: "card-h" }, h("h2", {}, t("ins.recent"))),
       (hist.recent || []).length ? h("div", { class: "live-body", style: { height: "320px" } }, hist.recent.map((r) => h("div", { class: "crow", style: { "grid-template-columns": "1fr auto" } },
         h("div", { class: "c-name ltr" }, (r.device_id ? `[${nameOf(r.device_id)}] ` : "") + r.domain, h("span", { class: "mono" }, `${r.bucket_minute} × ${r.count}`)), badge(r.status)))) : empty("ins.empty")));
 }

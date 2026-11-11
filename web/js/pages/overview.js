@@ -4,9 +4,7 @@ import { bar, avatar, chip, userStatus, devIcon, fmtBps } from "../components/ui
 import { openUserDrawer } from "../components/userDrawer.js";
 import { ov, loadDaily, loadLive } from "../core/overviewData.js";
 import { lineChart, barChart, gauge } from "../components/chart.js";
-import { actions } from "../core/actions.js";
 import { toast } from "../components/toast.js";
-import { api } from "../core/api.js";
 
 let chartTab = "speed", timer = null, loadingDaily = false, armedTop = 0;
 let netView = (() => { try { return localStorage.getItem("qm.ui.netview") === "lan" ? "lan" : "wan"; } catch { return "wan"; } })();
@@ -14,7 +12,6 @@ const setNetView = (v) => { netView = v; try { localStorage.setItem("qm.ui.netvi
 const QUICK_GB = [10, 25, 50];
 const mine = () => location.hash === "#/overview" || location.hash === "" || location.hash === "#/";
 function ensureData(ctx) {
-  // only fetch when missing/stale - an unconditional fetch+touch would re-render in a loop
   if ((!ov.daily || Date.now() - ov.dailyAt > 60000) && !loadingDaily) {
     loadingDaily = true;
     loadDaily(true).then(() => ctx.touch()).catch(() => {}).finally(() => { loadingDaily = false; });
@@ -44,11 +41,13 @@ function tipBlock(ctx, { over, warn, elapsed, avg, b, forecastLeft }) {
     } else if (!warn && forecastLeft != null) tip = fill(t("ov.tip.ok"), { x: num(forecastLeft) });
   }
   if (!tip) return null;
+  const bundleHooks = ctx.hooks.useBundle();
   const quick = (gb) => h("button", { type: "button", class: "btn ghost sm" + (armedTop === gb ? " armed" : ""), onclick: async () => {
     if (armedTop !== gb) { armedTop = gb; ctx.touch(); setTimeout(() => { if (armedTop === gb) { armedTop = 0; ctx.touch(); } }, 4000); return; }
     armedTop = 0;
-    try { await api.post("/api/bundle", { add_gb: gb }); await ctx.refresh(); toast(t("q.saved")); } catch (e) { toast(`${t("dr.failed")}: ${e.message}`, "bad"); ctx.touch(); }
+    try { await bundleHooks.addGb(gb); await ctx.refresh(); toast(t("q.saved")); } catch (e) { toast(`${t("dr.failed")}: ${e.message}`, "bad"); ctx.touch(); }
   } }, armedTop === gb ? t("dr.confirm") : `+${num(gb, 0)} ${t("common.gb")}`);
+  const securityHooks = ctx.hooks.useSecurity();
   return h("div", { class: "hero-tip" }, h("p", {}, tip),
     actions ? h("div", { class: "tip-actions" }, ...QUICK_GB.map(quick),
       h("a", { class: "btn ghost sm", href: "#/quota" }, t("ov.tip.custom")),
@@ -68,7 +67,7 @@ function hero(d, ctx) {
   const chipText = b.days_left >= 0 ? `${t("ov.resets")} ${num(b.days_left, 0)} ${t("common.days")}`
     : b.period_type === "manual" ? `${t("ov.period.manual")} · ${iso(b.period_start || "—")}` : `${t("ov.since")} ${iso(b.period_start || "—")}`;
   return h("section", { class: "card c5" },
-    h("header", { class: "card-h" }, h("h3", {}, t("side.bundle")), chip("", chipText)),
+    h("header", { class: "card-h" }, h("h2", {}, t("side.bundle")), chip("", chipText)),
     h("div", { class: "hero-body" },
       h("div", { class: "gauge" }, gauge(pct, fPct), h("div", { class: "g-center" },
         h("div", { class: "g-num" }, num(b.used_gb)),
@@ -139,7 +138,7 @@ function liveCard(ctx, live) {
     }
   }
   return h("section", { class: "card c7" },
-    h("header", { class: "card-h" }, h("div", { class: "h-with" }, h("h3", {}, t("ov.live")), h("span", { class: "pill-live" + (live ? "" : " off"), style: { "--ph": `-${((performance.now() % 1800) / 1000).toFixed(3)}s` } }, h("i"), live ? t("ov.livebadge") : t("common.offline"))),
+    h("header", { class: "card-h" }, h("div", { class: "h-with" }, h("h2", {}, t("ov.live")), h("span", { class: "pill-live" + (live ? "" : " off"), style: { "--ph": `-${((performance.now() % 1800) / 1000).toFixed(3)}s` } }, h("i"), live ? t("ov.livebadge") : t("common.offline"))),
       h("div", { class: "card-tools" }, netSwitch, tabs)),
     h("div", { class: "live-body" }, legend ? h("div", { style: { "margin-bottom": "10px" } }, legend) : null, body));
 }
@@ -163,6 +162,7 @@ export default function overview(ctx) {
   if (!d) return h("div", { class: "page" }, h("div", { class: "skeleton", style: { height: "260px" } }), h("div", { class: "skeleton", style: { height: "200px" } }));
   const devices = d.devices || [], users = d.users || [];
   const open = (u) => openUserDrawer(u.id, ctx.getDashboard, ctx.refresh);
+  const userHooks = ctx.hooks.useUsers();
   const act = (fn) => async () => { try { await fn(); toast(t("dr.done")); await ctx.refresh(); } catch (e) { toast(`${t("dr.failed")}: ${e.message}`, "bad"); } };
   const top = [...users].filter((u) => !u.protected).sort((a, c) => c.used_gb - a.used_gb).slice(0, 6);
 
@@ -171,18 +171,18 @@ export default function overview(ctx) {
   if (d.internet === false) feed.push(fi("danger", "alert", t("feed.down"), t("feed.down.sub")));
   for (const u of users.filter((x) => x.guest && x.blocked))
     feed.push(fi("", "userplus", `${u.name} ${t("feed.guest")}`, `${(u.devices || []).length} ${t("pp.devs")}`, [
-      h("button", { class: "btn primary sm", onclick: act(() => actions.approveGuest(u.id)) }, t("dr.approve")),
-      h("button", { class: "btn ghost sm", onclick: act(() => actions.rejectGuest(u.id)) }, t("dr.reject"))]));
+      h("button", { class: "btn primary sm", onclick: act(() => userHooks.approveGuest(u.id)) }, t("dr.approve")),
+      h("button", { class: "btn ghost sm", onclick: act(() => userHooks.rejectGuest(u.id)) }, t("dr.reject"))]));
   for (const r of d.rogue || []) feed.push(fi("warn", "alert", t("feed.rogue"), [iso(r.mac || ""), r.ip ? iso(r.ip) : "", r.vendor || ""].filter(Boolean).join(" · ")));
   if (d.security?.default_password) feed.push(fi("warn", "lock", t("feed.defpw"), t("feed.defpw.sub")));
   if ((d.security?.attack_new || 0) > 5)
     feed.push(fi("danger", "shield", t("feed.attack"), `${num(d.security.attack_new, 0)} ${t("feed.attack.sub")}`, [
-      h("button", { class: "btn primary sm", onclick: act(() => api.post("/api/security/ack-attack")) }, t("feed.ack"))]));
+      h("button", { class: "btn primary sm", onclick: act(() => ctx.hooks.useSecurity().ackAttack()) }, t("feed.ack"))]));
 
   return h("div", { class: "page" }, h("div", { class: "grid" },
     hero(d, ctx), liveCard(ctx, ctx.live), tiles(d, users.flatMap((u) => u.devices || [])),
     h("section", { class: "card c7" },
-      h("header", { class: "card-h" }, h("h3", {}, t("ov.topusers")), h("a", { class: "btn ghost sm", href: "#/people" }, t("ov.viewall"))),
+      h("header", { class: "card-h" }, h("h2", {}, t("ov.topusers")), h("a", { class: "btn ghost sm", href: "#/people" }, t("ov.viewall"))),
       top.length ? h("div", {}, top.map((u) => {
         const st = userStatus(u), online = (u.devices || []).filter((x) => x.connected).length;
         return h("button", { type: "button", class: "crow", onclick: () => open(u) }, avatar(u.name, u.id),
@@ -191,7 +191,7 @@ export default function overview(ctx) {
           chip(st.cls.replace("chip", "").trim(), st.text));
       })) : h("div", { class: "empty" }, t("ov.nousers"))),
     h("section", { class: "card c5" },
-      h("header", { class: "card-h" }, h("h3", {}, t("ov.attention")), feed.length ? chip("warn", num(feed.length, 0)) : null),
+      h("header", { class: "card-h" }, h("h2", {}, t("ov.attention")), feed.length ? chip("warn", num(feed.length, 0)) : null),
       feed.length ? h("div", { class: "feed" }, feed)
         : h("div", { class: "empty" }, h("span", { class: "ei" }, icon("check", 22)), h("b", {}, t("feed.allclear")), h("span", {}, t("feed.allclear.sub"))))));
 }

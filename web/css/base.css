@@ -78,3 +78,205 @@ button:focus-visible,input:focus-visible,a:focus-visible,[tabindex]:focus-visibl
 .note{margin-top:16px;font-size:12.5px;color:var(--text-3)}
 #bg-particles{position:fixed;inset:0;width:100vw;height:100vh;z-index:0;pointer-events:none;background:transparent}
 html{scrollbar-gutter:stable}
+
+/* ===== UI Polish: small design details ===== */
+
+/* Prevent text selection on UI chrome */
+button, .btn, .icon-btn, .nav, .nav-i, .nav-t, .nav-glabel, .nav-badge,
+.side, .side-meter, .side-foot, .brand, .wm, .top, .top-l, .top-actions,
+.card, .card-head, .card-tools, .tile, .tile .tt, .chip, .pill,
+.u-id, .u-name, .u-sub, .u-num, .lhead, .chev, .sw, .seg,
+.opt, .tabs, .hero, .hero-stats, .gauge, .g-num, .g-sub, .g-center,
+.insight, .feed, .feed-i, .fb, .crow, .c-name, .c-num,
+.sumrow, .legend, .talkers, .tk, .empty, .toast, .dialog header,
+.kv .k, .dev-card, .setting, .setting .t, .setting .d,
+.vhero, .vstate, .vstats, .node, .node .name, .node .sub,
+.route-row, .peers, .peer, .tone, .chk, .banner, .guide,
+.pvrow, .swatch, .opts, .ins-row, .ins-top, .ins-l, .ins-r,
+.ins-chips, .ins-dom, .ins-hero, .ins-tl, .ins-col, .dropz,
+.tones, .lt-file, .lt-bar, .lt-stats, .dq-x,
+.cl-h, .cl-li, .dq-heavy, .dq-days, .dq-add, .dq-prev, .dq-today,
+.dq-mini, .row-sw, .row-sw b, .row-sw span, .dz-r, .dz-r b, .dz-r span,
+.d-main, .d-ic, .d-name, .d-meta, .d-live, .d-use,
+.u-use, .u-stat, .u-num, .chev, .search,
+.hero-tip, .hero-tip p, .hero-foot, .hero-body,
+.net-split, .net-split .ns, .lan-line, .lan-line .nl,
+.tile .ti, .ti, .fi, .fa, .fb b, .fb span,
+.card-tools, .hero-tip p.tip-note,
+.kpi-grid, .kpi-grid b, .kpi-big,
+.sumrow .lbl, .sumrow b,
+.g-sub, .g-num,
+.c-use, .c-num, .c-num b,
+.tk-top, .tk-top span, .tk b,
+.crow, .c-name, .c-name span,
+.feed-i, .fi, .fb,
+.fa,
+.scrim {
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Re-enable text selection in content areas */
+input, textarea, select, code, pre, .terminal, .logs, .mono, .wan-msg,
+.err, .note, [contenteditable="true"], .v, .kv .v,
+.terminal .t, .terminal .e, .terminal .w, .terminal .i {
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  -ms-user-select: text;
+  user-select: text;
+}
+
+/* Cursor: pointer on all clickable elements */
+a, button, .btn, .icon-btn, .nav-i, .u-id, .chev, .chk, .tone,
+.opt, .sw, .tabs button, .seg button, .dq-x, .row-acts button,
+.card, .tile, .crow, .node, .route-row, .feed-i, .ins-dom, .d-main,
+.peer, .dropz, .swatch, .insight, .tk, .sumrow .lbl,
+[role="button"], [tabindex="0"], [tabindex="-1"] {
+  cursor: pointer;
+}
+
+/* Disabled elements */
+.btn:disabled, .icon-btn:disabled, [disabled] {
+  cursor: not-allowed;
+}
+
+/* Hide number input spinners */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+/* Prevent image/icon dragging */
+img, svg, .ic, .logo, .logo-lg, .av, .fi, .ti, .peer-av {
+  -webkit-user-drag: none;
+  -khtml-user-drag: none;
+  -moz-user-drag: none;
+  -o-user-drag: none;
+  user-drag: none;
+  pointer-events: auto;
+}
+
+/* Prevent context menu on UI chrome via CSS (supplementary to JS) */
+button, .btn, .icon-btn, .nav, .nav-i, .card, .tile, .chip, .pill,
+.u-id, .chev, .sw, .seg, .opt, .tabs button, .tone, .chk,
+.feed-i, .crow, .node, .route-row, .peer, .dropz, .ins-hero,
+.hero, .gauge, .sumrow, .talkers, .legend {
+  -webkit-touch-callout: none;
+}
+
+/* Focus styles: ensure visible focus ring on all interactive elements */
+button:focus-visible, a:focus-visible, input:focus-visible,
+select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible,
+[role="button"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Prevent text selection flash on long-press (mobile) */
+* {
+  -webkit-touch-callout: none;
+}
+input, textarea, [contenteditable="true"] {
+  -webkit-touch-callout: default;
+}
+
+
+/* ===== UI Polish v2: responsive + accessibility + theme ===== */
+
+/* Skip link */
+.skip-link {
+  position: absolute;
+  top: -40px;
+  inset-inline-start: 6px;
+  z-index: 100;
+  padding: 8px 12px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 13px;
+  transition: top .15s;
+}
+.skip-link:focus {
+  top: 6px;
+}
+
+/* Focus visible enhancement for all interactive */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Reduced motion: respect user preference */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Mobile touch targets (min 44px) */
+@media (max-width: 900px) {
+  .btn.sm { min-height: 44px; }
+  .icon-btn { width: 44px; height: 44px; }
+  .collapse-btn { width: 44px; height: 44px; }
+  .side-foot .icon-btn { width: 44px; height: 44px; }
+  .nav-i { min-height: 44px; }
+  .chev { width: 44px; height: 44px; }
+  .seg button { min-height: 44px; }
+  .tabs button { min-height: 44px; }
+  .sw { min-height: 44px; min-width: 44px; }
+  .dq-x { padding: 4px 8px; min-height: 32px; }
+  .btn { min-height: 44px; }
+}
+
+/* Theme-aware terminal (light mode) */
+:root[data-theme=light] .terminal {
+  background: #f8f9fc;
+  color: #3a4256;
+  border-color: var(--line-2);
+}
+:root[data-theme=light] .terminal .t { color: #8a93a8; }
+:root[data-theme=light] .terminal .e { color: #c42b45; }
+:root[data-theme=light] .terminal .w { color: #9a5b00; }
+:root[data-theme=light] .terminal .i { color: #2563eb; }
+
+/* Font size floor on mobile */
+@media (max-width: 640px) {
+  .ins-col span { font-size: 11px; }
+  .ylab, .xlab { font-size: 11px; }
+  .chip, .pill { font-size: 12px; }
+}
+
+/* Mobile padding reduction */
+@media (max-width: 640px) {
+  .card { padding: 16px; }
+  .dialog { padding: 0; }
+  .dialog header { padding: 14px 16px; }
+  .dialog-body { padding: 16px; }
+  .dialog-actions { padding: 0 16px 16px; }
+  .dr-h { padding: 16px; }
+  .dr-body { padding: 16px; }
+  .dr-f { padding: 12px 16px; }
+}
+
+/* Fixed heights → max-height on mobile */
+@media (max-width: 640px) {
+  .terminal { height: auto; max-height: 220px; }
+  .live-body { height: auto; max-height: 300px; }
+  .scroll { max-height: 280px; }
+}
+
+/* Dark-only color-mix lifts for light theme */
+:root[data-theme=light] .tile .ti { color: var(--accent); }
+:root[data-theme=light] .fi { color: var(--accent); }
+:root[data-theme=light] .av { color: var(--accent-ink); }

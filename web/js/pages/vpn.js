@@ -1,6 +1,6 @@
 import { h, icon } from "../core/dom.js";
 import { t, num, iso } from "../core/i18n.js";
-import { vpn, vpnApi, loadAll, loadStatus, loadNodes, loadRouting, loadSettings, loadLogs, nodeParams } from "../core/vpn.js";
+import { vpn, loadAll, nodeParams } from "../core/vpn.js";
 import { fmtBytes, toggle } from "../components/ui.js";
 import { openDialog } from "../components/dialog.js";
 import { toast } from "../components/toast.js";
@@ -28,13 +28,14 @@ function nodeDialog(ctx, node) {
   const p = node ? nodeParams(node) : null;
   if (!node) {
     const name = h("input", { class: "input", placeholder: t("vpn.name_ph") });
-    const raw = h("textarea", { class: "input", required: true, placeholder: "vless://…\nvmess://…\ntrojan://…\nss://…", spellcheck: "false" });
+    const raw = h("textarea", { class: "input", required: true, placeholder: "vless://…\nvmess://…\ntrojan://…\nss://…", spellcheck: "false", autocomplete: "off" });
+    const vpnHooks = ctx.hooks.useVpn();
     openDialog({ title: t("vpn.add_title"), sub: t("vpn.add_d"), submitLabel: t("vpn.save_verify"),
       content: [h("div", { class: "field" }, h("label", {}, t("vpn.name")), name), h("div", { class: "field" }, h("label", {}, t("vpn.link")), raw)],
-      onSubmit: async () => { await vpnApi.addNode(name.value.trim(), raw.value.trim()); await Promise.allSettled([loadNodes(), loadStatus()]); ctx.touch(); toast(t("vpn.saved"), "ok"); return true; } });
+      onSubmit: async () => { await vpnHooks.addNode(name.value.trim(), raw.value.trim()); await Promise.allSettled([loadNodes(), loadStatus()]); ctx.touch(); toast(t("vpn.saved"), "ok"); return true; } });
     return;
   }
-  const f = (label, v, extra = {}) => { const i = h("input", { class: "input ltr", value: v ?? "", spellcheck: "false", ...extra }); return [h("div", { class: "field" }, h("label", {}, label), i), i]; };
+  const f = (label, v, extra = {}) => { const i = h("input", { class: "input ltr", value: v ?? "", spellcheck: "false", autocomplete: "off", ...extra }); return [h("div", { class: "field" }, h("label", {}, label), i), i]; };
   const [nameF, name] = f(t("vpn.name"), p.name, { class: "input" });
   const [srvF, server] = f(t("vpn.server"), p.server, { required: true });
   const [portF, port] = f(t("vpn.port"), p.server_port, { type: "number", min: 1, max: 65535, required: true });
@@ -45,12 +46,13 @@ function nodeDialog(ctx, node) {
   const [sidF, sid] = f(t("vpn.sid"), p.sid);
   const [pathF, path] = f(t("vpn.path"), p.path);
   const transport = h("select", { class: "select" }, ["TCP", "WS", "gRPC"].map((v) => h("option", { value: v, selected: v === p.transport }, v)));
+  const vpnHooks = ctx.hooks.useVpn();
   openDialog({ title: t("vpn.edit_title"), sub: node.name, wide: true, submitLabel: t("vpn.save"),
     content: [nameF, h("div", { class: "form-row", style: { "grid-template-columns": "3fr 1fr" } }, srvF, portF), uuidF,
       h("div", { class: "form-row" }, sniF, flowF), h("div", { class: "form-row" }, pbkF, sidF),
       h("div", { class: "form-row" }, h("div", { class: "field" }, h("label", {}, t("vpn.transport")), transport), pathF)],
     onSubmit: async () => {
-      await vpnApi.editNode(node.id, { name: name.value.trim() || null, server: server.value.trim(), server_port: parseInt(port.value, 10) || 443,
+      await vpnHooks.editNode(node.id, { name: name.value.trim() || null, server: server.value.trim(), server_port: parseInt(port.value, 10) || 443,
         uuid: uuid.value.trim(), sni: sni.value.trim() || null, flow: flow.value.trim() || null, pbk: pbk.value.trim() || null,
         sid: sid.value.trim() || null, transport: transport.value, path: path.value.trim() || null });
       await Promise.allSettled([loadNodes(), loadStatus()]); ctx.touch(); toast(t("vpn.saved"), "ok"); return true;
@@ -62,10 +64,10 @@ function hero(ctx, st) {
   const label = { connected: t("vpn.connected"), connecting: t("vpn.connecting"), error: t("vpn.error") }[state] || t("vpn.disconnected");
   const on = state === "connected";
   const onClick = () => {
-    if (on || state === "connecting") return act(ctx, "hero", vpnApi.disconnect);
+    if (on || state === "connecting") return act(ctx, "hero", ctx.hooks.useVpn().disconnect);
     const id = st?.active_node_id || vpn.nodes[0]?.id;
     if (!id) return nodeDialog(ctx, null);
-    return act(ctx, "hero", () => vpnApi.connect(id));
+    return act(ctx, "hero", () => ctx.hooks.useVpn().connect(id));
   };
   const up = st?.uptime_seconds || 0;
   const mini = (l, v) => h("div", { class: "mini" }, h("div", { class: "l" }, l), h("div", { class: "v num" }, v));
@@ -90,7 +92,7 @@ function nodes(ctx, st) {
   const del = (n) => { const key = "del" + n.id; const a = armed.has(key);
     return h("button", { class: "btn danger sm" + (a ? " armed" : ""), "aria-label": t("vpn.delete"), title: t("vpn.delete"),
       onclick: () => { if (!armed.has(key)) { armed.add(key); setTimeout(() => { armed.delete(key); ctx.touch(); }, 4000); ctx.touch(); return; }
-        armed.delete(key); act(ctx, key, () => vpnApi.deleteNode(n.id), t("dr.done")); } }, a ? t("dr.confirm") : icon("close", 14)); };
+        armed.delete(key); act(ctx, key, () => ctx.hooks.useVpn().deleteNode(n.id), t("dr.done")); } }, a ? t("dr.confirm") : icon("close", 14)); };
   const row = (n) => {
     const isActive = activeId === Number(n.id);
     const ms = n.ping_ms;
@@ -99,11 +101,10 @@ function nodes(ctx, st) {
       h("span", { class: "dot " + (isActive && connected ? "ok" : "") }),
       h("div", { class: "grow" }, h("div", { class: "name" }, n.name), h("div", { class: "sub" }, h("span", { class: "proto" }, (n.protocol || "vless").toUpperCase()), " ", ping)),
       h("div", { class: "acts" },
-        isActive && connected ? h("button", { class: "btn danger sm", disabled: busy === "n" + n.id, onclick: () => act(ctx, "n" + n.id, vpnApi.disconnect) }, t("vpn.disconnect"))
-          : h("button", { class: "btn primary sm", disabled: busy === "n" + n.id, onclick: () => act(ctx, "n" + n.id, () => vpnApi.connect(n.id)) }, busy === "n" + n.id ? t("vpn.connecting") : t("vpn.connect")),
-        h("button", { class: "btn sm", disabled: busy === "p" + n.id, title: t("vpn.ping"), onclick: () => act(ctx, "p" + n.id, async () => { await vpnApi.ping(n.id); pinged.add(n.id); }) }, icon("bolt", 14), busy === "p" + n.id ? "…" : t("vpn.ping")),
-        h("button", { class: "btn sm", onclick: () => nodeDialog(ctx, n) }, t("vpn.edit")), del(n)));
-  };
+        isActive && connected ? h("button", { class: "btn danger sm", disabled: busy === "n" + n.id, onclick: () => act(ctx, "n" + n.id, ctx.hooks.useVpn().disconnect) }, t("vpn.disconnect"))
+          : h("button", { class: "btn primary sm", disabled: busy === "n" + n.id, onclick: () => act(ctx, "n" + n.id, () => ctx.hooks.useVpn().connect(n.id)) }, busy === "n" + n.id ? t("vpn.connecting") : t("vpn.connect")),
+        h("button", { class: "btn sm", disabled: busy === "p" + n.id, title: t("vpn.ping"), onclick: () => act(ctx, "p" + n.id, async () => { await ctx.hooks.useVpn().ping(n.id); pinged.add(n.id); }) }, icon("bolt", 14), busy === "p" + n.id ? "…" : t("vpn.ping")),
+        h("button", { class: "btn sm", onclick: () => nodeDialog(ctx, n) }, t("vpn.edit")), del(n))); };
   return h("div", { class: "card" },
     h("div", { class: "card-head" }, h("h2", {}, t("vpn.nodes")), h("div", { class: "grow" }),
       h("button", { class: "btn primary sm", onclick: () => nodeDialog(ctx, null) }, "+ " + t("vpn.add"))),
@@ -111,7 +112,7 @@ function nodes(ctx, st) {
     h("div", { class: "setting", style: { "margin-block-start": "12px" } }, h("div", {}, h("div", { class: "t" }, t("vpn.insecure")), h("div", { class: "d" }, t("vpn.insecure.d"))),
       toggle(vpn.settings.allow_insecure, t("vpn.insecure"), async () => {
         const v = !vpn.settings.allow_insecure; vpn.settings.allow_insecure = v; ctx.touch();
-        try { await vpnApi.setInsecure(v); } catch (e) { vpn.settings.allow_insecure = !v; fail(e); } await loadSettings().catch(() => {}); ctx.touch(); })));
+        try { await ctx.hooks.useVpn().setInsecure(v); } catch (e) { vpn.settings.allow_insecure = !v; fail(e); } await loadSettings().catch(() => {}); ctx.touch(); })));
 }
 
 function routing(ctx) {
@@ -119,12 +120,12 @@ function routing(ctx) {
   const visible = () => { const qq = query.trim().toLowerCase(); return (vpn.routing[tab] || []).filter((x) => !qq || (x.name || "").toLowerCase().includes(qq) || (x.mac || "").toLowerCase().includes(qq)); };
   const set = async (items2, v) => {
     items2.forEach((x) => { x.route_vpn = v; }); ctx.touch();
-    try { await Promise.all(items2.map((x) => vpnApi.route(type, x.id, v))); } catch (e) { fail(e); }
+    try { await Promise.all(items2.map((x) => ctx.hooks.useVpn().route(type, x.id, v))); } catch (e) { fail(e); }
     await loadRouting().catch(() => {}); ctx.touch();
   };
   const all = (v) => async () => { const both = [["user", vpn.routing.users], ["device", vpn.routing.devices]];
     both.forEach(([, a]) => a.forEach((x) => { x.route_vpn = v; })); ctx.touch();
-    try { await Promise.all(both.flatMap(([ty, a]) => a.map((x) => vpnApi.route(ty, x.id, v)))); } catch (e) { fail(e); }
+    try { await Promise.all(both.flatMap(([ty, a]) => a.map((x) => ctx.hooks.useVpn().route(ty, x.id, v)))); } catch (e) { fail(e); }
     await loadRouting().catch(() => {}); ctx.touch(); };
   const list = h("div", { class: "scroll", onscroll: (e) => { routeTop = e.currentTarget.scrollTop; } });
   requestAnimationFrame(() => { list.scrollTop = routeTop; });
@@ -135,7 +136,14 @@ function routing(ctx) {
   fill();
   return h("div", { class: "card" },
     h("div", { class: "card-head" }, h("div", {}, h("h2", { style: { margin: "0" } }, t("vpn.routing")), h("div", { class: "sub", style: { color: "var(--text-3)", "font-size": "12.5px" } }, t("vpn.routing.d"))), h("div", { class: "grow" }),
-      h("button", { class: "btn sm", onclick: all(true) }, t("vpn.route_all")), h("button", { class: "btn sm", onclick: all(false) }, t("vpn.direct_all"))),
+      h("button", { class: "btn sm", onclick: (ev) => {
+        if (!vpn._armedAll) { vpn._armedAll = true; ev.currentTarget.classList.add("armed"); ev.currentTarget.textContent = t("dr.confirm"); setTimeout(() => { vpn._armedAll = false; ev.currentTarget.classList.remove("armed"); ev.currentTarget.textContent = t("vpn.route_all"); }, 4000); return; }
+        vpn._armedAll = false; all(true)();
+      } }, t("vpn.route_all")),
+      h("button", { class: "btn sm", onclick: (ev) => {
+        if (!vpn._armedAllDirect) { vpn._armedAllDirect = true; ev.currentTarget.classList.add("armed"); ev.currentTarget.textContent = t("dr.confirm"); setTimeout(() => { vpn._armedAllDirect = false; ev.currentTarget.classList.remove("armed"); ev.currentTarget.textContent = t("vpn.direct_all"); }, 4000); return; }
+        vpn._armedAllDirect = false; all(false)();
+      } }, t("vpn.direct_all"))),
     h("div", { style: { display: "flex", gap: "8px", "margin-block-end": "12px", "flex-wrap": "wrap" } },
       h("div", { class: "seg" }, ["users", "devices"].map((k) => h("button", { "aria-pressed": String(tab === k), onclick: () => { tab = k; ctx.touch(); } }, t("vpn.tab." + k)))),
       h("input", { class: "input", style: { flex: "1", "min-width": "140px" }, placeholder: t("vpn.search"), value: query, "aria-label": t("vpn.search"), oninput: (e) => { query = e.target.value; fill(); } })),

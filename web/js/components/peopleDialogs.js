@@ -30,7 +30,7 @@ export function openAddUser(refresh) {
 }
 
 export function openAddDevice(users, refresh) {
-  const mac = h("input", { class: "input ltr", required: true, placeholder: "aa:bb:cc:dd:ee:ff", spellcheck: "false" });
+  const mac = h("input", { class: "input ltr", required: true, placeholder: "aa:bb:cc:dd:ee:ff", spellcheck: "false", autocomplete: "off" });
   const name = h("input", { class: "input" });
   const owner = h("select", { class: "select" }, h("option", { value: "" }, t("add.dev.newuser")), users.filter((u) => !u.protected).map((u) => h("option", { value: String(u.id) }, u.name)));
   const uname = h("input", { class: "input", placeholder: t("add.dev.uname.ph") });

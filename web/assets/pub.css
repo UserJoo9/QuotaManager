@@ -46,3 +46,16 @@ input::placeholder,textarea::placeholder{color:var(--text-3)}
 .banner.warn{background:color-mix(in srgb,var(--warn) 12%,transparent);border-color:color-mix(in srgb,var(--warn) 35%,transparent)}
 .banner.info{background:var(--accent-soft);border-color:var(--accent-line)}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+/* ===== UI Polish ===== */
+*, *::before, *::after { -webkit-tap-highlight-color: transparent; }
+button, .btn, a, [role="button"], [tabindex] { cursor: pointer; }
+button:disabled, [disabled] { cursor: not-allowed; }
+img, svg, .ic, .logo { -webkit-user-drag: none; user-drag: none; pointer-events: auto; }
+body { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+input, textarea, select, code, pre, .mono, .err, .note, [contenteditable] {
+  -webkit-user-select: text; user-select: text; -webkit-touch-callout: default;
+}
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+input[type="number"] { -moz-appearance: textfield; appearance: textfield; }

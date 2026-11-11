@@ -1,11 +1,28 @@
 import { h, icon } from "../core/dom.js";
 import { t } from "../core/i18n.js";
-let current = null;
-export function closeDialog() { if (current) { current.remove(); current = null; document.removeEventListener("keydown", onKey); } }
-function onKey(e) { if (e.key === "Escape") closeDialog(); }
+let current = null, prevFocus = null;
+export function closeDialog() {
+  if (current) {
+    current.remove(); current = null;
+    document.removeEventListener("keydown", onKey);
+    if (prevFocus && typeof prevFocus.focus === "function") { try { prevFocus.focus(); } catch {} }
+    prevFocus = null;
+  }
+}
+function onKey(e) {
+  if (e.key === "Escape") { closeDialog(); return; }
+  if (e.key === "Tab" && current) {
+    const focusable = current.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])');
+    if (!focusable.length) return;
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+}
 // content: Node[] shown in a <form>. onSubmit(setError) => Promise; return truthy to close.
 // infoOnly: a read-only dialog — the header X plus a single Close button (no redundant Cancel).
 export function openDialog({ title, sub, content, submitLabel, onSubmit, wide, infoOnly }) {
+  prevFocus = document.activeElement;
   closeDialog();
   const err = h("div", { class: "err", role: "alert", hidden: true, style: { "text-align": "start" } });
   const submit = h("button", { class: "btn primary", type: "submit" }, submitLabel);

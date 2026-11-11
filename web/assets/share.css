@@ -132,3 +132,16 @@ button{font:inherit;color:inherit}
 .hidden{display:none!important}
 @media(max-width:480px){.text-input{flex:none;width:100%}body{padding:10px}.share-header{padding:12px}.btn-icon{padding:0 10px}.text-form{flex-direction:column}.btn-primary{width:100%}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+/* ===== UI Polish ===== */
+*, *::before, *::after { -webkit-tap-highlight-color: transparent; }
+button, .btn, a, [role="button"], [tabindex] { cursor: pointer; }
+button:disabled, [disabled] { cursor: not-allowed; }
+img, svg, .ic { -webkit-user-drag: none; user-drag: none; }
+body { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+input, textarea, select, code, pre, .mono, .err, .note, [contenteditable] {
+  -webkit-user-select: text; user-select: text; -webkit-touch-callout: default;
+}
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+input[type="number"] { -moz-appearance: textfield; appearance: textfield; }

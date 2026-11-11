@@ -61,7 +61,7 @@ export default function wanCard(ctx) {
   const dim = !dirty && desired && linkUp && w.internet === true;
 
   return h("section", { class: "card c12" },
-    h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("wan.title")), h("span", { class: "sub" }, t("wan.sub"))),
+    h("header", { class: "card-h" }, h("div", {}, h("h2", {}, t("wan.title")), h("span", { class: "sub" }, t("wan.sub"))),
       h("div", { style: { display: "flex", gap: "10px", "align-items": "center" } }, chip(live ? "warn" : "ok", live ? "WAN" : "LAN"), chip(linkUp ? "ok" : "", `ppp0 ${w.ppp0 || "n/a"}`))),
     banner ? h("p", { class: "banner " + (desired && !linkUp && !dirty ? "warn" : "info"), role: "status" }, banner) : null,
     s.note ? h("p", { class: "sub" }, s.note) : null,
@@ -74,9 +74,9 @@ export default function wanCard(ctx) {
     on ? h("div", { style: { display: "flex", "flex-direction": "column", gap: "12px", "margin-top": "6px" } },
       h("p", { class: "sub" }, t("wan.creds.d")),
       h("div", { class: "form-row" },
-        field(t("wan.user"), h("input", { class: "input ltr", value: s.user, placeholder: "user@isp", spellcheck: "false", autocomplete: "username", oninput: (e) => { s.user = e.target.value; s.dirty = true; } })),
-        field(t("wan.pass"), h("input", { class: "input ltr", type: "password", value: s.pass, autocomplete: "new-password", placeholder: s.hasPass ? t("wan.pass.stored") : t("wan.pass.enter"), oninput: (e) => { s.pass = e.target.value; s.dirty = true; } }))),
-      field(t("wan.if"), h("input", { class: "input ltr", value: s.wanIf, placeholder: "eth1", spellcheck: "false", oninput: (e) => { s.wanIf = e.target.value; s.dirty = true; } }), t("wan.if.h")),
+        field(t("wan.user"), h("input", { class: "input ltr", value: s.user, placeholder: "user@isp", spellcheck: "false", autocomplete: "off", autocomplete: "username", oninput: (e) => { s.user = e.target.value; s.dirty = true; } })),
+        field(t("wan.pass"), h("input", { class: "input ltr", type: "password", autocomplete: "current-password", value: s.pass, autocomplete: "new-password", placeholder: s.hasPass ? t("wan.pass.stored") : t("wan.pass.enter"), oninput: (e) => { s.pass = e.target.value; s.dirty = true; } }))),
+      field(t("wan.if"), h("input", { class: "input ltr", value: s.wanIf, placeholder: "eth1", spellcheck: "false", autocomplete: "off", oninput: (e) => { s.wanIf = e.target.value; s.dirty = true; } }), t("wan.if.h")),
       h("div", { class: "fa" }, h("button", { type: "button", class: "btn ghost sm", disabled: s.testing, onclick: () => runTest(false) }, s.testing ? t("wan.t.running") : t("wan.t.btn"))),
       s.msg ? h("pre", { class: "wan-msg " + (s.msg.ok ? "ok" : s.msg.ok === false ? "bad" : "") }, s.msg.text) : null,
       h("p", { class: "sub" }, t("wan.t.h"))) : null,

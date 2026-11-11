@@ -116,14 +116,14 @@ export function deviceShare(d, u, run) {
 // Master switch card for the Quota page.
 export function dailyMasterCard(on, toggle) {
   return h("section", { class: "card c12" },
-    h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("dq.master")), h("span", { class: "sub" }, t("dq.master.d"))), on ? chip("ok", t("common.active")) : null),
+    h("header", { class: "card-h" }, h("div", {}, h("h2", {}, t("dq.master")), h("span", { class: "sub" }, t("dq.master.d"))), on ? chip("ok", t("common.active")) : null),
     h("div", { class: "row-sw" }, h("div", {}, h("b", {}, t("dq.master.sw")), h("span", {}, t("dq.master.sw.d"))), sw(on, t("dq.master.sw"), toggle)));
 }
 
 // "Open for everyone when everyone is out of quota" switch for the Quota page.
 export function freeModeCard(enabled, active, toggle) {
   return h("section", { class: "card c12" },
-    h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("fm.title")), h("span", { class: "sub" }, t("fm.d"))), active ? chip("warn", t("fm.active")) : null),
+    h("header", { class: "card-h" }, h("div", {}, h("h2", {}, t("fm.title")), h("span", { class: "sub" }, t("fm.d"))), active ? chip("warn", t("fm.active")) : null),
     active ? h("p", { class: "banner warn", role: "status" }, t("fm.active.d")) : null,
     h("div", { class: "row-sw" }, h("div", {}, h("b", {}, t("fm.sw")), h("span", {}, t("fm.sw.d"))), sw(enabled, t("fm.sw"), toggle)));
 }
