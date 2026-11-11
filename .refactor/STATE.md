@@ -4,29 +4,35 @@
 # Language: Egyptian Arabic for reporting
 
 ## Current Phase
-Phase 3 in progress — Wave A complete (U1, U2, U3 done). Moving to Wave B (U4, U5, U6).
+Phase 3 in progress — Wave B complete (U4, U5, U6 done). Wave C: U7 (API layer) dispatched, U8 (runtime entry) pending after U7.
 
 ## Wave
-Wave A — Backend foundations U1/U2/U3: DONE (3 commits)
-Wave B — Backend foundations U4/U5/U6: pending
+Wave A — Backend foundations U1/U2/U3: DONE (3 commits: ab33a35, 7078c95, 30533eb)
+Wave B — Backend foundations U4/U5/U6: DONE (3 commits: 19fc1ba, 0ebb142, d581979)
+Wave C — U7 API layer → U8 runtime entry: U7 dispatched (deleg_073128d5), running; U8 pending after U7
 
 ## Per-Unit Status
-- U1 (config+db+service): DONE — commit ab33a35, 3 pure domain helpers extracted, 137 tests pass
-- U2 (nftables+firewall): DONE — commit 7078c95, _sync_set + _render_bans_drop extracted, 16/16 tests pass
-- U3 (shaping+vpnshare): DONE — commit 30533eb, shaping.py cleaned, vpnshare.py verified clean, 107 tests pass
-- U4 (history+analytics+DNS+ARP): pending
-- U5 (IPv6+network+VPN/TUN+wifi/latency): pending
-- U6 (storage+security+__init__): pending
-- U7-U15: pending
+- U1 (config+db+service): DONE — ab33a35
+- U2 (nftables+firewall): DONE — 7078c95
+- U3 (shaping+vpnshare): DONE — 30533eb
+- U4 (history+analytics+DNS+ARP): DONE — 19fc1ba
+- U5 (IPv6+network+VPN/TUN+wifi/latency): DONE — 0ebb142
+- U6 (storage+security+__init__): DONE — d581979
+- U7 (backend API layer): dispatched — api/app.py + 3 other api files
+- U8 (runtime entry): pending — run.py, core/__init__.py
+- U9-U15: pending
 
 ## Last Green Commit
-HEAD = refactor/total (30533eb). test_new_ui.py 16/16 pass, 0 JS syntax errors.
+HEAD = refactor/total (d581979). test_new_ui.py 16/16 pass, full test suite passed, pyflakes clean on all changed files. Working tree clean.
 
 ## Open Blockers
 None
 
+## Next Action
+Wait for U7 sub-agent result, run verification gates, commit, then dispatch U8 (run.py). Then Wave D (frontend U9-U11).
+
 ## Notes
-- Working tree has unrelated pre-existing modifications to quota/firewall.py and quota/nftables.py (flagged by U2 sub-agent, outside U1/U3 allowlists, left uncommitted). Decide whether to commit or stash these in a later wave.
-- Follow-ups logged: add unit tests for new pure helpers; optionally fold _sync_known_ips/_sync_pending_guests into _sync_set; resolve dormant _lan_counter_name IPv6-escaping; split TcShaper._tree_cmds helpers.
+- Working tree clean (no uncommitted changes).
+- Full test suite now passes (no collection errors — uvicorn available).
 - Constitution: .refactor/specs/memory/constitution.md. Plan: .refactor/01-plan.md (17 units, 7 waves).
 - Master prompt constraints: one commit per task, conventional commits, Egyptian Arabic reporting, never touch main, no force-push.
