@@ -5,19 +5,34 @@
 // May bind framework lifecycle and reactivity, but must NOT own business rules,
 // call raw API/transport code, duplicate store state, or become a general utility.
 
-import { createAuthService } from "../services/index.js";
-import { createBundleService } from "../services/index.js";
-import { createUserService } from "../services/index.js";
-import { createDeviceService } from "../services/index.js";
-import { createNetworkService } from "../services/index.js";
-import { createSecurityService } from "../services/index.js";
-import { createDnsService } from "../services/index.js";
-import { createVpnService } from "../services/index.js";
-import { createSystemService } from "../services/index.js";
-import { createDailyPlanService } from "../services/index.js";
+import {
+  createAuthService,
+  createBundleService,
+  createUserService,
+  createDeviceService,
+  createNetworkService,
+  createSecurityService,
+  createDnsService,
+  createVpnService,
+  createSystemService,
+  createDailyPlanService,
+} from "../services/index.js";
 
+/**
+ * Creates all presentation hooks with dependencies injected at the composition root.
+ *
+ * @param {Object} deps - injected dependencies
+ * @param {Object} deps.api - API layer: dashboard, bundle, user, device, network,
+ *   security, dns, vpn, system
+ * @param {Object} deps.store - dashboard store
+ * @param {Object} deps.prefs - prefs store
+ * @param {Object} deps.live - live store
+ * @param {Object} deps.toast - toast port, { show(message, kind) }
+ * @returns {Object} hook factories: useAuth, useBundle, useUsers, useDevices,
+ *   useNetwork, useSecurity, useDns, useVpn, useSystem, useDailyPlan, useShare,
+ *   usePrefs, useLive, useDashboard
+ */
 // ---- Hook factory ----
-// Creates all hooks with shared dependencies injected at the composition root.
 export function createHooks({ api, store, prefs, live, toast }) {
   const auth = createAuthService(api, store, toast);
   const bundle = createBundleService(api, store, toast);
@@ -36,7 +51,7 @@ export function createHooks({ api, store, prefs, live, toast }) {
       login: auth.login,
       logout: auth.logout,
       checkAuth: auth.checkAuth,
-      isAuthed: () => store.getState().authed,
+      isAuthed: store.getAuthed,
     }),
 
     // Bundle hooks
@@ -47,10 +62,7 @@ export function createHooks({ api, store, prefs, live, toast }) {
       createRecharge: bundle.createRecharge,
       deleteRecharge: bundle.deleteRecharge,
       getUsagePercent: bundle.getUsagePercent,
-      getBundle: () => {
-        const s = store.getState();
-        return s.dashboard ? s.dashboard.bundle : null;
-      },
+      getBundle: () => store.getBundle(),
     }),
 
     // User hooks
@@ -65,15 +77,8 @@ export function createHooks({ api, store, prefs, live, toast }) {
       rejectGuest: users.rejectGuest,
       isBlocked: users.isBlocked,
       isOnline: users.isOnline,
-      getUsers: () => {
-        const s = store.getState();
-        return s.dashboard ? s.dashboard.users : [];
-      },
-      getUserById: (id) => {
-        const s = store.getState();
-        if (!s.dashboard) return null;
-        return s.dashboard.users.find((u) => u.id === id) || null;
-      },
+      getUsers: () => store.getUsers(),
+      getUserById: (id) => store.getUserById(id),
     }),
 
     // Device hooks
@@ -83,15 +88,7 @@ export function createHooks({ api, store, prefs, live, toast }) {
       blockDevice: devices.blockDevice,
       kickDevice: devices.kickDevice,
       blacklistDevice: devices.blacklistDevice,
-      getDeviceById: (deviceId) => {
-        const s = store.getState();
-        if (!s.dashboard) return null;
-        for (const u of s.dashboard.users) {
-          const d = u.devices.find((d) => d.id === deviceId);
-          if (d) return { ...d, owner: u.name };
-        }
-        return null;
-      },
+      getDeviceById: (deviceId) => store.getDeviceById(deviceId),
     }),
 
     // Network hooks
@@ -217,16 +214,10 @@ export function createHooks({ api, store, prefs, live, toast }) {
 
     // Dashboard data hooks
     useDashboard: () => ({
-      getState: () => store.getState(),
-      getDashboard: () => {
-        const s = store.getState();
-        return s.dashboard;
-      },
-      getUsers: () => {
-        const s = store.getState();
-        return s.dashboard ? s.dashboard.users : [];
-      },
-      subscribe: (fn) => store.subscribe(fn),
+      getState: store.getState,
+      getDashboard: () => store.getDashboard(),
+      getUsers: () => store.getUsers(),
+      subscribe: store.subscribe,
     }),
   };
 }

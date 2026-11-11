@@ -3,6 +3,9 @@
 
 /**
  * Format bytes to human-readable string.
+ * @param {number} bytes
+ * @param {number} [decimals=2]
+ * @returns {string}
  */
 export function formatBytes(bytes, decimals = 2) {
   if (bytes === null || bytes === undefined || bytes === 0) return "0 B";
@@ -15,6 +18,8 @@ export function formatBytes(bytes, decimals = 2) {
 
 /**
  * Format bits per second to human-readable string.
+ * @param {number} bps
+ * @returns {string}
  */
 export function formatBps(bps) {
   const n = +bps || 0;
@@ -25,6 +30,10 @@ export function formatBps(bps) {
 
 /**
  * Clamp a value between min and max.
+ * @param {number} value
+ * @param {number} min
+ * @param {number} max
+ * @returns {number}
  */
 export function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
@@ -32,6 +41,9 @@ export function clamp(value, min, max) {
 
 /**
  * Debounce a function.
+ * @param {Function} fn
+ * @param {number} delay
+ * @returns {Function}
  */
 export function debounce(fn, delay) {
   let timer = null;
@@ -43,6 +55,9 @@ export function debounce(fn, delay) {
 
 /**
  * Throttle a function.
+ * @param {Function} fn
+ * @param {number} limit
+ * @returns {Function}
  */
 export function throttle(fn, limit) {
   let inThrottle;
@@ -56,7 +71,9 @@ export function throttle(fn, limit) {
 }
 
 /**
- * Deep clone a plain object/array.
+ * Deep clone a plain object/array (JSON-serializable values only).
+ * @param {*} obj
+ * @returns {*}
  */
 export function deepClone(obj) {
   return JSON.parse(JSON.stringify(obj));
@@ -64,6 +81,8 @@ export function deepClone(obj) {
 
 /**
  * Generate a random ID.
+ * @param {string} [prefix='id']
+ * @returns {string}
  */
 export function generateId(prefix = "id") {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -71,6 +90,8 @@ export function generateId(prefix = "id") {
 
 /**
  * Check if an object is empty.
+ * @param {*} obj
+ * @returns {boolean}
  */
 export function isEmpty(obj) {
   if (obj == null) return true;
@@ -80,6 +101,9 @@ export function isEmpty(obj) {
 
 /**
  * Group array by key.
+ * @param {Array} array
+ * @param {Function} keyFn
+ * @returns {Object}
  */
 export function groupBy(array, keyFn) {
   return array.reduce((groups, item) => {
@@ -92,6 +116,10 @@ export function groupBy(array, keyFn) {
 
 /**
  * Sort array by key.
+ * @param {Array} array
+ * @param {Function} keyFn
+ * @param {"asc"|"desc"} [direction='asc']
+ * @returns {Array}
  */
 export function sortBy(array, keyFn, direction = "asc") {
   return [...array].sort((a, b) => {
@@ -105,6 +133,8 @@ export function sortBy(array, keyFn, direction = "asc") {
 
 /**
  * Escape HTML special characters.
+ * @param {string} text
+ * @returns {string}
  */
 export function escapeHtml(text) {
   const div = document.createElement("div");
@@ -114,6 +144,8 @@ export function escapeHtml(text) {
 
 /**
  * Sleep for a duration.
+ * @param {number} ms
+ * @returns {Promise}
  */
 export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -121,6 +153,10 @@ export function sleep(ms) {
 
 /**
  * Retry a function with exponential backoff.
+ * @param {Function} fn
+ * @param {number} [maxAttempts=3]
+ * @param {number} [delay=1000]
+ * @returns {Promise}
  */
 export async function retry(fn, maxAttempts = 3, delay = 1000) {
   let lastError;
@@ -139,6 +175,8 @@ export async function retry(fn, maxAttempts = 3, delay = 1000) {
 
 /**
  * Parse query string from URL.
+ * @param {string} url
+ * @returns {Object<string, string>}
  */
 export function parseQueryString(url) {
   const params = {};
@@ -152,6 +190,8 @@ export function parseQueryString(url) {
 
 /**
  * Build query string from object.
+ * @param {Object} params
+ * @returns {string}
  */
 export function buildQueryString(params) {
   return Object.entries(params)
@@ -162,6 +202,8 @@ export function buildQueryString(params) {
 
 /**
  * Capitalize first letter.
+ * @param {string} text
+ * @returns {string}
  */
 export function capitalize(text) {
   if (!text) return text;
@@ -170,6 +212,9 @@ export function capitalize(text) {
 
 /**
  * Truncate text with ellipsis.
+ * @param {string} text
+ * @param {number} maxLength
+ * @returns {string}
  */
 export function truncate(text, maxLength) {
   if (!text || text.length <= maxLength) return text;

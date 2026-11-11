@@ -3,7 +3,6 @@
 // assembles routes and context providers; connects them to screens.
 // Construction happens here, not in hooks, services, stores, or components.
 
-import { http } from "../transport/http.js";
 import {
   dashboardApi, bundleApi, userApi, deviceApi,
   networkApi, securityApi, dnsApi, vpnApi, systemApi,
@@ -22,7 +21,13 @@ const toastPort = {
   show: (message, kind = "") => toast(message, kind),
 };
 
-// ---- Dependency injection container ----
+/**
+ * Dependency injection container.
+ * Wires API layer, stores, hooks and the toast port together; nothing else
+ * constructs services, stores or hooks.
+ *
+ * @returns {Object} { ports, stores, hooks }
+ */
 export function createAppContainer() {
   // Transport is already a singleton module (http)
   // API layer is already a singleton module (dashboardApi, etc.)
@@ -84,6 +89,10 @@ export function createAppContainer() {
 // Singleton container instance
 let container = null;
 
+/**
+ * Returns the live container, constructing it on first use.
+ * @returns {Object} the app container
+ */
 export function getContainer() {
   if (!container) {
     container = createAppContainer();
@@ -91,6 +100,7 @@ export function getContainer() {
   return container;
 }
 
+/** Drops the lazily constructed container (mainly for tests). */
 export function resetContainer() {
   container = null;
 }

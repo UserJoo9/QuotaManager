@@ -3,9 +3,19 @@
 // Does NOT call APIs, services, or transport.
 
 import { createStore } from "../../core/store.js";
-import { createUser, createDevice, createBundle, createVpnStatus, isUserBlocked, isUserOnline, bundleUsagePercent } from "../../model/domain/index.js";
+import { bundleUsagePercent } from "../../model/domain/index.js";
 
 // ---- Dashboard store ----
+
+/**
+ * Initial dashboard state.
+ * @typedef {Object} DashboardState
+ * @property {boolean} authed - whether the session is authenticated
+ * @property {Object|null} dashboard - latest dashboard snapshot
+ * @property {boolean} live - live updates enabled
+ * @property {boolean} loading - request in flight
+ * @property {Object|null} error - last error
+ */
 const initialDashboardState = {
   authed: false,
   dashboard: null,
@@ -14,22 +24,39 @@ const initialDashboardState = {
   error: null,
 };
 
+/**
+ * Creates the dashboard store.
+ *
+ * @returns {Object} store API and selectors:
+ *   {setDashboard, setAuthed, setLive, setLoading, setError, reset,
+ *    getState, getDashboard, getAuthed, getLive, getLoading, getError,
+ *    getUsers, getBundle, getVpnStatus, getUserById, getDeviceById,
+ *    getUsagePercent, subscribe}
+ */
 export function createDashboardStore() {
   const store = createStore({ ...initialDashboardState });
 
+  // One source of truth for reading the current dashboard snapshot.
+  const dashboardSnapshot = () => store.get().dashboard;
+
   const api = {
+    /** @param {Object} snapshot */
     setDashboard: (snapshot) => {
       store.set({ dashboard: snapshot, loading: false, error: null });
     },
+    /** @param {boolean} authed */
     setAuthed: (authed) => {
       store.set({ authed });
     },
+    /** @param {boolean} live */
     setLive: (live) => {
       store.set({ live });
     },
+    /** @param {boolean} loading */
     setLoading: (loading) => {
       store.set({ loading });
     },
+    /** @param {Object|null} error */
     setError: (error) => {
       store.set({ error, loading: false });
     },
@@ -40,39 +67,51 @@ export function createDashboardStore() {
 
   const selectors = {
     getState: () => store.get(),
-    getDashboard: () => store.get().dashboard,
+    getDashboard: () => dashboardSnapshot(),
     getAuthed: () => store.get().authed,
     getLive: () => store.get().live,
     getLoading: () => store.get().loading,
     getError: () => store.get().error,
+    /** @returns {Array} */
     getUsers: () => {
-      const d = store.get().dashboard;
+      const d = dashboardSnapshot();
       return d ? d.users : [];
     },
+    /** @returns {Object|null} */
     getBundle: () => {
-      const d = store.get().dashboard;
+      const d = dashboardSnapshot();
       return d ? d.bundle : null;
     },
+    /** @returns {Object|null} */
     getVpnStatus: () => {
-      const d = store.get().dashboard;
+      const d = dashboardSnapshot();
       return d ? d.vpn : null;
     },
+    /**
+     * @param {string} id
+     * @returns {Object|null}
+     */
     getUserById: (id) => {
-      const d = store.get().dashboard;
+      const d = dashboardSnapshot();
       if (!d) return null;
       return d.users.find((u) => u.id === id) || null;
     },
+    /**
+     * @param {string} deviceId
+     * @returns {Object|null} device with `owner` name attached
+     */
     getDeviceById: (deviceId) => {
-      const d = store.get().dashboard;
+      const d = dashboardSnapshot();
       if (!d) return null;
       for (const u of d.users) {
-        const d_ = u.devices.find((d) => d.id === deviceId);
-        if (d_) return { ...d_, owner: u.name };
+        const device = u.devices.find((d) => d.id === deviceId);
+        if (device) return { ...device, owner: u.name };
       }
       return null;
     },
+    /** @returns {number} usage percent (0 when no bundle) */
     getUsagePercent: () => {
-      const d = store.get().dashboard;
+      const d = dashboardSnapshot();
       return d && d.bundle ? bundleUsagePercent(d.bundle) : 0;
     },
     subscribe: (fn) => store.subscribe(fn),
@@ -82,6 +121,14 @@ export function createDashboardStore() {
 }
 
 // ---- Preference store ----
+
+/**
+ * Initial preference state.
+ * @typedef {Object} PrefsState
+ * @property {string} theme @property {string} lang @property {string} accent
+ * @property {string} tone @property {string} particles @property {string} fx
+ * @property {string} density @property {boolean} rail
+ */
 const initialPrefsState = {
   theme: "dark",
   lang: "en",
@@ -93,10 +140,19 @@ const initialPrefsState = {
   rail: false,
 };
 
+/**
+ * Creates the preferences store.
+ * `applyPrefs` is an intentional no-op here; the composition root applies prefs.
+ *
+ * @returns {Object} store API and selectors:
+ *   {setPref, applyPrefs, reset, getState, getPrefs, getTheme, getLang,
+ *    getAccent, getTone, getParticles, getFx, getDensity, getRail, subscribe}
+ */
 export function createPrefsStore() {
   const store = createStore({ ...initialPrefsState });
 
   const api = {
+    /** @param {string} key @param {*} value */
     setPref: (key, value) => {
       store.set({ [key]: value });
     },
@@ -110,6 +166,7 @@ export function createPrefsStore() {
 
   const selectors = {
     getState: () => store.get(),
+    /** @returns {PrefsState} shallow copy of current prefs */
     getPrefs: () => ({ ...store.get() }),
     getTheme: () => store.get().theme,
     getLang: () => store.get().lang,
@@ -126,6 +183,14 @@ export function createPrefsStore() {
 }
 
 // ---- Live data store ----
+
+/**
+ * Creates the live connection store.
+ *
+ * @returns {Object} store API and selectors:
+ *   {setConnected, incrementReconnect, resetReconnect,
+ *    getState, isConnected, getReconnectAttempts, subscribe}
+ */
 export function createLiveStore() {
   const store = createStore({
     connected: false,
@@ -134,8 +199,12 @@ export function createLiveStore() {
   });
 
   const api = {
+    /** @param {boolean} connected */
     setConnected: (connected) => {
-      store.set({ connected, lastUpdate: connected ? Date.now() : store.get().lastUpdate });
+      store.set({
+        connected,
+        lastUpdate: connected ? Date.now() : store.get().lastUpdate,
+      });
     },
     incrementReconnect: () => {
       store.set({ reconnectAttempts: store.get().reconnectAttempts + 1 });
