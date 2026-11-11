@@ -13,10 +13,8 @@ import {
   mapPatchUserRequest,
   mapPatchDeviceRequest,
   mapTopUpCommand,
-  mapDailyPlanRequest,
   mapNetworkRequest,
   mapGuestRequest,
-  mapMacListRequest,
   mapStaticLeaseRequest,
   mapFirewallRequest,
   mapDnsRuleRequest,
@@ -93,6 +91,27 @@ const ENDPOINTS = {
   setup: "/api/setup",
   setupComplete: "/api/setup/complete",
   dailyPlanPreview: (userId) => `/api/users/${userId}/daily-plan/preview`,
+  // ---- one source of truth for every endpoint (no inline URLs in methods) ----
+  freeMode: "/api/free-mode",
+  device: (id) => `/api/devices/${id}`,
+  history: (device) => `/api/history/${encodeURIComponent(device)}`,
+  historyLive: "/api/history/live",
+  wanRenew: "/api/wan/renew",
+  wanRenewConfig: "/api/wan/renew-config",
+  ipv6Probe: "/api/network/ipv6/probe",
+  tailscaleInstall: "/api/tailscale/install",
+  tailscaleConnect: "/api/tailscale/connect",
+  tailscaleDisconnect: "/api/tailscale/disconnect",
+  ipv6Status: "/api/network/ipv6/status",
+  tailscale: "/api/tailscale",
+  shareClear: "/api/share/clear",
+  shareDeleteBatch: "/api/share/delete-batch",
+  shareDeleteFile: (id) => `/api/share/files/${id}`,
+  shareDeleteText: (id) => `/api/share/texts/${id}`,
+  shareAddText: "/api/share/text",
+  shareInitFolder: "/api/share/folder/init",
+  shareFinalizeFolder: "/api/share/folder/finalize",
+  shareList: "/api/share/list",
 };
 
 /**
@@ -138,7 +157,7 @@ export const bundleApi = {
     await http.post(ENDPOINTS.dailyPlanPreview(0), { enabled }); // Uses daily endpoint
   },
   toggleFreeMode: async (enabled) => {
-    await http.post("/api/free-mode", { enabled });
+    await http.post(ENDPOINTS.freeMode, { enabled });
   },
 };
 
@@ -183,10 +202,10 @@ export const userApi = {
  */
 export const deviceApi = {
   patchDevice: async (deviceId, fields) => {
-    await http.patch(`/api/devices/${deviceId}`, mapPatchDeviceRequest(fields));
+    await http.patch(ENDPOINTS.device(deviceId), mapPatchDeviceRequest(fields));
   },
   blockDevice: async (deviceId, blocked) => {
-    await http.patch(`/api/devices/${deviceId}`, { block: blocked });
+    await http.patch(ENDPOINTS.device(deviceId), { block: blocked });
   },
   topUpDevice: async (deviceId, gb) => {
     await http.post(ENDPOINTS.topUpDevice(deviceId), { extra_gb: gb });
@@ -315,10 +334,10 @@ export const dnsApi = {
     await http.post(ENDPOINTS.dnsAckAttack);
   },
   getHistory: async (device, window, limit) => {
-    return await http.get(`/api/history/${encodeURIComponent(device)}?window=${window}&limit=${limit}`);
+    return await http.get(`${ENDPOINTS.history(device)}?window=${window}&limit=${limit}`);
   },
   getHistoryLive: async (deviceId) => {
-    return await http.get(`/api/history/live?device_id=${encodeURIComponent(deviceId)}`);
+    return await http.get(`${ENDPOINTS.historyLive}?device_id=${encodeURIComponent(deviceId)}`);
   },
 };
 
@@ -357,22 +376,22 @@ export const vpnApi = {
     await http.post(ENDPOINTS.vpnRouteAll, { route_vpn: viaVpn });
   },
   wanRenew: async () => {
-    await http.post("/api/wan/renew");
+    await http.post(ENDPOINTS.wanRenew);
   },
   wanRenewConfig: async (enabled, minutes) => {
-    await http.post("/api/wan/renew-config", { enabled, minutes });
+    await http.post(ENDPOINTS.wanRenewConfig, { enabled, minutes });
   },
   ipv6Probe: async () => {
-    await http.post("/api/network/ipv6/probe");
+    await http.post(ENDPOINTS.ipv6Probe);
   },
   tailscaleInstall: async () => {
-    await http.post("/api/tailscale/install");
+    await http.post(ENDPOINTS.tailscaleInstall);
   },
   tailscaleConnect: async (logout) => {
-    await http.post("/api/tailscale/connect", { logout });
+    await http.post(ENDPOINTS.tailscaleConnect, { logout });
   },
   tailscaleDisconnect: async (logout) => {
-    await http.post("/api/tailscale/disconnect", { logout });
+    await http.post(ENDPOINTS.tailscaleDisconnect, { logout });
   },
   loadLogs: async () => {
     return await http.get(ENDPOINTS.vpnLogs);
@@ -381,40 +400,40 @@ export const vpnApi = {
     return await http.get(ENDPOINTS.vpnSettings);
   },
   getIPv6Status: async () => {
-    return await http.get("/api/network/ipv6/status");
+    return await http.get(ENDPOINTS.ipv6Status);
   },
   getTailscale: async () => {
-    return await http.get("/api/tailscale");
+    return await http.get(ENDPOINTS.tailscale);
   },
 };
 
 /**
- * System API
+ * Share API
  */
 export const shareApi = {
   clear: async () => {
-    await http.post("/api/share/clear");
+    await http.post(ENDPOINTS.shareClear);
   },
   deleteBatch: async (ids) => {
-    await http.post("/api/share/delete-batch", { ids });
+    await http.post(ENDPOINTS.shareDeleteBatch, { ids });
   },
   deleteFile: async (id) => {
-    await http.del(`/api/share/files/${id}`);
+    await http.del(ENDPOINTS.shareDeleteFile(id));
   },
   deleteText: async (id) => {
-    await http.del(`/api/share/texts/${id}`);
+    await http.del(ENDPOINTS.shareDeleteText(id));
   },
   addText: async (text) => {
-    await http.post("/api/share/text", { text });
+    await http.post(ENDPOINTS.shareAddText, { text });
   },
   initFolder: async (name, ttl) => {
-    return await http.post("/api/share/folder/init", { folder_name: name, ttl });
+    return await http.post(ENDPOINTS.shareInitFolder, { folder_name: name, ttl });
   },
   finalizeFolder: async (folderId) => {
-    await http.post("/api/share/folder/finalize", { folder_id: folderId });
+    await http.post(ENDPOINTS.shareFinalizeFolder, { folder_id: folderId });
   },
   list: async () => {
-    return await http.get("/api/share/list");
+    return await http.get(ENDPOINTS.shareList);
   },
 };
 

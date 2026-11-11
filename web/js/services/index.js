@@ -30,8 +30,21 @@ import {
 } from "../model/application/index.js";
 
 // ---- Auth service ----
+/**
+ * Auth service — authentication & session lifecycle.
+ * @param {object} api API layer (dashboardApi)
+ * @param {object} store store port (setAuthed, setDashboard)
+ * @param {object} toast toast port (show)
+ * @returns {{login:function, logout:function, checkAuth:function}}
+ */
 export function createAuthService(api, store, toast) {
   return {
+    /**
+     * Log in with password + optional TOTP; sets auth state and shows a toast.
+     * @param {string} password
+     * @param {string|null} code
+     * @returns {Promise<boolean>} true when authenticated
+     */
     login: async (password, code) => {
       const cmd = createLoginCommand(password, code);
       const result = await api.dashboard.login(cmd.password, cmd.code);
@@ -39,12 +52,20 @@ export function createAuthService(api, store, toast) {
       toast.show(result.authed ? "Login successful" : "Login failed", result.authed ? "ok" : "bad");
       return result.authed;
     },
+    /**
+     * Log out, clear auth state and dashboard, show a toast.
+     * @returns {Promise<void>}
+     */
     logout: async () => {
       await api.dashboard.logout();
       store.setAuthed(false);
       store.setDashboard(null);
       toast.show("Logged out", "ok");
     },
+    /**
+     * Check authentication status via /api/me and persist it.
+     * @returns {Promise<boolean>}
+     */
     checkAuth: async () => {
       const result = await api.dashboard.me();
       store.setAuthed(result.authenticated);
@@ -54,6 +75,13 @@ export function createAuthService(api, store, toast) {
 }
 
 // ---- Bundle/quota service ----
+/**
+ * Bundle/quota service — bundle mutations and usage read.
+ * @param {object} api API layer (bundleApi)
+ * @param {object} store store port (getState)
+ * @param {object} toast toast port (show)
+ * @returns {{updateBundle:function, addGb:function, resetMonth:function, createRecharge:function, deleteRecharge:function, toggleDaily:function, toggleFreeMode:function, getUsagePercent:function}}
+ */
 export function createBundleService(api, store, toast) {
   return {
     updateBundle: async (totalGb, resetDay, periodType) => {
@@ -86,6 +114,10 @@ export function createBundleService(api, store, toast) {
       await api.bundle.toggleFreeMode(enabled);
       toast.show(enabled ? "Free mode enabled" : "Free mode disabled", "ok");
     },
+    /**
+     * Usage percent from dashboard state (0 when no bundle).
+     * @returns {number}
+     */
     getUsagePercent: () => {
       const state = store.getState();
       const bundle = state.dashboard ? state.dashboard.bundle : null;
@@ -95,8 +127,21 @@ export function createBundleService(api, store, toast) {
 }
 
 // ---- User service ----
+/**
+ * User service — user mutations and read-only status checks.
+ * @param {object} api API layer (userApi)
+ * @param {object} store store port (getState)
+ * @param {object} toast toast port (show)
+ * @returns {{patchUser:function, blockUser:function, topUpUser:function, kickUser:function, blacklistUser:function, approveGuest:function, makeRegular:function, rejectGuest:function, setDns:function, isBlocked:function, isOnline:function}}
+ */
 export function createUserService(api, store, toast) {
   return {
+    /**
+     * Patch user fields via a validated command, then toast.
+     * @param {number} userId
+     * @param {object} fields
+     * @returns {Promise<void>}
+     */
     patchUser: async (userId, fields) => {
       const cmd = createPatchUserCommand(userId, fields);
       await api.user.patchUser(cmd.id, {
@@ -146,11 +191,21 @@ export function createUserService(api, store, toast) {
       await api.user.dnsUser(userId, dnsServer);
       toast.show("DNS updated", "ok");
     },
+    /**
+     * Read-only: is the user blocked? (from dashboard state)
+     * @param {number} userId
+     * @returns {boolean}
+     */
     isBlocked: (userId) => {
       const state = store.getState();
       const user = state.dashboard ? state.dashboard.users.find((u) => u.id === userId) : null;
       return user ? isUserBlocked(user) : false;
     },
+    /**
+     * Read-only: is the user online (any device connected)?
+     * @param {number} userId
+     * @returns {boolean}
+     */
     isOnline: (userId) => {
       const state = store.getState();
       const user = state.dashboard ? state.dashboard.users.find((u) => u.id === userId) : null;
@@ -160,8 +215,21 @@ export function createUserService(api, store, toast) {
 }
 
 // ---- Device service ----
+/**
+ * Device service — device mutations.
+ * @param {object} api API layer (deviceApi)
+ * @param {object} store store port (getState)
+ * @param {object} toast toast port (show)
+ * @returns {{patchDevice:function, blockDevice:function, topUpDevice:function, kickDevice:function, blacklistDevice:function, setDns:function}}
+ */
 export function createDeviceService(api, store, toast) {
   return {
+    /**
+     * Patch device fields via a validated command, then toast.
+     * @param {number} deviceId
+     * @param {object} fields
+     * @returns {Promise<void>}
+     */
     patchDevice: async (deviceId, fields) => {
       const cmd = createPatchDeviceCommand(deviceId, fields);
       await api.device.patchDevice(cmd.id, {
@@ -199,8 +267,20 @@ export function createDeviceService(api, store, toast) {
 }
 
 // ---- Network service ----
+/**
+ * Network service — network config, WAN, static leases, MAC lists, guest.
+ * @param {object} api API layer (networkApi)
+ * @param {object} store store port (unused, kept for interface parity)
+ * @param {object} toast toast port (show)
+ * @returns {{updateNetwork:function, toggleVpnShare:function, setRandomMacs:function, addStaticLease:function, deleteStaticLease:function, addToMacList:function, removeFromMacList:function, updateGuest:function, getNetwork:function, getStaticLeases:function, getMacLists:function, getGuest:function, getWanConfig:function, testWan:function, applyWan:function}}
+ */
 export function createNetworkService(api, store, toast) {
   return {
+    /**
+     * Update network shaping config via a validated command, then toast.
+     * @param {object} config
+     * @returns {Promise<void>}
+     */
     updateNetwork: async (config) => {
       const cmd = createNetworkConfigCommand(config);
       await api.network.updateNetwork({
@@ -231,10 +311,22 @@ export function createNetworkService(api, store, toast) {
       await api.network.deleteStaticLease(mac);
       toast.show("Static lease deleted", "ok");
     },
+    /**
+     * Add a MAC to the allow/deny list, then toast.
+     * @param {string} list 'allow'|'deny'
+     * @param {string} mac
+     * @returns {Promise<void>}
+     */
     addToMacList: async (list, mac) => {
       await api.network.addToMacList(list, mac);
       toast.show(`Added to ${list} list`, "ok");
     },
+    /**
+     * Remove a MAC from the allow/deny list, then toast.
+     * @param {string} list 'allow'|'deny'
+     * @param {string} mac
+     * @returns {Promise<void>}
+     */
     removeFromMacList: async (list, mac) => {
       await api.network.removeFromMacList(list, mac);
       toast.show(`Removed from ${list} list`, "ok");
@@ -261,6 +353,11 @@ export function createNetworkService(api, store, toast) {
     testWan: async (user, pass) => {
       return await api.network.testWan(user, pass);
     },
+    /**
+     * Apply WAN config, then toast.
+     * @param {object} config
+     * @returns {Promise<void>}
+     */
     applyWan: async (config) => {
       await api.network.applyWan(config);
       toast.show("WAN config applied", "ok");
@@ -269,6 +366,13 @@ export function createNetworkService(api, store, toast) {
 }
 
 // ---- Security service ----
+/**
+ * Security service — firewall, bans, HTTPS enforcement.
+ * @param {object} api API layer (securityApi)
+ * @param {object} store store port (unused, kept for interface parity)
+ * @param {object} toast toast port (show)
+ * @returns {{updateFirewall:function, revertFirewall:function, banIp:function, unbanIp:function, removeHttps:function, enforceHttps:function}}
+ */
 export function createSecurityService(api, store, toast) {
   return {
     updateFirewall: async (config) => {
@@ -299,6 +403,13 @@ export function createSecurityService(api, store, toast) {
 }
 
 // ---- DNS service ----
+/**
+ * DNS service — DNS master/tier/presets/rules/import/history/attacks.
+ * @param {object} api API layer (dnsApi)
+ * @param {object} store store port (unused, kept for interface parity)
+ * @param {object} toast toast port (show)
+ * @returns {{setDnsMaster:function, setDnsTier:function, toggleDnsPreset:function, addDnsRule:function, deleteDnsRule:function, importDnsRules:function, quickDnsRule:function, ackAttack:function, getHistory:function, getHistoryLive:function}}
+ */
 export function createDnsService(api, store, toast) {
   return {
     setDnsMaster: async (enabled) => {
@@ -313,6 +424,15 @@ export function createDnsService(api, store, toast) {
       await api.dns.toggleDnsPreset(presetId, enabled);
       toast.show(`Preset ${presetId} ${enabled ? "enabled" : "disabled"}`, "ok");
     },
+    /**
+     * Add a DNS rule via a validated command, then toast.
+     * @param {string} domain
+     * @param {string} action
+     * @param {string|null} targetIp
+     * @param {string} scope
+     * @param {number|null} scopeId
+     * @returns {Promise<void>}
+     */
     addDnsRule: async (domain, action, targetIp, scope, scopeId) => {
       const cmd = createDnsRuleCommand(domain, action, targetIp, scope, scopeId);
       await api.dns.addDnsRule(cmd.domain, cmd.action, cmd.target_ip, cmd.scope, cmd.scope_id);
@@ -322,11 +442,28 @@ export function createDnsService(api, store, toast) {
       await api.dns.deleteDnsRule(ruleId);
       toast.show("DNS rule deleted", "ok");
     },
+    /**
+     * Import DNS rules from text; returns the import result.
+     * @param {string} text
+     * @param {string} format
+     * @param {string} scope
+     * @param {number|null} scopeId
+     * @param {string} action
+     * @returns {Promise<object>}
+     */
     importDnsRules: async (text, format, scope, scopeId, action) => {
       const result = await api.dns.importDnsRules(text, format, scope, scopeId, action);
       toast.show(`Imported ${result.created} rules`, "ok");
       return result;
     },
+    /**
+     * Quick block/allow a domain (device-scoped when applicable), then toast.
+     * @param {string} domain
+     * @param {string} action
+     * @param {string} scope
+     * @param {number|null} deviceId
+     * @returns {Promise<void>}
+     */
     quickDnsRule: async (domain, action, scope, deviceId) => {
       await api.dns.quickDnsRule(domain, action, scope, deviceId);
       toast.show(`Domain ${action}ed`, "ok");
@@ -335,9 +472,21 @@ export function createDnsService(api, store, toast) {
       await api.dns.ackAttack();
       toast.show("Attack acknowledged", "ok");
     },
+    /**
+     * Read-only history for a device within a window.
+     * @param {string} device
+     * @param {number|string} window
+     * @param {number} limit
+     * @returns {Promise<object>}
+     */
     getHistory: async (device, window, limit) => {
       return await api.dns.getHistory(device, window, limit);
     },
+    /**
+     * Read-only live history snapshot for a device.
+     * @param {string|number} deviceId
+     * @returns {Promise<object>}
+     */
     getHistoryLive: async (deviceId) => {
       return await api.dns.getHistoryLive(deviceId);
     },
@@ -345,6 +494,13 @@ export function createDnsService(api, store, toast) {
 }
 
 // ---- VPN service ----
+/**
+ * VPN service — nodes, connect/route, WAN renew, IPv6, Tailscale, logs.
+ * @param {object} api API layer (vpnApi)
+ * @param {object} store store port (unused, kept for interface parity)
+ * @param {object} toast toast port (show)
+ * @returns {{loadAll:function, addNode:function, editNode:function, deleteNode:function, connect:function, disconnect:function, ping:function, setInsecure:function, route:function, routeAll:function, wanRenew:function, wanRenewConfig:function, ipv6Probe:function, tailscaleInstall:function, tailscaleConnect:function, tailscaleDisconnect:function, loadLogs:function, loadSettings:function, getIPv6Status:function, getTailscale:function}}
+ */
 export function createVpnService(api, store, toast) {
   return {
     loadAll: async () => {
@@ -362,6 +518,11 @@ export function createVpnService(api, store, toast) {
       await api.vpn.deleteNode(nodeId);
       toast.show("VPN node deleted", "ok");
     },
+    /**
+     * Connect to a VPN node via a validated command, then toast.
+     * @param {number} nodeId
+     * @returns {Promise<void>}
+     */
     connect: async (nodeId) => {
       const cmd = createVpnConnectCommand(nodeId);
       await api.vpn.connect(cmd.nodeId);
@@ -379,6 +540,13 @@ export function createVpnService(api, store, toast) {
       await api.vpn.setInsecure(enabled);
       toast.show(enabled ? "Insecure mode enabled" : "Insecure mode disabled", "ok");
     },
+    /**
+     * Route a user/device via VPN or direct via a validated command, then toast.
+     * @param {string} type
+     * @param {number} id
+     * @param {boolean} viaVpn
+     * @returns {Promise<void>}
+     */
     route: async (type, id, viaVpn) => {
       const cmd = createVpnRouteCommand(type, id, viaVpn);
       await api.vpn.route(cmd.type, cmd.id, cmd.route_vpn);
@@ -428,6 +596,13 @@ export function createVpnService(api, store, toast) {
 }
 
 // ---- System service ----
+/**
+ * System service — password, TOTP, updates, logs, setup, export.
+ * @param {object} api API layer (systemApi)
+ * @param {object} store store port (unused, kept for interface parity)
+ * @param {object} toast toast port (show)
+ * @returns {{changePassword:function, enrollTotp:function, enableTotp:function, disableTotp:function, checkUpdates:function, installUpdates:function, toggleAutoInstall:function, fetchLogs:function, getTotp:function, getSetup:function, completeSetup:function, exportLogs:function}}
+ */
 export function createSystemService(api, store, toast) {
   return {
     changePassword: async (current, newPassword) => {
@@ -468,6 +643,10 @@ export function createSystemService(api, store, toast) {
     completeSetup: async (body) => {
       return await api.system.completeSetup(body);
     },
+    /**
+     * Export logs — handled in the UI layer (no-op here).
+     * @returns {void}
+     */
     exportLogs: () => {
       // Export handled in UI layer
     },
@@ -475,8 +654,25 @@ export function createSystemService(api, store, toast) {
 }
 
 // ---- Daily plan service ----
+/**
+ * Daily plan service — save & preview a user's daily plan.
+ * @param {object} api API layer (userApi)
+ * @param {object} store store port (unused, kept for interface parity)
+ * @param {object} toast toast port (show)
+ * @returns {{saveDailyPlan:function, previewDailyPlan:function}}
+ */
 export function createDailyPlanService(api, store, toast) {
   return {
+    /**
+     * Save a user's daily plan via a validated command, then toast.
+     * @param {number} userId
+     * @param {string} mode
+     * @param {number} gb
+     * @param {string} carry
+     * @param {string} split
+     * @param {Object<string,number>} heavy
+     * @returns {Promise<void>}
+     */
     saveDailyPlan: async (userId, mode, gb, carry, split, heavy) => {
       const cmd = createDailyPlanCommand(userId, mode, gb, carry, split, heavy);
       await api.user.patchUser(userId, {
@@ -495,6 +691,13 @@ export function createDailyPlanService(api, store, toast) {
 }
 
 // ---- Share service ----
+/**
+ * Share service — share CRUD, folder uploads, listing.
+ * @param {object} api API layer (shareApi)
+ * @param {object} store store port (unused, kept for interface parity)
+ * @param {object} toast toast port (show)
+ * @returns {{clear:function, deleteBatch:function, deleteFile:function, deleteText:function, addText:function, initFolder:function, finalizeFolder:function, list:function}}
+ */
 export function createShareService(api, store, toast) {
   return {
     clear: async () => {
