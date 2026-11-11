@@ -246,13 +246,6 @@ class TotpEnableRequest(BaseModel):
     """Verify the enrollment code (from the authenticator app) and switch on."""
     code: str = Field(..., min_length=6, max_length=8)
 
-
-class TotpDisableRequest(BaseModel):
-    """Turn 2FA off. A valid session is the only requirement (an attacker
-    without one can't reach this route at all)."""
-    pass
-
-
 class WanUpdate(BaseModel):
     """WAN-mode apply (the dashboard WAN tab, v19).
 
@@ -421,56 +414,6 @@ class TailscaleDisconnect(BaseModel):
     logout: bool = False
 
 
-class FirewallRule(BaseModel):
-    """One ordered custom firewall rule (Firewall tab).
-
-    ``chain`` ``"input"`` guards the box itself (the dashboard), ``"forward"``
-    the forwarded path. ``action`` ``"deny"`` drops, ``"allow"`` accepts.
-    Empty ``src``/``dst``/``protocol``/ports mean "any". A deny rule whose
-    source/dest covers the client subnet or the box's own IPs is refused
-    server-side (the admin can never lock themself out).
-    """
-
-    name: str = ""
-    chain: str = Field("forward", pattern="^(input|forward)$")
-    action: str = Field("deny", pattern="^(allow|deny)$")
-    src: str = ""
-    dst: str = ""
-    protocol: str = Field("", pattern="^(|tcp|udp|icmp)$")
-    src_port: int = Field(0, ge=0, le=65535)
-    dst_port: int = Field(0, ge=0, le=65535)
-    log: bool = True
-
-
-class FirewallService(BaseModel):
-    """A box service exposed on the internet under WAN mode."""
-
-    name: str = ""
-    protocol: str = Field("tcp", pattern="^(tcp|udp)$")
-    port: int = Field(..., ge=1, le=65535)
-    source: str = "0.0.0.0/0"
-
-
-class FirewallPortForward(BaseModel):
-    """WAN-mode inbound port forward (dnat to an internal host)."""
-
-    name: str = ""
-    protocol: str = Field("tcp", pattern="^(tcp|udp)$")
-    source_port: int = Field(..., ge=1, le=65535)
-    target_ip: str = ""
-    target_port: int = Field(..., ge=1, le=65535)
-
-    @field_validator("target_ip")
-    @classmethod
-    def _validate_target_ip(cls, v: str) -> str:
-        v = v.strip()
-        try:
-            ipaddress.ip_address(v)
-        except ValueError:
-            raise ValueError(f"target_ip must be a bare IP address, got {v!r}") from None
-        return v
-
-
 class FirewallConfigUpdate(BaseModel):
     """Full firewall config replacement (Firewall tab "Apply").
 
@@ -482,10 +425,10 @@ class FirewallConfigUpdate(BaseModel):
     enabled: Optional[bool] = None
     watchdog_seconds: Optional[int] = Field(None, ge=1, le=3600)
     probe_ip: Optional[str] = None
-    services: Optional[list[FirewallService]] = None
-    port_forwards: Optional[list[FirewallPortForward]] = None
+    services: Optional[list] = None
+    port_forwards: Optional[list] = None
     dmz: Optional[str] = None
-    rules: Optional[list[FirewallRule]] = None
+    rules: Optional[list] = None
     allow_cidrs: Optional[list[str]] = None
     deny_cidrs: Optional[list[str]] = None
     syn_flood: Optional[dict] = None
