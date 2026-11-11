@@ -364,6 +364,15 @@ def _assert_safe_preset_url(url: str) -> None:
         raise ValueError(f"preset host {host!r} not in allowlist")
 
 
+#: Presets with no upstream URLs fall back to these curated inline domain sets.
+_INLINE_PRESET_DOMAINS: dict[str, set[str]] = {
+    "streaming": STREAMING_DOMAINS,
+    "porn": PORN_DOMAINS,
+    "adblock-ultra": ULTRA_ADBLOCK_DOMAINS,
+    "ads-tracking": ULTRA_ADBLOCK_DOMAINS,
+}
+
+
 def fetch_preset(preset: Preset) -> set[str]:
     """Fetch + parse every source URL of a preset into one domain set.
 
@@ -372,13 +381,10 @@ def fetch_preset(preset: Preset) -> set[str]:
     than failing the whole preset.
     """
     if not preset.urls:
-        if preset.id == "streaming":
-            return set(STREAMING_DOMAINS)
-        if preset.id == "porn":
-            return set(PORN_DOMAINS)
-        if preset.id in ("adblock-ultra", "ads-tracking"):
-            return set(ULTRA_ADBLOCK_DOMAINS)
-        return set()
+        domains = _INLINE_PRESET_DOMAINS.get(preset.id)
+        if domains is None:
+            return set()
+        return set(domains)
     domains: set[str] = set()
     for url in preset.urls:
         try:
@@ -396,6 +402,28 @@ def fetch_preset(preset: Preset) -> set[str]:
 # ---------------------------------------------------------------------------
 # Rendering: DB rows -> dnsmasq config text
 # ---------------------------------------------------------------------------
+
+def _bracket_ipv6(ip6: str) -> str:
+    """Wrap an IPv6 address in brackets unless already bracketed (dnsmasq syntax)."""
+    if ip6.startswith("[") and ip6.endswith("]"):
+        return ip6
+    return f"[{ip6}]"
+
+
+def _coerce_static_lease(val: Any) -> tuple[str, str]:
+    """Normalize one ``static_leases`` value to ``(ipv4, ipv6)`` strings.
+
+    Accepts ``ip``, ``(ip, ip6)``, ``[ip, ip6]`` or ``{"ip": ..., "ip6": ...}``.
+    """
+    if isinstance(val, dict):
+        return (str(val.get("ip") or "").strip(),
+                str(val.get("ip6") or "").strip())
+    if isinstance(val, (tuple, list)):
+        ip4 = str(val[0] if len(val) > 0 else "").strip()
+        ip6 = str(val[1] if len(val) > 1 else "").strip()
+        return (ip4, ip6)
+    return (str(val or "").strip(), "")
+
 
 def device_tag(device_id: int) -> str:
     """The dnsmasq DHCP tag a device is bound to (stable per device id)."""
@@ -423,13 +451,7 @@ def render_tags(devices: Iterable[Any],
     static_map: dict[str, tuple[str, str]] = {}
     if static_leases:
         for m, val in static_leases.items():
-            if isinstance(val, dict):
-                static_map[m.lower()] = (str(val.get("ip") or "").strip(), str(val.get("ip6") or "").strip())
-            elif isinstance(val, (tuple, list)):
-                static_map[m.lower()] = (str(val[0] if len(val) > 0 else "").strip(),
-                                         str(val[1] if len(val) > 1 else "").strip())
-            else:
-                static_map[m.lower()] = (str(val or "").strip(), "")
+            static_map[m.lower()] = _coerce_static_lease(val)
 
     seen_macs: set[str] = set()
 
@@ -447,7 +469,7 @@ def render_tags(devices: Iterable[Any],
             if ip4 and _is_safe_config_token(ip4):
                 ip_parts.append(ip4)
             if ip6 and _is_safe_config_token(ip6):
-                clean_ip6 = ip6 if (ip6.startswith("[") and ip6.endswith("]")) else f"[{ip6}]"
+                clean_ip6 = _bracket_ipv6(ip6)
                 ip_parts.append(clean_ip6)
 
         if ip_parts:
@@ -462,7 +484,7 @@ def render_tags(devices: Iterable[Any],
             if ip4 and _is_safe_config_token(ip4):
                 ip_parts.append(ip4)
             if ip6 and _is_safe_config_token(ip6):
-                clean_ip6 = ip6 if (ip6.startswith("[") and ip6.endswith("]")) else f"[{ip6}]"
+                clean_ip6 = _bracket_ipv6(ip6)
                 ip_parts.append(clean_ip6)
             if ip_parts:
                 lines.append(f"dhcp-host={mac_lower},{','.join(ip_parts)}")
