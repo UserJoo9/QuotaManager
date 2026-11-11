@@ -29,7 +29,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime as _dt
-import ipaddress
 import json
 import logging
 import os
@@ -56,6 +55,8 @@ from quota.engine import GATEWAY_MAC, EngineSnapshot, SnapshotHolder
 from quota.flows import (FlowSampler, enable_conntrack_accounting,
                          seed_dns_names_from_log)
 from quota.firewall import FirewallManager
+from quota.guest_portal_ipv6 import blocked_guest_addresses
+from quota.ipv6_addresses import build_ipv6_ownership, canonical_ipv6
 from quota.latency_probe import ArpRttProbe
 from quota.netmgr import TopologyManager
 from quota.nftables import NftablesEngine
@@ -64,6 +65,7 @@ from quota.service import QuotaService
 from quota.topology import (check_internet, check_internet_dns, detect_ppp,
                             restart_pppoe)
 from quota.updater import Updater
+from quota.web_listener import make_web_listener_sockets as _make_web_listener_sockets
 
 log = logging.getLogger("quota.run")
 
@@ -363,6 +365,9 @@ class Gateway:
         #: briefly undo the user's fresh caps. Whoever runs second re-reads the
         #: DB, so the lock makes both orderings end on the fresh state.
         self._shaping_lock = asyncio.Lock()
+        #: serializes engine enforcement and snapshot publication between the
+        #: 15-second tick and immediate API approval/kick updates.
+        self._engine_state_lock = asyncio.Lock()
         #: serializes DNS-rule regeneration the same way ``_shaping_lock``
         #: does for the tc tree (a maintenance tick and an API-triggered
         #: immediate apply must not race each other's DB read + file write).
@@ -440,6 +445,8 @@ class Gateway:
         #: IPv6 ISP probe + (ULA/global IPv6 address -> MAC) from `ip -6 neigh`
         self.ipv6_probe: object | None = None
         self._ipv6_neigh: dict[str, str] = {}
+        self._ipv6_neigh_rows: list[tuple[str, str]] = []
+        self._ipv6_ownership = build_ipv6_ownership({}, [], set(), IPV6_MAX_PER_MAC)
         #: MACs seen using a router-assigned GLOBAL IPv6 address (they route
         #: around this box — uncounted and uncuttable until the router's RA is off)
         self._ipv6_direct_macs: set[str] = set()
@@ -833,13 +840,10 @@ class Gateway:
         """
         if self.firewall is None or not getattr(self.firewall, "available", False):
             return
-        self.firewall.set_topology_override(target_topology)
         try:
-            await asyncio.to_thread(self.firewall.apply)
+            await self.firewall.apply_topology(target_topology)
         except Exception:  # noqa: BLE001
             log.exception("firewall WAN-preapply failed")
-        finally:
-            self.firewall.set_topology_override(None)
 
     async def _persist_lease(self, mac: str, ip: str) -> None:
         try:
@@ -939,15 +943,17 @@ class Gateway:
                     return
                 elif await self.service.is_guest_mode():
                     # Guest mode is active: new guest devices are registered in the
-                    # pending lock (0 GB allowance, admin-cut) until admin approves.
+                    # pending lock (0 GB allowance) until the admin approves or a
+                    # guest redeems a voucher. This state is distinct from an
+                    # explicit administrator rejection.
                     dev = await self.database.upsert_device(
                         mac, name="", quota_mode=_db.QUOTA_FIXED,
                         fixed_gb=0.0, guest=True)
                     await self.database.set_device_state(
-                        dev.id, _db.BLOCK_ADMIN)
+                        dev.id, _db.BLOCK_GUEST_PENDING)
                     if dev.user_id:
                         await self.database.update_user(
-                            dev.user_id, block_state=_db.BLOCK_ADMIN)
+                            dev.user_id, block_state=_db.BLOCK_GUEST_PENDING)
                     await self.database.add_event(
                         f"New GUEST on network: {dev.mac} ({ip}) — "
                         f"awaiting admin approval", "info", dev.id)
@@ -1059,13 +1065,11 @@ class Gateway:
         LED all day. ``PERMANENT``/``NOARP`` are static and prove nothing. An
         idle-but-connected device is re-confirmed by the ARP probe sweep.
 
-        IPv6 — every non-failed row with a link-layer address maps a client's
-        ULA address (inside ``dhcp.ipv6_prefix``) to its MAC into
-        ``_ipv6_neigh``. A STALE row is fine here: this is address -> MAC
-        bookkeeping, not presence. Link-local rows are ignored (never reach the
-        internet); global (2000::/3) rows mean the device took an address
-        straight from the ISP router and bypasses this box — remembered in
-        ``_ipv6_direct_macs`` so the dashboard can warn.
+        IPv6 — every valid non-link-local address with a link-layer address is
+        retained, including ULA and global addresses. A STALE row is fine here:
+        this is address -> MAC bookkeeping, not presence. Global addresses are
+        mapped for traffic that traverses this gateway and also recorded in
+        ``_ipv6_direct_macs`` because their upstream path may bypass the box.
 
         Falls back to plain ``ip neigh`` text when ``-j`` is unavailable (old
         iproute2). A missing/unusable ``ip`` binary degrades to a no-op.
@@ -1103,14 +1107,9 @@ class Gateway:
             return
 
         from quota.ipv6_probe import is_global_unicast_ipv6
-        try:
-            ula_net = ipaddress.ip_network(
-                getattr(self.cfg.dhcp, "ipv6_prefix", "") or "fd00:da7a:2::/64",
-                strict=False)
-        except ValueError:
-            ula_net = ipaddress.ip_network("fd00:da7a:2::/64")
         active: set[str] = set()
         ipv6_neigh: dict[str, str] = {}
+        ipv6_rows: list[tuple[str, str]] = []
         direct: set[str] = set()
         for dst, lladdr, states in rows:
             if ":" not in dst:
@@ -1119,17 +1118,17 @@ class Gateway:
                 continue
             if not lladdr or states & {"FAILED", "INCOMPLETE"}:
                 continue
-            try:
-                addr = ipaddress.ip_address(dst.split("%")[0])
-            except ValueError:
+            address = canonical_ipv6(dst)
+            if address is None:
                 continue
-            if addr in ula_net:
-                ipv6_neigh[dst.lower()] = lladdr
-            elif is_global_unicast_ipv6(dst):
+            ipv6_rows.append((address, lladdr))
+            ipv6_neigh.setdefault(address, lladdr)
+            if is_global_unicast_ipv6(address):
                 direct.add(lladdr)
         self._neigh_collected = True
         self._neigh_active_ips = active
         self._ipv6_neigh = ipv6_neigh
+        self._ipv6_neigh_rows = ipv6_rows
         self._ipv6_direct_macs = direct
 
     def _ipv6_wan_wanted(self) -> bool:
@@ -1144,25 +1143,25 @@ class Gateway:
         return str(self._last_vpn_status.get("state", "")) != "on"
 
     def _device_ipv6_map(self) -> dict[str, str]:
-        """MAC -> one display IPv6 address (the ULA address the box tracks)."""
+        """MAC -> one legacy display IPv6 address, kept for older consumers."""
         out: dict[str, str] = {}
         for ip6, mac in sorted(self._ipv6_neigh.items()):
             out.setdefault(mac, ip6)
         return out
 
-    def _tracked_ipv6(self, known_macs: set[str]) -> dict[str, str]:
-        """IPv6 address -> MAC for counting/cutting: only KNOWN devices'
-        addresses, capped at ``IPV6_MAX_PER_MAC`` per device (deterministic:
-        sorted, so the same addresses win every tick), plus static reservations."""
-        per_mac: dict[str, list[str]] = {}
-        for ip6, mac in sorted(self._ipv6_neigh.items()):
-            if mac in known_macs:
-                per_mac.setdefault(mac, []).append(ip6)
-        out: dict[str, str] = {}
-        for mac, addrs in per_mac.items():
-            for ip6 in addrs[:IPV6_MAX_PER_MAC]:
-                out[ip6] = mac
-        return out
+    def _device_ipv6_addresses(self) -> dict[str, list[str]]:
+        """MAC -> every unambiguous observed or reserved IPv6 address."""
+        return {mac: list(addresses)
+                for mac, addresses in self._ipv6_ownership.addresses_by_mac.items()}
+
+    def _device_ipv6_coverage(self) -> dict[str, tuple[str, str]]:
+        """MAC -> current quota-address coverage status and reason."""
+        known_macs = set(self._ipv6_ownership.addresses_by_mac)
+        known_macs.update(self._ipv6_ownership.ambiguous_macs)
+        known_macs.update(self._ipv6_ownership.capped_macs)
+        known_macs.update(self._ipv6_ownership.unverified_macs)
+        return {mac: self._ipv6_ownership.coverage_for(mac)
+                for mac in known_macs}
 
     async def _wifi_probe_tick(self) -> None:
         """Collect a snapshot from the WiFi probe (monitor-mode radio data).
@@ -1448,6 +1447,124 @@ class Gateway:
             if dt > 1.0:
                 log.warning("maintenance step %s took %.1fs", name, dt)
 
+    async def _publish_engine_snapshot(
+            self, live_by_ip: dict[str, object],
+            live_lan_by_ip: dict[str, object], flush_interval: float
+            ) -> dict[str, str]:
+        """Rebuild dual-stack enforcement and publish one matching snapshot.
+
+        The API calls this after an immediate policy change; the maintenance
+        tick calls it after collecting counters. Re-reading DB state while
+        holding the lock prevents a tick that started earlier from overwriting
+        a newer approval or deny decision.
+        """
+        async with self._engine_state_lock:
+            await self._sync_static_hosts()
+            state = await self.service.snapshot_state()
+            await self._apply_unmanaged_block(state)
+            ip_to_mac = {value["ip"]: mac for mac, value in state.items()
+                         if value.get("ip")}
+            known_macs = {str(mac).lower() for mac in state}
+            static_ipv6 = [
+                (row["mac"], row.get("ip6") or "")
+                for row in await self.database.list_static_leases()
+                if row.get("ip6")
+            ]
+            ownership = build_ipv6_ownership(
+                self._ipv6_neigh_rows or list(self._ipv6_neigh.items()),
+                static_ipv6, known_macs, max_per_mac=IPV6_MAX_PER_MAC)
+            self._ipv6_ownership = ownership
+            ip_to_mac_all = dict(ip_to_mac)
+            ip_to_mac_all.update(ownership.ip_to_mac)
+            portal_ip_to_mac = dict(ip_to_mac)
+            portal_ip_to_mac.update(ownership.portal_ip_to_mac)
+            self._last_ip_to_mac = ip_to_mac_all
+            blocked = {mac: value["blocked"] for mac, value in state.items()}
+            ipv6_quarantine_macs = sorted(
+                set(ownership.overflow_by_mac) | set(ownership.ambiguous_macs))
+            pending_guests = blocked_guest_addresses(state, portal_ip_to_mac)
+
+            engine_available = False
+            engine_state_sync_succeeded = False
+            ipv6_pending_set_applied = False
+            gateway_blocked = None
+            if self.engine is not None:
+                try:
+                    await asyncio.to_thread(
+                        self.engine.update_state, ip_to_mac_all, blocked,
+                        sorted(pending_guests),
+                        blocked_ipv6_macs=ipv6_quarantine_macs)
+                    engine_state_sync_succeeded = True
+                except TypeError:
+                    try:
+                        await asyncio.to_thread(
+                            self.engine.update_state, ip_to_mac_all, blocked,
+                            sorted(pending_guests))
+                        engine_state_sync_succeeded = True
+                    except TypeError:
+                        try:
+                            await asyncio.to_thread(
+                                self.engine.update_state, ip_to_mac_all, blocked)
+                            engine_state_sync_succeeded = True
+                        except Exception:  # noqa: BLE001
+                            log.exception("packet-engine state sync failed")
+                    except Exception:  # noqa: BLE001
+                        log.exception("packet-engine state sync failed")
+                except Exception:  # noqa: BLE001
+                    log.exception("packet-engine state sync failed")
+                set_ipv6_wan = getattr(self.engine, "set_ipv6_wan", None)
+                if self.ipv6_probe is not None and set_ipv6_wan is not None:
+                    await asyncio.to_thread(set_ipv6_wan, self._ipv6_wan_wanted())
+                await asyncio.to_thread(
+                    self.engine.set_gateway_blocked,
+                    bool(state.get(GATEWAY_MAC, {}).get("blocked", False)))
+                engine_available = bool(getattr(self.engine, "available", True))
+                portal_status = getattr(self.engine, "ipv6_portal_status", None)
+                if engine_state_sync_succeeded and callable(portal_status):
+                    try:
+                        ipv6_pending_set_applied = bool(
+                            portal_status().get("pending_set_applied", False))
+                    except Exception:  # noqa: BLE001
+                        log.exception("IPv6 guest portal state unavailable")
+                gateway_blocked = getattr(self.engine, "gateway_blocked", None)
+
+            flows_by_mac: dict[str, list[dict]] = {}
+            try:
+                await asyncio.to_thread(self.flows.sample, set(ip_to_mac_all))
+                addresses_by_mac: dict[str, set[str]] = {}
+                for address, mac in ip_to_mac_all.items():
+                    addresses_by_mac.setdefault(mac, set()).add(address)
+                for mac, addresses in addresses_by_mac.items():
+                    destinations = self.flows.top_destinations(addresses)
+                    if destinations:
+                        flows_by_mac[mac] = destinations
+            except Exception:  # noqa: BLE001
+                log.debug("flow sampling failed", exc_info=True)
+
+            self.holder.swap(EngineSnapshot(
+                by_ip=live_by_ip, lan_by_ip=live_lan_by_ip,
+                ip_to_mac=ip_to_mac_all, blocked=blocked,
+                rogue=list(self._rogues), wan_status=await self._wan_status(),
+                gateway_blocked=gateway_blocked,
+                engine_available=engine_available,
+                engine_state_sync_ok=engine_state_sync_succeeded,
+                ipv6_pending_set_applied=ipv6_pending_set_applied,
+                pending_guests=pending_guests,
+                blocked_ipv6_macs=ipv6_quarantine_macs,
+                portal_ip_to_mac=portal_ip_to_mac,
+                interval_s=flush_interval, flows_by_mac=flows_by_mac,
+                ts=time.time()))
+            return ip_to_mac_all
+
+    async def _sync_engine_now(self) -> bool:
+        """Apply current dual-stack policy immediately after an API change."""
+        if self.engine is None:
+            return False
+        snapshot = self.holder.get()
+        await self._publish_engine_snapshot(
+            snapshot.by_ip, snapshot.lan_by_ip, snapshot.interval_s)
+        return bool(getattr(self.engine, "available", True))
+
     async def _maintenance_tick(self) -> None:
         # 1. Roll the quota period if stale (covers month boundary).
         await self.service.ensure_period()
@@ -1583,83 +1700,10 @@ class Gateway:
         for ch in changes:
             log.warning("device %s (%s) -> %s", ch["device_id"], ch["mac"], ch["state"])
 
-        # 4. Push fresh enforcement maps into the engine + holder.
-        await self._sync_static_hosts()
-        state = await self.service.snapshot_state()
-        await self._apply_unmanaged_block(state)
-        ip_to_mac = {v["ip"]: mac for mac, v in state.items() if v.get("ip")}
-        # IPv6: the engine counts/cuts each known device's tracked IPv6
-        # addresses exactly like its IPv4 lease (static reservations + the
-        # ULA addresses learned from the neighbor table).
-        ip_to_mac_all = dict(ip_to_mac)
-        for s_row in await self.database.list_static_leases():
-            ip6 = (s_row.get("ip6") or "").strip().lower()
-            if ip6 and s_row["mac"].lower() in state:
-                ip_to_mac_all[ip6] = s_row["mac"].lower()
-        ip_to_mac_all.update(self._tracked_ipv6({m.lower() for m in state}))
-        self._last_ip_to_mac = ip_to_mac_all  # for an immediate shaping re-sync
-        blocked = {mac: v["blocked"] for mac, v in state.items()}
-        pending_guests = {
-            v["ip"] for mac, v in state.items()
-            if v.get("ip") and v.get("guest") and v.get("blocked")
-        }
-        engine_available = False
-        gateway_blocked = None
-        if self.engine is not None:
-            # nft update_state + set_gateway_blocked shell out to `nft`
-            # (a subprocess per rebuild, ~80 on a first boot). Run them off
-            # the event loop so a slow kernel sync never stalls the WS push.
-            try:
-                await asyncio.to_thread(
-                    self.engine.update_state, ip_to_mac_all, blocked, list(pending_guests))
-            except TypeError:
-                await asyncio.to_thread(
-                    self.engine.update_state, ip_to_mac_all, blocked)
-            # The box's own internet is cut via the gateway chains (gw_blocked
-            # set) — its MAC has no lease/IP, so it never enters the forward
-            # blocked set above. The Gateway user's resolved state drives the
-            # toggle; the engine cache-gates a no-op on an unchanged state.
-            _set6 = getattr(self.engine, "set_ipv6_wan", None)
-            if self.ipv6_probe is not None and _set6 is not None:
-                await asyncio.to_thread(_set6, self._ipv6_wan_wanted())
-            await asyncio.to_thread(
-                self.engine.set_gateway_blocked,
-                bool(state.get(GATEWAY_MAC, {}).get("blocked", False)))
-            # getattr: some test fakes implement only the minimal engine
-            # surface; the real engine always carries both attributes.
-            engine_available = bool(getattr(self.engine, "available", True))
-            # What the kernel actually holds for the box's cut (True/False), or
-            # None if it was never programmed — copied into the snapshot so the
-            # dashboard can show "Blocked in the UI but not cut at the kernel".
-            gateway_blocked = getattr(self.engine, "gateway_blocked", None)
-        # Where is each device's traffic going? Diff conntrack byte counters
-        # (off-loop: /proc read + parse). Best effort — never blocks the tick.
-        flows_by_mac: dict[str, list[dict]] = {}
-        try:
-            _addr_mac = {a: m for a, m in ip_to_mac_all.items()}
-            await asyncio.to_thread(self.flows.sample, set(_addr_mac))
-            by_mac_addrs: dict[str, set[str]] = {}
-            for a, m in _addr_mac.items():
-                by_mac_addrs.setdefault(m, set()).add(a)
-            for m, addrs in by_mac_addrs.items():
-                dests = self.flows.top_destinations(addrs)
-                if dests:
-                    flows_by_mac[m] = dests
-        except Exception:  # noqa: BLE001
-            log.debug("flow sampling failed", exc_info=True)
-        # Live counters = the flushed delta, so the dashboard shows real
-        # recent traffic instead of always-zero values.
-        self.holder.swap(EngineSnapshot(
-            by_ip=live_by_ip,
-            lan_by_ip=live_lan_by_ip,
-            ip_to_mac=ip_to_mac_all, blocked=blocked, rogue=list(self._rogues),
-            wan_status=await self._wan_status(),
-            gateway_blocked=gateway_blocked,
-            engine_available=engine_available,
-            pending_guests=pending_guests,
-            interval_s=flush_interval,
-            flows_by_mac=flows_by_mac,
-            ts=time.time()))
+        # 4. Re-read policy under the shared engine lock, then publish matching
+        # enforcement and client snapshot state.
+        ip_to_mac_all = await self._publish_engine_snapshot(
+            live_by_ip, live_lan_by_ip, flush_interval)
 
         # 5. Linux: reconcile the tc speed-shaping tree (settings + live IPs).
         #    update_state is signature-gated, so an unchanged state does not
@@ -1725,15 +1769,17 @@ class Gateway:
                 users = {u.id: u for u in await self.database.list_users()}
                 devices = {d.mac.lower(): d for d in await self.database.list_devices()}
                 rate_map: list[dict[str, object]] = []
-                # IPv6 addresses ride on their device's (IPv4) entry as ``ip6``
+                # Group both families by device so an IPv6-only device gets
+                # the same class and configured speed caps as a dual-stack one.
+                v4_by_mac: dict[str, list[str]] = {}
                 v6_by_mac: dict[str, list[str]] = {}
                 for ip, mac in ip_to_mac.items():
                     if ":" in ip:
                         v6_by_mac.setdefault(mac.lower(), []).append(ip)
-                for ip, mac in ip_to_mac.items():
-                    if ":" in ip:
-                        continue
-                    dev = devices.get(mac.lower())
+                    else:
+                        v4_by_mac.setdefault(mac.lower(), []).append(ip)
+                for mac in sorted(set(v4_by_mac) | set(v6_by_mac)):
+                    dev = devices.get(mac)
                     if dev is None or dev.user_id is None:
                         continue  # untracked or orphaned — nothing to shape
                     user = users.get(dev.user_id)
@@ -1746,14 +1792,15 @@ class Gateway:
                         user_down = min(user_down, guest_speed) if user_down else guest_speed
                         user_up = min(user_up, guest_speed) if user_up else guest_speed
                     rate_map.append({
-                        "ip": ip,
+                        "ip": min(v4_by_mac.get(mac, ()), default=""),
+                        "ip4": sorted(set(v4_by_mac.get(mac, ()))),
                         "device_id": dev.id,
                         "user_id": dev.user_id,
                         "down": float(dev.limit_down_mbps or 0.0),
                         "up": float(dev.limit_up_mbps or 0.0),
                         "user_down": user_down,
                         "user_up": user_up,
-                        "ip6": sorted(v6_by_mac.get(mac.lower(), ())),
+                        "ip6": sorted(set(v6_by_mac.get(mac, ()))),
                     })
                 # "VPN active" = the tunnel is genuinely carrying the client
                 # subnet right now (VpnShareManager applied the policy route).
@@ -2543,6 +2590,7 @@ def main() -> None:
                 if net not in seen:
                     cfg.waf.local_subnets.append(net)
                     seen.add(net)
+        listener_state = {"ipv6_bound": False}
         app = create_app(gateway.database, gateway.service, gateway.holder,
                          log_path=cfg.log_file,
                          topology_manager=gateway.topology_manager,
@@ -2567,7 +2615,11 @@ def main() -> None:
                          waf_config=cfg.waf,
                          ipv6_probe=lambda: gateway.ipv6_probe,
                          ipv6_map_getter=gateway._device_ipv6_map,
-                         ipv6_direct_getter=lambda: sorted(gateway._ipv6_direct_macs))
+                         ipv6_direct_getter=lambda: sorted(gateway._ipv6_direct_macs),
+                         ipv6_addresses_getter=gateway._device_ipv6_addresses,
+                         ipv6_coverage_getter=gateway._device_ipv6_coverage,
+                         web_ipv6_bound_getter=lambda: listener_state["ipv6_bound"],
+                         engine_sync=gateway._sync_engine_now)
         # TLS (web.tls_certfile / web.tls_keyfile): uvicorn terminates HTTPS
         # itself — a self-signed cert is fine (one-time trust step in the
         # browser). When TLS is on, secure_cookies is forced True by the app.
@@ -2588,12 +2640,22 @@ def main() -> None:
             server.should_exit = True
 
         stop_task = asyncio.create_task(_stop_listener())
-        # Launch kernel/subsystem background init concurrently with web server
-        subsystems_task = asyncio.create_task(gateway.startup_subsystems())
+        listener_sockets: list[socket.socket] = []
+        subsystems_task = None
         try:
-            await server.serve()
+            listener_sockets = _make_web_listener_sockets(cfg.web.host, cfg.web.port)
+            listener_state["ipv6_bound"] = any(
+                sock.family == socket.AF_INET6 for sock in listener_sockets)
+            if not listener_state["ipv6_bound"]:
+                log.warning("IPv6 web listener unavailable; captive portal is IPv4-only")
+            # Launch kernel/subsystem background init concurrently with web server.
+            subsystems_task = asyncio.create_task(gateway.startup_subsystems())
+            await server.serve(sockets=listener_sockets)
         finally:
-            if not subsystems_task.done():
+            listener_state["ipv6_bound"] = False
+            for listener in listener_sockets:
+                listener.close()
+            if subsystems_task is not None and not subsystems_task.done():
                 subsystems_task.cancel()
                 try:
                     await subsystems_task

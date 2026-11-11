@@ -6,6 +6,25 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## [Unreleased]
+
+Added:
+- **Guest vouchers**: an administrator can issue a one-time code with a specific allowance and optional expiry, list its state, and revoke an unused code. A pending guest can redeem the code from the portal. Invalid codes get a generic message, and repeated guesses trigger a cooldown.
+- **IPv6 quota and firewall coverage**: known IPv6 addresses now follow the same device quota, speed-limit, and supported firewall policies as IPv4 when traffic passes through the gateway. The device view reports partial or unverified address coverage.
+- **IPv6 guest portal**: pending guests can reach the portal and redeem a voucher over HTTP on IPv4 or IPv6 when the gateway's web listener is configured for both families.
+
+Limits: HTTPS is not intercepted, and IPv6 traffic that bypasses the gateway cannot be counted or blocked. IPv6 service publishing, port forwards, and DMZ remain unsupported.
+
+Changed:
+- New installations listen on IPv4 and IPv6 when IPv6 is available. Existing listener settings stay in place when setup runs again.
+
+Fixed:
+- The guest approval page now treats return links as safe web addresses instead of page markup, and shows a useful message when the device cannot be identified or is blocked.
+- A voucher is not spent when its device is already blocked. Administrators can now see when a code expires and which device redeemed it, including on a phone.
+- When IPv6 addresses exceed the tracking limit or have conflicting owners, IPv6 Internet access is paused for that device until ownership can be tracked safely. This prevents uncounted traffic from bypassing its quota; IPv4 stays available.
+- The guest portal waits for IPv6 access rules to update before it says the connection is ready. Guests whose IPv6 access is limited see that approval was saved and that IPv4 remains available.
+- Firewall status now shows separately whether the IPv4 and IPv6 rules applied successfully.
+
 ## [0.5.5] — 2026-11-09
 
 Added:

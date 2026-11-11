@@ -150,7 +150,9 @@ class BundleConfig:
 
 @dataclass
 class WebConfig:
-    host: str = "0.0.0.0"
+    #: "*" binds explicit IPv4 and IPv6 listeners when IPv6 is available.
+    #: A numeric wildcard such as 0.0.0.0 intentionally remains IPv4-only.
+    host: str = "*"
     port: int = 8080
     #: Mark session cookies ``Secure`` (browser sends them only over HTTPS).
     #: Auto-forced on when ``tls_certfile`` is set; keep False for a plain

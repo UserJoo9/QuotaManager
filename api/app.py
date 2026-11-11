@@ -31,6 +31,8 @@ from typing import Any, Callable, Optional
 import yaml
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                PlainTextResponse, RedirectResponse,
                                StreamingResponse)
@@ -44,7 +46,7 @@ from api.schemas import (BundleUpdate, ConsumptionSpoofRequest, DeviceCreate,
                          DnsServerUpdate, DomainRuleCreate, DomainRuleUpdate,
                          FirewallBanRequest, FirewallConfigUpdate,
                          FirewallGeoUpdate, FirewallUnbanRequest,
-                         GuestUpdate,
+                         GuestUpdate, GuestVoucherCreate, GuestVoucherRedeem,
                          LoginRequest, MacListsUpdate,
                          MilestoneNotify, MilestoneDailyPlan,
                          NetworkUpdate, PasswordUpdate, RechargeCreate, SetupComplete,
@@ -57,12 +59,34 @@ from api.schemas import (BundleUpdate, ConsumptionSpoofRequest, DeviceCreate,
 from api import waf as _waf
 
 _MAC_RE_API = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
+
+
+def _request_client_ip(request: Request) -> str:
+    """Return a canonical source IP for snapshot and captive-portal lookups."""
+    host = request.client.host if request.client else ""
+    return canonical_ip_address(host) or ""
+
+
+def _snapshot_client_mac(snapshot: EngineSnapshot | None, address: str) -> str:
+    """Resolve a current source IP through the gateway's ownership snapshot."""
+    if snapshot is None or not address:
+        return ""
+    mapping = getattr(snapshot, "portal_ip_to_mac", None) or snapshot.ip_to_mac
+    return str(mapping.get(address, "") or "").strip().lower()
+
+
 from core import passwords as _passwords
 from core import timeutil
+from core.attempt_limiter import AttemptBucket, AttemptBuckets
 from core.config import WafConfig, WebConfig
 from quota import daily_plan as _dp
 from quota import db as _db
 from quota import dns_rules as _dns_rules
+from quota.guest_vouchers import VoucherAttemptLimiter, generate_voucher_code
+from quota.guest_state import is_pending_guest
+from quota.guest_portal_ipv6 import blocked_guest_addresses
+from quota.ip_addresses import canonical_ip_address
+from quota.ipv6_addresses import ipv6_address_inventory
 from quota import totp as _totp
 from quota.tailscale import TailscaleManager
 from quota.engine import GATEWAY_MAC, EngineSnapshot, SnapshotHolder
@@ -176,50 +200,48 @@ class _LoginLimiter:
     """
 
     def __init__(self) -> None:
-        self._fails: dict[str, int] = {}
-        self._next_allowed: dict[str, float] = {}
-        self._global_fails: list[float] = []       # timestamps of all failures
-        self._global_next_allowed = 0.0
-
-    def _retry_after(self, key: str) -> float:
-        """Seconds until the next attempt for ``key`` is processed (0 = now)."""
-        nxt = self._next_allowed.get(key, 0.0)
-        remaining = nxt - time.monotonic()
-        return max(0.0, remaining)
+        self._attempts = AttemptBuckets(max_entries=8192)
+        self._global = AttemptBucket()
 
     def check(self, key: str, now: float | None = None) -> float:
         """Retry-After for ``key``. 0.0 = this attempt may be processed now."""
         now = now if now is not None else time.monotonic()
-        if now < self._global_next_allowed:
-            return self._global_next_allowed - now
-        if now < self._next_allowed.get(key, 0.0):
-            return self._next_allowed[key] - now
+        if now < self._global.blocked_until:
+            return self._global.blocked_until - now
+        state = self._attempts.get(key)
+        if state is not None and now < state.blocked_until:
+            return state.blocked_until - now
         # window roll: forget an old locked entry so a stale key unblocks
         return 0.0
 
     def fail(self, key: str, now: float | None = None) -> None:
         now = now if now is not None else time.monotonic()
-        fails = self._fails.get(key, 0) + 1
-        self._fails[key] = fails
+        state = self._attempts.get(key, create=True)
+        assert state is not None
+        fails = state.failures + 1
+        state.failures = fails
         # No delay for the first LOGIN_FREE_FAILURES failures (typo-friendly);
         # the failure that CROSSES the free tier arms the first backoff step,
         # so the NEXT attempt is the first one throttled.
         if fails > LOGIN_LOCKOUT_FAILURES:
-            self._next_allowed[key] = now + LOGIN_LOCKOUT_SEC
+            state.blocked_until = now + LOGIN_LOCKOUT_SEC
         elif fails > LOGIN_FREE_FAILURES:
             delay = (LOGIN_BACKOFF_BASE_SEC *
                      (LOGIN_BACKOFF_FACTOR ** (fails - LOGIN_FREE_FAILURES - 1)))
-            self._next_allowed[key] = now + min(delay, LOGIN_MAX_BACKOFF_SEC)
+            state.blocked_until = now + min(delay, LOGIN_MAX_BACKOFF_SEC)
         # global breaker: a rolling window of failures across ALL sources
-        self._global_fails = [t for t in self._global_fails
-                              if now - t <= LOGIN_GLOBAL_WINDOW_SEC]
-        self._global_fails.append(now)
-        if len(self._global_fails) >= LOGIN_GLOBAL_MAX_FAILURES:
-            self._global_next_allowed = now + LOGIN_LOCKOUT_SEC
+        cutoff = now - LOGIN_GLOBAL_WINDOW_SEC
+        while self._global.timestamps and self._global.timestamps[0] < cutoff:
+            self._global.timestamps.popleft()
+        self._global.timestamps.append(now)
+        if len(self._global.timestamps) >= LOGIN_GLOBAL_MAX_FAILURES:
+            self._global.blocked_until = now + LOGIN_LOCKOUT_SEC
+
+    def failure_count(self, key: str) -> int:
+        return self._attempts.count(key)
 
     def success(self, key: str) -> None:
-        self._fails.pop(key, None)
-        self._next_allowed.pop(key, None)
+        self._attempts.discard(key)
 
 
 async def _record_failed_login(database: _db.Database, host: str) -> None:
@@ -305,6 +327,10 @@ def create_app(
     ipv6_map_getter: Optional[Callable[[], dict[str, str]]] = None,
     ipv6_direct_getter: Optional[Callable[[], list[str]]] = None,
     tailscale_manager: Optional[object] = None,
+    ipv6_addresses_getter: Optional[Callable[[], dict[str, list[str]]]] = None,
+    ipv6_coverage_getter: Optional[Callable[[], dict[str, tuple[str, str]]]] = None,
+    web_ipv6_bound_getter: Optional[Callable[[], bool]] = None,
+    engine_sync: Optional[Callable[[], object]] = None,
 ) -> FastAPI:
     web_cfg: WebConfig = web_config or WebConfig()
     tailscale = tailscale_manager or TailscaleManager()
@@ -322,6 +348,26 @@ def create_app(
                   openapi_url="/api/openapi.json" if web_cfg.docs_enabled
                   else None)
 
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(request: Request,
+                               exc: RequestValidationError) -> Response:
+        if request.url.path == "/api/guest/voucher/redeem":
+            # FastAPI's default 422 payload includes the submitted input. A
+            # voucher is a bearer token, so return only a stable error code.
+            return JSONResponse(
+                status_code=422,
+                content={"detail": {"code": "voucher_request_invalid"}})
+        if request.url.path == "/api/guest/vouchers":
+            # Keep validator output useful without serializing unsupported
+            # floats (NaN/Infinity) or reflecting submitted values to callers.
+            errors = [{
+                "loc": list(error.get("loc", ())),
+                "msg": str(error.get("msg", "Invalid request")),
+                "type": str(error.get("type", "value_error")),
+            } for error in exc.errors()]
+            return JSONResponse(status_code=422, content={"detail": errors})
+        return await request_validation_exception_handler(request, exc)
+
     _vpn_manager: VpnManager = (
         vpn_manager if isinstance(vpn_manager, VpnManager)
         else VpnManager(
@@ -330,6 +376,7 @@ def create_app(
         )
     )
     app.state.vpn_manager = _vpn_manager
+    voucher_attempts = VoucherAttemptLimiter()
 
 
     def _now() -> _dt.datetime:
@@ -400,20 +447,54 @@ def create_app(
 
     _engine = engine
 
-    def _schedule_engine_sync() -> None:
-        """Push fresh enforcement maps into the packet engine right away."""
-        if _engine is None or not hasattr(_engine, "update_state"):
-            return
-        async def _do_sync():
+    async def _sync_engine_state() -> bool:
+        """Refresh enforcement without dropping current IPv6 ownership state."""
+        if engine_sync is not None:
             try:
-                state = await service.snapshot_state()
-                ip_to_mac = {v["ip"]: mac for mac, v in state.items() if v.get("ip")}
-                blocked = {mac: v["blocked"] for mac, v in state.items()}
-                await asyncio.to_thread(_engine.update_state, ip_to_mac, blocked)
+                return bool(await engine_sync())
             except Exception:
-                pass
+                log.exception("API: immediate packet-engine sync failed")
+                return False
+        if _engine is None or not hasattr(_engine, "update_state"):
+            return False
+        state = await service.snapshot_state()
+        snapshot = holder.get()
+        known_macs = set(state)
+        ip_to_mac = {v["ip"]: mac for mac, v in state.items() if v.get("ip")}
+        snapshot_ip_map = getattr(snapshot, "ip_to_mac", {}) if snapshot else {}
+        ipv6_ip_to_mac = {
+            ip: str(mac).lower() for ip, mac in snapshot_ip_map.items()
+            if ":" in ip and str(mac).lower() in known_macs
+        }
+        ip_to_mac.update(ipv6_ip_to_mac)
+        portal_source = (getattr(snapshot, "portal_ip_to_mac", {}) or
+                         snapshot_ip_map)
+        portal_ip_to_mac = {
+            ip: str(mac).lower() for ip, mac in portal_source.items()
+            if ":" in ip and str(mac).lower() in known_macs
+        }
+        portal_ip_to_mac.update(ip_to_mac)
+        blocked = {mac: bool(value.get("blocked"))
+                   for mac, value in state.items()}
+        pending_guests = blocked_guest_addresses(state, portal_ip_to_mac)
+        blocked_ipv6_macs = sorted(
+            set(getattr(snapshot, "blocked_ipv6_macs", []) or []) & known_macs
+        )
         try:
-            asyncio.create_task(_do_sync())
+            await asyncio.to_thread(
+                _engine.update_state, ip_to_mac, blocked,
+                sorted(pending_guests), blocked_ipv6_macs=blocked_ipv6_macs)
+        except Exception:
+            log.exception("API: immediate packet-engine sync failed")
+            return False
+        if not bool(getattr(_engine, "available", True)):
+            return False
+        return True
+
+    def _schedule_engine_sync() -> None:
+        """Push fresh, dual-stack enforcement maps into the engine."""
+        try:
+            asyncio.create_task(_sync_engine_state())
         except RuntimeError:
             pass
 
@@ -497,7 +578,11 @@ def create_app(
                      active_ips: Optional[set[str]] = None,
                      lan_usage: dict[str, int] | None = None,
                      ip6: str = "",
-                     ipv6_direct: bool = False) -> dict[str, Any]:
+                     ipv6_direct: bool = False,
+                     ipv4_addresses: list[str] | None = None,
+                     ipv6_addresses: list[str] | None = None,
+                     ipv6_enforcement: str = "unverified",
+                     ipv6_enforcement_reason: str = "no_ipv6_address_observed") -> dict[str, Any]:
         """Device card. allowance/used/percent are the USER's aggregates (all of
         a user's devices report the same), ``state`` is the resolved block state
         (service.resolve_device_state) so a user cut reaches every device.
@@ -523,7 +608,11 @@ def create_app(
             "user_id": dev.user_id,
             "user_name": user.name if user else "",
             "ip": leases.get(dev.mac, ""),
+            "ipv4_addresses": ipv4_addresses or [],
             "ip6": ip6,
+            "ipv6_addresses": ipv6_addresses or [],
+            "ipv6_enforcement": ipv6_enforcement,
+            "ipv6_enforcement_reason": ipv6_enforcement_reason,
             # took a GLOBAL IPv6 address from the ISP router: its IPv6 traffic
             # bypasses this box (not counted, not cut) until router RA is off
             "ipv6_direct": ipv6_direct,
@@ -631,7 +720,15 @@ def create_app(
             for s in static_leases
             if s.get("ip6")
         }
+        static_ip4_map = {
+            s["mac"].lower(): s["ip"]
+            for s in static_leases
+            if s.get("ip")
+        }
         dynamic_ip6_map = ipv6_map_getter() if ipv6_map_getter else {}
+        dynamic_ipv6_addresses = (
+            ipv6_addresses_getter() if ipv6_addresses_getter else {})
+        ipv6_coverage = ipv6_coverage_getter() if ipv6_coverage_getter else {}
         direct_macs = set(ipv6_direct_getter()) if ipv6_direct_getter else set()
         allowances = bundle.allowances
         live = holder.get()
@@ -717,13 +814,42 @@ def create_app(
                 deny_listed=d.mac in deny_set,
                 has_device_booster=d.id in device_booster_ids)
             dev_mac = d.mac.lower().strip()
-            dev_ip6 = static_ip6_map.get(dev_mac) or dynamic_ip6_map.get(dev_mac, "")
+            if ipv6_addresses_getter:
+                raw_v6 = dynamic_ipv6_addresses.get(dev_mac, [])
+            else:
+                legacy_v6 = dynamic_ip6_map.get(dev_mac, "")
+                raw_v6 = [legacy_v6] if legacy_v6 else []
+            if isinstance(raw_v6, str):
+                raw_v6 = [raw_v6]
+            dev_ip6, dev_ipv6_addresses = ipv6_address_inventory(
+                static_ip6_map.get(dev_mac, ""), raw_v6)
+            coverage = ipv6_coverage.get(dev_mac)
+            if coverage:
+                ipv6_enforcement, ipv6_enforcement_reason = coverage
+            elif dev_mac in direct_macs:
+                ipv6_enforcement = "unverified"
+                ipv6_enforcement_reason = "global_prefix_path_unverified"
+            elif dev_ipv6_addresses:
+                ipv6_enforcement = "managed"
+                ipv6_enforcement_reason = ""
+            else:
+                ipv6_enforcement = "unverified"
+                ipv6_enforcement_reason = "no_ipv6_address_observed"
+            dev_ipv4_addresses = sorted({
+                address for address in
+                [leases.get(d.mac, ""), static_ip4_map.get(dev_mac, "")]
+                if address
+            })
             dev_view = _device_view(
                 d, user, uv, leases, live, state,
                 usage_by_device.get(d.id, {"up": 0, "down": 0}),
                 active_ips,
                 ip6=dev_ip6,
                 ipv6_direct=dev_mac in direct_macs,
+                ipv4_addresses=dev_ipv4_addresses,
+                ipv6_addresses=dev_ipv6_addresses,
+                ipv6_enforcement=ipv6_enforcement,
+                ipv6_enforcement_reason=ipv6_enforcement_reason,
                 lan_usage=lan_by_device.get(d.id))
             dev_view["daily_share_gb"] = float(d.daily_share_gb or 0.0)
             dcap = (daily.get(d.user_id) or {}).get("device_caps", {}).get(d.id)
@@ -1790,15 +1916,11 @@ def create_app(
         WAN-only (409 in LAN mode)."""
         if firewall is None:
             raise HTTPException(404, "firewall disabled in config")
-        current = dict(await firewall.load_config())
         incoming = body.model_dump(exclude_none=True)
-        current.update(incoming)
-        if firewall.topology != "wan":
-            if current.get("port_forwards") or current.get("dmz"):
-                raise HTTPException(
-                    409, "port forwards and DMZ are WAN-mode only — apply "
-                         "them after switching to Strong (WAN) mode")
-        result = await firewall.safe_apply(current, reason="dashboard")
+        result = await firewall.safe_apply_partial(
+            incoming, reason="dashboard", require_wan=True)
+        if result.get("conflict"):
+            raise HTTPException(409, result.get("error", "WAN mode required"))
         if not result.get("ok"):
             raise HTTPException(500, result.get("error", "firewall apply failed"))
         return result
@@ -1816,16 +1938,20 @@ def create_app(
         own IPs / the client subnet (self-DoS guard)."""
         if firewall is None:
             raise HTTPException(404, "firewall disabled in config")
+        rejection = firewall.validate_ban_target(body.ip)
+        if rejection:
+            raise HTTPException(400, rejection)
         ok = await firewall.ban_ip(body.ip, body.seconds, body.reason)
         if not ok:
-            raise HTTPException(400, "refusing to ban the box itself or the client subnet")
+            raise HTTPException(500, "firewall could not apply the ban")
         return {"ok": True}
 
     @app.post("/api/firewall/unban", dependencies=[Depends(_require_auth)])
     async def unban_firewall(body: FirewallUnbanRequest) -> dict[str, Any]:
         if firewall is None:
             raise HTTPException(404, "firewall disabled in config")
-        await firewall.unban_ip(body.ip)
+        if not await firewall.unban_ip(body.ip):
+            raise HTTPException(500, "firewall could not apply the unban")
         return {"ok": True}
 
     @app.post("/api/firewall/geo", dependencies=[Depends(_require_auth)])
@@ -2959,6 +3085,126 @@ def create_app(
                 "speed_limit_mbps": await service.guest_speed_limit_mbps(),
                 "stop_new": await service.stop_new_connections()}
 
+    # -- Guest vouchers --------------------------------------------------------
+
+    def _guest_voucher_payload(voucher: _db.GuestVoucher) -> dict[str, Any]:
+        if voucher.revoked_at is not None:
+            status = "revoked"
+        elif voucher.used_at is not None:
+            status = "used"
+        elif voucher.expires_at is not None and voucher.expires_at <= time.time():
+            status = "expired"
+        else:
+            status = "unused"
+        return {
+            "code": voucher.code,
+            "quota_gb": voucher.quota_gb,
+            "created_at": voucher.created_at,
+            "expires_at": voucher.expires_at,
+            "used_at": voucher.used_at,
+            "used_mac": voucher.used_mac,
+            "revoked_at": voucher.revoked_at,
+            "comment": voucher.comment,
+            "status": status,
+        }
+
+    @app.post("/api/guest/vouchers", status_code=201,
+              dependencies=[Depends(_require_auth)])
+    async def create_guest_voucher(body: GuestVoucherCreate) -> dict[str, Any]:
+        if body.expires_at is not None and body.expires_at <= time.time():
+            raise HTTPException(422, "expires_at must be in the future")
+        voucher = await database.create_guest_voucher(
+            generate_voucher_code(), body.quota_gb,
+            expires_at=body.expires_at, comment=body.comment)
+        await database.add_event(
+            f"Guest voucher created ({voucher.quota_gb:g} GB)", "info")
+        return _guest_voucher_payload(voucher)
+
+    @app.get("/api/guest/vouchers", dependencies=[Depends(_require_auth)])
+    async def list_guest_vouchers() -> dict[str, Any]:
+        vouchers = await database.list_guest_vouchers(active_only=False)
+        return {"vouchers": [_guest_voucher_payload(v) for v in vouchers]}
+
+    @app.post("/api/guest/vouchers/{code}/revoke",
+              dependencies=[Depends(_require_auth)])
+    async def revoke_guest_voucher(code: str) -> dict[str, Any]:
+        voucher = await database.get_guest_voucher(code)
+        if voucher is None:
+            raise HTTPException(404, "Guest voucher not found")
+        if voucher.used_at is not None or voucher.revoked_at is not None:
+            raise HTTPException(409, "Guest voucher is no longer revocable")
+        if not await database.revoke_guest_voucher(code):
+            raise HTTPException(409, "Guest voucher is no longer revocable")
+        await database.add_event("Guest voucher revoked", "warn")
+        return {"ok": True, "status": "revoked"}
+
+    @app.post("/api/guest/voucher/redeem")
+    async def redeem_guest_voucher(body: GuestVoucherRedeem,
+                                   request: Request) -> dict[str, Any]:
+        if not await service.is_guest_mode():
+            raise HTTPException(403, {"code": "guest_mode_disabled"})
+        if await service.stop_new_connections():
+            raise HTTPException(403, {"code": "new_guests_paused"})
+
+        host = _request_client_ip(request)
+        snapshot = holder.get() if holder else None
+        mac = _snapshot_client_mac(snapshot, host)
+        dev = await database.get_device(mac=mac) if mac else None
+        if dev is None or not dev.user_id:
+            raise HTTPException(403, {"code": "device_unrecognized"})
+
+        deny_macs = {str(value).strip().lower()
+                     for value in await database.get_mac_list("deny")}
+        kicked_getter = getattr(service, "active_kicked_macs", None)
+        kicked_macs = kicked_getter() if callable(kicked_getter) else set()
+        kicked_macs = {str(value).strip().lower() for value in kicked_macs}
+        if dev.mac.lower() in deny_macs or dev.mac.lower() in kicked_macs:
+            raise HTTPException(403, {"code": "device_blocked"})
+
+        user = await database.get_user(dev.user_id)
+        if user is None or not is_pending_guest(
+                user.guest, user.block_state, dev.block_state):
+            raise HTTPException(403, {"code": "guest_not_pending"})
+
+        async with voucher_attempts.serialize(dev.mac):
+            # Recheck in-memory kick state after waiting for another request
+            # from this device; persisted deny/admin state is checked again in
+            # the atomic database transaction.
+            kicked_getter = getattr(service, "active_kicked_macs", None)
+            kicked_macs = kicked_getter() if callable(kicked_getter) else set()
+            if dev.mac.lower() in {str(value).strip().lower()
+                                   for value in kicked_macs}:
+                raise HTTPException(403, {"code": "device_blocked"})
+
+            retry_after = voucher_attempts.retry_after(dev.mac)
+            if retry_after:
+                raise HTTPException(
+                    429, {"code": "voucher_cooldown"},
+                    headers={"Retry-After": str(retry_after)})
+
+            ok, reason, quota_gb = await database.redeem_guest_voucher_for_device(
+                body.code, dev.mac)
+            if not ok:
+                if reason == "guest_mode_disabled":
+                    raise HTTPException(403, {"code": "guest_mode_disabled"})
+                if reason == "new_guests_paused":
+                    raise HTTPException(403, {"code": "new_guests_paused"})
+                if reason == "guest_not_pending":
+                    raise HTTPException(403, {"code": "guest_not_pending"})
+                if reason == "device_blocked":
+                    raise HTTPException(403, {"code": "device_blocked"})
+                if reason == "guest_account_shared":
+                    raise HTTPException(403, {"code": "guest_account_shared"})
+                if reason == "voucher_invalid":
+                    voucher_attempts.record_invalid(dev.mac)
+                    raise HTTPException(400, {"code": "voucher_invalid"})
+                raise HTTPException(500, {"code": "voucher_service_error"})
+
+        await service.recompute_allowances()
+        _schedule_shaping_sync()
+        await _sync_engine_state()
+        return {"ok": True, "status": "approved", "quota_gb": quota_gb}
+
     # -- Guest Mode (Admin Accept / Reject) -----------------------------------
 
     @app.post("/api/guest/{device_id}/approve", dependencies=[Depends(_require_auth)])
@@ -2980,6 +3226,7 @@ def create_app(
         await database.add_event(f"Guest device approved by admin: {dev.mac} ({quota_gb:g} GB)", "info", dev.id)
         await service.recompute_allowances()
         _schedule_shaping_sync()
+        await _sync_engine_state()
         return {"ok": True, "block_state": _db.BLOCK_OK, "quota_gb": quota_gb}
 
     @app.post("/api/guest/{device_id}/reject", dependencies=[Depends(_require_auth)])
@@ -2997,6 +3244,7 @@ def create_app(
         await database.add_event(f"Guest device rejected/blocked by admin: {dev.mac}", "warn", dev.id)
         await service.recompute_allowances()
         _schedule_shaping_sync()
+        await _sync_engine_state()
         return {"ok": True, "block_state": _db.BLOCK_ADMIN}
 
     @app.post("/api/guest/user/{user_id}/approve", dependencies=[Depends(_require_auth)])
@@ -3019,6 +3267,7 @@ def create_app(
         await database.add_event(f"Guest user approved by admin: {u.name or 'Guest'} ({quota_gb:g} GB)", "info")
         await service.recompute_allowances()
         _schedule_shaping_sync()
+        await _sync_engine_state()
         return {"ok": True, "block_state": _db.BLOCK_OK, "quota_gb": quota_gb}
 
     @app.post("/api/guest/user/{user_id}/reject", dependencies=[Depends(_require_auth)])
@@ -3037,6 +3286,7 @@ def create_app(
         await database.add_event(f"Guest user rejected/blocked by admin: {u.name or 'Guest'}", "warn")
         await service.recompute_allowances()
         _schedule_shaping_sync()
+        await _sync_engine_state()
         return {"ok": True, "block_state": _db.BLOCK_ADMIN}
 
     # -- captive portal & guest approval status --------------------------------
@@ -3044,33 +3294,75 @@ def create_app(
     @app.get("/api/guest/status")
     async def get_guest_status(request: Request) -> dict[str, Any]:
         """Check connection and approval status for the requesting client."""
-        host = request.client.host if request.client else ""
+        host = _request_client_ip(request)
         snapshot = holder.get() if holder else None
-        mac = snapshot.ip_to_mac.get(host, "") if snapshot else ""
-        dev = None
-        if host:
-            dev = await database.get_device_by_ip(host)
-        if not dev and mac:
-            dev = await database.get_device(mac=mac.lower())
-        if not mac and dev:
-            mac = dev.mac
+        mac = _snapshot_client_mac(snapshot, host)
+        dev = await database.get_device(mac=mac) if mac else None
         user = await database.get_user(dev.user_id) if dev and dev.user_id else None
 
         is_guest = bool((user and user.guest) or (dev and dev.guest))
-        is_blocked = bool(
-            (snapshot and host in snapshot.pending_guests) or
-            (dev and dev.block_state != _db.BLOCK_OK) or
-            (user and user.block_state != _db.BLOCK_OK)
-        )
-
-        is_approved = is_guest and not is_blocked
-        is_pending = is_guest and is_blocked
+        database_approved = bool(
+            is_guest and dev and user and dev.block_state == _db.BLOCK_OK and
+            user.block_state == _db.BLOCK_OK)
+        pending_guest = bool(
+            user and dev and is_pending_guest(
+                user.guest, user.block_state, dev.block_state))
+        denied_macs = {str(value).strip().lower()
+                       for value in await database.get_mac_list("deny")}
+        kicked_getter = getattr(service, "active_kicked_macs", None)
+        kicked_macs = kicked_getter() if callable(kicked_getter) else set()
+        kicked_macs = {str(value).strip().lower() for value in kicked_macs}
+        mac = str(mac or "").lower()
+        device_state = str(dev.block_state) if dev else ""
+        user_state = str(user.block_state) if user else ""
+        pending_state = getattr(_db, "BLOCK_GUEST_PENDING", "guest_pending")
+        device_policy_blocked = bool(
+            dev and device_state != _db.BLOCK_OK and
+            not (is_guest and device_state == pending_state))
+        user_policy_blocked = bool(
+            user and user_state != _db.BLOCK_OK and
+            not (is_guest and user_state == pending_state))
+        policy_blocked = bool(
+            (mac and (mac in denied_macs or mac in kicked_macs)) or
+            device_policy_blocked or user_policy_blocked)
+        snapshot_pending = bool(snapshot and host in snapshot.pending_guests)
+        enforcement_available = bool(
+            snapshot and getattr(snapshot, "engine_available", True) and
+            getattr(snapshot, "engine_state_sync_ok", True))
+        is_ipv6_client = ipaddress.ip_address(host).version == 6 if host else False
+        ipv6_pending_set_applied = bool(
+            getattr(snapshot, "ipv6_pending_set_applied", False) if snapshot else False)
+        ipv6_quarantined = bool(
+            is_ipv6_client and mac and mac in
+            (getattr(snapshot, "blocked_ipv6_macs", []) or []))
+        activating = bool(database_approved and
+                          (snapshot_pending or not enforcement_available or
+                           (is_ipv6_client and not ipv6_pending_set_applied)) and
+                          not policy_blocked and not ipv6_quarantined)
+        is_blocked = bool(policy_blocked or
+                          (snapshot_pending and not database_approved))
+        is_limited = bool(database_approved and ipv6_quarantined and
+                          not policy_blocked)
+        is_approved = bool(database_approved and not policy_blocked and
+                           not snapshot_pending and enforcement_available and
+                           (not is_ipv6_client or ipv6_pending_set_applied) and
+                           not ipv6_quarantined)
+        is_pending = bool(is_guest and pending_guest and not policy_blocked)
+        status = ("limited" if is_limited else
+                  "activating" if activating else
+                  "pending" if is_pending else
+                  "blocked" if is_blocked else
+                  "approved" if is_approved else "ok")
 
         return {
-            "status": "pending" if is_pending else ("approved" if is_approved else ("blocked" if is_blocked else "ok")),
+            "status": status,
             "is_guest": is_guest,
             "approved": is_approved,
+            "approval_saved": bool(database_approved and not policy_blocked),
             "blocked": is_blocked,
+            "enforcement_pending": activating,
+            "internet_ready": is_approved,
+            "ipv6_quarantined": ipv6_quarantined,
             "ip": host,
             "mac": mac,
             "device_name": (dev.name if dev else "") or "Guest Device",
@@ -3086,7 +3378,7 @@ def create_app(
     @app.get("/generate_204")
     @app.get("/gen_204")
     async def captive_generate_204(request: Request):
-        host = request.client.host if request.client else ""
+        host = _request_client_ip(request)
         snapshot = holder.get() if holder else None
         if snapshot and host in snapshot.pending_guests:
             router_host = request.headers.get("host") or "192.168.2.1:8080"
@@ -3095,7 +3387,7 @@ def create_app(
 
     @app.get("/hotspot-detect.html")
     async def captive_apple(request: Request):
-        host = request.client.host if request.client else ""
+        host = _request_client_ip(request)
         snapshot = holder.get() if holder else None
         if snapshot and host in snapshot.pending_guests:
             router_host = request.headers.get("host") or "192.168.2.1:8080"
@@ -3105,7 +3397,7 @@ def create_app(
     @app.get("/connecttest.txt")
     @app.get("/ncsi.txt")
     async def captive_windows(request: Request):
-        host = request.client.host if request.client else ""
+        host = _request_client_ip(request)
         snapshot = holder.get() if holder else None
         if snapshot and host in snapshot.pending_guests:
             router_host = request.headers.get("host") or "192.168.2.1:8080"
@@ -3114,7 +3406,7 @@ def create_app(
 
     @app.get("/canonical.html")
     async def captive_firefox(request: Request):
-        host = request.client.host if request.client else ""
+        host = _request_client_ip(request)
         snapshot = holder.get() if holder else None
         if snapshot and host in snapshot.pending_guests:
             router_host = request.headers.get("host") or "192.168.2.1:8080"
@@ -3263,6 +3555,57 @@ def create_app(
         # a plain probe object (tests) is still accepted.
         return ipv6_probe() if callable(ipv6_probe) and not hasattr(ipv6_probe, "get_status") else ipv6_probe
 
+    def _add_ipv6_enforcement_status(status: dict[str, Any]) -> dict[str, Any]:
+        firewall_status: dict[str, Any] = {}
+        if firewall is not None and hasattr(firewall, "status"):
+            try:
+                firewall_status = dict(firewall.status())
+            except Exception:  # noqa: BLE001 — health reporting must degrade safely
+                log.exception("IPv6 firewall status unavailable")
+        portal_status: dict[str, Any] = {}
+        if engine is not None and hasattr(engine, "ipv6_portal_status"):
+            try:
+                portal_status = dict(engine.ipv6_portal_status())
+            except Exception:  # noqa: BLE001 — health reporting must degrade safely
+                log.exception("IPv6 captive portal status unavailable")
+        try:
+            listener_bound = bool(
+                web_ipv6_bound_getter() if web_ipv6_bound_getter else False)
+        except Exception:  # noqa: BLE001 — health reporting must degrade safely
+            log.exception("IPv6 web listener status unavailable")
+            listener_bound = False
+        redirect_configured = bool(portal_status.get("redirect_configured", False))
+        pending_set_applied = bool(portal_status.get("pending_set_applied", False))
+        portal_available = bool(portal_status.get("available", False))
+        portal_error = str(portal_status.get("last_error", "") or "")
+        if not listener_bound and not portal_error:
+            portal_error = "IPv6 web listener is not bound"
+        status["portal_ipv6"] = {
+            "available": portal_available and listener_bound,
+            "redirect_configured": redirect_configured,
+            "pending_set_applied": pending_set_applied,
+            "listener_bound": listener_bound,
+            "healthy": bool(
+                portal_available and redirect_configured and
+                pending_set_applied and listener_bound),
+            "last_error": portal_error,
+        }
+        status["firewall_ipv6"] = {
+            "available": bool(firewall_status.get("ipv6_available", False)),
+            "enabled": bool(firewall_status.get("ipv6_enabled", False)),
+            "applied": bool(firewall_status.get("ipv6_applied", False)),
+            "healthy": bool(firewall_status.get("ipv6_healthy", False)),
+            "last_error": str(firewall_status.get("ipv6_last_error", "") or ""),
+        }
+        coverage = ipv6_coverage_getter() if ipv6_coverage_getter else {}
+        counts = {"managed": 0, "partial": 0, "unverified": 0}
+        for detail in coverage.values():
+            state = detail[0] if isinstance(detail, (tuple, list)) and detail else ""
+            if state in counts:
+                counts[state] += 1
+        status["ipv6_coverage_counts"] = counts
+        return status
+
     @app.get("/api/network/ipv6/status", dependencies=[Depends(_require_auth)])
     async def get_ipv6_status() -> dict[str, Any]:
         _p6 = _ipv6_probe()
@@ -3271,8 +3614,8 @@ def create_app(
             direct = ipv6_direct_getter() if ipv6_direct_getter else []
             st["direct_device_macs"] = direct
             st["direct_devices"] = len(direct)
-            return st
-        return {
+            return _add_ipv6_enforcement_status(st)
+        return _add_ipv6_enforcement_status({
             "lan_ipv6_enabled": True,
             "lan_prefix": "fd00:da7a:2::/64",
             "lan_gateway": "fd00:da7a:2::1",
@@ -3282,7 +3625,7 @@ def create_app(
             "last_probe_time": 0.0,
             "last_probe_status": "not_initialized",
             "last_probe_details": "IPv6 probe not initialized",
-        }
+        })
 
     @app.post("/api/network/ipv6/probe", dependencies=[Depends(_require_auth)])
     async def trigger_ipv6_probe() -> dict[str, Any]:
@@ -3679,7 +4022,7 @@ def create_app(
             if host and firewall is not None:
                 bf = getattr(firewall, "_config", {}) or {}
                 threshold = int((bf.get("brute_force", {}) or {}).get("threshold", 0) or 0)
-                if threshold and login_limiter._fails.get(ip_key, 0) >= threshold:
+                if threshold and login_limiter.failure_count(ip_key) >= threshold:
                     seconds = int((bf.get("brute_force", {}) or {}).get("ban_seconds", 0) or 0) or 1800
                     ban = getattr(firewall, "ban_ip", None)
                     if ban is not None:
@@ -3940,7 +4283,7 @@ def create_app(
         response: Response | None = None
         try:
             # Captive portal redirection for pending guests
-            host = request.client.host if request.client else ""
+            host = _request_client_ip(request)
             path = request.url.path
             if host and holder:
                 snapshot = holder.get()
@@ -3948,7 +4291,8 @@ def create_app(
                     is_allowed = (
                         path.startswith("/guest/pending") or
                         path.startswith("/api/guest/status") or
-                        path.startswith("/assets/") or
+                        path == "/api/guest/voucher/redeem" or
+                        path.startswith(("/assets/", "/js/", "/css/", "/fonts/")) or
                         path == "/favicon.ico"
                     )
                     if not is_allowed:

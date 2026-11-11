@@ -1,5 +1,12 @@
 # Project Guidelines & Rules
 
+## Engineering Constitution
+
+The project-wide engineering invariants are in
+.specify/memory/constitution.md. Read them alongside these operational rules and
+CLAUDE.md; if a change appears to conflict with a principle, reconcile the guidance
+before implementation.
+
 ## Documentation Style & Target Audiences
 
 1. **CHANGELOG (`CHANGELOG.md`)**:

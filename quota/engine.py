@@ -55,6 +55,8 @@ class EngineSnapshot:
     by_ip: dict[str, EngineCounters] = field(default_factory=dict)
     #: ip -> mac for fast lookup
     ip_to_mac: dict[str, str] = field(default_factory=dict)
+    #: Unambiguous client identity map, including overflow IPv6 portal addresses.
+    portal_ip_to_mac: dict[str, str] = field(default_factory=dict)
     #: mac -> blocked (bool) — the enforcement truth
     blocked: dict[str, bool] = field(default_factory=dict)
     #: hosts alive on the LAN that are NOT known DHCP devices (static-IP bypassers)
@@ -76,8 +78,15 @@ class EngineSnapshot:
     #: blocked in that state, so the dashboard must say so instead of implying
     #: enforcement is live.
     engine_available: bool = True
+    #: did the most recent desired-state sync complete without an exception?
+    engine_state_sync_ok: bool = True
     #: IPs of guest devices currently awaiting admin approval (for captive portal)
     pending_guests: set[str] = field(default_factory=set)
+    #: Whether the complete IPv6 captive redirect set matches desired guests.
+    ipv6_pending_set_applied: bool = False
+    #: MACs whose IPv6 must stay quarantined because ownership exceeds tracking
+    #: coverage or an address is shared/ambiguous.
+    blocked_ipv6_macs: list[str] = field(default_factory=list)
     ts: float = field(default_factory=time.time)
     #: seconds of traffic that ``by_ip`` / ``gateway`` cover (the real time
     #: between two counter flushes). Live speeds must divide by THIS, not by an

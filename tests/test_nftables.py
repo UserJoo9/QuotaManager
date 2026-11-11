@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 
 from core.config import Config
 from quota.engine import SnapshotHolder
@@ -178,6 +179,82 @@ def _engine(fake: FakeNft) -> NftablesEngine:
     return NftablesEngine(cfg, SnapshotHolder(), run_command=fake)
 
 
+def test_start_serializes_rebuild_with_ipv6_guest_portal_sync():
+    """A concurrent guest sync must not be erased by a table rebuild."""
+    fake = FakeNft()
+    engine = _engine(fake)
+    engine.start()
+
+    mac = "aa:bb:cc:dd:ee:55"
+    previous_ip = "2001:db8::55"
+    current_ip = "2001:db8::56"
+    engine.update_state({previous_ip: mac}, {mac: True},
+                         pending_guests=[previous_ip])
+    pending_set = fake._sets["inet quota_gateway"]["pending_guests6"]
+    assert pending_set == {previous_ip}
+
+    startup_flush_entered = threading.Event()
+    release_startup = threading.Event()
+    startup_errors: list[Exception] = []
+    update_errors: list[Exception] = []
+    update_started = threading.Event()
+    update_finished = threading.Event()
+    original_run = engine._run
+
+    def pause_before_flush(args):
+        if args[:2] == ["flush", "table"] and args[2] == "inet quota_gateway":
+            startup_flush_entered.set()
+            if not release_startup.wait(timeout=2):
+                raise AssertionError("test did not release startup flush")
+        return original_run(args)
+
+    def rebuild():
+        try:
+            engine.start()
+        except Exception as exc:  # surfaced in the test thread below
+            startup_errors.append(exc)
+
+    def update_guest():
+        update_started.set()
+        try:
+            engine.update_state({current_ip: mac}, {mac: True},
+                                pending_guests=[current_ip])
+        except Exception as exc:  # surfaced in the test thread below
+            update_errors.append(exc)
+        finally:
+            update_finished.set()
+
+    engine._run = pause_before_flush
+    startup_thread = threading.Thread(target=rebuild, daemon=True)
+    startup_thread.start()
+    assert startup_flush_entered.wait(timeout=2)
+
+    lock_acquired = engine._update_state_lock.acquire(blocking=False)
+    if lock_acquired:
+        engine._update_state_lock.release()
+
+    updater_thread = threading.Thread(target=update_guest, daemon=True)
+    updater_thread.start()
+    try:
+        assert not lock_acquired, "start() must hold the update-state lock"
+        assert update_started.wait(timeout=2)
+        assert not update_finished.wait(timeout=0.05)
+    finally:
+        release_startup.set()
+        startup_thread.join(timeout=2)
+        updater_thread.join(timeout=2)
+
+    assert not startup_thread.is_alive()
+    assert not updater_thread.is_alive()
+    assert startup_errors == []
+    assert update_errors == []
+    assert update_finished.is_set()
+
+    redirect = "ip6 saddr @pending_guests6 tcp dport 80 redirect to :8080"
+    assert fake.rules.count(redirect) == 1
+    assert pending_set == {current_ip}
+
+
 def test_start_programs_base_ruleset():
     fake = FakeNft()
     eng = _engine(fake)
@@ -222,8 +299,9 @@ def test_update_state_is_add_only():
     eng.update_state({"192.168.2.111": "aa:bb:cc:dd:ee:01"}, {})
     n_calls = len(fake.calls)
     eng.update_state({}, {})  # device gone
-    # only the three blocked-set flushes (IPv4 + IPv6 + MAC, all empty) — no deletes
-    assert len(fake.calls) == n_calls + 3
+    # only blocked-set flushes (IPv4 + IPv6 + MAC + overflow IPv6 MAC, all empty)
+    # — no deletes
+    assert len(fake.calls) == n_calls + 4
     # counters still exist but are not surfaced (flush filters by ip_to_mac)
     assert "q_up_192_168_2_111" in fake.counters
 
@@ -911,6 +989,74 @@ def test_gateway_allowed_failure_stays_uncommitted():
     assert fake.gw_allowed == set()
 
 
+def test_pending_guest_ipv6_set_separates_families_and_retries(monkeypatch):
+    """IPv6 pending membership must use its own set and retry a failed sync."""
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    joined = " | ".join(fake.rules)
+    assert "ip6 saddr @pending_guests6 tcp dport 80 redirect to :8080" in joined
+
+    mac = "aa:bb:cc:dd:ee:55"
+    pending = ["192.168.2.55", "2001:db8::55"]
+    original_run = eng._run_best_effort
+    failed = False
+
+    def fail_ipv6_element_once(args):
+        nonlocal failed
+        if (not failed and args[:2] == ["add", "element"] and
+                args[2].endswith("pending_guests6")):
+            failed = True
+            return False
+        return original_run(args)
+
+    monkeypatch.setattr(eng, "_run_best_effort", fail_ipv6_element_once)
+    eng.update_state({ip: mac for ip in pending}, {mac: True}, pending_guests=pending)
+    assert eng.ipv6_portal_status()["pending_set_applied"] is False
+
+    monkeypatch.setattr(eng, "_run_best_effort", original_run)
+    eng.update_state({ip: mac for ip in pending}, {mac: True}, pending_guests=pending)
+    assert eng.ipv6_portal_status()["pending_set_applied"] is True
+    sets = fake._sets["inet quota_gateway"]
+    assert sets["pending_guests"] == {"192.168.2.55"}
+    assert sets["pending_guests6"] == {"2001:db8::55"}
+
+    eng.update_state({ip: mac for ip in pending}, {mac: False}, pending_guests=[])
+    assert sets["pending_guests"] == set()
+    assert sets["pending_guests6"] == set()
+
+
+def test_ipv6_guest_approval_waits_for_pending_set_flush_retry(monkeypatch):
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    mac = "aa:bb:cc:dd:ee:56"
+    guest_ip = "2001:db8::56"
+    eng.update_state({guest_ip: mac}, {mac: True}, pending_guests=[guest_ip])
+    assert eng.ipv6_portal_status()["pending_set_applied"] is True
+
+    original_run = eng._run_best_effort
+    failed = False
+
+    def fail_approval_flush_once(args):
+        nonlocal failed
+        if (not failed and args[:2] == ["flush", "set"] and
+                args[2].endswith("pending_guests6")):
+            failed = True
+            return False
+        return original_run(args)
+
+    monkeypatch.setattr(eng, "_run_best_effort", fail_approval_flush_once)
+    eng.update_state({guest_ip: mac}, {mac: False}, pending_guests=[])
+    assert eng.ipv6_portal_status()["pending_set_applied"] is False
+    assert fake._sets["inet quota_gateway"]["pending_guests6"] == {guest_ip}
+
+    monkeypatch.setattr(eng, "_run_best_effort", original_run)
+    eng.update_state({guest_ip: mac}, {mac: False}, pending_guests=[])
+    assert eng.ipv6_portal_status()["pending_set_applied"] is True
+    assert fake._sets["inet quota_gateway"]["pending_guests6"] == set()
+
+
 def test_gateway_cut_exempts_loopback():
     """A Gateway cut (gw_blocked) drops the box's own internet but never
     loopback — the dashboard and the tun2socks<->VPN-client hop keep working
@@ -1009,6 +1155,23 @@ def test_ipv6_counters_and_blocked6_set():
     snap = eng.flush()
     assert snap.by_ip[ip6].up == 4096
     assert snap.by_ip[ip6].down == 8192
+
+
+def test_ipv6_overflow_mac_is_quarantined_without_counter_rules():
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    mac = "aa:bb:cc:dd:ee:51"
+    tracked = "fd00:da7a:2::50"
+    overflow = "fd00:da7a:2::51"
+
+    eng.update_state(
+        {tracked: mac}, {}, blocked_ipv6_macs=[mac])
+
+    assert mac in fake._sets["inet quota_gateway"]["blocked6_macs"]
+    assert overflow not in fake._sets["inet quota_gateway"]["blocked6"]
+    assert f"q_up_{overflow.replace(':', '_')}" not in fake.counters
+    assert tracked not in fake._sets["inet quota_gateway"]["blocked6"]
 
 
 
