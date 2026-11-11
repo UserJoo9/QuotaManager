@@ -108,6 +108,9 @@ export function createHooks({ api, store, prefs, live, toast }) {
       getStaticLeases: network.getStaticLeases,
       getMacLists: network.getMacLists,
       getGuest: network.getGuest,
+      getWanConfig: network.getWanConfig,
+      testWan: network.testWan,
+      applyWan: network.applyWan,
     }),
 
     // Security hooks
@@ -168,12 +171,16 @@ export function createHooks({ api, store, prefs, live, toast }) {
       installUpdates: system.installUpdates,
       toggleAutoInstall: system.toggleAutoInstall,
       fetchLogs: system.fetchLogs,
+      getTotp: system.getTotp,
+      getSetup: system.getSetup,
+      completeSetup: system.completeSetup,
       exportLogs: system.exportLogs,
     }),
 
     // Daily plan hooks
     useDailyPlan: () => ({
       saveDailyPlan: dailyPlan.saveDailyPlan,
+      previewDailyPlan: dailyPlan.previewDailyPlan,
     }),
 
     // Share hooks

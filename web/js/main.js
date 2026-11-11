@@ -187,7 +187,7 @@ async function boot() {
   if (!me.authenticated) { store.set({ authed: false }); return; }
   store.set({ authed: true, route: routeId() });
   await refresh();
-  maybeWelcome(refresh);
+  maybeWelcome(refresh, ctx);
   startLiveShare();
   let lastSnap = "";
   if (!stopLive) stopLive = startLive((snap) => { let j = ""; try { j = JSON.stringify(snap); } catch { /* draw anyway */ } if (j && j === lastSnap) return; lastSnap = j; store.set({ dashboard: snap }); }, (live) => { clearTimeout(offTimer); if (live) store.set({ live: true }); else offTimer = setTimeout(() => store.set({ live: false }), 2500); });

@@ -79,7 +79,7 @@ const mkDanger = (run) => (key, label, fn, closeAfter) => h("button", {
   } }, armed.has(key) ? t("dr.confirm") : label);
 
 // One device on its own: usage, access, addresses, limits, rename/move/top-up, kick/blacklist. No owner details.
-export function openDeviceDrawer(userId, deviceId, getDashboard, refresh) {
+export function openDeviceDrawer(userId, deviceId, getDashboard, refresh, ctx) {
   const run = mkRun(refresh), danger = mkDanger(run);
   openDrawer(() => {
     const users = getDashboard()?.users || [], u = users.find((x) => x.id === userId), d = u && (u.devices || []).find((x) => x.id === deviceId);
@@ -106,7 +106,7 @@ export function openDeviceDrawer(userId, deviceId, getDashboard, refresh) {
   });
 }
 
-export function openUserDrawer(userId, getDashboard, refresh) {
+export function openUserDrawer(userId, getDashboard, refresh, ctx) {
   const find = () => (getDashboard()?.users || []).find((u) => u.id === userId);
   const run = mkRun(refresh), danger = mkDanger(run);
 
@@ -133,7 +133,7 @@ export function openUserDrawer(userId, getDashboard, refresh) {
       body.push(h("div", { class: "fa" }, a));
     }
     body.push(settingsBlock("user", u, run, true));
-    const dq = dailySection(u, getDashboard() || {}, run); if (dq) body.push(dq);
+    const dq = dailySection(u, getDashboard() || {}, run, ctx); if (dq) body.push(dq);
     if (!u.protected) body.push(userDetails(u, run));
     if (!u.protected) body.push(h("div", { class: "dr-sec" }, h("h4", {}, t("dr.danger")),
       h("div", { class: "danger-z" },

@@ -28,16 +28,21 @@ function tailscaleCard(ts, run, ctx) {
   const head = (st) => h("header", { class: "card-h" }, h("div", {}, h("h2", {}, t("i.ts")), h("span", { class: "sub" }, t("i.ts.d"))),
     st ? chip(TS_CHIP[st] || "", t("i.ts.st." + st)) : null);
   if (!ts) return h("section", { class: "card c6" }, head(null), h("div", { class: "skeleton", style: { height: "140px" } }));
-  const st = ts.state, call = (path, body, ok) => run(async () => { x.ts = await api.post(path, body); }, ok);
+  const st = ts.state, tailscale = (op, body, ok) => run(async () => {
+    if (op === "install") { await vpnHooks.tailscaleInstall(); }
+    else if (op === "connect") { await vpnHooks.tailscaleConnect(!!body?.logout); }
+    else if (op === "disconnect") { await vpnHooks.tailscaleDisconnect(!!body?.logout); }
+    x.ts = await vpnHooks.getTailscale();
+  }, ok);
   const out = async (ev) => {
     if (!armedOut) { armedOut = true; ev.currentTarget.classList.add("armed"); ev.currentTarget.textContent = t("dr.confirm"); setTimeout(() => { armedOut = false; }, 4000); return; }
-    armedOut = false; await call("/api/tailscale/disconnect", { logout: true })();
+    armedOut = false; await tailscale("disconnect", { logout: true })();
   };
   let body;
   if (st === "not_installed") {
     body = [h("p", { class: "sub" }, t("i.ts.install.d")),
       ts.message ? h("div", { class: "banner warn", role: "alert" }, t("i.ts.fail")) : null,
-      h("div", { class: "fa" }, h("button", { type: "button", class: "btn primary sm", onclick: call("/api/tailscale/install") }, t(ts.message ? "i.ts.retry" : "i.ts.install"))),
+      h("div", { class: "fa" }, h("button", { type: "button", class: "btn primary sm", onclick: tailscale("install") }, t(ts.message ? "i.ts.retry" : "i.ts.install"))),
       ts.message ? h("details", {}, h("summary", { class: "sub" }, t("i.ts.details")),
         h("p", { class: "sub" }, t("i.ts.install.manual")),
         h("code", { class: "mono", style: { "word-break": "break-all" } }, ts.install_command || ""),
@@ -51,7 +56,7 @@ function tailscaleCard(ts, run, ctx) {
   } else if (st === "needs_login") {
     body = ts.auth_url
       ? [h("div", { class: "banner info", role: "status" }, h("b", {}, t("i.ts.login")), " ", t("i.ts.login.d")), h("div", { class: "fa" }, tsLink(ts.auth_url, t("i.ts.login.btn")))]
-      : [h("p", { class: "sub" }, t("i.ts.wait")), h("div", { class: "fa" }, h("button", { type: "button", class: "btn primary sm", onclick: call("/api/tailscale/connect", { logout: false }, t("i.ts.off")) }, t("i.ts.connect")))];
+      : [h("p", { class: "sub" }, t("i.ts.wait")), h("div", { class: "fa" }, h("button", { type: "button", class: "btn primary sm", onclick: tailscale("connect", { logout: false }, t("i.ts.off")) }, t("i.ts.connect")))];
   } else if (st === "connected") {
     body = [kv([[t("i.ts.addr"), ts.url || ts.ip, true], ts.url_name ? [t("i.ts.name"), ts.url_name, true] : null, [t("i.ts.version"), ts.version || "–", true], [t("i.ts.peers"), num(ts.peers || 0, 0)]]),
       h("p", { class: "sub" }, t("i.ts.how")),
@@ -63,14 +68,14 @@ function tailscaleCard(ts, run, ctx) {
       ts.wan_exposed ? h("div", { class: "banner warn", role: "status" }, t("i.ts.fw.on"), " ", h("a", { href: "#/security" }, t("i.ts.fw.link"))) : null,
       h("div", { class: "fa" },
         h("button", { type: "button", class: "btn primary sm", onclick: () => copyText(ts.url || ts.ip) }, t("i.ts.copy")),
-        h("button", { type: "button", class: "btn ghost sm", onclick: call("/api/tailscale/disconnect", { logout: false }, t("i.ts.off")) }, t("i.ts.disconnect")),
+        h("button", { type: "button", class: "btn ghost sm", onclick: tailscale("disconnect", { logout: false }, t("i.ts.off")) }, t("i.ts.disconnect")),
         h("button", { type: "button", class: "btn danger sm", onclick: out }, t("i.ts.logout")))];
   } else if (st === "starting") {
     body = [h("p", { class: "sub" }, t("i.ts.starting"))];
   } else {
     body = [h("p", { class: "sub" }, st === "daemon_down" ? t("i.ts.down") : t("i.ts.stopped")),
       ts.message ? h("div", { class: "banner warn", role: "alert" }, ts.message) : null,
-      h("div", { class: "fa" }, h("button", { type: "button", class: "btn primary sm", onclick: call("/api/tailscale/connect") }, t("i.ts.connect")))];
+      h("div", { class: "fa" }, h("button", { type: "button", class: "btn primary sm", onclick: tailscale("connect") }, t("i.ts.connect")))];
   }
   return h("section", { class: "card c6" }, head(st), h("div", { style: { display: "flex", "flex-direction": "column", gap: "12px" } }, body.filter(Boolean)));
 }

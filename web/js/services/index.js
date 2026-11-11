@@ -255,6 +255,16 @@ export function createNetworkService(api, store, toast) {
     getGuest: async () => {
       return await api.network.getGuest();
     },
+    getWanConfig: async () => {
+      return await api.network.getWanConfig();
+    },
+    testWan: async (user, pass) => {
+      return await api.network.testWan(user, pass);
+    },
+    applyWan: async (config) => {
+      await api.network.applyWan(config);
+      toast.show("WAN config applied", "ok");
+    },
   };
 }
 
@@ -449,6 +459,15 @@ export function createSystemService(api, store, toast) {
     fetchLogs: async () => {
       return await api.system.fetchLogs();
     },
+    getTotp: async () => {
+      return await api.system.getTotp();
+    },
+    getSetup: async () => {
+      return await api.system.getSetup();
+    },
+    completeSetup: async (body) => {
+      return await api.system.completeSetup(body);
+    },
     exportLogs: () => {
       // Export handled in UI layer
     },
@@ -468,6 +487,9 @@ export function createDailyPlanService(api, store, toast) {
         daily_heavy: cmd.heavy,
       });
       toast.show("Daily plan saved", "ok");
+    },
+    previewDailyPlan: async (userId, body) => {
+      return await api.user.previewDailyPlan(userId, body);
     },
   };
 }

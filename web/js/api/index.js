@@ -52,6 +52,9 @@ const ENDPOINTS = {
   staticLease: (mac) => `/api/network/static-leases/${encodeURIComponent(mac)}`,
   macLists: "/api/mac-lists",
   guest: "/api/guest",
+  wanConfig: "/api/wan",
+  wanTest: "/api/wan/test",
+  wanApply: "/api/wan",
   firewall: "/api/firewall",
   firewallRevert: "/api/firewall/revert",
   firewallBan: "/api/firewall/ban",
@@ -82,6 +85,7 @@ const ENDPOINTS = {
   totpEnroll: "/api/totp/enroll",
   totpEnable: "/api/totp/enable",
   totpDisable: "/api/totp/disable",
+  totpGet: "/api/totp",
   updatesCheck: "/api/updates/check",
   updatesInstall: "/api/updates/install",
   updatesPrefs: "/api/updates",
@@ -169,6 +173,9 @@ export const userApi = {
   dnsUser: async (userId, dnsServer) => {
     await http.patch(ENDPOINTS.dnsUser(userId), { dns_server: dnsServer });
   },
+  previewDailyPlan: async (userId, body) => {
+    return await http.post(ENDPOINTS.dailyPlanPreview(userId), body);
+  },
 };
 
 /**
@@ -236,6 +243,15 @@ export const networkApi = {
   },
   getGuest: async () => {
     return await http.get(ENDPOINTS.guest);
+  },
+  getWanConfig: async () => {
+    return await http.get(ENDPOINTS.wanConfig);
+  },
+  testWan: async (user, pass) => {
+    return await http.post(ENDPOINTS.wanTest, { pppoe_user: user, pppoe_password: pass });
+  },
+  applyWan: async (config) => {
+    await http.post(ENDPOINTS.wanApply, config);
   },
 };
 
@@ -429,6 +445,15 @@ export const systemApi = {
   },
   fetchLogs: async () => {
     return await http.get(ENDPOINTS.logs);
+  },
+  getTotp: async () => {
+    return await http.get(ENDPOINTS.totpGet);
+  },
+  getSetup: async () => {
+    return await http.get(ENDPOINTS.setup);
+  },
+  completeSetup: async (body) => {
+    return await http.post(ENDPOINTS.setupComplete, body);
   },
   exportLogs: () => {
     // Export handled in UI layer

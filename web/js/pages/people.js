@@ -23,8 +23,8 @@ export default function people(ctx) {
   const liveBy = new Map((ov.live?.devices || []).map((x) => [x.id, x]));
   const userHooks = ctx.hooks.useUsers();
   const act = (fn) => async () => { try { await fn(); toast(t("dr.done")); await ctx.refresh(); } catch (e) { toast(`${t("dr.failed")}: ${e.message}`, "bad"); } };
-  const open = (u) => openUserDrawer(u.id, ctx.getDashboard, ctx.refresh);
-  const openDev = (u, x) => openDeviceDrawer(u.id, x.id, ctx.getDashboard, ctx.refresh);
+  const open = (u) => openUserDrawer(u.id, ctx.getDashboard, ctx.refresh, ctx);
+  const openDev = (u, x) => openDeviceDrawer(u.id, x.id, ctx.getDashboard, ctx.refresh, ctx);
   const is = {
     all: () => true, online: (u) => !u.blocked && (u.devices || []).some((x) => x.connected),
     blocked: (u) => u.blocked && !u.guest, guest: (u) => u.guest,

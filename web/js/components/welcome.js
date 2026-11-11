@@ -1,15 +1,14 @@
 import { h } from "../core/dom.js";
 import { t } from "../core/i18n.js";
-import { api } from "../core/api.js";
 import { openDialog } from "./dialog.js";
 import { toast } from "./toast.js";
 
 let skipped = false;
 // First-run setup (same contract as the classic welcome panel): confirm the bundle and optionally change the default password.
-export async function maybeWelcome(refresh) {
+export async function maybeWelcome(refresh, ctx) {
   if (skipped) return;
   let st;
-  try { st = await api.get("/api/setup"); } catch { return; }
+  try { st = await ctx.hooks.useSystem().getSetup(); } catch { return; }
   if (!st || st.setup_complete) return;
   const f = (label, control, hint) => h("div", { class: "field" }, h("label", {}, label), control, hint ? h("span", { class: "sub" }, hint) : null);
   const total = h("input", { class: "input", type: "number", min: "1", step: "any", required: true, value: String(st.total_gb) });
@@ -24,6 +23,6 @@ export async function maybeWelcome(refresh) {
       const body = { total_gb: +total.value, reset_day: Math.max(0, Math.min(31, Math.round(+day.value || 0))), period_type: ptype.value, current_password: cur.value, new_password: nw.value || null };
       if (!(body.total_gb > 0)) throw new Error(t("welcome.bad"));
       if (body.new_password && body.new_password.length < 12) throw new Error(t("acct.pw.short"));
-      await api.post("/api/setup/complete", body); toast(t("dr.saved")); await refresh(); return true;
+      await ctx.hooks.useSystem().completeSetup(body); toast(t("dr.saved")); await refresh(); return true;
     } });
 }

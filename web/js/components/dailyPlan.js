@@ -1,6 +1,5 @@
 import { h } from "../core/dom.js";
 import { t, num } from "../core/i18n.js";
-import { api } from "../core/api.js";
 import { actions } from "../core/actions.js";
 import { sw, chip, bar } from "./ui.js";
 
@@ -21,7 +20,7 @@ export function dailyToday(u) {
 }
 
 // The "Daily plan" section of a person's drawer. `run(fn, okMsg)` is the drawer's toast+refresh wrapper.
-export function dailySection(u, dash, run) {
+export function dailySection(u, dash, run, ctx) {
   if (u.protected) return null;
   const q = u.daily || { mode: "off", gb: 0, carry: "spread", split: "open", heavy: {}, self_edit: false };
   const head = h("h4", {}, t("dq.title"));
@@ -79,7 +78,7 @@ export function dailySection(u, dash, run) {
     const f = form();
     if (f.daily_mode === "off") { previews.delete(u.id); paintPreview(null); return; }
     try {
-      const p = await api.post(`/api/users/${u.id}/daily-plan/preview`, { mode: f.daily_mode, daily_gb: f.daily_gb, carry: f.daily_carry, split: f.daily_split, heavy: f.daily_heavy });
+      const p = await ctx.hooks.useDailyPlan().previewDailyPlan(u.id, { mode: f.daily_mode, daily_gb: f.daily_gb, carry: f.daily_carry, split: f.daily_split, heavy: f.daily_heavy });
       previews.set(u.id, p); paintPreview(p);
     } catch (e) { paintPreview({ error: e.message }); }
   };
