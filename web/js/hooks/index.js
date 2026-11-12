@@ -118,6 +118,7 @@ export function createHooks({ api, store, prefs, live, toast }) {
       unbanIp: security.unbanIp,
       removeHttps: security.removeHttps,
       enforceHttps: security.enforceHttps,
+      getTls: security.getTls,
     }),
 
     // DNS hooks
@@ -132,6 +133,8 @@ export function createHooks({ api, store, prefs, live, toast }) {
       ackAttack: dns.ackAttack,
       getHistory: dns.getHistory,
       getHistoryLive: dns.getHistoryLive,
+      getPresets: dns.getPresets,
+      getRules: dns.getRules,
     }),
 
     // VPN hooks

@@ -399,6 +399,9 @@ export function createSecurityService(api, store, toast) {
       await api.security.enforceHttps();
       toast.show("HTTPS enforced", "ok");
     },
+    getTls: async () => {
+      try { return await api.security.getTls(); } catch { return null; }
+    },
   };
 }
 
@@ -489,6 +492,12 @@ export function createDnsService(api, store, toast) {
      */
     getHistoryLive: async (deviceId) => {
       return await api.dns.getHistoryLive(deviceId);
+    },
+    getPresets: async () => {
+      try { return await api.dns.getPresets(); } catch { return []; }
+    },
+    getRules: async () => {
+      try { return await api.dns.getRules(); } catch { return []; }
     },
   };
 }

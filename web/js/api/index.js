@@ -63,6 +63,7 @@ const ENDPOINTS = {
   dnsMaster: "/api/dns/master",
   dnsTier: "/api/dns/tier",
   dnsPreset: (id) => `/api/dns/presets/${id}`,
+  dnsPresets: "/api/dns/presets",
   dnsRules: "/api/dns/rules",
   dnsRule: (id) => `/api/dns/rules/${id}`,
   dnsImport: "/api/dns/import",
@@ -91,6 +92,7 @@ const ENDPOINTS = {
   setup: "/api/setup",
   setupComplete: "/api/setup/complete",
   dailyPlanPreview: (userId) => `/api/users/${userId}/daily-plan/preview`,
+  securityTls: "/api/security/tls",
   // ---- one source of truth for every endpoint (no inline URLs in methods) ----
   freeMode: "/api/free-mode",
   device: (id) => `/api/devices/${id}`,
@@ -296,6 +298,9 @@ export const securityApi = {
   enforceHttps: async () => {
     await http.post(ENDPOINTS.firewallEnforceHttps);
   },
+  getTls: async () => {
+    try { return await http.get(ENDPOINTS.securityTls); } catch { return null; }
+  },
 };
 
 /**
@@ -332,6 +337,12 @@ export const dnsApi = {
   },
   ackAttack: async () => {
     await http.post(ENDPOINTS.dnsAckAttack);
+  },
+  getPresets: async () => {
+    try { return await http.get(ENDPOINTS.dnsPresets); } catch { return []; }
+  },
+  getRules: async () => {
+    try { return await http.get(ENDPOINTS.dnsRules); } catch { return []; }
   },
   getHistory: async (device, window, limit) => {
     return await http.get(`${ENDPOINTS.history(device)}?window=${window}&limit=${limit}`);

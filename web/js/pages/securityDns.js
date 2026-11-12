@@ -14,8 +14,8 @@ async function load(ctx, force) {
   try {
     const dnsHooks = ctx.hooks.useDns();
     const [p, r] = await Promise.all([
-      fetch("/api/dns/presets", { headers: { "X-QM-CSRF": "1" }, credentials: "same-origin" }).then(res => res.ok ? res.json() : []),
-      fetch("/api/dns/rules", { headers: { "X-QM-CSRF": "1" }, credentials: "same-origin" }).then(res => res.ok ? res.json() : [])
+      dnsHooks.getPresets(),
+      dnsHooks.getRules()
     ]);
     dns.presets = p; dns.rules = r; dns.at = Date.now();
   } catch { dns.failAt = Date.now(); dns.presets = dns.presets || []; dns.rules = dns.rules || []; } finally { dns.loading = false; ctx.touch(); }
@@ -110,7 +110,7 @@ export default function dnsTab(ctx) {
       h("header", { class: "card-h" }, h("div", {}, h("h2", {}, t("dns.cats")), h("span", { class: "sub" }, t("dns.cats.d")))),
       cats.length ? h("div", {}, cats.map((p) => h("div", { class: "row-sw", style: { padding: "12px 0" } },
         h("div", {}, h("b", {}, tr("dns.cat." + p.id + ".n", p.name)), h("span", {}, tr("dns.cat." + p.id + ".d", p.description)), p.enabled ? h("span", {}, `${num(p.domain_count, 0)} ${t("dns.domains.n")} · ${scopeLabel({ scope: p.scope, scope_id: p.scope_id }, d)}`) : null),
-        sw(p.enabled, p.name, () => act("p" + p.id, () => (p.enabled ? fetch(`/api/dns/presets/${p.id}/disable`, { method: "POST", headers: { "X-QM-CSRF": "1" }, credentials: "same-origin" }) : enable(p.id)))))))
+        sw(p.enabled, p.name, () => act("p" + p.id, () => (p.enabled ? dnsHooks.toggleDnsPreset(p.id, false) : enable(p.id)))))))
         : h("div", { class: "empty" }, t("dns.cats.none"))),
 
     h("section", { class: "card c12" },

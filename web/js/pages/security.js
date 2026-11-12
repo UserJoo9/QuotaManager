@@ -20,7 +20,7 @@ async function load(ctx, force) {
         // Firewall state is fetched via security API
         return { enabled: fw.cfg?.enabled ?? false, mode: fw.cfg?.mode ?? "wan", status: {} };
       }).catch(() => ({ enabled: false, mode: "wan", status: {} })),
-      fetch("/api/security/tls").then(r => r.ok ? r.json() : null).catch(() => null)
+      securityHooks.getTls()
     ]);
     fw.state = state; fw.tls = tls; fw.at = Date.now();
     if (!fw.dirty && state && state.config) fw.cfg = clone(state.config);
@@ -102,35 +102,29 @@ function firewallTab(ctx) {
   const apply = async () => {
     if (fw.applying) return; fw.applying = true; ctx.touch();
     try {
-      const res = await fetch("/api/firewall", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-QM-CSRF": "1" },
-        credentials: "same-origin",
-        body: JSON.stringify({
-          enabled: c.enabled !== false, services: c.services || [], port_forwards: c.port_forwards || [], rules: c.rules || [],
-          allow_cidrs: c.allow_cidrs || [], deny_cidrs: c.deny_cidrs || [], dmz: c.dmz || "",
-          syn_flood: { rate: +c.syn_flood.rate || 10, burst: +c.syn_flood.burst || 20 }, brute_force: { threshold: +c.brute_force.threshold || 10, ban_seconds: +c.brute_force.ban_seconds || 1800 },
-          scan_detect: { enabled: c.scan_detect.enabled !== false, syn_threshold: +c.scan_detect.syn_threshold || 200, ban_seconds: +c.scan_detect.ban_seconds || 3600 },
-          geo_block: c.geo_block === true, wan_confirmed: c.wan_confirmed === true
-        })
+      await securityHooks.updateFirewall({
+        enabled: c.enabled !== false, services: c.services || [], port_forwards: c.port_forwards || [], rules: c.rules || [],
+        allow_cidrs: c.allow_cidrs || [], deny_cidrs: c.deny_cidrs || [], dmz: c.dmz || "",
+        syn_flood: { rate: +c.syn_flood.rate || 10, burst: +c.syn_flood.burst || 20 }, brute_force: { threshold: +c.brute_force.threshold || 10, ban_seconds: +c.brute_force.ban_seconds || 1800 },
+        scan_detect: { enabled: c.scan_detect.enabled !== false, syn_threshold: +c.scan_detect.syn_threshold || 200, ban_seconds: +c.scan_detect.ban_seconds || 3600 },
+        geo_block: c.geo_block === true, wan_confirmed: c.wan_confirmed === true
       });
-      const data = await res.json();
-      fw.warnings = data.warnings || []; fw.dirty = false; toast(t("fw.applied")); await load(ctx, true);
+      fw.warnings = []; fw.dirty = false; toast(t("fw.applied")); await load(ctx, true);
     } catch (e) { toast(`${t("fw.apply.fail")}: ${e.message}`, "bad"); } finally { fw.applying = false; ctx.touch(); }
   };
-  const revert = async () => { try { await fetch("/api/firewall/revert", { method: "POST", headers: { "X-QM-CSRF": "1" }, credentials: "same-origin" }); fw.dirty = false; toast(t("fw.reverted")); await load(ctx, true); } catch (e) { toast(`${t("fw.revert.fail")}: ${e.message}`, "bad"); } };
-  const ban = async () => { const ip = fw.banIp.trim(); if (!ip) return; try { await fetch("/api/firewall/ban", { method: "POST", headers: { "Content-Type": "application/json", "X-QM-CSRF": "1" }, credentials: "same-origin", body: JSON.stringify({ ip, seconds: 1800, reason: "manual" }) }); fw.banIp = ""; toast(t("fw.banned")); await load(ctx, true); } catch (e) { toast(`${t("dr.failed")}: ${e.message}`, "bad"); } };
-  const unban = async (ip) => { try { await fetch("/api/firewall/unban", { method: "POST", headers: { "Content-Type": "application/json", "X-QM-CSRF": "1" }, credentials: "same-origin", body: JSON.stringify({ ip }) }); toast(t("dr.done")); await load(ctx, true); } catch (e) { toast(`${t("dr.failed")}: ${e.message}`, "bad"); } };
+  const revert = async () => { try { await securityHooks.revertFirewall(); fw.dirty = false; toast(t("fw.reverted")); await load(ctx, true); } catch (e) { toast(`${t("fw.revert.fail")}: ${e.message}`, "bad"); } };
+  const ban = async () => { const ip = fw.banIp.trim(); if (!ip) return; try { await securityHooks.banIp(ip, 1800, "manual"); fw.banIp = ""; toast(t("fw.banned")); await load(ctx, true); } catch (e) { toast(`${t("dr.failed")}: ${e.message}`, "bad"); } };
+  const unban = async (ip) => { try { await securityHooks.unbanIp(ip); toast(t("dr.done")); await load(ctx, true); } catch (e) { toast(`${t("dr.failed")}: ${e.message}`, "bad"); } };
   const lines = (key, ph) => h("textarea", { class: "input ltr", rows: "5", spellcheck: "false", autocomplete: "off", placeholder: ph, style: { height: "auto", padding: "10px 12px", "font-family": "var(--mono, monospace)" }, oninput: (e) => { c[key] = e.target.value.split("\n").map((x) => x.trim()).filter(Boolean); edit(); } }, (c[key] || []).join("\n"));
 
   const httpsOn = fw.tls && fw.tls.enforced;
   const httpsBusy = { v: false };
   const enforce = async (ev) => { if (httpsBusy.v) return;
     if (fw.armed !== "https-on") { fw.armed = "https-on"; ev.currentTarget.classList.add("armed"); ev.currentTarget.textContent = t("dr.confirm"); setTimeout(() => { if (fw.armed === "https-on") { fw.armed = null; ctx.touch(); } }, 4000); return; }
-    fw.armed = null; httpsBusy.v = true; try { const r = await fetch("/api/security/enforce-https", { method: "POST", headers: { "X-QM-CSRF": "1" }, credentials: "same-origin" }); toast((await r.json()).message || t("fw.https.restart")); await load(ctx, true); } catch (e) { toast(`${t("dr.failed")}: ${e.message}`, "bad"); } finally { httpsBusy.v = false; } };
+    fw.armed = null; httpsBusy.v = true; try { const r = await securityHooks.enforceHttps(); toast(r?.message || t("fw.https.restart")); await load(ctx, true); } catch (e) { toast(`${t("dr.failed")}: ${e.message}`, "bad"); } finally { httpsBusy.v = false; } };
   const removeHttps = async (ev) => {
     if (fw.armed !== "https") { fw.armed = "https"; ev.currentTarget.classList.add("armed"); ev.currentTarget.textContent = t("dr.confirm"); setTimeout(() => { if (fw.armed === "https") fw.armed = null; }, 4000); return; }
-    fw.armed = null; try { await fetch("/api/security/remove-https", { method: "POST", headers: { "X-QM-CSRF": "1" }, credentials: "same-origin" }); toast(t("fw.https.removed")); await load(ctx, true); } catch (e) { toast(`${t("dr.failed")}: ${e.message}`, "bad"); }
+    fw.armed = null; try { await securityHooks.removeHttps(); toast(t("fw.https.removed")); await load(ctx, true); } catch (e) { toast(`${t("dr.failed")}: ${e.message}`, "bad"); }
   };
 
   return h("div", { class: "grid" },
