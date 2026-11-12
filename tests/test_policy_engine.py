@@ -445,4 +445,146 @@ def test_api_policy_crud():
         policies = await db_list_policies(db)
         assert len(policies) == 0
 
-    asyncio.get_event_loop().run_until_complete(run())
+
+# ---- Full API Integration Tests for all new features ----
+
+def test_api_backup_alerts_devicegroups_dpi_full_cycle():
+    """Full integration test for backup, alerts, device-groups, and DPI endpoints."""
+    from fastapi.testclient import TestClient
+    from api.app import create_app
+    from quota.db import Database, init_rbac_tables, init_device_group_tables
+    from quota.db import rbac_create_role, rbac_grant_permission, rbac_assign_role
+    from quota.alerts import init_alerts_tables
+    from quota.backup import init_backup_tables
+    import asyncio
+
+    async def setup():
+        db = Database(":memory:")
+        await db.connect()
+        await init_rbac_tables(db)
+        await init_alerts_tables(db)
+        await init_backup_tables(db)
+        await init_device_group_tables(db)
+        await rbac_create_role(db, "admin", "Administrator", "Full access")
+        for perm in ["policy:create", "policy:read", "policy:update", "policy:delete",
+                     "policy:simulate", "policy:view_conflicts", "audit:read", "rbac:manage"]:
+            await rbac_grant_permission(db, "admin", perm)
+        await rbac_assign_role(db, "admin", "admin", assigned_by="system")
+        return db
+
+    db = asyncio.get_event_loop().run_until_complete(setup())
+    app = create_app(database=db, service=None, holder=None)
+    client = TestClient(app)
+
+    # ---- Backup ----
+    resp = client.post("/api/policies/backup/create", json={"backup_type": "full", "note": "Test backup"})
+    assert resp.status_code == 200, resp.text
+    backup = resp.json()
+    backup_id = backup["backup_id"]
+    assert backup["status"] == "done"
+    assert backup["size_bytes"] > 0
+
+    resp = client.get("/api/policies/backup/list")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] >= 1
+    assert any(b["backup_id"] == backup_id for b in data["backups"])
+
+    resp = client.post(f"/api/policies/backup/restore/{backup_id}")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "restored"
+
+    resp = client.delete(f"/api/policies/backup/{backup_id}")
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] == True
+
+    # ---- Alerts ----
+    resp = client.post("/api/policies/alerts", json={
+        "alert_type": "policy_conflict",
+        "title": "TikTok Conflict",
+        "message": "TikTok blocked and allowed simultaneously",
+        "severity": "high",
+        "target": "app",
+        "target_id": "tiktok",
+    })
+    assert resp.status_code == 200, resp.text
+    alert = resp.json()
+    alert_id = alert["alert_id"]
+    assert alert["severity"] == "high"
+
+    resp = client.get("/api/policies/alerts")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] >= 1
+
+    resp = client.get("/api/policies/alerts/count")
+    assert resp.status_code == 200
+    assert resp.json()["count"] >= 1
+
+    resp = client.get(f"/api/policies/alerts/{alert_id}")
+    assert resp.status_code == 200
+    assert resp.json()["title"] == "TikTok Conflict"
+
+    resp = client.patch(f"/api/policies/alerts/{alert_id}/ack")
+    assert resp.status_code == 200
+    assert resp.json()["acknowledged"] == True
+
+    resp = client.delete(f"/api/policies/alerts/{alert_id}")
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] == True
+
+    # ---- Device Groups ----
+    resp = client.post("/api/policies/device-groups", json={
+        "group_id": "grp_test",
+        "group_name": "Test Group",
+        "description": "A test device group",
+    })
+    assert resp.status_code == 200, resp.text
+
+    resp = client.post("/api/policies/device-groups/grp_test/devices/AA:BB:CC:DD:EE:01")
+    assert resp.status_code == 200
+    assert resp.json()["added"] == True
+
+    resp = client.get("/api/policies/device-groups")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] >= 1
+    assert any(g["group_id"] == "grp_test" for g in data["groups"])
+
+    resp = client.get("/api/policies/device-groups/grp_test/members")
+    assert resp.status_code == 200
+    members = resp.json()["members"]
+    assert len(members) >= 1
+    assert members[0]["device_id"] == "AA:BB:CC:DD:EE:01"
+
+    resp = client.delete("/api/policies/device-groups/grp_test/devices/AA:BB:CC:DD:EE:01")
+    assert resp.status_code == 200
+    assert resp.json()["removed"] == True
+
+    resp = client.delete("/api/policies/device-groups/grp_test")
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] == True
+
+    # ---- DPI Detection ----
+    resp = client.get("/api/policies/dpi/apps")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] >= 1
+    assert any(a["name"] == "TikTok" for a in data["apps"])
+
+    resp = client.get("/api/policies/dpi/proxies")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] >= 1
+
+    resp = client.post("/api/policies/dpi/detect", json={
+        "dns_query": "www.tiktok.com",
+        "tls_sni": "tiktok.com",
+        "dst_port": 443,
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["apps"]) >= 1
+    assert data["apps"][0]["app"] == "TikTok"
+
+    print("ALL INTEGRATION TESTS PASSED")

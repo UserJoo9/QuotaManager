@@ -4,7 +4,7 @@ export default {
   "nav.overview": "Overview", "nav.people": "People & devices", "nav.quota": "Quota", "nav.network": "Network",
   "nav.internet": "Internet", "nav.security": "Security", "nav.vpn": "VPN", "nav.insights": "Insights",
   "nav.share": "Share", "nav.system": "System",  "nav.policies": "Policies", "audit.title": "Audit Log",
-  "nav.rbac": "RBAC",
+  "nav.rbac": "RBAC", "nav.system-tools": "System Tools",
   "audit.sub": "Policy change history",
   "audit.loading": "Loading...",
   "audit.empty": "No audit records",
@@ -989,9 +989,17 @@ export default {
   "apps.ads_trackers": "Ads & Trackers",
   "apps.vpn_services": "VPN Services",
 
+  // System Tools
+  "sys-tools.backup": "Backup", "sys-tools.alerts": "Alerts", "sys-tools.groups": "Device Groups",
+  "sys-tools.backup.title": "Backup & Restore", "sys-tools.backup.sub": "Create and restore database backups",
+  "sys-tools.backup.btn.create": "Create Backup", "sys-tools.backup.btn.restore": "Restore",
+  "sys-tools.backup.btn.delete": "Delete Backup",
+  "sys-tools.backup.no_backups": "No backups found",
+  "sys-tools.alerts.title": "Alerts", "sys-tools.alerts.sub": "System alerts and notifications",
+  "sys-tools.alerts.no_alerts": "No alerts",
+
   // RBAC
   "rbac.title": "User Roles & Permissions",
-  "rbac.sub": "Manage admin roles, permissions, and assignments",
   "rbac.roles": "Roles", "rbac.permissions": "Permissions", "rbac.assignments": "Assignments",
   "rbac.role_name": "Role Name", "rbac.role_desc": "Description", "rbac.role_id": "Role ID",
   "rbac.created_at": "Created At", "rbac.created_by": "Created By",
@@ -1022,6 +1030,7 @@ export default {
   "alert.message": "Message", "alert.target": "Target", "alert.acknowledged": "Acknowledged",
   "alert.acknowledge": "Acknowledge", "alert.delete": "Delete",
   "alert.no_alerts": "No alerts", "alert.unacked_count": "Unacknowledged",
+  "alert.created_at": "Created At",
   "alert.severity.low": "Low", "alert.severity.medium": "Medium",
   "alert.severity.high": "High", "alert.severity.critical": "Critical",
   "alert.type.policy_conflict": "Policy Conflict",

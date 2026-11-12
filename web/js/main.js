@@ -29,6 +29,7 @@ import sharePage from "./pages/share.js";
 import policyPage from "./pages/policy.js";
 import auditLogPage from "./pages/auditlog.js";
 import rbacPage from "./pages/rbac.js";
+import systemToolsPage from "./pages/systemTools.js";
 
 // UI Polish: suppress browser default context menu on non-text elements
 document.addEventListener("contextmenu", (e) => {
@@ -58,6 +59,7 @@ const ROUTES = [
   { id: "policies", icon: "shield", group: "nav.tools", page: policyPage },
   { id: "auditlog", icon: "clipboard", group: "nav.tools", page: auditLogPage },
   { id: "rbac", icon: "shield", group: "nav.tools", page: rbacPage },
+  { id: "system-tools", icon: "settings", group: "nav.tools", page: systemToolsPage },
 ];
 
 // ---- Composition root ----

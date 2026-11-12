@@ -4,7 +4,7 @@ export default {
   "nav.overview": "نظرة عامة", "nav.people": "الأشخاص والأجهزة", "nav.quota": "الحصص", "nav.network": "الشبكة",
   "nav.internet": "الإنترنت", "nav.security": "الأمان", "nav.vpn": "VPN", "nav.insights": "التحليلات",
   "nav.share": "المشاركة", "nav.system": "النظام",  "nav.policies": "السياسات", "audit.title": "سجل التدقيق",
-  "nav.rbac": "RBAC",
+  "nav.rbac": "RBAC", "nav.system-tools": "أدوات النظام",
   "audit.sub": "سجل التعديلات على السياسات",
   "audit.loading": "جارٍ التحميل...",
   "audit.empty": "لا توجد سجلات",
@@ -988,6 +988,15 @@ export default {
   "apps.ads_trackers": "إعلانات ومتتبعين",
   "apps.vpn_services": "خدمات VPN",
 
+  // System Tools
+  "sys-tools.backup": "النسخ الاحتياطي", "sys-tools.alerts": "التنبيهات", "sys-tools.groups": "مجموعات الأجهزة",
+  "sys-tools.backup.title": "النسخ الاحتياطي والاستعادة", "sys-tools.backup.sub": "إنشاء واستعادة نسخ احتياطية من قاعدة البيانات",
+  "sys-tools.backup.btn.create": "إنشاء نسخة احتياطية", "sys-tools.backup.btn.restore": "استعادة",
+  "sys-tools.backup.btn.delete": "حذف نسخة",
+  "sys-tools.backup.no_backups": "لا توجد نسخ احتياطية",
+  "sys-tools.alerts.title": "التنبيهات", "sys-tools.alerts.sub": "تنبيهات النظام والإشعارات",
+  "sys-tools.alerts.no_alerts": "لا توجد تنبيهات",
+
   // RBAC
   "rbac.title": "الأدوار والصلاحيات",
   "rbac.sub": "إدارة الأدوار والصلاحيات وتعيينها للمدراء",
@@ -1021,6 +1030,7 @@ export default {
   "alert.message": "الرسالة", "alert.target": "الهدف", "alert.acknowledged": "تم الاعتراف",
   "alert.acknowledge": "اعترف", "alert.delete": "احذف",
   "alert.no_alerts": "لا توجد تنبيهات", "alert.unacked_count": "غير معترف به",
+  "alert.created_at": "تاريخ الإنشاء",
   "alert.severity.low": "منخفضة", "alert.severity.medium": "متوسطة",
   "alert.severity.high": "عالية", "alert.severity.critical": "حرجة",
   "alert.type.policy_conflict": "تضارب في السياسات",
