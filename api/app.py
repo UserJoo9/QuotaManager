@@ -4146,8 +4146,27 @@ def create_app(
     enforcement_registry.register(QuotaEnforcementAdapter(service))
 
     # Initialize policy routes
-    from api.policy_routes import init_policy_engine, router as policy_router
-    init_policy_engine(database, policy_engine, enforcement_registry)
+    from api.policy_routes import init_policy_engine, router as policy_router, init_rbac_tables
+    from quota.db import rbac_create_role, rbac_grant_permission
+    import asyncio
+    # Initialize RBAC tables and default roles
+    _loop = asyncio.get_event_loop()
+    _loop.run_until_complete(init_rbac_tables(database))
+    # Create default roles if not exist
+    _loop.run_until_complete(rbac_create_role(database, "admin", "Administrator", "Full access to all policies and settings"))
+    _loop.run_until_complete(rbac_create_role(database, "editor", "Editor", "Can create, edit, and delete policies"))
+    _loop.run_until_complete(rbac_create_role(database, "viewer", "Viewer", "Read-only access to policies and audit log"))
+    _loop.run_until_complete(rbac_create_role(database, "auditor", "Auditor", "Read-only access to audit log only"))
+    # Grant permissions
+    for perm in ["policy:create", "policy:read", "policy:update", "policy:delete", "policy:simulate", "policy:view_conflicts", "audit:read", "rbac:manage"]:
+        _loop.run_until_complete(rbac_grant_permission(database, "admin", perm))
+    for perm in ["policy:create", "policy:read", "policy:update", "policy:delete", "policy:simulate", "policy:view_conflicts"]:
+        _loop.run_until_complete(rbac_grant_permission(database, "editor", perm))
+    for perm in ["policy:read", "policy:simulate", "policy:view_conflicts", "audit:read"]:
+        _loop.run_until_complete(rbac_grant_permission(database, "viewer", perm))
+    for perm in ["audit:read", "policy:view_conflicts"]:
+        _loop.run_until_complete(rbac_grant_permission(database, "auditor", perm))
+    init_policy_engine(database, policy_engine, enforcement_registry, current_user_id="admin")
 
     app.include_router(policy_router)
 

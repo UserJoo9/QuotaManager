@@ -2409,3 +2409,101 @@ async def list_audit_log(db: "Database", limit: int = 100) -> list[dict[str, Any
         for r in rows
     ]
 
+
+# --------------------------------------------------------------------------- #
+# RBAC — Role-Based Access Control for admin users
+# --------------------------------------------------------------------------- #
+
+async def init_rbac_tables(db: "Database") -> None:
+    """Create RBAC tables if they don't exist."""
+    await db.conn.execute("""
+        CREATE TABLE IF NOT EXISTS admin_roles (
+            role_id   TEXT PRIMARY KEY,
+            role_name TEXT NOT NULL UNIQUE,
+            description TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT ''
+        )
+    """)
+    await db.conn.execute("""
+        CREATE TABLE IF NOT EXISTS admin_user_roles (
+            user_id   TEXT NOT NULL,
+            role_id   TEXT NOT NULL,
+            assigned_at TEXT NOT NULL DEFAULT '',
+            assigned_by TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (user_id, role_id),
+            FOREIGN KEY (role_id) REFERENCES admin_roles(role_id) ON DELETE CASCADE
+        )
+    """)
+    await db.conn.execute("""
+        CREATE TABLE IF NOT EXISTS role_permissions (
+            role_id     TEXT NOT NULL,
+            permission  TEXT NOT NULL,
+            PRIMARY KEY (role_id, permission),
+            FOREIGN KEY (role_id) REFERENCES admin_roles(role_id) ON DELETE CASCADE
+        )
+    """)
+    await db.conn.commit()
+
+
+async def rbac_create_role(db: "Database", role_id: str, role_name: str, description: str = "") -> bool:
+    """Create a new admin role."""
+    import datetime as _dt
+    now = _dt.datetime.now().astimezone().isoformat()
+    try:
+        await db.conn.execute(
+            "INSERT INTO admin_roles (role_id, role_name, description, created_at) VALUES (?, ?, ?, ?)",
+            (role_id, role_name, description, now),
+        )
+        await db.conn.commit()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def rbac_assign_role(db: "Database", user_id: str, role_id: str, assigned_by: str = "admin") -> bool:
+    """Assign a role to a user."""
+    import datetime as _dt
+    now = _dt.datetime.now().astimezone().isoformat()
+    try:
+        await db.conn.execute(
+            "INSERT OR REPLACE INTO admin_user_roles (user_id, role_id, assigned_at, assigned_by) VALUES (?, ?, ?, ?)",
+            (user_id, role_id, now, assigned_by),
+        )
+        await db.conn.commit()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def rbac_grant_permission(db: "Database", role_id: str, permission: str) -> bool:
+    """Grant a permission to a role."""
+    try:
+        await db.conn.execute(
+            "INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES (?, ?)",
+            (role_id, permission),
+        )
+        await db.conn.commit()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def rbac_user_has_permission(db: "Database", user_id: str, permission: str) -> bool:
+    """Check if a user has a specific permission through any of their roles."""
+    rows = (await db.conn.execute("""
+        SELECT rp.permission FROM role_permissions rp
+        JOIN admin_user_roles aur ON aur.role_id = rp.role_id
+        WHERE aur.user_id = ?
+    """, (user_id,))).fetchall()
+    return any(r[0] == permission for r in rows)
+
+
+async def rbac_user_roles(db: "Database", user_id: str) -> list[str]:
+    """Return list of role names for a user."""
+    rows = (await db.conn.execute("""
+        SELECT ar.role_name FROM admin_roles ar
+        JOIN admin_user_roles aur ON aur.role_id = ar.role_id
+        WHERE aur.user_id = ?
+    """, (user_id,))).fetchall()
+    return [r[0] for r in rows]
+
