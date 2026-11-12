@@ -243,6 +243,12 @@ class Policy:
 
     def matches_scope(self, context: dict[str, Any]) -> bool:
         """Does this policy apply to the given context (user/device/etc.)?"""
+        # Exceptions: exempted targets never match
+        ctx_device = context.get("device_id") or context.get("mac")
+        ctx_user = context.get("user_id")
+        if str(ctx_device) in self.exceptions or str(ctx_user) in self.exceptions:
+            return False
+
         if self.scope_type == PolicyScope.GLOBAL:
             return True
         ctx_user = context.get("user_id")
