@@ -11,20 +11,21 @@ from __future__ import annotations
 
 import json
 import logging
+import datetime as _dt
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from dataclasses import asdict
 
+from quota.db import Database, save_policy, list_policies as db_list_policies, get_policy as db_get_policy, delete_policy as db_delete_policy, audit_policy_log
 from quota.policy_engine import (
     Policy, PolicyEngine, PolicyScope, PolicyTarget, PolicyAction,
     EnforcementMethod, PolicyCondition, PolicySchedule,
 )
-from quota.app_catalog import APP_CATALOG, CONTENT_CATEGORIES, get_capability_matrix, to_dict as catalog_to_dict
+from quota.app_catalog import to_dict as catalog_to_dict
 from quota.capabilities import detect_capabilities, get_capability_summary
-from quota.policy_adapters import EnforcementRegistry, DnsEnforcementAdapter, FirewallEnforcementAdapter, TrafficControlAdapter, QuotaEnforcementAdapter
-from quota.policy_scheduler import PolicyScheduler
+from quota.policy_adapters import EnforcementRegistry
 
 log = logging.getLogger("quota.policy_api")
 
@@ -33,14 +34,14 @@ router = APIRouter(prefix="/api/policies", tags=["policies"])
 # Global engine instance (initialized at app startup)
 _policy_engine: PolicyEngine | None = None
 _enforcement_registry: EnforcementRegistry | None = None
-_policy_scheduler: PolicyScheduler | None = None
+_db: Database | None = None
 
 
-def init_policy_engine(engine: PolicyEngine, registry: EnforcementRegistry, scheduler: PolicyScheduler) -> None:
-    global _policy_engine, _enforcement_registry, _policy_scheduler
+def init_policy_engine(db: Database, engine: PolicyEngine, registry: EnforcementRegistry) -> None:
+    global _policy_engine, _enforcement_registry, _db
+    _db = db
     _policy_engine = engine
     _enforcement_registry = registry
-    _policy_scheduler = scheduler
 
 
 def get_engine() -> PolicyEngine:
@@ -53,6 +54,12 @@ def get_registry() -> EnforcementRegistry:
     if _enforcement_registry is None:
         raise HTTPException(503, "Enforcement registry not initialized")
     return _enforcement_registry
+
+
+def get_db() -> Database:
+    if _db is None:
+        raise HTTPException(503, "Database not initialized")
+    return _db
 
 
 # --------------------------------------------------------------------------- #
@@ -138,6 +145,39 @@ def _policy_from_create(body: PolicyCreate, policy_id: str) -> Policy:
     )
 
 
+def _policy_to_dict(p: Policy) -> dict[str, Any]:
+    return {
+        "id": p.id,
+        "name": p.name,
+        "description": p.description,
+        "enabled": p.enabled,
+        "scope_type": p.scope_type.value,
+        "scope_targets": p.scope_targets,
+        "target_type": p.target_type.value,
+        "target_values": p.target_values,
+        "action": p.action.value,
+        "action_params": p.action_params,
+        "conditions": [asdict(c) for c in p.conditions],
+        "schedule": {
+            "enabled": p.schedule.enabled,
+            "days": p.schedule.days,
+            "time_ranges": p.schedule.time_ranges,
+            "timezone": p.schedule.timezone,
+            "start_date": p.schedule.start_date,
+            "end_date": p.schedule.end_date,
+        },
+        "priority": p.priority,
+        "exceptions": p.exceptions,
+        "expires_at": p.expires_at,
+        "enforcement_method": p.enforcement_method.value,
+        "log_enabled": p.log_enabled,
+        "created_at": p.created_at,
+        "updated_at": p.updated_at,
+        "created_by": p.created_by,
+        "tags": p.tags,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Routes
 # --------------------------------------------------------------------------- #
@@ -145,84 +185,126 @@ def _policy_from_create(body: PolicyCreate, policy_id: str) -> Policy:
 @router.get("")
 async def list_policies(enabled_only: bool = False):
     """List all policies."""
-    engine = get_engine()
-    policies = engine.list_policies(enabled_only=enabled_only)
-    return {"policies": [asdict(p) for p in policies], "count": len(policies)}
+    db = get_db()
+    rows = await db_list_policies(db, enabled_only=enabled_only)
+    return {"policies": rows, "count": len(rows)}
 
 
 @router.get("/{policy_id}")
 async def get_policy(policy_id: str):
     """Get a single policy by ID."""
-    engine = get_engine()
-    p = engine.get_policy(policy_id)
+    db = get_db()
+    p = await db_get_policy(db, policy_id)
     if not p:
         raise HTTPException(404, "Policy not found")
-    return asdict(p)
+    return p
 
 
 @router.post("")
 async def create_policy(body: PolicyCreate):
     """Create a new policy."""
     import uuid
+    import datetime as _dt
+    db = get_db()
     engine = get_engine()
     policy_id = f"pol_{uuid.uuid4().hex[:12]}"
+    now = _dt.datetime.now().astimezone().isoformat()
     policy = _policy_from_create(body, policy_id)
+    policy.created_at = now
+    policy.updated_at = now
+    await save_policy(db, _policy_to_dict(policy))
+    await audit_policy_log(db, "create", policy_id, policy.name, actor="admin", details={"scope": policy.scope_type.value, "target": policy.target_type.value, "action": policy.action.value})
     engine.add_policy(policy)
-    return {"id": policy_id, "policy": asdict(policy)}
+    return {"id": policy_id, "policy": _policy_to_dict(policy)}
 
 
 @router.put("/{policy_id}")
 async def update_policy(policy_id: str, body: PolicyUpdate):
     """Update an existing policy."""
+    db = get_db()
     engine = get_engine()
-    existing = engine.get_policy(policy_id)
+    existing = await db_get_policy(db, policy_id)
     if not existing:
         raise HTTPException(404, "Policy not found")
     # Apply updates
     if body.name is not None:
-        existing.name = body.name
+        existing["name"] = body.name
     if body.description is not None:
-        existing.description = body.description
+        existing["description"] = body.description
     if body.enabled is not None:
-        existing.enabled = body.enabled
+        existing["enabled"] = body.enabled
     if body.scope_type is not None:
-        existing.scope_type = PolicyScope(body.scope_type)
+        existing["scope_type"] = body.scope_type
     if body.scope_targets is not None:
-        existing.scope_targets = body.scope_targets
+        existing["scope_targets"] = body.scope_targets
     if body.target_type is not None:
-        existing.target_type = PolicyTarget(body.target_type)
+        existing["target_type"] = body.target_type
     if body.target_values is not None:
-        existing.target_values = body.target_values
+        existing["target_values"] = body.target_values
     if body.action is not None:
-        existing.action = PolicyAction(body.action)
+        existing["action"] = body.action
     if body.action_params is not None:
-        existing.action_params = body.action_params
+        existing["action_params"] = body.action_params
     if body.conditions is not None:
-        existing.conditions = [PolicyCondition(**c) for c in body.conditions]
+        existing["conditions"] = body.conditions
     if body.schedule is not None:
-        existing.schedule = PolicySchedule(**body.schedule) if body.schedule else PolicySchedule()
+        existing["schedule"] = body.schedule
     if body.priority is not None:
-        existing.priority = body.priority
+        existing["priority"] = body.priority
     if body.exceptions is not None:
-        existing.exceptions = body.exceptions
+        existing["exceptions"] = body.exceptions
     if body.expires_at is not None:
-        existing.expires_at = body.expires_at
+        existing["expires_at"] = body.expires_at
     if body.enforcement_method is not None:
-        existing.enforcement_method = EnforcementMethod(body.enforcement_method)
+        existing["enforcement_method"] = body.enforcement_method
     if body.log_enabled is not None:
-        existing.log_enabled = body.log_enabled
+        existing["log_enabled"] = body.log_enabled
     if body.tags is not None:
-        existing.tags = body.tags
-    engine.update_policy(existing)
-    return asdict(existing)
+        existing["tags"] = body.tags
+    existing["updated_at"] = _dt.datetime.now().astimezone().isoformat()
+    await save_policy(db, existing)
+    await audit_policy_log(db, "update", policy_id, existing["name"], actor="admin", details={"changes": list(body.model_dump(exclude_unset=True).keys())})
+    # Rebuild engine from DB
+    engine._policies.clear()
+    for p in await db_list_policies(db):
+        conds = [PolicyCondition(**c) for c in p.get("conditions", [])]
+        sched = PolicySchedule(**p.get("schedule", {})) if p.get("schedule") else PolicySchedule()
+        engine.add_policy(Policy(
+            id=p["id"], name=p["name"], description=p.get("description", ""),
+            enabled=p.get("enabled", True),
+            scope_type=PolicyScope(p.get("scope_type", "global")),
+            scope_targets=p.get("scope_targets", []),
+            target_type=PolicyTarget(p.get("target_type", "app")),
+            target_values=p.get("target_values", []),
+            action=PolicyAction(p.get("action", "block")),
+            action_params=p.get("action_params", {}),
+            conditions=conds,
+            schedule=sched,
+            priority=p.get("priority", 0),
+            exceptions=p.get("exceptions", []),
+            expires_at=p.get("expires_at", ""),
+            enforcement_method=EnforcementMethod(p.get("enforcement_method", "dns")),
+            log_enabled=p.get("log_enabled", True),
+            created_at=p.get("created_at", ""),
+            updated_at=p.get("updated_at", ""),
+            created_by=p.get("created_by", "admin"),
+            tags=p.get("tags", []),
+        ))
+    return existing
 
 
 @router.delete("/{policy_id}")
 async def delete_policy(policy_id: str):
     """Delete a policy."""
+    db = get_db()
     engine = get_engine()
-    if not engine.remove_policy(policy_id):
+    existing = await db_get_policy(db, policy_id)
+    if not existing:
         raise HTTPException(404, "Policy not found")
+    if not await db_delete_policy(db, policy_id):
+        raise HTTPException(404, "Policy not found")
+    await audit_policy_log(db, "delete", policy_id, existing["name"], actor="admin")
+    engine.remove_policy(policy_id)
     return {"deleted": policy_id}
 
 

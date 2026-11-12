@@ -448,6 +448,45 @@ CREATE TABLE IF NOT EXISTS dns_presets (
     updated_at   REAL NOT NULL DEFAULT 0
 );
 
+-- Unified Policy Engine: declarative access-control policies evaluated by
+-- quota/policy_engine.PolicyEngine. Each row is one policy (scope, target,
+-- action, schedule, priority) with a JSON-serialized conditions list.
+CREATE TABLE IF NOT EXISTS policies (
+    id              TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    description     TEXT NOT NULL DEFAULT '',
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    scope_type      TEXT NOT NULL DEFAULT 'global',
+    scope_targets   TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    target_type     TEXT NOT NULL DEFAULT 'app',
+    target_values   TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    action          TEXT NOT NULL DEFAULT 'block',
+    action_params   TEXT NOT NULL DEFAULT '{}',   -- JSON object
+    conditions      TEXT NOT NULL DEFAULT '[]',   -- JSON array of {field,operator,value}
+    schedule        TEXT NOT NULL DEFAULT '{}',   -- JSON object
+    priority        INTEGER NOT NULL DEFAULT 0,
+    exceptions      TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    expires_at      TEXT NOT NULL DEFAULT '',
+    enforcement_method TEXT NOT NULL DEFAULT 'dns',
+    log_enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at      TEXT NOT NULL DEFAULT '',
+    updated_at      TEXT NOT NULL DEFAULT '',
+    created_by      TEXT NOT NULL DEFAULT 'admin',
+    tags            TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    UNIQUE(name)
+);
+
+-- Policy audit log: records who changed what policy and when.
+CREATE TABLE IF NOT EXISTS policy_audit_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    action     TEXT NOT NULL,        -- create, update, delete
+    policy_id  TEXT NOT NULL,
+    policy_name TEXT NOT NULL,
+    actor      TEXT NOT NULL DEFAULT 'admin',
+    details    TEXT NOT NULL DEFAULT '{}',   -- JSON object
+    created_at TEXT NOT NULL DEFAULT ''
+);
+
 -- Static DHCP reservations (MAC <-> fixed IP mapping)
 CREATE TABLE IF NOT EXISTS static_leases (
     mac        TEXT PRIMARY KEY,
@@ -2216,4 +2255,137 @@ def _row_to_vpn_routing_rule(row: Any) -> VpnRoutingRule:
         target_id=int(row["target_id"]),
         route_vpn=bool(row["route_vpn"]),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Policy persistence (Unified Policy Engine)
+# --------------------------------------------------------------------------- #
+
+async def policy_row_to_dict(row: Any) -> dict[str, Any]:
+    import json
+    return {
+        "id": str(row["id"]),
+        "name": str(row["name"]),
+        "description": str(row["description"] or ""),
+        "enabled": bool(row["enabled"]),
+        "scope_type": str(row["scope_type"]),
+        "scope_targets": json.loads(row["scope_targets"] or "[]"),
+        "target_type": str(row["target_type"]),
+        "target_values": json.loads(row["target_values"] or "[]"),
+        "action": str(row["action"]),
+        "action_params": json.loads(row["action_params"] or "{}"),
+        "conditions": json.loads(row["conditions"] or "[]"),
+        "schedule": json.loads(row["schedule"] or "{}"),
+        "priority": int(row["priority"] or 0),
+        "exceptions": json.loads(row["exceptions"] or "[]"),
+        "expires_at": str(row["expires_at"] or ""),
+        "enforcement_method": str(row["enforcement_method"]),
+        "log_enabled": bool(row["log_enabled"]),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+        "created_by": str(row["created_by"] or "admin"),
+        "tags": json.loads(row["tags"] or "[]"),
+    }
+
+
+async def save_policy(db: "Database", policy: dict[str, Any]) -> str:
+    """Insert or update a policy in the database. Returns the policy id."""
+    import json
+    import datetime as _dt
+    now = _dt.datetime.now().astimezone().isoformat()
+    pid = policy.get("id") or f"pol_{_dt.datetime.now().timestamp():.0f}"
+    await db.conn.execute(
+        """INSERT INTO policies (id, name, description, enabled, scope_type,
+            scope_targets, target_type, target_values, action, action_params,
+            conditions, schedule, priority, exceptions, expires_at,
+            enforcement_method, log_enabled, created_at, updated_at,
+            created_by, tags)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+            name=excluded.name, description=excluded.description,
+            enabled=excluded.enabled, scope_type=excluded.scope_type,
+            scope_targets=excluded.scope_targets, target_type=excluded.target_type,
+            target_values=excluded.target_values, action=excluded.action,
+            action_params=excluded.action_params, conditions=excluded.conditions,
+            schedule=excluded.schedule, priority=excluded.priority,
+            exceptions=excluded.exceptions, expires_at=excluded.expires_at,
+            enforcement_method=excluded.enforcement_method,
+            log_enabled=excluded.log_enabled, updated_at=excluded.updated_at,
+            created_by=excluded.created_by, tags=excluded.tags""",
+        (
+            pid,
+            policy.get("name", ""),
+            policy.get("description", ""),
+            1 if policy.get("enabled", True) else 0,
+            policy.get("scope_type", "global"),
+            json.dumps(policy.get("scope_targets", [])),
+            policy.get("target_type", "app"),
+            json.dumps(policy.get("target_values", [])),
+            policy.get("action", "block"),
+            json.dumps(policy.get("action_params", {})),
+            json.dumps(policy.get("conditions", [])),
+            json.dumps(policy.get("schedule", {})),
+            int(policy.get("priority", 0)),
+            json.dumps(policy.get("exceptions", [])),
+            str(policy.get("expires_at", "")),
+            policy.get("enforcement_method", "dns"),
+            1 if policy.get("log_enabled", True) else 0,
+            policy.get("created_at", now),
+            now,
+            policy.get("created_by", "admin"),
+            json.dumps(policy.get("tags", [])),
+        ),
+    )
+    await db.conn.commit()
+    return pid
+
+
+async def list_policies(db: "Database", enabled_only: bool = False) -> list[dict[str, Any]]:
+    """Return all policies (optionally only enabled ones), newest first."""
+    import json
+    if enabled_only:
+        cur = await db.conn.execute(
+            "SELECT * FROM policies WHERE enabled = 1 ORDER BY priority DESC, name ASC"
+        )
+        rows = await cur.fetchall()
+    else:
+        cur = await db.conn.execute(
+            "SELECT * FROM policies ORDER BY priority DESC, name ASC"
+        )
+        rows = await cur.fetchall()
+    return [await policy_row_to_dict(r) for r in rows]
+
+
+async def get_policy(db: "Database", policy_id: str) -> dict[str, Any] | None:
+    """Return a single policy by id, or None if not found."""
+    cur = await db.conn.execute(
+        "SELECT * FROM policies WHERE id = ?", (policy_id,)
+    )
+    row = await cur.fetchone()
+    return await policy_row_to_dict(row) if row else None
+
+
+async def delete_policy(db: "Database", policy_id: str) -> bool:
+    """Delete a policy by id. Returns True if deleted."""
+    cur = await db.conn.execute("DELETE FROM policies WHERE id = ?", (policy_id,))
+    await db.conn.commit()
+    return cur.rowcount > 0
+
+
+# --------------------------------------------------------------------------- #
+# Policy audit log
+# --------------------------------------------------------------------------- #
+
+async def audit_policy_log(db: "Database", action: str, policy_id: str, policy_name: str,
+                           actor: str = "admin", details: dict | None = None) -> None:
+    """Record an audit entry for a policy change."""
+    import json
+    import datetime as _dt
+    now = _dt.datetime.now().astimezone().isoformat()
+    await db.conn.execute(
+        """INSERT INTO policy_audit_log (action, policy_id, policy_name, actor, details, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (action, policy_id, policy_name, actor, json.dumps(details or {}), now),
+    )
+    await db.conn.commit()
 

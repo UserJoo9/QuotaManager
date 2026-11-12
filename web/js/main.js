@@ -26,6 +26,7 @@ import vpnPage from "./pages/vpn.js";
 import securityPage from "./pages/security.js";
 import insightsPage from "./pages/insights.js";
 import sharePage from "./pages/share.js";
+import policyPage from "./pages/policy.js";
 
 // UI Polish: suppress browser default context menu on non-text elements
 document.addEventListener("contextmenu", (e) => {
@@ -52,6 +53,7 @@ const ROUTES = [
   { id: "insights", icon: "insights", group: "nav.tools", page: insightsPage },
   { id: "share", icon: "share", group: "nav.tools", page: sharePage },
   { id: "system", icon: "system", group: "nav.tools", page: system },
+  { id: "policies", icon: "shield", group: "nav.tools", page: policyPage },
 ];
 
 // ---- Composition root ----

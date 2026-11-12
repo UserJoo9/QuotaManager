@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import pytest
+import asyncio
 
 from quota.policy_engine import (
     Policy, PolicyEngine, PolicyScope, PolicyTarget, PolicyAction,
     EnforcementMethod, PolicyCondition, PolicySchedule, ResolvedDecision,
 )
+from quota.db import save_policy, list_policies as db_list_policies, get_policy as db_get_policy, delete_policy as db_delete_policy
 
 
 def test_policy_basic_block():
@@ -218,3 +220,50 @@ def test_policy_list_sorted_by_priority():
     assert policies[0].id == "high"
     assert policies[1].id == "mid"
     assert policies[2].id == "low"
+
+
+# ---- API-level CRUD tests ----
+
+def test_api_policy_crud():
+    """Test full CRUD cycle for policies via database."""
+    import asyncio
+    from quota.db import Database
+
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+
+        # Test save + list
+        pid = await save_policy(db, {
+            "id": "pol_test1", "name": "Test Policy", "description": "A test",
+            "enabled": True, "scope_type": "global", "scope_targets": [],
+            "target_type": "app", "target_values": ["tiktok"],
+            "action": "block", "action_params": {},
+            "conditions": [], "schedule": {}, "priority": 10,
+            "exceptions": [], "expires_at": "",
+            "enforcement_method": "dns", "log_enabled": True,
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "updated_at": "2024-01-01T00:00:00+00:00",
+            "created_by": "admin", "tags": [],
+        })
+        assert pid == "pol_test1"
+
+        policies = await db_list_policies(db)
+        assert len(policies) == 1
+        assert policies[0]["name"] == "Test Policy"
+
+        # Test get
+        p = await db_get_policy(db, "pol_test1")
+        assert p is not None
+        assert p["name"] == "Test Policy"
+        assert p["target_values"] == ["tiktok"]
+
+        # Test delete
+        assert await db_delete_policy(db, "pol_test1") is True
+        assert await db_get_policy(db, "pol_test1") is None
+        assert await db_delete_policy(db, "pol_test1") is False
+
+        policies = await db_list_policies(db)
+        assert len(policies) == 0
+
+    asyncio.get_event_loop().run_until_complete(run())

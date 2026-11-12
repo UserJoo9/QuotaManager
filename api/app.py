@@ -4147,7 +4147,7 @@ def create_app(
 
     # Initialize policy routes
     from api.policy_routes import init_policy_engine, router as policy_router
-    init_policy_engine(policy_engine, enforcement_registry, policy_scheduler)
+    init_policy_engine(database, policy_engine, enforcement_registry)
 
     app.include_router(policy_router)
 
