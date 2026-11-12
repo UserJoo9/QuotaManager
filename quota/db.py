@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -2508,4 +2509,112 @@ async def rbac_user_roles(db: "Database", user_id: str) -> list[str]:
         WHERE aur.user_id = ?
     """, (user_id,))).fetchall()
     return [r[0] for r in rows]
+
+
+# --------------------------------------------------------------------------- #
+# Device Groups — policies can target a group of devices
+# --------------------------------------------------------------------------- #
+
+async def init_device_group_tables(db: "Database") -> None:
+    """Create device_groups and device_group_members tables."""
+    await db.conn.execute("""
+        CREATE TABLE IF NOT EXISTS device_groups (
+            group_id    TEXT PRIMARY KEY,
+            group_name  TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL DEFAULT '',
+            created_by  TEXT NOT NULL DEFAULT 'admin'
+        )
+    """)
+    await db.conn.execute("""
+        CREATE TABLE IF NOT EXISTS device_group_members (
+            group_id  TEXT NOT NULL,
+            device_id TEXT NOT NULL,   -- MAC address or device id
+            added_at  TEXT NOT NULL DEFAULT '',
+            added_by  TEXT NOT NULL DEFAULT 'admin',
+            PRIMARY KEY (group_id, device_id),
+            FOREIGN KEY (group_id) REFERENCES device_groups(group_id) ON DELETE CASCADE
+        )
+    """)
+    await db.conn.commit()
+
+
+async def dg_create_group(db: "Database", group_id: str, group_name: str,
+                          description: str = "", created_by: str = "admin") -> bool:
+    """Create a device group."""
+    import datetime as _dt
+    now = _dt.datetime.now(timezone.utc).isoformat()
+    try:
+        await db.conn.execute(
+            "INSERT INTO device_groups (group_id, group_name, description, created_at, created_by) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (group_id, group_name, description, now, created_by),
+        )
+        await db.conn.commit()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def dg_add_device(db: "Database", group_id: str, device_id: str,
+                        added_by: str = "admin") -> bool:
+    """Add a device to a group."""
+    import datetime as _dt
+    now = _dt.datetime.now(timezone.utc).isoformat()
+    try:
+        await db.conn.execute(
+            "INSERT OR IGNORE INTO device_group_members (group_id, device_id, added_at, added_by) "
+            "VALUES (?, ?, ?, ?)",
+            (group_id, device_id, now, added_by),
+        )
+        await db.conn.commit()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def dg_remove_device(db: "Database", group_id: str, device_id: str) -> bool:
+    """Remove a device from a group."""
+    cur = await db.conn.execute(
+        "DELETE FROM device_group_members WHERE group_id = ? AND device_id = ?",
+        (group_id, device_id),
+    )
+    await db.conn.commit()
+    return cur.rowcount > 0
+
+
+async def dg_list_groups(db: "Database") -> list[dict[str, Any]]:
+    """List all device groups with member counts."""
+    import json
+    cur = await db.conn.execute("SELECT group_id, group_name, description, created_at, created_by FROM device_groups")
+    rows = await cur.fetchall()
+    result = []
+    for r in rows:
+        group_id = r[0]
+        cur2 = await db.conn.execute("SELECT COUNT(*) FROM device_group_members WHERE group_id = ?", (group_id,))
+        row2 = await cur2.fetchone()
+        member_count = int(row2[0]) if row2 else 0
+        result.append({
+            "group_id": group_id,
+            "group_name": r[1],
+            "description": r[2],
+            "created_at": r[3],
+            "created_by": r[4],
+            "member_count": int(member_count),
+        })
+    return result
+
+
+async def dg_list_members(db: "Database", group_id: str) -> list[dict[str, str]]:
+    """List members of a device group."""
+    cur = await db.conn.execute("SELECT device_id, added_at, added_by FROM device_group_members WHERE group_id = ?", (group_id,))
+    rows = await cur.fetchall()
+    return [{"device_id": r[0], "added_at": r[1], "added_by": r[2]} for r in rows]
+
+
+async def dg_delete_group(db: "Database", group_id: str) -> bool:
+    """Delete a device group and its members."""
+    cur = await db.conn.execute("DELETE FROM device_groups WHERE group_id = ?", (group_id,))
+    await db.conn.commit()
+    return cur.rowcount > 0
 

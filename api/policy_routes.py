@@ -18,7 +18,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from dataclasses import asdict
 
-from quota.db import Database, save_policy, list_policies as db_list_policies, get_policy as db_get_policy, delete_policy as db_delete_policy, audit_policy_log, list_audit_log, init_rbac_tables, rbac_user_has_permission
+from quota.db import Database, save_policy, list_policies as db_list_policies, get_policy as db_get_policy, delete_policy as db_delete_policy, audit_policy_log, list_audit_log, init_rbac_tables, rbac_user_has_permission, init_device_group_tables, dg_create_group, dg_add_device, dg_remove_device, dg_list_groups, dg_list_members, dg_delete_group
+from quota.backup import init_backup_tables, create_backup, list_backups, delete_backup, restore_backup
+from quota.alerts import init_alerts_tables, create_alert, list_alerts, get_alert, ack_alert, delete_alert, alert_count_unacked
 from quota.policy_engine import (
     Policy, PolicyEngine, PolicyScope, PolicyTarget, PolicyAction,
     EnforcementMethod, PolicyCondition, PolicySchedule,
@@ -454,6 +456,235 @@ async def get_enforcement_status():
         "available_methods": registry.available_methods(),
         "capabilities": registry.capability_matrix(),
     }
+
+
+# ---- Backup & Restore endpoints ----
+
+@router.post("/backup/create")
+@require_permission("policy:read")
+async def api_create_backup(body: dict = None):
+    """Create a full database backup."""
+    db = get_db()
+    body = body or {}
+    backup_type = body.get("backup_type", "full")
+    created_by = body.get("created_by", _current_user_id or "admin")
+    note = body.get("note", "")
+    return await create_backup(db, backup_type=backup_type, created_by=created_by, note=note)
+
+
+@router.get("/backup/list")
+@require_permission("policy:read")
+async def api_list_backups():
+    """List all backup jobs."""
+    db = get_db()
+    return {"backups": await list_backups(db), "count": len(await list_backups(db))}
+
+
+@router.delete("/backup/{backup_id}")
+@require_permission("policy:read")
+async def api_delete_backup(backup_id: str):
+    """Delete a backup job and its file."""
+    db = get_db()
+    ok = await delete_backup(db, backup_id, created_by=_current_user_id or "admin")
+    if not ok:
+        raise HTTPException(404, "Backup not found")
+    return {"backup_id": backup_id, "deleted": True}
+
+
+@router.post("/backup/restore/{backup_id}")
+@require_permission("policy:read")
+async def api_restore_backup(backup_id: str, body: dict = None):
+    """Restore all tables from a backup."""
+    db = get_db()
+    body = body or {}
+    created_by = body.get("created_by", _current_user_id or "admin")
+    return await restore_backup(db, backup_id, created_by=created_by)
+
+
+# ---- Alerts endpoints ----
+
+@router.get("/alerts")
+@require_permission("policy:read")
+async def api_list_alerts(acknowledged: bool | None = None, severity: str | None = None, limit: int = 100):
+    """List alerts with optional filters."""
+    db = get_db()
+    alerts = await list_alerts(db, acknowledged=acknowledged, severity=severity, limit=limit)
+    return {"alerts": alerts, "count": len(alerts)}
+
+
+@router.get("/alerts/count")
+@require_permission("policy:read")
+async def api_alert_count_unacked():
+    """Return count of unacknowledged alerts."""
+    db = get_db()
+    return {"count": await alert_count_unacked(db)}
+
+
+@router.post("/alerts")
+@require_permission("policy:create")
+async def api_create_alert(body: dict):
+    """Create a new alert."""
+    db = get_db()
+    alert = await create_alert(
+        db,
+        alert_type=body.get("alert_type", "system_error"),
+        title=body.get("title", "Alert"),
+        message=body.get("message", ""),
+        severity=body.get("severity", "medium"),
+        target=body.get("target", ""),
+        target_id=body.get("target_id", ""),
+        expires_at=body.get("expires_at", ""),
+        metadata=body.get("metadata", {}),
+        created_by=_current_user_id or "admin",
+    )
+    return alert
+
+
+@router.get("/alerts/{alert_id}")
+@require_permission("policy:read")
+async def api_get_alert(alert_id: str):
+    """Get a single alert by id."""
+    db = get_db()
+    alert = await get_alert(db, alert_id)
+    if not alert:
+        raise HTTPException(404, "Alert not found")
+    return alert
+
+
+@router.patch("/alerts/{alert_id}/ack")
+@require_permission("policy:update")
+async def api_ack_alert(alert_id: str, body: dict = None):
+    """Acknowledge an alert."""
+    db = get_db()
+    body = body or {}
+    acknowledged_by = body.get("acknowledged_by", _current_user_id or "admin")
+    ok = await ack_alert(db, alert_id, acknowledged_by=acknowledged_by)
+    if not ok:
+        raise HTTPException(404, "Alert not found or already acknowledged")
+    return {"alert_id": alert_id, "acknowledged": True}
+
+
+@router.delete("/alerts/{alert_id}")
+@require_permission("policy:delete")
+async def api_delete_alert(alert_id: str):
+    """Delete an alert."""
+    db = get_db()
+    ok = await delete_alert(db, alert_id, created_by=_current_user_id or "admin")
+    if not ok:
+        raise HTTPException(404, "Alert not found")
+    return {"alert_id": alert_id, "deleted": True}
+
+
+# ---- DPI / Proxy Detection endpoints ----
+
+from quota.dpi_detection import detect_app, detect_proxy, list_apps, list_proxies
+
+
+@router.get("/dpi/apps")
+@require_permission("policy:read")
+async def api_dpi_apps():
+    """List detectable applications."""
+    return {"apps": list_apps(), "count": len(list_apps())}
+
+
+@router.get("/dpi/proxies")
+@require_permission("policy:read")
+async def api_dpi_proxies():
+    """List detectable proxy/VPN services."""
+    return {"proxies": list_proxies(), "count": len(list_proxies())}
+
+
+@router.post("/dpi/detect")
+@require_permission("policy:read")
+async def api_dpi_detect(body: dict):
+    """Detect apps/proxies from DNS query, TLS SNI, or destination port."""
+    dns_query = body.get("dns_query")
+    tls_sni = body.get("tls_sni")
+    dst_port = body.get("dst_port")
+    if dst_port is not None:
+        try:
+            dst_port = int(dst_port)
+        except (ValueError, TypeError):
+            dst_port = None
+
+    apps = detect_app(dns_query=dns_query, tls_sni=tls_sni, dst_port=dst_port)
+    proxies = detect_proxy(dns_query=dns_query, tls_sni=tls_sni, dst_port=dst_port)
+    return {
+        "apps": apps,
+        "proxies": proxies,
+        "dns_query": dns_query,
+        "tls_sni": tls_sni,
+        "dst_port": dst_port,
+    }
+
+
+# ---- Device Group endpoints ----
+
+@router.get("/device-groups")
+@require_permission("policy:read")
+async def api_dg_list_groups():
+    """List all device groups."""
+    db = get_db()
+    return {"groups": await dg_list_groups(db), "count": len(await dg_list_groups(db))}
+
+
+@router.post("/device-groups")
+@require_permission("policy:create")
+async def api_dg_create_group(body: dict):
+    """Create a device group."""
+    db = get_db()
+    ok = await dg_create_group(
+        db,
+        group_id=body.get("group_id", ""),
+        group_name=body.get("group_name", ""),
+        description=body.get("description", ""),
+        created_by=_current_user_id or "admin",
+    )
+    if not ok:
+        raise HTTPException(400, "Group already exists or invalid data")
+    return {"group_id": body.get("group_id"), "group_name": body.get("group_name")}
+
+
+@router.post("/device-groups/{group_id}/devices/{device_id}")
+@require_permission("policy:update")
+async def api_dg_add_device(group_id: str, device_id: str, body: dict = None):
+    """Add a device to a group."""
+    db = get_db()
+    body = body or {}
+    ok = await dg_add_device(db, group_id, device_id, added_by=body.get("added_by", _current_user_id or "admin"))
+    if not ok:
+        raise HTTPException(400, "Failed to add device")
+    return {"group_id": group_id, "device_id": device_id, "added": True}
+
+
+@router.delete("/device-groups/{group_id}/devices/{device_id}")
+@require_permission("policy:update")
+async def api_dg_remove_device(group_id: str, device_id: str):
+    """Remove a device from a group."""
+    db = get_db()
+    ok = await dg_remove_device(db, group_id, device_id)
+    if not ok:
+        raise HTTPException(404, "Device not found in group")
+    return {"group_id": group_id, "device_id": device_id, "removed": True}
+
+
+@router.get("/device-groups/{group_id}/members")
+@require_permission("policy:read")
+async def api_dg_list_members(group_id: str):
+    """List members of a device group."""
+    db = get_db()
+    return {"group_id": group_id, "members": await dg_list_members(db, group_id)}
+
+
+@router.delete("/device-groups/{group_id}")
+@require_permission("policy:delete")
+async def api_dg_delete_group(group_id: str):
+    """Delete a device group."""
+    db = get_db()
+    ok = await dg_delete_group(db, group_id)
+    if not ok:
+        raise HTTPException(404, "Group not found")
+    return {"group_id": group_id, "deleted": True}
 
 
 # ---- RBAC endpoints ----

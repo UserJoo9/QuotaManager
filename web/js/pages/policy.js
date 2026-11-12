@@ -128,6 +128,7 @@ export default function policyPage(ctx) {
           h("button", { type: "button", class: `btn ${filter === "enabled" ? "primary" : "ghost"} sm`, onclick: () => { ctx._filter = "enabled"; ctx.touch(); } }, t("policy.filter.enabled")),
           h("button", { type: "button", class: `btn ${filter === "disabled" ? "primary" : "ghost"} sm`, onclick: () => { ctx._filter = "disabled"; ctx.touch(); } }, t("policy.filter.disabled")),
           h("button", { type: "button", class: "btn primary", onclick: () => openPolicyDialog() }, icon("plus", 14), t("common.add")),
+          h("button", { type: "button", class: "btn accent", onclick: viewConflicts }, icon("shield", 14), t("policy.btn.view_conflicts")),
         )
       ),
       h("div", { class: "grid" },
@@ -384,6 +385,30 @@ export default function policyPage(ctx) {
       policies = res.policies || [];
     } catch (e) { toast(t("policy.failed") + ": " + e.message, "bad"); policies = []; }
   }
+
+  // ---- Conflict Viewer ----
+  const viewConflicts = async () => {
+    try {
+      const res = await api.get(`${API_BASE}/conflicts`);
+      const conflicts = res.conflicts || [];
+      const rows = conflicts.map(c => h("div", { class: "card", style: { marginBottom: "10px" } },
+        h("div", { class: "lbl" }, c.target),
+        h("div", { class: "sub", style: { fontSize: "11px", marginBottom: "6px" } }, t("policy.conflict.block_vs_allow")),
+        h("div", { class: "kv", style: { fontSize: "12px" } },
+          h("div", {}, h("span", { class: "k" }, t("policy.conflict.resolution")), h("span", { class: "v" }, c.resolution === "block" ? t("policy.conflict.block_wins") : t("policy.conflict.allow_wins"))),
+          h("div", {}, h("span", { class: "k" }, c.block_policy.name), h("span", { class: "v danger" }, "block")),
+          h("div", {}, h("span", { class: "k" }, c.allow_policy.name), h("span", { class: "v ok" }, "allow")),
+        ),
+        h("div", { class: "sub", style: { fontSize: "11px", marginTop: "6px" } }, c.explanation)
+      ));
+      openDialog({
+        title: t("policy.conflicts.title"),
+        fields: [h("div", {}, h("p", {}, t("policy.conflicts.sub"))), ...rows],
+        onSubmit: () => {},
+        showClose: true,
+      });
+    } catch (e) { toast("Failed to load conflicts: " + e.message, "error"); }
+  };
 
   const field = (label, control) => h("div", { class: "field" }, h("label", {}, label), control);
 

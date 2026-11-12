@@ -4148,9 +4148,18 @@ def create_app(
     # Initialize policy routes
     from api.policy_routes import init_policy_engine, router as policy_router, init_rbac_tables
     from quota.db import rbac_create_role, rbac_grant_permission, rbac_assign_role
+    from quota.backup import init_backup_tables
+    from quota.alerts import init_alerts_tables
+    from quota.db import init_device_group_tables
     import asyncio
-    # Initialize RBAC tables and default roles
+    # Initialize backup tables
     _loop = asyncio.get_event_loop()
+    _loop.run_until_complete(init_backup_tables(database))
+    # Initialize alerts tables
+    _loop.run_until_complete(init_alerts_tables(database))
+    # Initialize device group tables
+    _loop.run_until_complete(init_device_group_tables(database))
+    # Initialize RBAC tables and default roles
     _loop.run_until_complete(init_rbac_tables(database))
     # Create default roles if not exist
     _loop.run_until_complete(rbac_create_role(database, "admin", "Administrator", "Full access to all policies and settings"))
