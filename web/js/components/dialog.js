@@ -1,4 +1,4 @@
-import { h, icon, FOCUSABLE } from "../core/dom.js";
+import { h, icon, FOCUSABLE, onKeyTrap } from "../core/dom.js";
 import { t } from "../core/i18n.js";
 
 /** The open modal element, and the element that had focus before it opened. */
@@ -8,20 +8,9 @@ let current = null, prevFocus = null;
 export function closeDialog() {
   if (current) {
     current.remove(); current = null;
-    document.removeEventListener("keydown", onKey);
+    onKeyTrap.close();
     if (prevFocus && typeof prevFocus.focus === "function") { try { prevFocus.focus(); } catch {} }
     prevFocus = null;
-  }
-}
-/** Escape closes; Tab cycles focus inside the modal and never leaves it. */
-function onKey(e) {
-  if (e.key === "Escape") { closeDialog(); return; }
-  if (e.key === "Tab" && current) {
-    const focusable = current.querySelectorAll(FOCUSABLE);
-    if (!focusable.length) return;
-    const first = focusable[0], last = focusable[focusable.length - 1];
-    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   }
 }
 /**
@@ -56,6 +45,6 @@ export function openDialog({ title, sub, content, submitLabel, onSubmit, wide, i
         h("button", { class: "icon-btn", type: "button", "aria-label": t("common.close"), onclick: closeDialog }, icon("close"))),
       form));
   document.body.append(current);
-  document.addEventListener("keydown", onKey);
+  onKeyTrap.open(current, closeDialog);
   current.querySelector("input,textarea,select")?.focus();
 }

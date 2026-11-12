@@ -81,13 +81,14 @@ def _writer_loop(
     log_file: str | Path | None,
     console_level: int,
 ) -> None:
-    """Drain the queue into rotating file + console handlers."""
+    """Drain the queue into rotating file + console handler.
+
+    One console handler only: the previous two-handler design (console + a
+    separate console_errors) emitted every ERROR record twice to stderr.
+    """
     console = logging.StreamHandler()
     console.setLevel(console_level)
     console.setFormatter(logging.Formatter(LOG_FORMAT))
-    console_errors = logging.StreamHandler()
-    console_errors.setLevel(logging.ERROR)
-    console_errors.setFormatter(logging.Formatter(LOG_FORMAT))
 
     # Simpler: one rotating file handler (if configured) + one console handler.
     file_handler: logging.handlers.RotatingFileHandler | None = None
@@ -122,5 +123,3 @@ def _writer_loop(
             file_handler.emit(record)
         if record.levelno >= console.level:
             console.emit(record)
-        if record.levelno >= console_errors.level:
-            console_errors.emit(record)

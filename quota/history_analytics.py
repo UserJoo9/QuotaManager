@@ -439,12 +439,14 @@ async def get_live_traffic_analytics(
         )
         d["is_idle"] = is_idle
 
-    # Top consumer is the #1 active device
-    top_consumer = (
-        device_results[0]
-        if (device_results and (device_results[0]["total_bps"] > 0 or device_results[0]["live_down_bytes"] > 0))
-        else (device_results[0] if device_results else None)
+    # Top consumer is the #1 ACTIVE device (traffic > 0), else the first device
+    # with any bytes recorded — never a zero-traffic device presented as "top".
+    active = next(
+        (d for d in device_results
+         if d["total_bps"] > 0 or d["live_down_bytes"] > 0 or d["live_up_bytes"] > 0),
+        None,
     )
+    top_consumer = active if active is not None else (device_results[0] if device_results else None)
 
     return {
         "timestamp": now_ts,

@@ -5,6 +5,40 @@ import { icons } from "../components/icons.js";
 // Focusable elements for Tab cycling inside modals (drawer.js, dialog.js) — one source of truth.
 export const FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
 
+// ---- Shared modal key-trap (Escape closes, Tab cycles focus) ----
+// One singleton listener serves dialog.js AND drawer.js — no duplicated handler.
+let _trapContainer = null;
+let _trapOnClose = null;
+
+function _onTrapKey(e) {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    _trapOnClose && _trapOnClose();
+    return;
+  }
+  if (e.key === "Tab" && _trapContainer) {
+    const focusable = _trapContainer.querySelectorAll(FOCUSABLE);
+    if (!focusable.length) return;
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+}
+
+/** Install the shared Escape/Tab trap for `container`. Pass `onClose` for Escape. */
+export const onKeyTrap = {
+  open(container, onClose) {
+    _trapContainer = container;
+    _trapOnClose = onClose;
+    document.addEventListener("keydown", _onTrapKey);
+  },
+  close() {
+    _trapContainer = null;
+    _trapOnClose = null;
+    document.removeEventListener("keydown", _onTrapKey);
+  }
+};
+
 export function h(tag, props, ...kids) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(props || {})) {

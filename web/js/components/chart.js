@@ -17,8 +17,8 @@ const GAUGE_R = 80, GAUGE_C = 100;      // gauge ring radius + center
 const GAUGE_ROT = "rotate(135 100 100)";
 const GAUGE_ARC_FRAC = 0.75;            // 270° of the ring carries the value
 
-/** Vertical pixel for value `v` out of `max` (`v` clamped to [0, max]). */
-const yOf = (v, max) => CHART_PAD + (1 - Math.min(1, v / max)) * (CHART_H - 2 * CHART_PAD);
+/** Vertical pixel for value `v` out of `max` (`v` clamped to [0, max]). max <= 0 → flat line at baseline. */
+const yOf = (v, max) => max <= 0 ? CHART_H - CHART_PAD : CHART_PAD + (1 - Math.min(1, v / max)) * (CHART_H - 2 * CHART_PAD);
 
 /** SVG shell: viewBox, gradients, dashed grid. Returns the <svg> element. */
 function base(id) {
@@ -26,7 +26,7 @@ function base(id) {
   const defs = el("defs");
   const g = el("linearGradient", { id: `aGrad${id}`, x1: 0, y1: 0, x2: 0, y2: 1 });
   g.append(el("stop", { offset: 0, style: "stop-color:var(--accent);stop-opacity:.32" }), el("stop", { offset: 1, style: "stop-color:var(--accent);stop-opacity:0" }));
-  const b = el("linearGradient", { id: "barGrad", x1: 0, y1: 0, x2: 0, y2: 1 });
+  const b = el("linearGradient", { id: `barGrad${id}`, x1: 0, y1: 0, x2: 0, y2: 1 });
   b.append(el("stop", { offset: 0, style: "stop-color:var(--accent)" }), el("stop", { offset: 1, style: "stop-color:var(--accent-2)" }));
   defs.append(g, b); svg.append(defs);
   const grid = el("g", { class: "grid-l" });
@@ -63,7 +63,8 @@ export function lineChart(down, up, max) {
     const pd = down.map((v, i) => [i * step, yOf(v, max)]), pu = up.map((v, i) => [i * step, yOf(v, max)]);
     const line = smooth(pd);
     svg.append(el("path", { class: "a-down", style: "fill:url(#aGradL)", d: `${line}L${CHART_W} ${CHART_H}L0 ${CHART_H}Z` }),
-      el("path", { class: "l-down", d: line }), el("path", { class: "l-up", d: smooth(pu) })));
+      el("path", { class: "l-down", d: line }),
+      el("path", { class: "l-up", d: smooth(pu) }));
   }
   return svg;
 }
@@ -77,7 +78,7 @@ export function barChart(bars, max) {
   const svg = base("B");
   const n = bars.length, gap = BAR_GAP, bw = (CHART_W - gap * (n - 1)) / n;
   bars.forEach((b, i) => {
-    const hh = Math.max(b.value > 0 ? BAR_MIN_H : 0, (b.value / max) * (CHART_H - 12));
+    const hh = Math.max(b.value > 0 ? BAR_MIN_H : 0, (max > 0 ? (b.value / max) * (CHART_H - 12) : 0));
     const r = el("rect", { class: "cbar" + (b.today ? " today" : ""), x: (i * (bw + gap)).toFixed(1), y: (CHART_H - 1 - hh).toFixed(1), width: bw.toFixed(1), height: hh.toFixed(1), rx: BAR_RX });
     const tt = el("title"); tt.textContent = b.title; r.append(tt); svg.append(r);
   });

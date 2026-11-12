@@ -1,4 +1,4 @@
-import { h, icon, FOCUSABLE } from "../core/dom.js";
+import { h, icon, FOCUSABLE, onKeyTrap } from "../core/dom.js";
 import { t } from "../core/i18n.js";
 
 /** The open drawer element, its builder, and the element that had focus before it opened. */
@@ -7,20 +7,10 @@ let current = null, builder = null, prevFocus = null;
 /** Close the open drawer, restore focus, and unbind the Escape/Tab handler. */
 export function closeDrawer() {
   if (current) {
-    current.remove(); current = null; document.removeEventListener("keydown", onKey);
+    current.remove(); current = null;
+    onKeyTrap.close();
     if (prevFocus && typeof prevFocus.focus === "function") { try { prevFocus.focus(); } catch {} }
     prevFocus = null;
-  }
-}
-/** Escape closes; Tab cycles focus inside the drawer and never leaves it. */
-function onKey(e) {
-  if (e.key === "Escape") { closeDrawer(); return; }
-  if (e.key === "Tab" && current) {
-    const focusable = current.querySelectorAll(FOCUSABLE);
-    if (!focusable.length) return;
-    const first = focusable[0], last = focusable[focusable.length - 1];
-    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   }
 }
 /**
@@ -35,7 +25,7 @@ export function openDrawer(build) {
   const panel = h("aside", { class: "drawer", role: "dialog", "aria-modal": "true" });
   current = h("div", {}, h("div", { class: "scrim", onclick: closeDrawer }), panel); current._panel = panel;
   document.body.append(current); fill();
-  document.addEventListener("keydown", onKey);
+  onKeyTrap.open(current, closeDrawer);
   panel.querySelector("button")?.focus();
 }
 function fill() {

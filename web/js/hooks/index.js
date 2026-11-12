@@ -16,6 +16,7 @@ import {
   createVpnService,
   createSystemService,
   createDailyPlanService,
+  createShareService,
 } from "../services/index.js";
 
 /**
@@ -44,6 +45,7 @@ export function createHooks({ api, store, prefs, live, toast }) {
   const vpn = createVpnService(api, store, toast);
   const system = createSystemService(api, store, toast);
   const dailyPlan = createDailyPlanService(api, store, toast);
+  const share = createShareService(api, store, toast);
 
   return {
     // Auth hooks

@@ -420,6 +420,8 @@ class FlowSampler:
         lines = self._read()
         flows = [f for f in (parse_conntrack_line(l) for l in lines) if f]
         self.available = bool(flows) or not lines
+        if not flows and not lines:
+            self.available = False
         if self._last_t is not None:
             self.window_s = min(120.0, max(1.0, now - self._last_t))
         self._last_t = now
