@@ -4129,6 +4129,28 @@ def create_app(
     async def _legacy_ui_path(rest: str = "") -> RedirectResponse:
         return RedirectResponse("/" + rest.lstrip("/"), status_code=307)
 
+    # Policy engine (Unified Policy Engine)
+    from quota.policy_engine import PolicyEngine
+    from quota.policy_adapters import EnforcementRegistry, DnsEnforcementAdapter, FirewallEnforcementAdapter, TrafficControlAdapter, QuotaEnforcementAdapter
+    from quota.policy_scheduler import PolicyScheduler
+    from quota.capabilities import detect_capabilities
+
+    policy_engine = PolicyEngine()
+    enforcement_registry = EnforcementRegistry()
+    policy_scheduler = PolicyScheduler()
+
+    # Register adapters (best-effort, None managers for now)
+    enforcement_registry.register(DnsEnforcementAdapter(None))
+    enforcement_registry.register(FirewallEnforcementAdapter(firewall))
+    enforcement_registry.register(TrafficControlAdapter(None))
+    enforcement_registry.register(QuotaEnforcementAdapter(service))
+
+    # Initialize policy routes
+    from api.policy_routes import init_policy_engine, router as policy_router
+    init_policy_engine(policy_engine, enforcement_registry, policy_scheduler)
+
+    app.include_router(policy_router)
+
     # static UI
     if WEB_DIR.exists():
         app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="ui")
