@@ -266,4 +266,183 @@ def test_api_policy_crud():
         policies = await db_list_policies(db)
         assert len(policies) == 0
 
+
+# ---- API Endpoint tests (via FastAPI TestClient) ----
+
+def test_api_policy_endpoints():
+    """Test policy API endpoints via FastAPI TestClient."""
+    from fastapi.testclient import TestClient
+    from api.app import create_app
+    from quota.db import Database, init_rbac_tables, rbac_create_role, rbac_grant_permission
+    import asyncio
+
+    async def setup():
+        db = Database(":memory:")
+        await db.connect()
+        await init_rbac_tables(db)
+        await rbac_create_role(db, "admin", "Administrator", "Full access")
+        await rbac_grant_permission(db, "admin", "policy:create")
+        await rbac_grant_permission(db, "admin", "policy:read")
+        await rbac_grant_permission(db, "admin", "policy:update")
+        await rbac_grant_permission(db, "admin", "policy:delete")
+        await rbac_grant_permission(db, "admin", "policy:simulate")
+        await rbac_grant_permission(db, "admin", "policy:view_conflicts")
+        return db
+
+    db = asyncio.get_event_loop().run_until_complete(setup())
+    # Grant policy:create permission to admin (create_app also does this, but ensure it's set)
+    app = create_app(database=db, service=None, holder=None)
+    client = TestClient(app)
+
+    # Create policy
+    resp = client.post("/api/policies", json={
+        "name": "Block TikTok",
+        "description": "Block TikTok for all users",
+        "enabled": True,
+        "scope_type": "global",
+        "scope_targets": [],
+        "target_type": "app",
+        "target_values": ["tiktok"],
+        "action": "block",
+        "action_params": {},
+        "conditions": [],
+        "schedule": {},
+        "priority": 10,
+        "exceptions": [],
+        "expires_at": "",
+        "enforcement_method": "dns",
+        "log_enabled": True,
+        "tags": [],
+    })
+    print(f"DEBUG create: {resp.status_code} {resp.text}", flush=True)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    policy_id = data["id"]
+    assert data["policy"]["name"] == "Block TikTok"
+
+    # List policies
+    resp = client.get("/api/policies")
+    print(f"DEBUG list: {resp.status_code} {resp.text[:200]}", flush=True)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] >= 1
+    assert any(p["id"] == policy_id for p in data["policies"])
+
+    # Get single policy
+    resp = client.get(f"/api/policies/{policy_id}")
+    print(f"DEBUG get: {resp.status_code} {resp.text[:200]}", flush=True)
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "Block TikTok"
+
+    # Update policy
+    resp = client.put(f"/api/policies/{policy_id}", json={
+        "name": "Block TikTok Updated",
+        "description": "Updated description",
+        "enabled": True,
+        "scope_type": "global",
+        "scope_targets": [],
+        "target_type": "app",
+        "target_values": ["tiktok"],
+        "action": "block",
+        "action_params": {},
+        "conditions": [],
+        "schedule": {},
+        "priority": 20,
+        "exceptions": [],
+        "expires_at": "",
+        "enforcement_method": "dns",
+        "log_enabled": True,
+        "tags": [],
+    })
+    print(f"DEBUG update: {resp.status_code} {resp.text[:200]}", flush=True)
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "Block TikTok Updated"
+    assert resp.json()["priority"] == 20
+
+    # Simulate policy
+    resp = client.post("/api/policies/simulate", json={
+        "target": "tiktok",
+        "context": {"user_id": "1"}
+    })
+    print(f"DEBUG simulate: {resp.status_code} {resp.text[:200]}", flush=True)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["resolved_action"] == "block"
+
+    # Get capabilities
+    resp = client.get("/api/policies/capabilities")
+    print(f"DEBUG capabilities: {resp.status_code} {resp.text[:200]}", flush=True)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "enforcement" in data
+
+    # Get conflicts
+    resp = client.get("/api/policies/conflicts")
+    print(f"DEBUG conflicts: {resp.status_code} {resp.text[:200]}", flush=True)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "conflicts" in data
+
+    # Get audit log
+    resp = client.get("/api/policies/audit-log")
+    print(f"DEBUG audit: {resp.status_code} {resp.text[:200]}", flush=True)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "audit_log" in data
+
+    # Delete policy
+    resp = client.delete(f"/api/policies/{policy_id}")
+    print(f"DEBUG delete: {resp.status_code} {resp.text}", flush=True)
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] == policy_id
+
+    # Verify deletion
+    resp = client.get(f"/api/policies/{policy_id}")
+    assert resp.status_code == 404
+
+
+# ---- API-level CRUD tests ----
+
+def test_api_policy_crud():
+    """Test full CRUD cycle for policies via database."""
+    import asyncio
+    from quota.db import Database
+
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+
+        # Test save + list
+        pid = await save_policy(db, {
+            "id": "pol_test1", "name": "Test Policy", "description": "A test",
+            "enabled": True, "scope_type": "global", "scope_targets": [],
+            "target_type": "app", "target_values": ["tiktok"],
+            "action": "block", "action_params": {},
+            "conditions": [], "schedule": {}, "priority": 10,
+            "exceptions": [], "expires_at": "",
+            "enforcement_method": "dns", "log_enabled": True,
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "updated_at": "2024-01-01T00:00:00+00:00",
+            "created_by": "admin", "tags": [],
+        })
+        assert pid == "pol_test1"
+
+        policies = await db_list_policies(db)
+        assert len(policies) == 1
+        assert policies[0]["name"] == "Test Policy"
+
+        # Test get
+        p = await db_get_policy(db, "pol_test1")
+        assert p is not None
+        assert p["name"] == "Test Policy"
+        assert p["target_values"] == ["tiktok"]
+
+        # Test delete
+        assert await db_delete_policy(db, "pol_test1") is True
+        assert await db_get_policy(db, "pol_test1") is None
+        assert await db_delete_policy(db, "pol_test1") is False
+
+        policies = await db_list_policies(db)
+        assert len(policies) == 0
+
     asyncio.get_event_loop().run_until_complete(run())

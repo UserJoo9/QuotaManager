@@ -4147,7 +4147,7 @@ def create_app(
 
     # Initialize policy routes
     from api.policy_routes import init_policy_engine, router as policy_router, init_rbac_tables
-    from quota.db import rbac_create_role, rbac_grant_permission
+    from quota.db import rbac_create_role, rbac_grant_permission, rbac_assign_role
     import asyncio
     # Initialize RBAC tables and default roles
     _loop = asyncio.get_event_loop()
@@ -4166,6 +4166,8 @@ def create_app(
         _loop.run_until_complete(rbac_grant_permission(database, "viewer", perm))
     for perm in ["audit:read", "policy:view_conflicts"]:
         _loop.run_until_complete(rbac_grant_permission(database, "auditor", perm))
+    # Assign admin role to admin user
+    _loop.run_until_complete(rbac_assign_role(database, "admin", "admin", assigned_by="system"))
     init_policy_engine(database, policy_engine, enforcement_registry, current_user_id="admin")
 
     app.include_router(policy_router)

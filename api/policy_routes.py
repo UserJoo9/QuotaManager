@@ -218,6 +218,57 @@ async def list_policies(enabled_only: bool = False):
     return {"policies": rows, "count": len(rows)}
 
 
+@router.get("/capabilities")
+async def get_capabilities():
+    """Get capability matrix for the current environment."""
+    return detect_capabilities()
+
+
+@router.get("/conflicts")
+async def get_policy_conflicts():
+    """Detect conflicting policies — same target with different actions and overlapping scopes."""
+    engine = get_engine()
+    policies = engine.list_policies(enabled_only=True)
+    conflicts = []
+    
+    # Group by target
+    by_target: dict[str, list] = {}
+    for p in policies:
+        for tv in p.target_values:
+            by_target.setdefault(tv, []).append(p)
+    
+    for target, ps in by_target.items():
+        if len(ps) < 2:
+            continue
+        # Check for block vs allow conflicts
+        blocks = [p for p in ps if p.action == PolicyAction.BLOCK]
+        allows = [p for p in ps if p.action == PolicyAction.ALLOW]
+        
+        if blocks and allows:
+            # Find the highest priority block and allow
+            max_block = max(blocks, key=lambda p: p.priority)
+            max_allow = max(allows, key=lambda p: p.priority)
+            
+            conflicts.append({
+                "target": target,
+                "conflict_type": "block_vs_allow",
+                "block_policy": {"id": max_block.id, "name": max_block.name, "priority": max_block.priority, "scope": max_block.scope_type.value},
+                "allow_policy": {"id": max_allow.id, "name": max_allow.name, "priority": max_allow.priority, "scope": max_allow.scope_type.value},
+                "resolution": "block" if max_block.priority >= max_allow.priority else "allow",
+                "explanation": f"Conflict: '{max_block.name}' blocks '{target}' while '{max_allow.name}' allows it. Higher priority wins.",
+            })
+    
+    return {"conflicts": conflicts, "count": len(conflicts)}
+
+
+@router.get("/audit-log")
+async def get_audit_log(limit: int = 100):
+    """Get policy audit log entries."""
+    db = get_db()
+    rows = await list_audit_log(db, limit=limit)
+    return {"audit_log": rows, "count": len(rows)}
+
+
 @router.get("/{policy_id}")
 async def get_policy(policy_id: str):
     """Get a single policy by ID."""
@@ -369,12 +420,6 @@ async def simulate_policy(body: SimulateRequest):
     return engine.simulate(body.target, body.context)
 
 
-@router.get("/capabilities")
-async def get_capabilities():
-    """Get capability matrix for the current environment."""
-    return detect_capabilities()
-
-
 @router.get("/capabilities/summary")
 async def get_capability_summary_text():
     """Get human-readable capability summary."""
@@ -409,51 +454,6 @@ async def get_enforcement_status():
         "available_methods": registry.available_methods(),
         "capabilities": registry.capability_matrix(),
     }
-
-
-@router.get("/audit-log")
-async def get_audit_log(limit: int = 100):
-    """Get policy audit log entries."""
-    db = get_db()
-    rows = await list_audit_log(db, limit=limit)
-    return {"audit_log": rows, "count": len(rows)}
-
-
-@router.get("/conflicts")
-async def get_policy_conflicts():
-    """Detect conflicting policies — same target with different actions and overlapping scopes."""
-    engine = get_engine()
-    policies = engine.list_policies(enabled_only=True)
-    conflicts = []
-    
-    # Group by target
-    by_target: dict[str, list] = {}
-    for p in policies:
-        for tv in p.target_values:
-            by_target.setdefault(tv, []).append(p)
-    
-    for target, ps in by_target.items():
-        if len(ps) < 2:
-            continue
-        # Check for block vs allow conflicts
-        blocks = [p for p in ps if p.action == PolicyAction.BLOCK]
-        allows = [p for p in ps if p.action == PolicyAction.ALLOW]
-        
-        if blocks and allows:
-            # Find the highest priority block and allow
-            max_block = max(blocks, key=lambda p: p.priority)
-            max_allow = max(allows, key=lambda p: p.priority)
-            
-            conflicts.append({
-                "target": target,
-                "conflict_type": "block_vs_allow",
-                "block_policy": {"id": max_block.id, "name": max_block.name, "priority": max_block.priority, "scope": max_block.scope_type.value},
-                "allow_policy": {"id": max_allow.id, "name": max_allow.name, "priority": max_allow.priority, "scope": max_allow.scope_type.value},
-                "resolution": "block" if max_block.priority >= max_allow.priority else "allow",
-                "explanation": f"Conflict: '{max_block.name}' blocks '{target}' while '{max_allow.name}' allows it. Higher priority wins.",
-            })
-    
-    return {"conflicts": conflicts, "count": len(conflicts)}
 
 
 # ---- RBAC endpoints ----

@@ -2393,9 +2393,10 @@ async def audit_policy_log(db: "Database", action: str, policy_id: str, policy_n
 async def list_audit_log(db: "Database", limit: int = 100) -> list[dict[str, Any]]:
     """Return recent audit log entries, newest first."""
     import json
-    rows = (await db.conn.execute(
+    cur = await db.conn.execute(
         "SELECT * FROM policy_audit_log ORDER BY created_at DESC LIMIT ?", (limit,)
-    )).fetchall()
+    )
+    rows = await cur.fetchall()
     return [
         {
             "id": str(r["id"]),
@@ -2490,11 +2491,12 @@ async def rbac_grant_permission(db: "Database", role_id: str, permission: str) -
 
 async def rbac_user_has_permission(db: "Database", user_id: str, permission: str) -> bool:
     """Check if a user has a specific permission through any of their roles."""
-    rows = (await db.conn.execute("""
+    cur = await db.conn.execute("""
         SELECT rp.permission FROM role_permissions rp
         JOIN admin_user_roles aur ON aur.role_id = rp.role_id
         WHERE aur.user_id = ?
-    """, (user_id,))).fetchall()
+    """, (user_id,))
+    rows = await cur.fetchall()
     return any(r[0] == permission for r in rows)
 
 
