@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from dataclasses import asdict
 
-from quota.db import Database, save_policy, list_policies as db_list_policies, get_policy as db_get_policy, delete_policy as db_delete_policy, audit_policy_log
+from quota.db import Database, save_policy, list_policies as db_list_policies, get_policy as db_get_policy, delete_policy as db_delete_policy, audit_policy_log, list_audit_log
 from quota.policy_engine import (
     Policy, PolicyEngine, PolicyScope, PolicyTarget, PolicyAction,
     EnforcementMethod, PolicyCondition, PolicySchedule,
@@ -378,3 +378,11 @@ async def get_enforcement_status():
         "available_methods": registry.available_methods(),
         "capabilities": registry.capability_matrix(),
     }
+
+
+@router.get("/audit-log")
+async def get_audit_log(limit: int = 100):
+    """Get policy audit log entries."""
+    db = get_db()
+    rows = await list_audit_log(db, limit=limit)
+    return {"audit_log": rows, "count": len(rows)}

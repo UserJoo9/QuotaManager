@@ -2389,3 +2389,23 @@ async def audit_policy_log(db: "Database", action: str, policy_id: str, policy_n
     )
     await db.conn.commit()
 
+
+async def list_audit_log(db: "Database", limit: int = 100) -> list[dict[str, Any]]:
+    """Return recent audit log entries, newest first."""
+    import json
+    rows = (await db.conn.execute(
+        "SELECT * FROM policy_audit_log ORDER BY created_at DESC LIMIT ?", (limit,)
+    )).fetchall()
+    return [
+        {
+            "id": str(r["id"]),
+            "action": str(r["action"]),
+            "policy_id": str(r["policy_id"]),
+            "policy_name": str(r["policy_name"]),
+            "actor": str(r["actor"]),
+            "details": json.loads(r["details"] or "{}"),
+            "created_at": str(r["created_at"] or ""),
+        }
+        for r in rows
+    ]
+

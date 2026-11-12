@@ -88,6 +88,7 @@ const policyCard = (p) => {
   const actionCls = p.action === "block" ? "danger" : (p.action === "allow" ? "ok" : "accent");
   return h("div", { class: "card policy-card" },
     h("div", { class: "policy-head", style: { display: "flex", gap: "10px", alignItems: "center", marginBottom: "8px" } },
+      h("input", { type: "checkbox", checked: selectedPolicies.has(p.id), onchange: () => toggleSelect(p.id) }),
       h("div", { class: `chip ${enabledCls}`, style: { fontSize: "11px" } }, p.enabled ? t("common.enabled") : t("common.disabled")),
       h("div", { class: `chip ${actionCls}`, style: { fontSize: "11px" } }, actionLabel(p.action)),
       h("div", { class: "chip", style: { fontSize: "11px", background: "var(--muted)" } }, methodLabel(p.method)),
@@ -284,9 +285,8 @@ export default function policyPage(ctx) {
     });
   };
 
-  const applyTemplate = (tpl) => {
+  const applyTemplate = async (tpl) => {
     const np = {
-      id: "pol_" + Math.random().toString(36).slice(2, 9),
       name: tpl.name + " (copy)",
       desc: tpl.desc,
       scope: "global",
@@ -295,13 +295,86 @@ export default function policyPage(ctx) {
       priority: 10,
       enabled: true,
       method: "dns",
-      matches: 0,
     };
-    policies.push(np);
+    try {
+      await apiPost(`${API_BASE}/`, np);
+      await loadPolicies();
+      ctx.touch();
+      toast(t("policy.template_applied"));
+      setView.v = "list";
+      ctx.touch();
+    } catch (e) { toast(t("policy.failed") + ": " + e.message, "bad"); }
+  };
+
+  // ---- Bulk selection state ----
+  let selectedPolicies = new Set();
+
+  const toggleSelect = (id) => {
+    if (selectedPolicies.has(id)) selectedPolicies.delete(id);
+    else selectedPolicies.add(id);
     ctx.touch();
-    toast(t("policy.template_applied"));
-    setView.v = "list";
+  };
+
+  const selectAllPolicies = () => {
+    const shown = (ctx._filter || "all") === "all" ? policies : policies.filter(p => p.enabled === (ctx._filter === "enabled"));
+    shown.forEach(p => selectedPolicies.add(p.id));
     ctx.touch();
+    toast(`${selectedPolicies.size} ${t("policy.btn.selected")}`);
+  };
+
+  const bulkSetEnabled = async (enabled) => {
+    if (selectedPolicies.size === 0) { toast(t("policy.btn.select_none")); return; }
+    try {
+      await Promise.all([...selectedPolicies].map(id => apiPut(`${API_BASE}/${id}`, { ...policies.find(p => p.id === id), enabled })));
+      await loadPolicies();
+      selectedPolicies.clear();
+      ctx.touch();
+      toast(enabled ? t("policy.btn.enabled_all") : t("policy.btn.disabled_all"));
+    } catch (e) { toast(t("policy.failed") + ": " + e.message, "bad"); }
+  };
+
+  const bulkDelete = async () => {
+    if (selectedPolicies.size === 0) { toast(t("policy.btn.select_none")); return; }
+    if (!confirm(`${t("policy.confirm_delete_multi")} (${selectedPolicies.size})`)) return;
+    try {
+      await Promise.all([...selectedPolicies].map(id => apiDelete(`${API_BASE}/${id}`)));
+      await loadPolicies();
+      selectedPolicies.clear();
+      ctx.touch();
+      toast(t("policy.deleted_multi"));
+    } catch (e) { toast(t("policy.failed") + ": " + e.message, "bad"); }
+  };
+
+  const exportPolicies = () => {
+    const data = JSON.stringify(policies, null, 2);
+    const blob = new Blob([data], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `quota-policies-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast(t("policy.btn.exported"));
+  };
+
+  const importPolicies = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json";
+    input.onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const text = await file.text();
+      try {
+        const imported = JSON.parse(text);
+        if (!Array.isArray(imported)) throw new Error("Invalid format");
+        await Promise.all(imported.map(p => apiPost(`${API_BASE}/`, p)));
+        await loadPolicies();
+        ctx.touch();
+        toast(`${imported.length} ${t("policy.btn.imported")}`);
+      } catch (err) { toast(t("policy.import_failed") + ": " + err.message, "bad"); }
+    };
+    input.click();
   };
 
   // ---- Load policies from API ----
@@ -324,8 +397,14 @@ export default function policyPage(ctx) {
     h("div", { class: "fa", style: { gap: "8px", flexWrap: "wrap" } },
       h("button", { type: "button", class: "btn primary", onclick: () => { setView.v = "templates"; ctx.touch(); } }, icon("layers", 14), t("policy.btn.templates")),
       h("button", { type: "button", class: "btn ghost", onclick: () => { setView.v = "sim"; ctx.touch(); } }, icon("shield-check", 14), t("policy.btn.sim")),
-      h("button", { type: "button", class: "btn ghost", onclick: () => toast(t("policy.coming_soon")) }, icon("save", 14), t("policy.btn.export")),
-      h("button", { type: "button", class: "btn ghost", onclick: () => toast(t("policy.coming_soon")) }, icon("refresh-cw", 14), t("policy.btn.refresh")),
+      h("div", { class: "sep", style: { width: "1px", height: "24px", background: "var(--line)", margin: "0 4px" } }),
+      h("button", { type: "button", class: "btn ghost sm", onclick: () => selectAllPolicies() }, icon("check", 14), t("policy.btn.select_all")),
+      h("button", { type: "button", class: "btn ghost sm", onclick: () => bulkSetEnabled(true) }, icon("play", 14), t("policy.btn.enable_all")),
+      h("button", { type: "button", class: "btn ghost sm", onclick: () => bulkSetEnabled(false) }, icon("pause", 14), t("policy.btn.disable_all")),
+      h("button", { type: "button", class: "btn danger sm", onclick: () => bulkDelete() }, icon("delete", 14), t("policy.btn.delete_all")),
+      h("div", { class: "sep", style: { width: "1px", height: "24px", background: "var(--line)", margin: "0 4px" } }),
+      h("button", { type: "button", class: "btn ghost sm", onclick: () => exportPolicies() }, icon("save", 14), t("policy.btn.export")),
+      h("button", { type: "button", class: "btn ghost sm", onclick: () => importPolicies() }, icon("upload", 14), t("policy.btn.import")),
     )
   );
 
