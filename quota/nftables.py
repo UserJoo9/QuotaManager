@@ -501,21 +501,35 @@ class NftablesEngine:
             if ok:
                 self._last_pending_guests = pg_sorted
 
+    def _sync_set(self, set_name: str, elements: list[str], last_attr: str) -> None:
+        """Program kernel set ``set_name`` to exactly ``elements`` (cache-gated).
+
+        Shared by the ``blocked``/``blocked6``/``blocked_macs`` sets: a same-set
+        re-flush every tick would re-open a short unblock window (the chain's
+        policy is accept between the flush and the last re-add), so the
+        flush+re-add only runs when membership actually changed. A failed step
+        leaves the cache unset so the next tick retries instead of silently
+        dropping enforcement.
+        """
+        elements = sorted(elements)
+        if elements and elements == getattr(self, last_attr):
+            return
+        setattr(self, last_attr, None)  # not yet committed; retry next tick if a step fails
+        table = f"{FAMILY} {self.table}"
+        if not self._run(["flush", "set", f"{table} {set_name}"]):
+            return
+        ok = True
+        for el in elements:
+            if not self._run(["add", "element", f"{table} {set_name}",
+                              f"{{ {el} }}"]):
+                ok = False
+                break
+        if ok:
+            setattr(self, last_attr, elements)
+
     def _sync_blocked_ips(self, blocked_ips: list[str]) -> None:
         """Program the kernel ``blocked`` set for leased, quota-blocked IPs."""
-        if blocked_ips and blocked_ips == self._last_blocked_ips:
-            return
-        self._last_blocked_ips = None  # not yet committed; retry next tick if a step fails
-        if self._run(["flush", "set", f"{FAMILY} {self.table} blocked"]):
-            ok = True
-            for ip in blocked_ips:
-                if not self._run(["add", "element",
-                                  f"{FAMILY} {self.table} blocked",
-                                  f"{{ {ip} }}"]):
-                    ok = False
-                    break
-            if ok:
-                self._last_blocked_ips = blocked_ips
+        self._sync_set("blocked", blocked_ips, "_last_blocked_ips")
 
     def set_ipv6_wan(self, active: bool) -> None:
         """Open (ISP IPv6 works) or close (it does not) the IPv6 WAN gate.
@@ -547,19 +561,7 @@ class NftablesEngine:
 
     def _sync_blocked6_ips(self, blocked6_ips: list[str]) -> None:
         """Program the kernel ``blocked6`` set for leased, quota-blocked IPv6s."""
-        if blocked6_ips and blocked6_ips == self._last_blocked6_ips:
-            return
-        self._last_blocked6_ips = None
-        if self._run(["flush", "set", f"{FAMILY} {self.table} blocked6"]):
-            ok = True
-            for ip in blocked6_ips:
-                if not self._run(["add", "element",
-                                  f"{FAMILY} {self.table} blocked6",
-                                  f"{{ {ip} }}"]):
-                    ok = False
-                    break
-            if ok:
-                self._last_blocked6_ips = blocked6_ips
+        self._sync_set("blocked6", blocked6_ips, "_last_blocked6_ips")
 
     def _sync_blocked_macs(self, blocked: dict[str, bool]) -> None:
         """Program the kernel ``blocked_macs`` set for every blocked device.
@@ -574,19 +576,7 @@ class NftablesEngine:
         # "Invalid LL address", which used to switch the whole engine off.
         blocked_macs = sorted(m for m, b in blocked.items()
                               if b and m != GATEWAY_MAC and _MAC_RE.match(m))
-        if blocked_macs and blocked_macs == self._last_blocked_macs:
-            return
-        self._last_blocked_macs = None  # not yet committed; retry next tick
-        if self._run(["flush", "set", f"{FAMILY} {self.table} blocked_macs"]):
-            ok = True
-            for mac in blocked_macs:
-                if not self._run(["add", "element",
-                                  f"{FAMILY} {self.table} blocked_macs",
-                                  f"{{ {mac} }}"]):
-                    ok = False
-                    break
-            if ok:
-                self._last_blocked_macs = blocked_macs
+        self._sync_set("blocked_macs", blocked_macs, "_last_blocked_macs")
 
     def _sync_known_ips(self, ip_to_mac: dict[str, str]) -> None:
         """Keep the kernel ``known_ips`` set == the currently leased client IPs.

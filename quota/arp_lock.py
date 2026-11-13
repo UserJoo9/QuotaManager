@@ -61,7 +61,7 @@ class ArpLock:
     #: how long the loop waits for an ARP frame before re-checking stop
     RECV_TIMEOUT = 0.5
 
-    def __init__(self, cfg, run_command: RunCommand | None = None,
+    def __init__(self, cfg: Any, run_command: RunCommand | None = None,
                  socket_factory: SocketFactory | None = None) -> None:
         self._run = run_command or _default_run_command
         self._socket_factory = socket_factory or _open_raw_socket

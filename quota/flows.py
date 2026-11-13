@@ -40,6 +40,9 @@ ACCT_SYSCTL = Path("/proc/sys/net/netfilter/nf_conntrack_acct")
 MIN_DEST_BYTES = 4096
 #: Entries kept in the IP -> name caches.
 _MAX_NAMES = 20000
+#: Cache TTLs for reverse-DNS results (positive hits last a day, misses an hour).
+_RDNS_POSITIVE_TTL = 86400.0
+_RDNS_NEGATIVE_TTL = 3600.0
 _PROTOS = {"tcp", "udp", "udplite", "sctp", "dccp"}
 
 RunCommand = Callable[[list[str]], tuple[int, str]]
@@ -191,7 +194,7 @@ class _ReverseResolver:
     def lookup(self, ip: str) -> str | None:
         with self._lock:
             hit = self._cache.get(ip)
-        if hit and time.time() - hit[1] < (86400 if hit[0] else 3600):
+        if hit and time.time() - hit[1] < (_RDNS_POSITIVE_TTL if hit[0] else _RDNS_NEGATIVE_TTL):
             return hit[0]
         self._request(ip)
         return None
@@ -332,7 +335,7 @@ class _OwnerResolver:
             for net, owner in self._ranges:
                 if addr in net:
                     return owner
-            if time.time() - self._neg.get(ip, 0) < 3600:
+            if time.time() - self._neg.get(ip, 0) < _RDNS_NEGATIVE_TTL:
                 return None
             if ip in self._pending:
                 return None
@@ -417,6 +420,8 @@ class FlowSampler:
         lines = self._read()
         flows = [f for f in (parse_conntrack_line(l) for l in lines) if f]
         self.available = bool(flows) or not lines
+        if not flows and not lines:
+            self.available = False
         if self._last_t is not None:
             self.window_s = min(120.0, max(1.0, now - self._last_t))
         self._last_t = now

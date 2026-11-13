@@ -47,6 +47,9 @@ def _default_run_command(argv: list[str]) -> tuple[int, str]:
 
 _ULA_NET = ipaddress.IPv6Network("fc00::/7")
 
+_DEFAULT_LAN_IPV6_PREFIX = "fd00:da7a:2::/64"
+_DEFAULT_LAN_IPV6_GATEWAY = "fd00:da7a:2::1"
+
 
 def is_global_unicast_ipv6(addr_str: str) -> bool:
     """Check if address is a routable Global Unicast Address (2000::/3).
@@ -215,8 +218,8 @@ class Ipv6Probe:
     def get_status(self) -> dict[str, Any]:
         """Return a dictionary representing current IPv6 dual-stack status."""
         dhcp = getattr(self.cfg, "dhcp", None) if self.cfg else None
-        prefix = getattr(dhcp, "ipv6_prefix", "fd00:da7a:2::/64") if dhcp else "fd00:da7a:2::/64"
-        gateway = getattr(dhcp, "ipv6_gateway", "fd00:da7a:2::1") if dhcp else "fd00:da7a:2::1"
+        prefix = getattr(dhcp, "ipv6_prefix", _DEFAULT_LAN_IPV6_PREFIX) if dhcp else _DEFAULT_LAN_IPV6_PREFIX
+        gateway = getattr(dhcp, "ipv6_gateway", _DEFAULT_LAN_IPV6_GATEWAY) if dhcp else _DEFAULT_LAN_IPV6_GATEWAY
         return {
             "lan_ipv6_enabled": True,
             "lan_prefix": prefix,

@@ -20,7 +20,16 @@ import datetime as _dt
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 #: ISO date format used by the dashboard / history tables.
-ISO_DATE = "%Y-%m-%d"
+ISO_DATE: str = "%Y-%m-%d"
+
+
+def _has_monthly_boundary(reset_day: int) -> bool:
+    """True when ``reset_day`` defines an automatic monthly reset.
+
+    ``reset_day <= 0`` means "no automatic reset" (manual top-up); this is the
+    single place that rule lives so every caller agrees.
+    """
+    return reset_day > 0
 
 
 def tz_for(tz_name: str) -> ZoneInfo:
@@ -54,7 +63,7 @@ def period_bounds(now: _dt.datetime, reset_day: int) -> tuple[_dt.datetime, _dt.
     degenerate single-day window (used only for a fresh open; the service
     layer keeps it open until an admin action).
     """
-    if reset_day <= 0:
+    if not _has_monthly_boundary(reset_day):
         return now, now + _dt.timedelta(days=1)
     # The period containing `now` starts at the most recent reset instant AT
     # OR BEFORE `now`. Before this month's reset day the current period began
@@ -70,7 +79,7 @@ def period_bounds(now: _dt.datetime, reset_day: int) -> tuple[_dt.datetime, _dt.
 
 def next_reset(now: _dt.datetime, reset_day: int) -> _dt.datetime:
     """Datetime of the next quota reset strictly after ``now``."""
-    if reset_day <= 0:
+    if not _has_monthly_boundary(reset_day):
         return now + _dt.timedelta(days=1)
     return period_bounds(now, reset_day)[1]
 
@@ -81,7 +90,7 @@ def days_remaining(now: _dt.datetime, reset_day: int) -> int:
     Returns ``-1`` for ``reset_day <= 0`` (no scheduled reset) so callers can
     render "manual" instead of a number.
     """
-    if reset_day <= 0:
+    if not _has_monthly_boundary(reset_day):
         return -1
     _, end = period_bounds(now, reset_day)
     end_date = end.date()

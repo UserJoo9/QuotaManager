@@ -25,6 +25,25 @@ LIVE_IDLE_NET_BPS = 100_000
 #: How many recently-contacted sites each Live-traffic row/hero lists.
 LIVE_TOP_SITES = 4
 
+#: How many top apps / websites the history analytics lists.
+TOP_APPS_LIMIT = 15
+TOP_WEBSITES_LIMIT = 20
+
+#: Maximum number of hours the timeline can span (keeps charts readable).
+MAX_TIMELINE_HOURS = 72
+
+#: Live-traffic: only DNS queries within this many minutes count as "recent".
+LIVE_RECENT_MINUTES = 5
+#: Live-traffic: how many candidate domains the recent-sites query fetches.
+LIVE_RECENT_DOMAIN_LIMIT = 40
+
+
+def _bps(byte_count: int, window_s: float) -> int:
+    """Convert a byte count over ``window_s`` seconds into bits-per-second."""
+    if not byte_count:
+        return 0
+    return int((byte_count * 8) / window_s)
+
 
 def _is_displayable_site(name: str) -> bool:
     """A real, user-meaningful site: has a dot, is not reverse-DNS / local noise
@@ -269,7 +288,7 @@ async def get_history_analytics(db: Database,
 
     # Fill in chronological hours if sparse
     timeline = []
-    for h in range(min(hours, 72)):
+    for h in range(min(hours, MAX_TIMELINE_HOURS)):
         slot = (now - _dt.timedelta(hours=hours - 1 - h)).strftime("%Y-%m-%d %H:00")
         label = (now - _dt.timedelta(hours=hours - 1 - h)).strftime("%H:00")
         timeline.append({
@@ -282,8 +301,8 @@ async def get_history_analytics(db: Database,
         "device_id": device_id,
         "hours": hours,
         "total_queries": total_queries,
-        "top_apps": top_apps[:15],
-        "top_websites": top_websites[:20],
+        "top_apps": top_apps[:TOP_APPS_LIMIT],
+        "top_websites": top_websites[:TOP_WEBSITES_LIMIT],
         "timeline": timeline,
         "unclassified_queries": sum(website_counts.values()),
         "app_queries": sum(a["queries"] for a in top_apps),
@@ -340,14 +359,14 @@ async def get_live_traffic_analytics(
             lan_up = lan_down = 0
 
         # Average speed over the real flush window
-        down_bps = int((live_down * 8) / window_s) if live_down else 0
-        up_bps = int((live_up * 8) / window_s) if live_up else 0
+        down_bps = _bps(live_down, window_s)
+        up_bps = _bps(live_up, window_s)
         total_bps = down_bps + up_bps
 
         # Determine what this device is currently accessing ("ساحبه ف ايه")
         # Strict time-decay filter: only consider DNS queries within the last 5 minutes
         now_dt = _dt.datetime.now().astimezone()
-        live_cutoff = (now_dt - _dt.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")
+        live_cutoff = (now_dt - _dt.timedelta(minutes=LIVE_RECENT_MINUTES)).strftime("%Y-%m-%d %H:%M")
 
         recent_rows = await db.conn.execute_fetchall(
             """
@@ -389,8 +408,8 @@ async def get_live_traffic_analytics(
             "down_bps": down_bps,
             "up_bps": up_bps,
             "total_bps": total_bps,
-            "lan_down_bps": int((lan_down * 8) / window_s) if lan_down else 0,
-            "lan_up_bps": int((lan_up * 8) / window_s) if lan_up else 0,
+            "lan_down_bps": _bps(lan_down, window_s),
+            "lan_up_bps": _bps(lan_up, window_s),
             "recent_domains": recent_domains,
             "recent_sites": recent_sites,
             # where the bytes actually went in the last window (conntrack); [] when
@@ -420,12 +439,14 @@ async def get_live_traffic_analytics(
         )
         d["is_idle"] = is_idle
 
-    # Top consumer is the #1 active device
-    top_consumer = (
-        device_results[0]
-        if (device_results and (device_results[0]["total_bps"] > 0 or device_results[0]["live_down_bytes"] > 0))
-        else (device_results[0] if device_results else None)
+    # Top consumer is the #1 ACTIVE device (traffic > 0), else the first device
+    # with any bytes recorded — never a zero-traffic device presented as "top".
+    active = next(
+        (d for d in device_results
+         if d["total_bps"] > 0 or d["live_down_bytes"] > 0 or d["live_up_bytes"] > 0),
+        None,
     )
+    top_consumer = active if active is not None else (device_results[0] if device_results else None)
 
     return {
         "timestamp": now_ts,

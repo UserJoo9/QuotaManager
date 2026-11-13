@@ -335,42 +335,39 @@ def create_app(
     def _now() -> _dt.datetime:
         return now_provider() if now_provider else _dt.datetime.now().astimezone()
 
+    def _schedule(cb: Optional[Callable[[], object]]) -> None:
+        """Fire-and-forget: invoke callback ``cb`` on the running loop and
+        return immediately — the HTTP response is sent first, the callback
+        runs in the background. No-op when nothing is wired (tests /
+        degraded boot) or when there is no running event loop."""
+        if cb is None:
+            return
+        try:
+            asyncio.create_task(cb())
+        except RuntimeError:  # no running event loop (should not happen in a route)
+            pass
+
     def _schedule_shaping_sync() -> None:
         """Apply a speed-limit edit in the kernel right away (no 15 s tick
         wait). Fire-and-forget: the HTTP response returns first, the shaper
         reconciles in the background. ``shaping_sync`` is run.py's callback;
         without one (tests/degraded boot) this is a no-op."""
-        if shaping_sync is None:
-            return
-        try:
-            asyncio.create_task(shaping_sync())
-        except RuntimeError:  # no running event loop (should not happen in a route)
-            pass
+        _schedule(shaping_sync)
 
     def _schedule_dns_apply() -> None:
         """Apply a domain-rule / DNS-server edit to dnsmasq right away (no
         15 s tick wait). Fire-and-forget, same pattern as
         ``_schedule_shaping_sync``; ``dns_apply`` is run.py's callback and is
         a no-op when unset (tests / degraded boot)."""
-        if dns_apply is None:
-            return
-        try:
-            asyncio.create_task(dns_apply())
-        except RuntimeError:  # no running event loop (should not happen in a route)
-            pass
+        _schedule(dns_apply)
 
     def _schedule_vpn_apply() -> None:
         """Apply a VPN-share toggle in the kernel right away (no 15 s tick
         wait): policy routing into/out of the tunnel + the gateway-meter
-        suspension. Fire-and-forget, same pattern as
-        ``_schedule_shaping_sync``; ``vpn_apply`` is run.py's callback and is
-        a no-op when unset (tests / degraded boot)."""
-        if vpn_apply is None:
-            return
-        try:
-            asyncio.create_task(vpn_apply())
-        except RuntimeError:  # no running event loop (should not happen in a route)
-            pass
+        suspension. Fire-and-forget, same pattern as ``_schedule_shaping_sync``;
+        ``vpn_apply`` is run.py's callback and is a no-op when unset
+        (tests / degraded boot)."""
+        _schedule(vpn_apply)
 
     def _schedule_stop_new_sync() -> None:
         """Apply a STOP-NEW-CONNECTIONS toggle to dnsmasq right away (no 15 s
@@ -378,12 +375,7 @@ def create_app(
         Fire-and-forget, same pattern as ``_schedule_dns_apply``;
         ``stop_new_sync`` is run.py's callback and is a no-op when unset
         (tests / degraded boot)."""
-        if stop_new_sync is None:
-            return
-        try:
-            asyncio.create_task(stop_new_sync())
-        except RuntimeError:  # no running event loop (should not happen in a route)
-            pass
+        _schedule(stop_new_sync)
 
     def _schedule_decline_random_sync() -> None:
         """Apply a Decline-random-MACs toggle to dnsmasq right away (no 15 s
@@ -391,12 +383,7 @@ def create_app(
         Fire-and-forget, same pattern as ``_schedule_stop_new_sync``;
         ``decline_random_sync`` is run.py's callback and is a no-op when
         unset (tests / degraded boot)."""
-        if decline_random_sync is None:
-            return
-        try:
-            asyncio.create_task(decline_random_sync())
-        except RuntimeError:  # no running event loop (should not happen in a route)
-            pass
+        _schedule(decline_random_sync)
 
     _engine = engine
 
@@ -589,30 +576,90 @@ def create_app(
 
     # -- dashboard --------------------------------------------------------------
 
+    async def _attach_vpn_share_status(vpn_share: dict[str, Any]) -> None:
+        """Probe the live VPN-share kernel state into ``vpn_share`` (mutates in
+        place). A failing probe degrades to an error status — it must never
+        500 the panel. No-op when no status getter is wired (tests /
+        degraded boot)."""
+        if vpn_status_getter is None:
+            return
+        try:
+            vpn_share["status"] = vpn_status_getter()
+        except Exception:  # noqa: BLE001 — a status probe must never 500 the panel
+            vpn_share["status"] = {"state": "error", "message": "status probe failed"}
+
     async def _vpn_share_payload() -> dict[str, Any]:
         """Switch + live kernel state for the WS snapshot (mirrors /api/network)."""
         cfg = await service.get_vpn_config()
-        if vpn_status_getter is not None:
-            try:
-                cfg["status"] = vpn_status_getter()
-            except Exception:  # noqa: BLE001 — a status probe must never 500 the panel
-                cfg["status"] = {"state": "error", "message": "status probe failed"}
+        await _attach_vpn_share_status(cfg)
         return cfg
 
-    def _daily_user_view(u: _db.User, dst: dict[str, Any] | None,
-                         feature_on: bool) -> dict[str, Any]:
-        """The person's daily plan (settings) + today's live numbers."""
+    def _daily_base_view(u: _db.User, dst: dict[str, Any] | None) -> dict[str, Any]:
+        """The person's daily plan (settings) + today's live numbers — fields
+        shared by the dashboard and milestone views."""
         return {
             "mode": u.daily_mode, "gb": float(u.daily_gb or 0.0),
             "carry": u.daily_carry, "split": u.daily_split,
             "heavy": dict(u.daily_heavy or {}),
             "self_edit": bool(u.daily_self_edit),
-            "active": bool(feature_on and dst is not None),
             "cap_gb": dst["cap_gb"] if dst else None,
             "used_gb": dst["used_gb"] if dst else None,
             "blocked": bool(dst and dst["blocked"]),
             "resets_at": dst["resets_at"] if dst else None,
         }
+
+    def _daily_user_view(u: _db.User, dst: dict[str, Any] | None,
+                         feature_on: bool) -> dict[str, Any]:
+        """The person's daily plan (settings) + today's live numbers."""
+        view = _daily_base_view(u, dst)
+        view["active"] = bool(feature_on and dst is not None)
+        return view
+
+    def _device_usage_row(d: _db.Device, dusage: dict[str, int],
+                          allowance: float) -> dict[str, Any]:
+        """One device's period usage: its own up/down GB and its percent of
+        the owner's allowance (0 when the allowance is unset)."""
+        dused_gb = (dusage.get("up", 0) + dusage.get("down", 0)) / GB
+        return {
+            "id": d.id, "name": d.name, "mac": d.mac,
+            "device_used_gb": round(dused_gb, 3),
+            "device_up_gb": round(dusage.get("up", 0) / GB, 3),
+            "device_down_gb": round(dusage.get("down", 0) / GB, 3),
+            "device_percent": round(dused_gb / allowance * 100, 1)
+            if allowance > 0 else 0.0,
+        }
+
+    def _user_summary_row(u: _db.User, usage: dict[str, int],
+                          allowance: float,
+                          *,
+                          include_quota_blocked: bool = False) -> dict[str, Any]:
+        """Base user card for /dashboard and /report: identity, quota, usage
+        and the resolved block state (admin cut > monthly quota block > OK).
+        Callers extend it with their own fields — dashboard adds limits,
+        daily plan and LAN usage and exposes ``quota_blocked``; report adds
+        ``used_bytes``. The wire shape of neither endpoint changes."""
+        used_gb = (usage.get("up", 0) + usage.get("down", 0)) / GB
+        quota_blocked = service.user_quota_blocked(u, allowance, used_gb)
+        admin_blocked = u.block_state == _db.BLOCK_ADMIN
+        state = (_db.BLOCK_ADMIN if admin_blocked
+                 else (_db.BLOCK_QUOTA if quota_blocked else _db.BLOCK_OK))
+        row: dict[str, Any] = {
+            "id": u.id,
+            "name": u.name,
+            "quota_mode": u.quota_mode,
+            "protected": bool(u.protected),
+            "guest": bool(u.guest),
+            "exempt_quota": bool(u.exempt_quota),
+            "allowance_gb": round(allowance, 3),
+            "used_gb": round(used_gb, 3),
+            "percent": round(used_gb / allowance * 100, 1) if allowance > 0 else 0.0,
+            "blocked": admin_blocked or quota_blocked,
+            "block_state": state,
+            "devices": [],
+        }
+        if include_quota_blocked:
+            row["quota_blocked"] = quota_blocked
+        return row
 
     async def _dashboard_payload() -> dict[str, Any]:
         await service.sync_recharges()
@@ -657,47 +704,33 @@ def create_app(
         user_views: dict[int, dict[str, Any]] = {}
         for u in users:
             usage = usage_by_user.get(u.id, {"up": 0, "down": 0})
-            used_gb = (usage["up"] + usage["down"]) / GB
             allowance = allowances.get(u.id, 0.0)
+            dst = daily.get(u.id)
+            daily_blocked = bool(dst and dst["blocked"]) and not free_on
             # quota_blocked_for special-cases protected users: an allowance of
             # 0 cuts the box IMMEDIATELY (the engine's `allowance > 0` guard
             # would otherwise treat 0 as "unmetered").
-            monthly_blocked = service.user_quota_blocked(u, allowance, used_gb)
-            dst = daily.get(u.id)
-            daily_blocked = bool(dst and dst["blocked"]) and not free_on
-            quota_blocked = monthly_blocked or daily_blocked
+            uv = _user_summary_row(u, usage, allowance, include_quota_blocked=True)
+            uv["quota_blocked"] = uv["quota_blocked"] or daily_blocked
             admin_blocked = u.block_state == _db.BLOCK_ADMIN
-            state = (_db.BLOCK_ADMIN if admin_blocked
-                     else (_db.BLOCK_QUOTA if quota_blocked else _db.BLOCK_OK))
-            user_views[u.id] = {
-                "id": u.id, "name": u.name, "quota_mode": u.quota_mode,
-                "fixed_gb": u.fixed_gb,
-                "guest": bool(u.guest),
-                # protected users (the Gateway user) are permanent: editable but
-                # never deletable — the UI hides the delete control.
-                "protected": bool(u.protected),
-                # exempt users are never quota-blocked (admin cuts still apply)
-                "exempt_quota": bool(u.exempt_quota),
-                # exclude all this user's devices from the VPN-share tunnel
-                "vpn_bypass": bool(u.vpn_bypass),
-                # per-user aggregate speed caps (Mbps, 0 = unlimited)
-                "limit_down_mbps": float(u.limit_down_mbps or 0.0),
-                "limit_up_mbps": float(u.limit_up_mbps or 0.0),
-                # DNS-history retention override (days); None = global default
-                "history_days": u.history_days,
-                # per-user upstream DNS-server override (empty = inherit)
-                "dns_server": u.dns_server or "",
-                "allowance_gb": round(allowance, 3),
-                "used_gb": round(used_gb, 3),
-                "percent": round(used_gb / allowance * 100, 1) if allowance > 0 else 0.0,
-                # LOCAL (LAN) traffic of all this user's devices (monitoring only)
-                "lan_used_gb": round(sum(lan_by_user.get(u.id, {"up": 0, "down": 0}).values()) / GB, 3),
-                "blocked": admin_blocked or quota_blocked,
-                "block_state": state,
-                "quota_blocked": quota_blocked,
-                "daily": _daily_user_view(u, dst, daily_on),
-                "devices": [],
-            }
+            uv["blocked"] = admin_blocked or uv["quota_blocked"]
+            uv["block_state"] = (_db.BLOCK_ADMIN if admin_blocked
+                                 else (_db.BLOCK_QUOTA if uv["quota_blocked"] else _db.BLOCK_OK))
+            uv["fixed_gb"] = u.fixed_gb
+            # exclude all this user's devices from the VPN-share tunnel
+            uv["vpn_bypass"] = bool(u.vpn_bypass)
+            # per-user aggregate speed caps (Mbps, 0 = unlimited)
+            uv["limit_down_mbps"] = float(u.limit_down_mbps or 0.0)
+            uv["limit_up_mbps"] = float(u.limit_up_mbps or 0.0)
+            # DNS-history retention override (days); None = global default
+            uv["history_days"] = u.history_days
+            # per-user upstream DNS-server override (empty = inherit)
+            uv["dns_server"] = u.dns_server or ""
+            # LOCAL (LAN) traffic of all this user's devices (monitoring only)
+            uv["lan_used_gb"] = round(
+                sum(lan_by_user.get(u.id, {"up": 0, "down": 0}).values()) / GB, 3)
+            uv["daily"] = _daily_user_view(u, dst, daily_on)
+            user_views[u.id] = uv
 
         devices_view: list[dict[str, Any]] = []
         allow_set = set(await database.get_mac_list("allow"))
@@ -867,17 +900,7 @@ def create_app(
             if d.mac in deny_set:
                 continue
             dusage = usage_by_device.get(d.id, {"up": 0, "down": 0})
-            dused_gb = (dusage.get("up", 0) + dusage.get("down", 0)) / GB
-            device_rows.append({
-                "id": d.id,
-                "name": d.name,
-                "mac": d.mac,
-                "device_used_gb": round(dused_gb, 3),
-                "device_up_gb": round(dusage.get("up", 0) / GB, 3),
-                "device_down_gb": round(dusage.get("down", 0) / GB, 3),
-                "device_percent": round(
-                    dused_gb / allowance * 100, 1) if allowance > 0 else 0.0,
-            })
+            device_rows.append(_device_usage_row(d, dusage, allowance))
         daily_info = await _milestone_daily(user, device_rows)
         return {
             "recognized": True,
@@ -907,14 +930,7 @@ def create_app(
                 row["daily_cap_gb"] = round(cap, 3)
                 row["daily_used_gb"] = dst["device_used"].get(row["id"], 0.0)
         return {
-            "mode": user.daily_mode, "gb": float(user.daily_gb or 0.0),
-            "carry": user.daily_carry, "split": user.daily_split,
-            "heavy": dict(user.daily_heavy or {}),
-            "self_edit": bool(user.daily_self_edit),
-            "cap_gb": dst["cap_gb"] if dst else None,
-            "used_gb": dst["used_gb"] if dst else None,
-            "blocked": bool(dst and dst["blocked"]),
-            "resets_at": dst["resets_at"] if dst else None,
+            **_daily_base_view(user, dst),
             "schedule": sched.get("schedule", []),
             "error": sched.get("error"),
         }
@@ -1029,27 +1045,10 @@ def create_app(
         user_rows = []
         for u in users:
             usage = usage_by_user.get(u.id, {"up": 0, "down": 0})
-            used_gb = (usage["up"] + usage["down"]) / GB
             allowance = allowances.get(u.id, 0.0)
-            quota_blocked = service.user_quota_blocked(u, allowance, used_gb)
-            admin_blocked = u.block_state == _db.BLOCK_ADMIN
-            user_rows.append({
-                "id": u.id,
-                "name": u.name,
-                "quota_mode": u.quota_mode,
-                "protected": bool(u.protected),
-                "guest": bool(u.guest),
-                "exempt_quota": bool(u.exempt_quota),
-                "allowance_gb": round(allowance, 3),
-                "used_gb": round(used_gb, 3),
-                "used_bytes": int(usage.get("up", 0) + usage.get("down", 0)),
-                "percent": round(used_gb / allowance * 100, 1) if allowance > 0 else 0.0,
-                "blocked": admin_blocked or quota_blocked,
-                "block_state": (_db.BLOCK_ADMIN if admin_blocked
-                                else (_db.BLOCK_QUOTA if quota_blocked
-                                      else _db.BLOCK_OK)),
-                "devices": [],
-            })
+            urow = _user_summary_row(u, usage, allowance)
+            urow["used_bytes"] = int(usage.get("up", 0) + usage.get("down", 0))
+            user_rows.append(urow)
         by_uid = {u["id"]: u for u in user_rows}
 
         deny_set = set(await database.get_mac_list("deny"))
@@ -1063,19 +1062,9 @@ def create_app(
                 continue
             urow = by_uid.get(d.user_id)
             dusage = usage_by_device.get(d.id, {"up": 0, "down": 0})
-            dused_gb = (dusage.get("up", 0) + dusage.get("down", 0)) / GB
             allowance = urow["allowance_gb"] if urow else 0.0
-            dev_row = {
-                "id": d.id,
-                "name": d.name,
-                "mac": d.mac,
-                "ip": leases.get(d.mac, ""),
-                "device_used_gb": round(dused_gb, 3),
-                "device_up_gb": round(dusage.get("up", 0) / GB, 3),
-                "device_down_gb": round(dusage.get("down", 0) / GB, 3),
-                "device_percent": round(
-                    dused_gb / allowance * 100, 1) if allowance > 0 else 0.0,
-            }
+            dev_row = _device_usage_row(d, dusage, allowance)
+            dev_row["ip"] = leases.get(d.mac, "")
             if urow is not None:
                 urow["devices"].append(dev_row)
 
@@ -2538,31 +2527,43 @@ def create_app(
             raise HTTPException(400, str(exc))
 
 
+    async def _set_dns_server(
+        label: str,
+        target_id: int,
+        get_row: Callable[[int], Any],
+        update_row: Callable[..., Any],
+        body: DnsServerUpdate,
+        event_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist a per-user/per-device upstream DNS override; 404 when the
+        target is missing. The override string was already validated by the
+        schema (bare IP or empty)."""
+        row = await get_row(target_id)
+        if row is None:
+            raise HTTPException(404, f"{label} not found")
+        cleaned = body.dns_server.strip()
+        await update_row(target_id, dns_server=cleaned)
+        await database.add_event(
+            f"DNS server for {label} '{row.name or target_id}' set to "
+            f"{cleaned or '(inherit default)'}", "info", **event_kwargs)
+        _schedule_dns_apply()
+        return {"id": target_id, "dns_server": cleaned}
+
     @app.patch("/api/users/{user_id}/dns", dependencies=[Depends(_require_auth)])
     async def set_user_dns(user_id: int, body: DnsServerUpdate) -> dict[str, Any]:
-        user = await database.get_user(user_id)
-        if user is None:
-            raise HTTPException(404, "user not found")
-        await database.update_user(user_id, dns_server=body.dns_server.strip())
-        await database.add_event(
-            f"DNS server for user '{user.name or user_id}' set to "
-            f"{body.dns_server.strip() or '(inherit default)'}", "info",
-            user_id=user_id)
-        _schedule_dns_apply()
-        return {"id": user_id, "dns_server": body.dns_server.strip()}
+        return await _set_dns_server(
+            "user", user_id,
+            lambda uid: database.get_user(uid),
+            lambda uid, dns: database.update_user(uid, dns_server=dns),
+            body, event_kwargs={"user_id": user_id})
 
     @app.patch("/api/devices/{device_id}/dns", dependencies=[Depends(_require_auth)])
     async def set_device_dns(device_id: int, body: DnsServerUpdate) -> dict[str, Any]:
-        dev = await database.get_device(device_id)
-        if dev is None:
-            raise HTTPException(404, "device not found")
-        await database.update_device(device_id, dns_server=body.dns_server.strip())
-        await database.add_event(
-            f"DNS server for device '{dev.name or dev.mac}' set to "
-            f"{body.dns_server.strip() or '(inherit default)'}", "info",
-            device_id)
-        _schedule_dns_apply()
-        return {"id": device_id, "dns_server": body.dns_server.strip()}
+        return await _set_dns_server(
+            "device", device_id,
+            lambda did: database.get_device(did),
+            lambda did, dns: database.update_device(did, dns_server=dns),
+            body, event_kwargs={"device_id": device_id})
 
     # -- domain filtering (blacklist / allow-list / custom hosts) -----------
 
@@ -3083,42 +3084,44 @@ def create_app(
         page = WEB_DIR / "guest_pending.html"
         return FileResponse(str(page))
 
-    @app.get("/generate_204")
-    @app.get("/gen_204")
-    async def captive_generate_204(request: Request):
+    async def _captive_redirect(request: Request) -> RedirectResponse | None:
+        """If the requesting host is a pending guest, send it to the captive
+        portal; else None so the route serves its normal response."""
         host = request.client.host if request.client else ""
         snapshot = holder.get() if holder else None
         if snapshot and host in snapshot.pending_guests:
             router_host = request.headers.get("host") or "192.168.2.1:8080"
             return RedirectResponse(f"http://{router_host}/guest/pending", status_code=302)
+        return None
+
+    @app.get("/generate_204")
+    @app.get("/gen_204")
+    async def captive_generate_204(request: Request) -> Response:
+        guard = await _captive_redirect(request)
+        if guard is not None:
+            return guard
         return Response(status_code=204)
 
     @app.get("/hotspot-detect.html")
-    async def captive_apple(request: Request):
-        host = request.client.host if request.client else ""
-        snapshot = holder.get() if holder else None
-        if snapshot and host in snapshot.pending_guests:
-            router_host = request.headers.get("host") or "192.168.2.1:8080"
-            return RedirectResponse(f"http://{router_host}/guest/pending", status_code=302)
+    async def captive_apple(request: Request) -> HTMLResponse:
+        guard = await _captive_redirect(request)
+        if guard is not None:
+            return guard
         return HTMLResponse("<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>")
 
     @app.get("/connecttest.txt")
     @app.get("/ncsi.txt")
-    async def captive_windows(request: Request):
-        host = request.client.host if request.client else ""
-        snapshot = holder.get() if holder else None
-        if snapshot and host in snapshot.pending_guests:
-            router_host = request.headers.get("host") or "192.168.2.1:8080"
-            return RedirectResponse(f"http://{router_host}/guest/pending", status_code=302)
+    async def captive_windows(request: Request) -> PlainTextResponse:
+        guard = await _captive_redirect(request)
+        if guard is not None:
+            return guard
         return PlainTextResponse("Microsoft Connect Test")
 
     @app.get("/canonical.html")
-    async def captive_firefox(request: Request):
-        host = request.client.host if request.client else ""
-        snapshot = holder.get() if holder else None
-        if snapshot and host in snapshot.pending_guests:
-            router_host = request.headers.get("host") or "192.168.2.1:8080"
-            return RedirectResponse(f"http://{router_host}/guest/pending", status_code=302)
+    async def captive_firefox(request: Request) -> HTMLResponse:
+        guard = await _captive_redirect(request)
+        if guard is not None:
+            return guard
         return HTMLResponse("<HTML><BODY>Success</BODY></HTML>")
 
     # -- speed shaping (Network tab) ------------------------------------------
@@ -3131,12 +3134,7 @@ def create_app(
         # manager (None in tests / degraded boot — the UI shows just the
         # persisted switch).
         result["vpn_share"] = await service.get_vpn_config()
-        if vpn_status_getter is not None:
-            try:
-                result["vpn_share"]["status"] = vpn_status_getter()
-            except Exception:  # noqa: BLE001 — a status probe must never 500 the panel
-                result["vpn_share"]["status"] = {"state": "error",
-                                                 "message": "status probe failed"}
+        await _attach_vpn_share_status(result["vpn_share"])
         result["decline_random_macs"] = await service.decline_random_macs()
         return result
 
@@ -3168,12 +3166,7 @@ def create_app(
                 also_existing=bool(body.decline_random_macs_existing))
             _schedule_decline_random_sync()
         result["vpn_share"] = await service.get_vpn_config()
-        if vpn_status_getter is not None:
-            try:
-                result["vpn_share"]["status"] = vpn_status_getter()
-            except Exception:  # noqa: BLE001
-                result["vpn_share"]["status"] = {"state": "error",
-                                                  "message": "status probe failed"}
+        await _attach_vpn_share_status(result["vpn_share"])
         result["decline_random_macs"] = await service.decline_random_macs()
         return result
 
@@ -3257,7 +3250,7 @@ def create_app(
 
     # -- IPv6 Dual-Stack Subsystem ---------------------------------------------
 
-    def _ipv6_probe():
+    def _ipv6_probe() -> Optional[object]:
         # The probe is created by the gateway's background startup (after this
         # app is built), so run.py hands over a getter instead of the object;
         # a plain probe object (tests) is still accepted.
@@ -4135,6 +4128,71 @@ def create_app(
     @app.get("/ui/{rest:path}", include_in_schema=False)
     async def _legacy_ui_path(rest: str = "") -> RedirectResponse:
         return RedirectResponse("/" + rest.lstrip("/"), status_code=307)
+
+    # Policy engine (Unified Policy Engine)
+    from quota.policy_engine import PolicyEngine
+    from quota.policy_adapters import EnforcementRegistry, DnsEnforcementAdapter, FirewallEnforcementAdapter, TrafficControlAdapter, QuotaEnforcementAdapter
+    from quota.policy_scheduler import PolicyScheduler
+    from quota.capabilities import detect_capabilities
+
+    policy_engine = PolicyEngine()
+    enforcement_registry = EnforcementRegistry()
+    policy_scheduler = PolicyScheduler()
+
+    # Register adapters (best-effort, None managers for now)
+    enforcement_registry.register(DnsEnforcementAdapter(None))
+    enforcement_registry.register(FirewallEnforcementAdapter(firewall))
+    enforcement_registry.register(TrafficControlAdapter(None))
+    enforcement_registry.register(QuotaEnforcementAdapter(service))
+
+    # Initialize policy routes
+    from api.policy_routes import init_policy_engine, router as policy_router
+    from quota.db import rbac_create_role, rbac_grant_permission, rbac_assign_role
+    from quota.backup import init_backup_tables
+    from quota.alerts import init_alerts_tables
+    from quota.db import init_device_group_tables
+    import asyncio
+
+    async def _ensure_policy_tables() -> None:
+        """Create policy/backup/alert/device-group/RBAC tables and seed roles.
+
+        Idempotent (CREATE TABLE IF NOT EXISTS, INSERT OR IGNORE / REPLACE), so
+        running it twice is harmless.
+        """
+        from api.policy_routes import init_rbac_tables
+        await init_backup_tables(database)
+        await init_alerts_tables(database)
+        await init_device_group_tables(database)
+        await init_rbac_tables(database)
+        await rbac_create_role(database, "admin", "Administrator", "Full access to all policies and settings")
+        await rbac_create_role(database, "editor", "Editor", "Can create, edit, and delete policies")
+        await rbac_create_role(database, "viewer", "Viewer", "Read-only access to policies and audit log")
+        await rbac_create_role(database, "auditor", "Auditor", "Read-only access to audit log only")
+        for perm in ["policy:create", "policy:read", "policy:update", "policy:delete", "policy:simulate", "policy:view_conflicts", "audit:read", "rbac:manage"]:
+            await rbac_grant_permission(database, "admin", perm)
+        for perm in ["policy:create", "policy:read", "policy:update", "policy:delete", "policy:simulate", "policy:view_conflicts"]:
+            await rbac_grant_permission(database, "editor", perm)
+        for perm in ["policy:read", "policy:simulate", "policy:view_conflicts", "audit:read"]:
+            await rbac_grant_permission(database, "viewer", perm)
+        for perm in ["audit:read", "policy:view_conflicts"]:
+            await rbac_grant_permission(database, "auditor", perm)
+        await rbac_assign_role(database, "admin", "admin", assigned_by="system")
+
+    # create_app is sync but has two callers: run.py's async _serve() (a loop is
+    # already running) and sync embedders/tests (no loop). Drive the bootstrap to
+    # completion only when no loop is running; otherwise schedule it on the
+    # running loop and expose the task so the caller can await it before serving
+    # (run.py::_serve does exactly that).
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.get_event_loop().run_until_complete(_ensure_policy_tables())
+    else:
+        app.state.policy_tables_ready = asyncio.ensure_future(_ensure_policy_tables())
+
+    init_policy_engine(database, policy_engine, enforcement_registry, current_user_id="admin")
+
+    app.include_router(policy_router)
 
     # static UI
     if WEB_DIR.exists():

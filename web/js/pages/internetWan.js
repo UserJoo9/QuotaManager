@@ -2,7 +2,6 @@
 // A mistake here can cut the internet, so every apply/revert is a two-step action with the full warning shown.
 import { h } from "../core/dom.js";
 import { t, iso, privacyHidden } from "../core/i18n.js";
-import { api } from "../core/api.js";
 import { sw, chip } from "../components/ui.js";
 import { toast } from "../components/toast.js";
 
@@ -13,7 +12,7 @@ async function load(ctx) {
   if (s.loading || Date.now() - s.failAt < 10000) return;
   s.loading = true;
   try {
-    const w = await api.get("/api/wan");
+    const w = await ctx.hooks.useNetwork().getWanConfig();
     if (!s.dirty) { s.on = (w.configured || w.topology) === "wan"; s.user = privacyHidden() ? "" : (w.pppoe_user || ""); s.wanIf = w.wan_if || ""; s.pass = ""; }
     s.hasPass = !!w.pppoe_has_password; s.loaded = true;
   } catch { s.failAt = Date.now(); s.loaded = true; } finally { s.loading = false; ctx.touch(); }
@@ -38,7 +37,7 @@ export default function wanCard(ctx) {
 
   const runTest = async (auto) => {
     if (s.testing) return; s.testing = true; s.msg = { text: t(auto ? "wan.t.auto" : "wan.t.run") }; ctx.touch();
-    try { s.msg = verdict(await api.post("/api/wan/test", { pppoe_user: s.user.trim(), pppoe_password: s.pass })); }
+    try { s.msg = verdict(await ctx.hooks.useNetwork().testWan(s.user.trim(), s.pass)); }
     catch (e) { s.msg = { ok: false, text: `${t("wan.t.err")}: ${e.message}` }; } finally { s.testing = false; ctx.touch(); }
   };
   if (!s.autoRan && s.loaded && !dirty && desired && !linkUp && w.ppp0 !== undefined) { s.autoRan = true; setTimeout(() => runTest(true), 0); }
@@ -49,7 +48,7 @@ export default function wanCard(ctx) {
     try {
       const body = { topology: target };
       if (target === "wan") { body.pppoe_user = s.user.trim(); body.pppoe_password = s.pass; body.wan_if = s.wanIf.trim(); }
-      await api.post("/api/wan", body); s.dirty = false; s.pass = ""; s.note = t(target === "wan" ? "wan.applied.wan" : "wan.applied.lan"); toast(s.note);
+      await ctx.hooks.useNetwork().applyWan(body); s.dirty = false; s.pass = ""; s.note = t(target === "wan" ? "wan.applied.wan" : "wan.applied.lan"); toast(s.note);
       setTimeout(() => { s.note = ""; ctx.touch(); }, 8000);
     } catch (e) { s.dirty = false; toast(`${t("dr.failed")}: ${e.message}`, "bad"); }
     finally { s.applying = false; s.loaded = false; await ctx.refresh(); ctx.touch(); }
@@ -61,7 +60,7 @@ export default function wanCard(ctx) {
   const dim = !dirty && desired && linkUp && w.internet === true;
 
   return h("section", { class: "card c12" },
-    h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("wan.title")), h("span", { class: "sub" }, t("wan.sub"))),
+    h("header", { class: "card-h" }, h("div", {}, h("h2", {}, t("wan.title")), h("span", { class: "sub" }, t("wan.sub"))),
       h("div", { style: { display: "flex", gap: "10px", "align-items": "center" } }, chip(live ? "warn" : "ok", live ? "WAN" : "LAN"), chip(linkUp ? "ok" : "", `ppp0 ${w.ppp0 || "n/a"}`))),
     banner ? h("p", { class: "banner " + (desired && !linkUp && !dirty ? "warn" : "info"), role: "status" }, banner) : null,
     s.note ? h("p", { class: "sub" }, s.note) : null,
@@ -74,9 +73,9 @@ export default function wanCard(ctx) {
     on ? h("div", { style: { display: "flex", "flex-direction": "column", gap: "12px", "margin-top": "6px" } },
       h("p", { class: "sub" }, t("wan.creds.d")),
       h("div", { class: "form-row" },
-        field(t("wan.user"), h("input", { class: "input ltr", value: s.user, placeholder: "user@isp", spellcheck: "false", autocomplete: "username", oninput: (e) => { s.user = e.target.value; s.dirty = true; } })),
-        field(t("wan.pass"), h("input", { class: "input ltr", type: "password", value: s.pass, autocomplete: "new-password", placeholder: s.hasPass ? t("wan.pass.stored") : t("wan.pass.enter"), oninput: (e) => { s.pass = e.target.value; s.dirty = true; } }))),
-      field(t("wan.if"), h("input", { class: "input ltr", value: s.wanIf, placeholder: "eth1", spellcheck: "false", oninput: (e) => { s.wanIf = e.target.value; s.dirty = true; } }), t("wan.if.h")),
+        field(t("wan.user"), h("input", { class: "input ltr", value: s.user, placeholder: "user@isp", spellcheck: "false", autocomplete: "off", autocomplete: "username", oninput: (e) => { s.user = e.target.value; s.dirty = true; } })),
+        field(t("wan.pass"), h("input", { class: "input ltr", type: "password", autocomplete: "current-password", value: s.pass, autocomplete: "new-password", placeholder: s.hasPass ? t("wan.pass.stored") : t("wan.pass.enter"), oninput: (e) => { s.pass = e.target.value; s.dirty = true; } }))),
+      field(t("wan.if"), h("input", { class: "input ltr", value: s.wanIf, placeholder: "eth1", spellcheck: "false", autocomplete: "off", oninput: (e) => { s.wanIf = e.target.value; s.dirty = true; } }), t("wan.if.h")),
       h("div", { class: "fa" }, h("button", { type: "button", class: "btn ghost sm", disabled: s.testing, onclick: () => runTest(false) }, s.testing ? t("wan.t.running") : t("wan.t.btn"))),
       s.msg ? h("pre", { class: "wan-msg " + (s.msg.ok ? "ok" : s.msg.ok === false ? "bad" : "") }, s.msg.text) : null,
       h("p", { class: "sub" }, t("wan.t.h"))) : null,

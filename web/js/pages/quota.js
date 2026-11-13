@@ -1,6 +1,5 @@
 import { h, icon } from "../core/dom.js";
 import { t, num, iso } from "../core/i18n.js";
-import { api } from "../core/api.js";
 import { bar, chip } from "../components/ui.js";
 import { openDialog } from "../components/dialog.js";
 import { toast } from "../components/toast.js";
@@ -13,9 +12,10 @@ export default function quota(ctx) {
   const d = ctx.dashboard;
   if (!d) return h("div", { class: "page" }, h("div", { class: "skeleton", style: { height: "260px" } }));
   const b = d.bundle, users = d.users || [];
+  const bundleHooks = ctx.hooks.useBundle();
   if (!draft) draft = { total_gb: b.base_total_gb ?? b.total_gb, reset_day: b.reset_day ?? 0, period_type: b.period_type === "end_of_month" ? "end_of_month" : "renew_day" };
   const run = (fn, ok) => async () => {
-    if (busy) return; busy = true;
+    if (busy) return; busy = true; ctx.touch();
     try { await fn(); toast(ok || t("q.saved")); await ctx.refresh(); } catch (e) { toast(`${t("dr.failed")}: ${e.message}`, "bad"); } finally { busy = false; ctx.touch(); }
   };
   const field = (label, input, hint) => h("div", { class: "field" }, h("label", {}, label), input, hint ? h("span", { class: "sub" }, hint) : null);
@@ -25,13 +25,13 @@ export default function quota(ctx) {
     ["renew_day", "end_of_month"].map((v) => h("option", { value: v, selected: draft.period_type === v }, t("q.period." + v))));
   const save = run(async () => {
     if (!(draft.total_gb > 0)) throw new Error(t("q.total"));
-    await api.post("/api/bundle", { total_gb: draft.total_gb, reset_day: draft.reset_day, period_type: draft.period_type }); draft = null;
+    await bundleHooks.updateBundle(draft.total_gb, draft.reset_day, draft.period_type); draft = null;
   });
   const addGb = h("input", { class: "input", type: "number", min: "0", step: "any", placeholder: "10", value: topup, oninput: (e) => { topup = e.target.value; } });
-  const doTop = run(async () => { const gb = +topup; if (!(gb > 0)) throw new Error(t("q.topup.gb")); await api.post("/api/bundle", { add_gb: gb }); topup = ""; });
+  const doTop = run(async () => { const gb = +topup; if (!(gb > 0)) throw new Error(t("q.topup.gb")); await bundleHooks.addGb(gb); topup = ""; });
   const doReset = async (ev) => {
     if (!armedReset) { armedReset = true; ev.currentTarget.classList.add("armed"); ev.currentTarget.textContent = t("dr.confirm"); setTimeout(() => { armedReset = false; }, 4000); return; }
-    armedReset = false; await run(() => api.post("/api/reset-month"))();
+    armedReset = false; await bundleHooks.resetMonth();
   };
 
   const packs = b.recharges || [];
@@ -41,7 +41,7 @@ export default function quota(ctx) {
   const delPack = (p) => h("button", { type: "button", class: "btn danger sm" + (armedDel === p.id ? " armed" : ""), "aria-label": t("q.pack.del"),
     onclick: async (ev) => {
       if (armedDel !== p.id) { armedDel = p.id; ev.currentTarget.classList.add("armed"); ev.currentTarget.textContent = t("dr.confirm"); setTimeout(() => { if (armedDel === p.id) armedDel = null; }, 4000); return; }
-      armedDel = null; await run(() => api.del(`/api/bundle/recharges/${p.id}`), t("dr.done"))();
+      armedDel = null; await bundleHooks.deleteRecharge(p.id); toast(t("dr.done")); await ctx.refresh();
     } }, armedDel === p.id ? t("dr.confirm") : icon("x", 15));
 
   function packDialog() {
@@ -65,27 +65,27 @@ export default function quota(ctx) {
         const body = { gb: +gb.value, expires_at: Math.floor(Date.now() / 1000) + Math.max(1, +days.value || 30) * DAY, recurring: rec.checked, target_type: tt.value, comment: note.value.trim() };
         if (!(body.gb > 0)) throw new Error(t("q.pack.gb"));
         if (tt.value !== "all") { body.target_id = parseInt(tgt.value, 10); if (!body.target_id) throw new Error(t("q.pack.who")); }
-        await api.post("/api/bundle/recharges", body); await ctx.refresh(); toast(t("q.saved")); return true;
+        await bundleHooks.createRecharge(body.gb, body.expires_at, body.recurring, body.target_type, body.target_id, body.comment); await ctx.refresh(); toast(t("q.saved")); return true;
       } });
   }
 
   const pct = b.total_gb > 0 ? (b.used_gb / b.total_gb) * 100 : 0;
   return h("div", { class: "page" }, h("div", { class: "grid" },
     h("section", { class: "card c7" },
-      h("header", { class: "card-h" }, h("h3", {}, t("q.bundle")), chip("", b.days_left >= 0 ? `${t("ov.resets")} ${num(b.days_left, 0)} ${t("common.days")}` : t("ov.period.manual"))),
+      h("header", { class: "card-h" }, h("h2", {}, t("q.bundle")), chip("", b.days_left >= 0 ? `${t("ov.resets")} ${num(b.days_left, 0)} ${t("common.days")}` : t("ov.period.manual"))),
       h("div", { class: "c-num", style: { "margin-bottom": "8px" } }, h("b", {}, `${num(b.used_gb)} ${t("common.gb")} ${t("ov.of")} ${num(b.total_gb)}`), h("span", {}, `${num(pct, 0)}%`)), bar(pct),
       h("div", { class: "form-row", style: { "margin-top": "20px" } }, field(t("q.total"), total), field(t("q.reset"), reset)),
       h("div", { style: { "margin-top": "12px" } }, field(t("q.period"), ptype)),
       h("div", { class: "fa", style: { "margin-top": "18px" } }, h("button", { type: "button", class: "btn primary", onclick: save }, t("q.save")))),
     h("section", { class: "card c5" },
-      h("header", { class: "card-h" }, h("h3", {}, t("q.topup"))), h("p", { class: "sub", style: { "margin-bottom": "12px" } }, t("q.topup.d")),
+      h("header", { class: "card-h" }, h("h2", {}, t("q.topup"))), h("p", { class: "sub", style: { "margin-bottom": "12px" } }, t("q.topup.d")),
       h("div", { style: { display: "flex", gap: "10px" } }, h("div", { class: "grow" }, addGb), h("button", { type: "button", class: "btn primary", onclick: doTop }, icon("plus", 16), t("q.topup.btn"))),
       h("div", { class: "setting" }, h("div", {}, h("div", { class: "t" }, t("q.newperiod")), h("div", { class: "d" }, t("q.newperiod.d"))),
         h("button", { type: "button", class: "btn danger sm", onclick: doReset }, t("q.newperiod.btn")))),
-    dailyMasterCard(!!d.daily_enabled, run(() => api.post("/api/daily", { enabled: !d.daily_enabled }))),
-    freeModeCard(d.free_mode_enabled !== false, !!d.free_mode, run(() => api.post("/api/free-mode", { enabled: d.free_mode_enabled === false }))),
+    dailyMasterCard(!!d.daily_enabled, run(() => bundleHooks.toggleDaily(!d.daily_enabled))),
+    freeModeCard(d.free_mode_enabled !== false, !!d.free_mode, run(() => bundleHooks.toggleFreeMode(d.free_mode_enabled === false))),
     h("section", { class: "card c12" },
-      h("header", { class: "card-h" }, h("h3", {}, t("q.packs")), h("button", { type: "button", class: "btn primary sm", onclick: packDialog }, icon("plus", 15), t("q.packs.new"))),
+      h("header", { class: "card-h" }, h("h2", {}, t("q.packs")), h("button", { type: "button", class: "btn primary sm", onclick: packDialog }, icon("plus", 15), t("q.packs.new"))),
       packs.length ? h("div", {}, packs.map((p) => h("div", { class: "crow", style: { "grid-template-columns": "36px minmax(120px,1fr) minmax(130px,1.2fr) 84px auto" } },
         h("span", { class: "d-ic" }, icon("bolt", 16)),
         h("div", { class: "c-name" }, `${num(p.gb)} ${t("common.gb")}`, h("span", {}, [who(p), p.comment].filter(Boolean).join(" · "))),

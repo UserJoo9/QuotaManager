@@ -151,7 +151,9 @@ def test_daily_plan_ui_is_wired_and_guarded():
     from pathlib import Path
     web = Path(__file__).resolve().parents[1] / "web"
     dp = (web / "js/components/dailyPlan.js").read_text()
-    assert "daily-plan/preview" in dp and "dailyMasterCard" in dp
+    assert "dailyMasterCard" in dp
+    api_idx = (web / "js/api/index.js").read_text()
+    assert "daily-plan/preview" in api_idx
     # unsaved heavy-day edits must survive the drawer's live rebuilds
     assert "heavyDraft" in dp
     ud = (web / "js/components/userDrawer.js").read_text()

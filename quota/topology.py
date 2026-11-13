@@ -17,9 +17,10 @@ from __future__ import annotations
 import logging
 import re
 import socket
+import struct
 import subprocess
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 log = logging.getLogger("quota.topology")
 
@@ -77,7 +78,7 @@ def detect_ppp(interface: str = "ppp0",
 def check_internet(hosts: tuple[str, ...] = ("1.1.1.1", "8.8.8.8"),
                    port: int = 443,
                    timeout: float = 2.0,
-                   connect: Callable | None = None) -> bool:
+                   connect: Callable[..., Any] | None = None) -> bool:
     """Prove the gateway can reach the public internet (the WAN-tab green dot).
 
     Raw-IP TCP connect — deliberately NOT ICMP (needs root/setuid) and NOT DNS
@@ -104,7 +105,6 @@ def _dns_query(server: str, timeout: float) -> bool:
     UDP port 53 is exempted from the gateway block (``udp dport 53 accept``), so
     this reaches the public resolver even while the box's own browsing is cut.
     """
-    import struct
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:

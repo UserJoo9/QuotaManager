@@ -75,7 +75,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import re
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from quota.nftables import resolve_local_networks
 
@@ -133,6 +133,13 @@ def _burst(mbps: float) -> list[str]:
     return ["burst", str(burst), "cburst", str(burst)]
 
 
+#: Minimum programmable rate (Mbps). tc rejects near-zero bandwidth, so every
+#: class/qdisc that must exist is floored at 256 kbps — alive but unable to
+#: carry measurable traffic. Used for the outer VPN policers, the WAN egress
+#: class, and fair-share floors.
+MIN_RATE_MBPS = 0.256
+
+
 def _effective(dev_cap: float, user_cap: float, total: float) -> float | None:
     """Effective per-device cap: min(device cap, user cap), clamped to the
     direction total. ``0`` means unlimited; None => no cap -> default class."""
@@ -140,6 +147,24 @@ def _effective(dev_cap: float, user_cap: float, total: float) -> float | None:
     if not caps:
         return None
     return max(0.0, min(min(caps), total))
+
+
+def _inet_addrs(out: str) -> Iterator[tuple[str, str, str]]:
+    """``(iface, addr, prefix)`` for every ``inet addr/prefix`` line of
+    ``ip -o -4 addr show`` output.
+
+    Three callers (_find_interface_for, _find_uplink_subnet,
+    _find_own_addresses) parsed these lines identically; one parser keeps the
+    auto-detect paths consistent instead of three copies of the same loop.
+    """
+    for line in out.splitlines():
+        parts = line.split()
+        # e.g. "2: eth0    inet 192.168.2.1/24 brd 192.168.2.255 scope ..."
+        if len(parts) < 4 or parts[2] != "inet":
+            continue
+        addr, _, prefix = parts[3].partition("/")
+        if addr and prefix:
+            yield parts[1], addr, prefix
 
 
 def _find_interface_for(gateway_ip: str, run_command: RunCommand) -> str:
@@ -154,20 +179,13 @@ def _find_interface_for(gateway_ip: str, run_command: RunCommand) -> str:
         target = ipaddress.ip_address(gateway_ip)
     except ValueError:
         return ""
-    for line in out.splitlines():
-        parts = line.split()
-        # e.g. "2: eth0    inet 192.168.2.1/24 brd 192.168.2.255 …"
-        if len(parts) < 4 or parts[2] != "inet":
-            continue
-        addr, _, prefix = parts[3].partition("/")
-        if not prefix:
-            continue
+    for iface, addr, prefix in _inet_addrs(out):
         try:
             net = ipaddress.ip_network(f"{addr}/{prefix}", strict=False)
         except ValueError:
             continue
         if target in net:
-            return parts[1]
+            return iface
     return ""
 
 
@@ -204,13 +222,7 @@ def _find_uplink_subnet(iface: str, client_subnet: str,
         client = str(ipaddress.ip_network(client_subnet, strict=False))
     except ValueError:
         return ""
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) < 4 or parts[2] != "inet":
-            continue
-        addr, _, prefix = parts[3].partition("/")
-        if not prefix:
-            continue
+    for _, addr, prefix in _inet_addrs(out):
         try:
             net = str(ipaddress.ip_network(f"{addr}/{prefix}", strict=False))
         except ValueError:
@@ -235,15 +247,9 @@ def _find_own_addresses(iface: str, run_command: RunCommand) -> list[str]:
     code, out = run_command(["ip", "-o", "-4", "addr", "show", "dev", iface])
     if code != 0:
         return []
-    addrs: list[str] = []
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) < 4 or parts[2] != "inet":
-            continue
-        addr, _, _ = parts[3].partition("/")
-        if addr:
-            addrs.append(addr)
-    return addrs
+    # The kernel's address table is ground truth: every inet address on the
+    # shaping NIC is the box's own — no config keys involved.
+    return [addr for _, addr, _ in _inet_addrs(out)]
 
 
 class TcShaper:
@@ -325,6 +331,9 @@ class TcShaper:
         #: topology): the REAL bottleneck queue is on ppp0, not on the LAN NIC.
         self._ppp: tuple[str, int] | None = None
         self._ppp_dev_shaped = ""
+        self._vpn_pct = 0.0
+        #: last-detected (dev, ifindex) pair; logged only when it changes.
+        self._ppp_logged: tuple[str, int] | None = None
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -471,8 +480,8 @@ class TcShaper:
             for e in self._rate_map)
         return (self._enabled, self._fair_sharing, self._vpn_active, self._ppp,
                 self._rates_measured, self._line_margin_pct,
-                getattr(self, "_vpn_pct", 0.0),
-                self._vpn_margin_pct, round(self._total_down, 3),
+                self._vpn_pct, self._vpn_margin_pct,
+                round(self._total_down, 3),
                 round(self._total_up, 3), self._lan_rate_mbps,
                 self.uplink_subnet, tuple(sorted(self.own_addresses)), entries)
 
@@ -502,7 +511,7 @@ class TcShaper:
         """
         if not self._vpn_active:
             return 1.0
-        pct = getattr(self, "_vpn_pct", 0.0)
+        pct = self._vpn_pct
         if pct > 0 and not self._rates_measured:
             # Panel "VPN speed %": one knob replacing both margins.
             return pct / 100.0
@@ -569,7 +578,7 @@ class TcShaper:
             self._run_best_effort(argv)
         if self._total_up > 0:
             cmds.append(["tc", "qdisc", "add", "dev", dev, "root", "cake",
-                         "bandwidth", _rate(max(0.256, self._total_up * f)),
+                         "bandwidth", _rate(max(MIN_RATE_MBPS, self._total_up * f)),
                          "besteffort", "ack-filter"])
         if self._total_down > 0 and self._ensure_wan_ifb():
             cmds += [
@@ -580,7 +589,7 @@ class TcShaper:
                  "action", "mirred", "egress", "redirect", "dev",
                  self.wan_ifb],
                 ["tc", "qdisc", "add", "dev", self.wan_ifb, "root", "cake",
-                 "bandwidth", _rate(max(0.256, self._total_down * f)),
+                 "bandwidth", _rate(max(MIN_RATE_MBPS, self._total_down * f)),
                  "besteffort", "ingress"],
             ]
         return cmds
@@ -597,7 +606,6 @@ class TcShaper:
         """The box's own addresses that live on the uplink subnet."""
         if not self.uplink_subnet or self.uplink_subnet == self.client_subnet:
             return []
-        import ipaddress
         try:
             net = ipaddress.ip_network(self.uplink_subnet, strict=False)
         except ValueError:
@@ -645,7 +653,7 @@ class TcShaper:
         LAN hosts on the uplink subnet and all client-sourced traffic are
         excluded (they match earlier/other rules).
         """
-        rate = _rate(max(0.256, self._total_down * self._factor()))
+        rate = _rate(max(MIN_RATE_MBPS, self._total_down * self._factor()))
         iface, ifb = self.iface, self.wan_ifb
         cmds: list[list[str]] = [
             # uplink-subnet hosts (router admin, NAS, SSH from LAN) are LAN.
@@ -780,7 +788,7 @@ class TcShaper:
         wan_egress = bool(match_field == "dst" and self._vpn_active
                           and self._ppp is None
                           and self._total_up > 0 and self.client_subnet)
-        wan_up_rate = _rate(max(0.256, self._total_up * self._factor()))
+        wan_up_rate = _rate(max(MIN_RATE_MBPS, self._total_up * self._factor()))
         # The root caps at the LAN link rate so the pass-through class can
         # exceed the WAN line; every WAN class below stays capped at ``total``
         # so fq_codel keeps draining the internet queue at the line rate.
@@ -835,7 +843,7 @@ class TcShaper:
             cmds.append(["tc", "class", "add", "dev", dev, "parent", "1:1",
                          "classid", "1:3", "htb", "rate", wan_up_rate,
                          "ceil", wan_up_rate,
-                         *_burst(max(0.256, self._total_up * self._factor()))])
+                         *_burst(max(MIN_RATE_MBPS, self._total_up * self._factor()))])
             cmds.append(["tc", "qdisc", "add", "dev", dev, "parent", "1:3",
                          "handle", "3:", *self._aqm_args(True)])
             cmds.append(["tc", "filter", "add", "dev", dev, "parent", "1:",
@@ -866,8 +874,8 @@ class TcShaper:
         # The class programs whenever there is an uplink subnet OR the box has
         # own addresses to exempt (a NIC with only the client alias still needs
         # to pass client->box traffic through).
-        if (self.uplink_subnet and self.uplink_subnet != self.client_subnet) \
-                or self.own_addresses:
+        if ((self.uplink_subnet and self.uplink_subnet != self.client_subnet)
+                or self.own_addresses):
             cmds.append(["tc", "class", "add", "dev", dev, "parent", "1:1",
                          "classid", "1:99", "htb", "rate", lan_rate,
                          "ceil", lan_rate, *_burst(lan)])
@@ -900,7 +908,7 @@ class TcShaper:
                                  "match", "ip", "src", addr, "flowid", "1:99"])
 
         total_dev_count = sum(len(grp["devs"]) for grp in by_user.values())
-        fair_base_rate = max(0.256, round(stotal / max(total_dev_count, 1), 3)) if total_dev_count > 0 else stotal
+        fair_base_rate = max(MIN_RATE_MBPS, round(stotal / max(total_dev_count, 1), 3)) if total_dev_count > 0 else stotal
 
         for uid in sorted(by_user):
             grp = by_user[uid]
@@ -917,7 +925,7 @@ class TcShaper:
 
             user_ceil = min(cap, stotal) if cap > 0 else stotal
             if self._fair_sharing:
-                user_rate = min(user_ceil, max(0.256, round(fair_base_rate * len(leaves), 3)))
+                user_rate = min(user_ceil, max(MIN_RATE_MBPS, round(fair_base_rate * len(leaves), 3)))
             else:
                 user_rate = user_ceil
 
@@ -975,16 +983,6 @@ class TcShaper:
                           "ingress"]):
                 self._run_best_effort(argv)
             self._ppp_dev_shaped = ""
-
-    def _run(self, argv: list[str]) -> bool:
-        """Run an apply command; a failure degrades the shaper."""
-        if not self.available:
-            return False
-        code, out = self._run_command(argv)
-        if code == 0:
-            return True
-        self._fail(f"{argv[0]} failed: {out.strip()}")
-        return False
 
     def _run_best_effort(self, argv: list[str]) -> None:
         """Run a teardown/probe command; a failure only logs."""

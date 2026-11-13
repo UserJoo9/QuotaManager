@@ -1,11 +1,32 @@
-import { h, icon } from "../core/dom.js";
+import { h, icon, FOCUSABLE, onKeyTrap } from "../core/dom.js";
 import { t } from "../core/i18n.js";
-let current = null;
-export function closeDialog() { if (current) { current.remove(); current = null; document.removeEventListener("keydown", onKey); } }
-function onKey(e) { if (e.key === "Escape") closeDialog(); }
-// content: Node[] shown in a <form>. onSubmit(setError) => Promise; return truthy to close.
-// infoOnly: a read-only dialog — the header X plus a single Close button (no redundant Cancel).
+
+/** The open modal element, and the element that had focus before it opened. */
+let current = null, prevFocus = null;
+
+/** Close the open dialog, restore focus, and unbind the Escape/Tab handler. */
+export function closeDialog() {
+  if (current) {
+    current.remove(); current = null;
+    onKeyTrap.close();
+    if (prevFocus && typeof prevFocus.focus === "function") { try { prevFocus.focus(); } catch {} }
+    prevFocus = null;
+  }
+}
+/**
+ * Open a modal dialog rendering `content` inside a <form>.
+ * @typedef {Object} OpenDialogOptions
+ * @property {string} title - dialog title
+ * @property {string} [sub] - subtitle line under the title
+ * @property {Node[]} content - form body nodes
+ * @property {string} submitLabel - primary button label
+ * @property {() => Promise<boolean>} onSubmit - returning truthy closes the dialog
+ * @property {boolean} [wide] - wide variant
+ * @property {boolean} [infoOnly] - read-only: header X plus a single Close button (no redundant Cancel)
+ * @returns {void}
+ */
 export function openDialog({ title, sub, content, submitLabel, onSubmit, wide, infoOnly }) {
+  prevFocus = document.activeElement;
   closeDialog();
   const err = h("div", { class: "err", role: "alert", hidden: true, style: { "text-align": "start" } });
   const submit = h("button", { class: "btn primary", type: "submit" }, submitLabel);
@@ -24,6 +45,6 @@ export function openDialog({ title, sub, content, submitLabel, onSubmit, wide, i
         h("button", { class: "icon-btn", type: "button", "aria-label": t("common.close"), onclick: closeDialog }, icon("close"))),
       form));
   document.body.append(current);
-  document.addEventListener("keydown", onKey);
+  onKeyTrap.open(current, closeDialog);
   current.querySelector("input,textarea,select")?.focus();
 }

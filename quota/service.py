@@ -51,6 +51,27 @@ GB = 1024 ** 3
 MILESTONES = (50, 75, 100)
 
 
+def _milestone_entries(
+    percent: float, flags: dict[int, bool]
+) -> dict[int, dict[str, Any]]:
+    """Pure per-threshold milestone state: crossed / notified / pending.
+
+    Extracted so the 50/75/100% milestone logic is unit-testable without a DB.
+    ``percent`` is usage as a fraction of the allowance (0..100); ``flags`` maps
+    each threshold to its persisted notified flag.
+    """
+    out: dict[int, dict[str, Any]] = {}
+    for m in MILESTONES:
+        crossed = percent >= m
+        notified = bool(flags[m])
+        out[m] = {
+            "crossed": crossed,
+            "notified": notified,
+            "pending": crossed and not notified,
+        }
+    return out
+
+
 class QuotaService:
     def __init__(self, database: _db.Database, timezone: str = "",
                  clock: Any = None) -> None:
@@ -564,6 +585,25 @@ class QuotaService:
             return _db.BLOCK_QUOTA
         return _db.BLOCK_OK
 
+    @staticmethod
+    def _effective_allowance(user: _db.User, allowances: dict[int, float]) -> float:
+        """Resolved allowance for one user: snapshot value, else fixed+topup fallback.
+
+        ``allowances`` is the recomputed snapshot (user_id -> GB). When a user is
+        missing from it (e.g. mid-period reads before the snapshot is refreshed),
+        fall back to fixed_gb for fixed users, 0.0 for auto/disabled users, plus
+        the user's persisted top-up. Pure and testable without a DB.
+        """
+        allowance = allowances.get(user.id)
+        if allowance is None:
+            allowance = (
+                (user.fixed_gb or 0.0)
+                if user.quota_mode == _db.QUOTA_FIXED
+                else 0.0
+            )
+            allowance += (user.topup_gb or 0.0)
+        return allowance
+
     async def _user_quota_map(self, allowances: dict[int, float]) -> dict[int, bool]:
         """user_id -> True when the user is over their allowance.
 
@@ -576,10 +616,7 @@ class QuotaService:
         usage_by_user = await self.db.get_period_usage_by_user()
         out: dict[int, bool] = {}
         for uid, user in users.items():
-            allowance = allowances.get(uid)
-            if allowance is None:
-                allowance = (user.fixed_gb or 0.0) if user.quota_mode == _db.QUOTA_FIXED else 0.0
-                allowance += (user.topup_gb or 0.0)
+            allowance = self._effective_allowance(user, allowances)
             u = usage_by_user.get(uid, {"up": 0, "down": 0})
             used_gb = (u["up"] + u["down"]) / GB
             out[uid] = self.user_quota_blocked(user, allowance, used_gb)
@@ -656,10 +693,7 @@ class QuotaService:
             if (u.protected or u.exempt_quota or u.quota_mode == _db.QUOTA_DISABLED
                     or u.block_state == _db.BLOCK_ADMIN or u.id not in owners):
                 continue
-            allowance = allowances.get(u.id)
-            if allowance is None:
-                allowance = (u.fixed_gb or 0.0) if u.quota_mode == _db.QUOTA_FIXED else 0.0
-                allowance += (u.topup_gb or 0.0)
+            allowance = self._effective_allowance(u, allowances)
             raw = usage.get(u.id, {"up": 0, "down": 0})
             if not self.quota_blocked_for(u, allowance, (raw["up"] + raw["down"]) / GB):
                 return False
@@ -868,6 +902,24 @@ class QuotaService:
         # (re)start every day's cap from scratch: usage so far is deducted
         await self.db.clear_daily_caps()
 
+    async def _active_device_booster_ids(self) -> set[int]:
+        """Device ids with an active, unexpired, not-yet-fully-drawn device pack.
+
+        Pure enforcement input: a device with such a booster is never quota-cut
+        even when its user is over allowance. Extracted once so
+        :meth:`evaluate_blocks` and :meth:`snapshot_state` agree exactly.
+        """
+        now_ts = self._now().timestamp()
+        packs = await self.db.list_recharges(active_only=True)
+        return {
+            p.target_id
+            for p in packs
+            if p.target_type == "device"
+            and p.target_id is not None
+            and p.remaining_gb > 0
+            and p.expires_at > now_ts
+        }
+
     async def evaluate_blocks(self) -> list[dict[str, Any]]:
         """Recompute block states from per-USER usage vs per-USER allowance.
 
@@ -886,13 +938,7 @@ class QuotaService:
                      self.daily_blocked_devices(await self.daily_state(), devices))
         changes: list[dict[str, Any]] = []
 
-        now_ts = self._now().timestamp()
-        packs = await self.db.list_recharges(active_only=True)
-        device_booster_ids = {
-            p.target_id for p in packs
-            if p.target_type == "device" and p.target_id is not None
-            and p.remaining_gb > 0 and p.expires_at > now_ts
-        }
+        device_booster_ids = await self._active_device_booster_ids()
 
         for dev in devices:
             user = users.get(dev.user_id)
@@ -935,13 +981,7 @@ class QuotaService:
         allowances = (await self.db.get_bundle()).allowances
         allow_set = set(await self.db.get_mac_list("allow"))
         deny_set = set(await self.db.get_mac_list("deny")) | self.active_kicked_macs()
-        now_ts = self._now().timestamp()
-        packs = await self.db.list_recharges(active_only=True)
-        device_booster_ids = {
-            p.target_id for p in packs
-            if p.target_type == "device" and p.target_id is not None
-            and p.remaining_gb > 0 and p.expires_at > now_ts
-        }
+        device_booster_ids = await self._active_device_booster_ids()
         daily = await self.daily_state()
         daily_cut = set() if self.free_mode else self.daily_blocked_devices(daily, devices)
         out: dict[str, dict[str, Any]] = {}
@@ -1043,15 +1083,7 @@ class QuotaService:
             allowance = allowances.get(u.id, 0.0)
             percent = used_gb / allowance * 100 if allowance > 0 else 0.0
             flags = {50: u.notified_50, 75: u.notified_75, 100: u.notified_100}
-            milestones: dict[int, dict[str, Any]] = {}
-            for m in MILESTONES:
-                crossed = percent >= m
-                notified = bool(flags[m])
-                milestones[m] = {
-                    "crossed": crossed,
-                    "notified": notified,
-                    "pending": crossed and not notified,
-                }
+            milestones = _milestone_entries(percent, flags)
             out[u.id] = {
                 "allowance_gb": round(allowance, 3),
                 "used_gb": round(used_gb, 3),

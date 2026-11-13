@@ -1,31 +1,61 @@
-import { t } from "./i18n.js";
-// Same contract as the legacy UI: cookie session + X-QM-CSRF on every request.
-// Known English server messages are shown in the UI language.
+// Compatibility layer — delegates to the new api/transport layer.
+// Preserves the exact same interface for existing callers (pages, main.js).
+// Migration path: pages can keep importing from here while being gradually moved to hooks.
+
+import {
+  dashboardApi, bundleApi, userApi, deviceApi,
+  networkApi, securityApi, dnsApi, vpnApi, systemApi,
+} from "../api/index.js";
+
 function nice(m) {
-  if (/current password incorrect/i.test(m)) return t("err.pw.bad");
-  if (/invalid code/i.test(m)) return t("err.code.bad");
-  const h = /^HTTP (\d{3})$/.exec(m); if (h) return t("err.http").replace("{n}", h[1]);
+  if (/current password incorrect/i.test(m)) return "current password incorrect";
+  if (/invalid code/i.test(m)) return "invalid code";
+  const h = /^HTTP (\d{3})$/.exec(m); if (h) return `HTTP ${h[1]}`;
   return m;
 }
+
 let onUnauthorized = () => {};
 export const setUnauthorizedHandler = (fn) => { onUnauthorized = fn; };
 
 async function req(method, path, body) {
-  const opts = { method, headers: { "Content-Type": "application/json", "X-QM-CSRF": "1" }, credentials: "same-origin" };
-  if (body !== undefined) opts.body = JSON.stringify(body);
-  const res = await fetch(path, opts);
-  if (res.status === 401 && path !== "/api/login") { onUnauthorized(); throw new Error("unauthorized"); }
-  let data = null;
-  try { data = await res.json(); } catch { /* empty body */ }
-  if (!res.ok) {
-    const msg = (data && data.detail) || `HTTP ${res.status}`;
-    throw new Error(typeof msg === "string" ? nice(msg) : JSON.stringify(msg));
+  try {
+    if (method === "GET") return await httpGet(path);
+    if (method === "POST") return await httpPost(path, body);
+    if (method === "PATCH") return await httpPatch(path, body);
+    if (method === "DELETE") return await httpDel(path);
+    throw new Error(`Unknown method: ${method}`);
+  } catch (e) {
+    if (e.message === "unauthorized") { onUnauthorized(); throw e; }
+    throw new Error(nice(e.message));
   }
-  return data;
 }
+
+async function httpGet(path) {
+  const { http } = await import("../transport/http.js");
+  return await http.get(path);
+}
+
+async function httpPost(path, body) {
+  const { http } = await import("../transport/http.js");
+  return await http.post(path, body);
+}
+
+async function httpPatch(path, body) {
+  const { http } = await import("../transport/http.js");
+  return await http.patch(path, body);
+}
+
+async function httpDel(path) {
+  const { http } = await import("../transport/http.js");
+  return await http.del(path);
+}
+
 export const api = {
   get: (p) => req("GET", p),
   post: (p, b) => req("POST", p, b),
   patch: (p, b) => req("PATCH", p, b),
   del: (p) => req("DELETE", p),
 };
+
+// Re-export new API modules for gradual migration
+export { dashboardApi, bundleApi, userApi, deviceApi, networkApi, securityApi, dnsApi, vpnApi, systemApi };

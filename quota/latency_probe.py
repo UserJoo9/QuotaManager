@@ -33,7 +33,7 @@ import logging
 import re
 import socket
 import time
-from typing import Callable
+from typing import Any, Callable
 
 from quota.arp_scan import (RunCommand, _default_run_command,
                             arp_request_frame, parse_arp_reply, resolve_nic)
@@ -71,7 +71,7 @@ class ArpRttProbe:
     empty map when probing is impossible.
     """
 
-    def __init__(self, cfg, run_command: RunCommand | None = None,
+    def __init__(self, cfg: Any, run_command: RunCommand | None = None,
                  socket_factory: Callable[[], socket.socket] | None = None,
                  samples: int = 6, timeout_s: float = 0.5,
                  inter_round_s: float = 0.02) -> None:

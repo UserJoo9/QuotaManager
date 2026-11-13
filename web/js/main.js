@@ -1,16 +1,21 @@
+// Entry point — composition root wired to the new layered architecture.
+// Behavior is identical to the previous monolithic main.js; only the
+// dependency source changes (container/hooks instead of direct api/store imports).
+
 import { h, icon, mount } from "./core/dom.js";
-import { api, setUnauthorizedHandler } from "./core/api.js";
+import { setUnauthorizedHandler, api } from "./core/api.js";
 import { startLive } from "./core/ws.js";
-import { t, setLang, getLang, num } from "./core/i18n.js";
+import { t, setLang, getLang, num, privacyHidden, setPrivacyHidden } from "./core/i18n.js";
 import { applyPrefs, getPrefs, setPref, effTheme } from "./core/prefs.js";
 import { startParticles } from "./core/particles.js";
 import { startLiveShare } from "./core/live.js";
-import { bar } from "./components/ui.js";
-import { createStore } from "./core/store.js";
-import { refreshDrawer, closeDrawer } from "./components/drawer.js";
-import { privacyHidden, setPrivacyHidden } from "./core/i18n.js";
+import { closeDrawer } from "./components/drawer.js";
+import { closeDialog } from "./components/dialog.js";
 import { toast } from "./components/toast.js";
 import { maybeWelcome } from "./components/welcome.js";
+import { getContainer } from "./app/index.js";
+
+// ---- Pages (lazy-loaded via routes) ----
 import overview from "./pages/overview.js";
 import people from "./pages/people.js";
 import system from "./pages/system.js";
@@ -21,6 +26,24 @@ import vpnPage from "./pages/vpn.js";
 import securityPage from "./pages/security.js";
 import insightsPage from "./pages/insights.js";
 import sharePage from "./pages/share.js";
+import policyPage from "./pages/policy.js";
+import auditLogPage from "./pages/auditlog.js";
+import rbacPage from "./pages/rbac.js";
+import systemToolsPage from "./pages/systemTools.js";
+
+// UI Polish: suppress browser default context menu on non-text elements
+document.addEventListener("contextmenu", (e) => {
+  const tag = (e.target && e.target.tagName || "").toLowerCase();
+  const isText = tag === "input" || tag === "textarea" || tag === "select" || e.target.isContentEditable;
+  if (!isText) e.preventDefault();
+});
+// UI Polish: prevent dragging on images and SVG icons
+document.addEventListener("dragstart", (e) => {
+  const tag = (e.target && e.target.tagName || "").toLowerCase();
+  if (tag === "img" || tag === "svg" || (e.target && e.target.classList && (e.target.classList.contains("ic") || e.target.classList.contains("logo")))) {
+    e.preventDefault();
+  }
+});
 
 const ROUTES = [
   { id: "overview", icon: "overview", group: "nav.main", page: overview },
@@ -33,17 +56,46 @@ const ROUTES = [
   { id: "insights", icon: "insights", group: "nav.tools", page: insightsPage },
   { id: "share", icon: "share", group: "nav.tools", page: sharePage },
   { id: "system", icon: "system", group: "nav.tools", page: system },
+  { id: "policies", icon: "shield", group: "nav.tools", page: policyPage },
+  { id: "auditlog", icon: "clipboard", group: "nav.tools", page: auditLogPage },
+  { id: "rbac", icon: "shield", group: "nav.tools", page: rbacPage },
+  { id: "system-tools", icon: "settings", group: "nav.tools", page: systemToolsPage },
 ];
-const store = createStore({ authed: null, dashboard: null, live: false, route: "overview", navOpen: false });
+
+// ---- Composition root ----
+let container = null;
+let dashboardStore, prefsStore, liveStore, hooks;
+try {
+  container = getContainer();
+  if (!container) throw new Error("getContainer returned null/undefined");
+  if (!container.stores) throw new Error("container.stores is " + typeof container.stores);
+  if (!container.stores.dashboard) throw new Error("container.stores.dashboard is " + typeof container.stores.dashboard);
+  dashboardStore = container.stores.dashboard;
+  prefsStore = container.stores.prefs;
+  liveStore = container.stores.live;
+  hooks = container.hooks;
+  window.__qm_hooks = hooks;
+  window.__qm_store = dashboardStore;
+  window.__qm_prefs = prefsStore;
+  window.__qm_live = liveStore;
+} catch (e) {
+  document.getElementById("root").innerHTML = `<div style="padding:20px;color:red"><h3>Initialization Error</h3><pre>${e.message}</pre></div>`;
+  throw e;
+}
+
+// Expose hooks globally for pages that haven't been migrated yet
+
+const store = dashboardStore; // alias for backward compatibility in this file
 let stopLive = null, offTimer = null;
 
 const routeId = () => { const id = location.hash.replace(/^#\/?/, ""); return ROUTES.some((r) => r.id === id) ? id : "overview"; };
 const go = (id) => { location.hash = "#/" + id; };
-const refresh = async () => { try { store.set({ dashboard: await api.get("/api/dashboard") }); } catch { /* 401 handled */ } };
+const refresh = async () => { try { dashboardStore.setDashboard(await api.get("/api/dashboard")); } catch { /* 401 handled */ } };
 
 let loginPw = "";   // password kept in memory between the password and the 2FA step
 let loginBusy = false;   // one login request at a time, across every re-render
 let loginEpoch = 0;      // a response from an older screen must never redraw a newer one
+
 function renderLogin(step = "password", error = "") {
   const epoch = ++loginEpoch;
   const pw = h("input", { class: "input", type: "password", autocomplete: "current-password", "aria-label": t("login.password"), placeholder: t("login.password") });
@@ -90,12 +142,13 @@ function sidebar(s) {
     h("nav", { class: "nav", "aria-label": "Main" }, groups.map((g) => h("div", { class: "nav-group" }, h("div", { class: "nav-glabel" }, t(g.k)),
       g.items.map((r) => h("a", { class: "nav-i" + (s.route === r.id ? " on" : ""), href: "#/" + r.id, title: t("nav." + r.id), "aria-current": s.route === r.id ? "page" : null, onclick: () => store.set({ navOpen: false }) },
         icon(r.icon), h("span", { class: "nav-t" }, t("nav." + r.id)),
-        r.count && s.dashboard ? h("span", { class: "nav-badge" }, num(s.dashboard.users.filter((u) => !u.protected).length, 0)) : null))))),
+        r.count && s.dashboard ? h("span", { class: "nav-badge" }, num(s.dashboard.users.filter((u) => !u.protected).length, 0)) : null)))))),
     b ? h("div", { class: "side-meter" }, h("div", { class: "sm-top" }, h("span", {}, t("side.bundle")), h("b", {}, num(pct, 0) + "%")),
-      bar(pct), h("div", { class: "sm-sub" }, `${num(Math.max(0, b.remaining_gb))} ${t("common.gb")} ${t("side.left")}`)) : null,
+      h("div", { class: "bar" }, h("i", { style: { width: `${Math.min(100, Math.max(0, pct))}%` } })),
+      h("div", { class: "sm-sub" }, `${num(Math.max(0, b.remaining_gb))} ${t("common.gb")} ${t("side.left")}`)) : null,
     h("div", { class: "side-foot" }, h("span", { class: "av", style: { background: "linear-gradient(135deg,var(--accent),var(--accent-2))", color: "var(--accent-ink)" } }, "A"),
       h("div", { class: "who" }, h("b", {}, "Admin"), h("span", {}, h("i", { class: "dot " + (s.live ? "ok" : "") }), s.live ? t("common.live") : t("common.offline"))),
-      h("button", { type: "button", class: "icon-btn", "aria-label": t("common.logout"), title: t("common.logout"), onclick: logout }, icon("logout", 16))));
+      h("button", { type: "button", class: "icon-btn", "aria-label": t("common.logout"), title: t("common.logout"), onclick: logout }, icon("logout", 16)));
 }
 
 async function logout() { try { await api.post("/api/logout"); } catch { /* ignore */ } if (stopLive) stopLive(); stopLive = null; store.set({ authed: false, dashboard: null, live: false }); }
@@ -104,7 +157,7 @@ let lastRoute = null;
 function renderShell() {
   const s = store.get();
   const route = ROUTES.find((r) => r.id === s.route);
-  const ctx = { dashboard: s.dashboard, live: s.live, getDashboard: () => store.get().dashboard, refresh, rerender, touch: () => store.set({}) };
+  const ctx = { dashboard: s.dashboard, live: s.live, getDashboard: () => store.get().dashboard, refresh, rerender, touch: () => store.set({}), hooks };
   const page = route.page(ctx, { icon: route.icon });
   if (lastRoute !== s.route) { page.classList.add("enter"); lastRoute = s.route; }
   const dark = effTheme() === "dark", lang = getLang();
@@ -130,25 +183,17 @@ function rerender(full) { if (full) { setLang(getPrefs().lang); document.title =
 let hiddenDirty = false;
 document.addEventListener("visibilitychange", () => { if (!document.hidden && hiddenDirty && store.get().authed) { hiddenDirty = false; drawChanged(null, store.get()); } });
 function drawChanged(prev, s) {
-  // A background tab never repaints; it draws once when it comes back.
   if (document.hidden && document.querySelector(".shell")) { hiddenDirty = true; return; }
-  // A live snapshot only needs the page + drawer refreshed; keep scroll and focus untouched.
   const sc = window.scrollY;
   const active = document.activeElement;
   const typing = active && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName);
-  // never rebuild under someone's cursor - but the very first draw after signing in must happen
-  // even when a first-run dialog already holds focus, otherwise the login card stays underneath.
-  if (typing && document.querySelector(".shell")) { refreshDrawer(); return; }
+  if (typing && document.querySelector(".shell")) { return; }
   renderShell();
   window.scrollTo(0, sc);
-  refreshDrawer();
 }
 
 let loginShown = false;
 store.subscribe((s) => {
-  // Draw the login page only when we ENTER the signed-out state. Any later
-  // store.set (live-status timers, a late 401) must not rebuild it: that threw
-  // the user back from the 2FA step to the password step while typing.
   if (s.authed === false) { if (!loginShown) { loginShown = true; renderLogin(); } return; }
   loginShown = false;
   if (s.authed) drawChanged(null, s);
@@ -160,15 +205,14 @@ async function boot() {
   if (!me.authenticated) { store.set({ authed: false }); return; }
   store.set({ authed: true, route: routeId() });
   await refresh();
-  maybeWelcome(refresh);
+  maybeWelcome(refresh, ctx);
   startLiveShare();
-  // Identical snapshots (nothing changed in the last 5 s) are dropped instead of rebuilding the page.
   let lastSnap = "";
   if (!stopLive) stopLive = startLive((snap) => { let j = ""; try { j = JSON.stringify(snap); } catch { /* draw anyway */ } if (j && j === lastSnap) return; lastSnap = j; store.set({ dashboard: snap }); }, (live) => { clearTimeout(offTimer); if (live) store.set({ live: true }); else offTimer = setTimeout(() => store.set({ live: false }), 2500); });
 }
 
-setUnauthorizedHandler(() => { if (stopLive) stopLive(); stopLive = null; closeDrawer(); store.set({ authed: false, dashboard: null, live: false }); });
-window.addEventListener("hashchange", () => { if (store.get().authed) { closeDrawer(); store.set({ route: routeId(), navOpen: false }); } });
+setUnauthorizedHandler(() => { if (stopLive) stopLive(); stopLive = null; closeDrawer(); closeDialog(); store.set({ authed: false, dashboard: null, live: false }); });
+window.addEventListener("hashchange", () => { if (store.get().authed) { closeDrawer(); closeDialog(); store.set({ route: routeId(), navOpen: false }); } });
 
 // A chosen <select> keeps focus, which would pause live refresh; release it once a value is picked.
 document.addEventListener("change", (e) => { if (e.target && e.target.tagName === "SELECT") setTimeout(() => e.target.blur(), 0); });

@@ -26,7 +26,7 @@ import logging
 import re
 import socket
 import struct
-from typing import Callable
+from typing import Any, Callable
 
 from quota.engine import RogueHost
 from quota.nftables import resolve_local_networks
@@ -166,7 +166,7 @@ class ArpScanner:
     (``asyncio.to_thread``) on a slow cadence (60 s — not the 15 s tick).
     """
 
-    def __init__(self, cfg, run_command: RunCommand | None = None,
+    def __init__(self, cfg: Any, run_command: RunCommand | None = None,
                  probe: Probe | None = None) -> None:
         self._run = run_command or _default_run_command
         self._probe = probe or self._default_probe

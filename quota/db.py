@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -446,6 +447,45 @@ CREATE TABLE IF NOT EXISTS dns_presets (
     scope_id     INTEGER,
     domain_count INTEGER NOT NULL DEFAULT 0,
     updated_at   REAL NOT NULL DEFAULT 0
+);
+
+-- Unified Policy Engine: declarative access-control policies evaluated by
+-- quota/policy_engine.PolicyEngine. Each row is one policy (scope, target,
+-- action, schedule, priority) with a JSON-serialized conditions list.
+CREATE TABLE IF NOT EXISTS policies (
+    id              TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    description     TEXT NOT NULL DEFAULT '',
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    scope_type      TEXT NOT NULL DEFAULT 'global',
+    scope_targets   TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    target_type     TEXT NOT NULL DEFAULT 'app',
+    target_values   TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    action          TEXT NOT NULL DEFAULT 'block',
+    action_params   TEXT NOT NULL DEFAULT '{}',   -- JSON object
+    conditions      TEXT NOT NULL DEFAULT '[]',   -- JSON array of {field,operator,value}
+    schedule        TEXT NOT NULL DEFAULT '{}',   -- JSON object
+    priority        INTEGER NOT NULL DEFAULT 0,
+    exceptions      TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    expires_at      TEXT NOT NULL DEFAULT '',
+    enforcement_method TEXT NOT NULL DEFAULT 'dns',
+    log_enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at      TEXT NOT NULL DEFAULT '',
+    updated_at      TEXT NOT NULL DEFAULT '',
+    created_by      TEXT NOT NULL DEFAULT 'admin',
+    tags            TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    UNIQUE(name)
+);
+
+-- Policy audit log: records who changed what policy and when.
+CREATE TABLE IF NOT EXISTS policy_audit_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    action     TEXT NOT NULL,        -- create, update, delete
+    policy_id  TEXT NOT NULL,
+    policy_name TEXT NOT NULL,
+    actor      TEXT NOT NULL DEFAULT 'admin',
+    details    TEXT NOT NULL DEFAULT '{}',   -- JSON object
+    created_at TEXT NOT NULL DEFAULT ''
 );
 
 -- Static DHCP reservations (MAC <-> fixed IP mapping)
@@ -2216,4 +2256,365 @@ def _row_to_vpn_routing_rule(row: Any) -> VpnRoutingRule:
         target_id=int(row["target_id"]),
         route_vpn=bool(row["route_vpn"]),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Policy persistence (Unified Policy Engine)
+# --------------------------------------------------------------------------- #
+
+async def policy_row_to_dict(row: Any) -> dict[str, Any]:
+    import json
+    return {
+        "id": str(row["id"]),
+        "name": str(row["name"]),
+        "description": str(row["description"] or ""),
+        "enabled": bool(row["enabled"]),
+        "scope_type": str(row["scope_type"]),
+        "scope_targets": json.loads(row["scope_targets"] or "[]"),
+        "target_type": str(row["target_type"]),
+        "target_values": json.loads(row["target_values"] or "[]"),
+        "action": str(row["action"]),
+        "action_params": json.loads(row["action_params"] or "{}"),
+        "conditions": json.loads(row["conditions"] or "[]"),
+        "schedule": json.loads(row["schedule"] or "{}"),
+        "priority": int(row["priority"] or 0),
+        "exceptions": json.loads(row["exceptions"] or "[]"),
+        "expires_at": str(row["expires_at"] or ""),
+        "enforcement_method": str(row["enforcement_method"]),
+        "log_enabled": bool(row["log_enabled"]),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+        "created_by": str(row["created_by"] or "admin"),
+        "tags": json.loads(row["tags"] or "[]"),
+    }
+
+
+async def save_policy(db: "Database", policy: dict[str, Any]) -> str:
+    """Insert or update a policy in the database. Returns the policy id."""
+    import json
+    import datetime as _dt
+    now = _dt.datetime.now().astimezone().isoformat()
+    pid = policy.get("id") or f"pol_{_dt.datetime.now().timestamp():.0f}"
+    await db.conn.execute(
+        """INSERT INTO policies (id, name, description, enabled, scope_type,
+            scope_targets, target_type, target_values, action, action_params,
+            conditions, schedule, priority, exceptions, expires_at,
+            enforcement_method, log_enabled, created_at, updated_at,
+            created_by, tags)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+            name=excluded.name, description=excluded.description,
+            enabled=excluded.enabled, scope_type=excluded.scope_type,
+            scope_targets=excluded.scope_targets, target_type=excluded.target_type,
+            target_values=excluded.target_values, action=excluded.action,
+            action_params=excluded.action_params, conditions=excluded.conditions,
+            schedule=excluded.schedule, priority=excluded.priority,
+            exceptions=excluded.exceptions, expires_at=excluded.expires_at,
+            enforcement_method=excluded.enforcement_method,
+            log_enabled=excluded.log_enabled, updated_at=excluded.updated_at,
+            created_by=excluded.created_by, tags=excluded.tags""",
+        (
+            pid,
+            policy.get("name", ""),
+            policy.get("description", ""),
+            1 if policy.get("enabled", True) else 0,
+            policy.get("scope_type", "global"),
+            json.dumps(policy.get("scope_targets", [])),
+            policy.get("target_type", "app"),
+            json.dumps(policy.get("target_values", [])),
+            policy.get("action", "block"),
+            json.dumps(policy.get("action_params", {})),
+            json.dumps(policy.get("conditions", [])),
+            json.dumps(policy.get("schedule", {})),
+            int(policy.get("priority", 0)),
+            json.dumps(policy.get("exceptions", [])),
+            str(policy.get("expires_at", "")),
+            policy.get("enforcement_method", "dns"),
+            1 if policy.get("log_enabled", True) else 0,
+            policy.get("created_at", now),
+            now,
+            policy.get("created_by", "admin"),
+            json.dumps(policy.get("tags", [])),
+        ),
+    )
+    await db.conn.commit()
+    return pid
+
+
+async def list_policies(db: "Database", enabled_only: bool = False) -> list[dict[str, Any]]:
+    """Return all policies (optionally only enabled ones), newest first."""
+    import json
+    if enabled_only:
+        cur = await db.conn.execute(
+            "SELECT * FROM policies WHERE enabled = 1 ORDER BY priority DESC, name ASC"
+        )
+        rows = await cur.fetchall()
+    else:
+        cur = await db.conn.execute(
+            "SELECT * FROM policies ORDER BY priority DESC, name ASC"
+        )
+        rows = await cur.fetchall()
+    return [await policy_row_to_dict(r) for r in rows]
+
+
+async def get_policy(db: "Database", policy_id: str) -> dict[str, Any] | None:
+    """Return a single policy by id, or None if not found."""
+    cur = await db.conn.execute(
+        "SELECT * FROM policies WHERE id = ?", (policy_id,)
+    )
+    row = await cur.fetchone()
+    return await policy_row_to_dict(row) if row else None
+
+
+async def delete_policy(db: "Database", policy_id: str) -> bool:
+    """Delete a policy by id. Returns True if deleted."""
+    cur = await db.conn.execute("DELETE FROM policies WHERE id = ?", (policy_id,))
+    await db.conn.commit()
+    return cur.rowcount > 0
+
+
+# --------------------------------------------------------------------------- #
+# Policy audit log
+# --------------------------------------------------------------------------- #
+
+async def audit_policy_log(db: "Database", action: str, policy_id: str, policy_name: str,
+                           actor: str = "admin", details: dict | None = None) -> None:
+    """Record an audit entry for a policy change."""
+    import json
+    import datetime as _dt
+    now = _dt.datetime.now().astimezone().isoformat()
+    await db.conn.execute(
+        """INSERT INTO policy_audit_log (action, policy_id, policy_name, actor, details, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (action, policy_id, policy_name, actor, json.dumps(details or {}), now),
+    )
+    await db.conn.commit()
+
+
+async def list_audit_log(db: "Database", limit: int = 100) -> list[dict[str, Any]]:
+    """Return recent audit log entries, newest first."""
+    import json
+    cur = await db.conn.execute(
+        "SELECT * FROM policy_audit_log ORDER BY created_at DESC LIMIT ?", (limit,)
+    )
+    rows = await cur.fetchall()
+    return [
+        {
+            "id": str(r["id"]),
+            "action": str(r["action"]),
+            "policy_id": str(r["policy_id"]),
+            "policy_name": str(r["policy_name"]),
+            "actor": str(r["actor"]),
+            "details": json.loads(r["details"] or "{}"),
+            "created_at": str(r["created_at"] or ""),
+        }
+        for r in rows
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# RBAC — Role-Based Access Control for admin users
+# --------------------------------------------------------------------------- #
+
+async def init_rbac_tables(db: "Database") -> None:
+    """Create RBAC tables if they don't exist."""
+    await db.conn.execute("""
+        CREATE TABLE IF NOT EXISTS admin_roles (
+            role_id   TEXT PRIMARY KEY,
+            role_name TEXT NOT NULL UNIQUE,
+            description TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT ''
+        )
+    """)
+    await db.conn.execute("""
+        CREATE TABLE IF NOT EXISTS admin_user_roles (
+            user_id   TEXT NOT NULL,
+            role_id   TEXT NOT NULL,
+            assigned_at TEXT NOT NULL DEFAULT '',
+            assigned_by TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (user_id, role_id),
+            FOREIGN KEY (role_id) REFERENCES admin_roles(role_id) ON DELETE CASCADE
+        )
+    """)
+    await db.conn.execute("""
+        CREATE TABLE IF NOT EXISTS role_permissions (
+            role_id     TEXT NOT NULL,
+            permission  TEXT NOT NULL,
+            PRIMARY KEY (role_id, permission),
+            FOREIGN KEY (role_id) REFERENCES admin_roles(role_id) ON DELETE CASCADE
+        )
+    """)
+    await db.conn.commit()
+
+
+async def rbac_create_role(db: "Database", role_id: str, role_name: str, description: str = "") -> bool:
+    """Create a new admin role."""
+    import datetime as _dt
+    now = _dt.datetime.now().astimezone().isoformat()
+    try:
+        await db.conn.execute(
+            "INSERT INTO admin_roles (role_id, role_name, description, created_at) VALUES (?, ?, ?, ?)",
+            (role_id, role_name, description, now),
+        )
+        await db.conn.commit()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def rbac_assign_role(db: "Database", user_id: str, role_id: str, assigned_by: str = "admin") -> bool:
+    """Assign a role to a user."""
+    import datetime as _dt
+    now = _dt.datetime.now().astimezone().isoformat()
+    try:
+        await db.conn.execute(
+            "INSERT OR REPLACE INTO admin_user_roles (user_id, role_id, assigned_at, assigned_by) VALUES (?, ?, ?, ?)",
+            (user_id, role_id, now, assigned_by),
+        )
+        await db.conn.commit()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def rbac_grant_permission(db: "Database", role_id: str, permission: str) -> bool:
+    """Grant a permission to a role."""
+    try:
+        await db.conn.execute(
+            "INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES (?, ?)",
+            (role_id, permission),
+        )
+        await db.conn.commit()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def rbac_user_has_permission(db: "Database", user_id: str, permission: str) -> bool:
+    """Check if a user has a specific permission through any of their roles."""
+    cur = await db.conn.execute("""
+        SELECT rp.permission FROM role_permissions rp
+        JOIN admin_user_roles aur ON aur.role_id = rp.role_id
+        WHERE aur.user_id = ?
+    """, (user_id,))
+    rows = await cur.fetchall()
+    return any(r[0] == permission for r in rows)
+
+
+async def rbac_user_roles(db: "Database", user_id: str) -> list[str]:
+    """Return list of role names for a user."""
+    rows = (await db.conn.execute("""
+        SELECT ar.role_name FROM admin_roles ar
+        JOIN admin_user_roles aur ON aur.role_id = ar.role_id
+        WHERE aur.user_id = ?
+    """, (user_id,))).fetchall()
+    return [r[0] for r in rows]
+
+
+# --------------------------------------------------------------------------- #
+# Device Groups — policies can target a group of devices
+# --------------------------------------------------------------------------- #
+
+async def init_device_group_tables(db: "Database") -> None:
+    """Create device_groups and device_group_members tables."""
+    await db.conn.execute("""
+        CREATE TABLE IF NOT EXISTS device_groups (
+            group_id    TEXT PRIMARY KEY,
+            group_name  TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL DEFAULT '',
+            created_by  TEXT NOT NULL DEFAULT 'admin'
+        )
+    """)
+    await db.conn.execute("""
+        CREATE TABLE IF NOT EXISTS device_group_members (
+            group_id  TEXT NOT NULL,
+            device_id TEXT NOT NULL,   -- MAC address or device id
+            added_at  TEXT NOT NULL DEFAULT '',
+            added_by  TEXT NOT NULL DEFAULT 'admin',
+            PRIMARY KEY (group_id, device_id),
+            FOREIGN KEY (group_id) REFERENCES device_groups(group_id) ON DELETE CASCADE
+        )
+    """)
+    await db.conn.commit()
+
+
+async def dg_create_group(db: "Database", group_id: str, group_name: str,
+                          description: str = "", created_by: str = "admin") -> bool:
+    """Create a device group."""
+    import datetime as _dt
+    now = _dt.datetime.now(timezone.utc).isoformat()
+    try:
+        await db.conn.execute(
+            "INSERT INTO device_groups (group_id, group_name, description, created_at, created_by) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (group_id, group_name, description, now, created_by),
+        )
+        await db.conn.commit()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def dg_add_device(db: "Database", group_id: str, device_id: str,
+                        added_by: str = "admin") -> bool:
+    """Add a device to a group."""
+    import datetime as _dt
+    now = _dt.datetime.now(timezone.utc).isoformat()
+    try:
+        await db.conn.execute(
+            "INSERT OR IGNORE INTO device_group_members (group_id, device_id, added_at, added_by) "
+            "VALUES (?, ?, ?, ?)",
+            (group_id, device_id, now, added_by),
+        )
+        await db.conn.commit()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def dg_remove_device(db: "Database", group_id: str, device_id: str) -> bool:
+    """Remove a device from a group."""
+    cur = await db.conn.execute(
+        "DELETE FROM device_group_members WHERE group_id = ? AND device_id = ?",
+        (group_id, device_id),
+    )
+    await db.conn.commit()
+    return cur.rowcount > 0
+
+
+async def dg_list_groups(db: "Database") -> list[dict[str, Any]]:
+    """List all device groups with member counts."""
+    import json
+    cur = await db.conn.execute("SELECT group_id, group_name, description, created_at, created_by FROM device_groups")
+    rows = await cur.fetchall()
+    result = []
+    for r in rows:
+        group_id = r[0]
+        cur2 = await db.conn.execute("SELECT COUNT(*) FROM device_group_members WHERE group_id = ?", (group_id,))
+        row2 = await cur2.fetchone()
+        member_count = int(row2[0]) if row2 else 0
+        result.append({
+            "group_id": group_id,
+            "group_name": r[1],
+            "description": r[2],
+            "created_at": r[3],
+            "created_by": r[4],
+            "member_count": int(member_count),
+        })
+    return result
+
+
+async def dg_list_members(db: "Database", group_id: str) -> list[dict[str, str]]:
+    """List members of a device group."""
+    cur = await db.conn.execute("SELECT device_id, added_at, added_by FROM device_group_members WHERE group_id = ?", (group_id,))
+    rows = await cur.fetchall()
+    return [{"device_id": r[0], "added_at": r[1], "added_by": r[2]} for r in rows]
+
+
+async def dg_delete_group(db: "Database", group_id: str) -> bool:
+    """Delete a device group and its members."""
+    cur = await db.conn.execute("DELETE FROM device_groups WHERE group_id = ?", (group_id,))
+    await db.conn.commit()
+    return cur.rowcount > 0
 

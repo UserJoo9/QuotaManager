@@ -1,16 +1,31 @@
 import { h } from "../core/dom.js";
 import { t, num } from "../core/i18n.js";
-import { api } from "../core/api.js";
 import { actions } from "../core/actions.js";
 import { sw, chip, bar } from "./ui.js";
 
-// Pending (unsaved) heavy-day edits and the last preview survive the drawer's live rebuilds.
+// Pending (unsaved) heavy-day edits and the last preview survive the drawer's live rebuilds, keyed by user id.
 const heavyDraft = new Map(), previews = new Map();
+// Preview schedule rows shown at most this many; the rest get a "+N days" summary chip.
+const PREVIEW_ROWS = 8;
 
+/** "12 Oct" label from an ISO date. */
 const fmtDay = (iso) => { const [y, m, d] = iso.split("-").map(Number); return new Date(y, m - 1, d).toLocaleDateString(undefined, { month: "short", day: "numeric" }); };
+/** "HH:MM" from an ISO timestamp, or "" when it cannot be parsed. */
 const fmtTime = (iso) => { try { return new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }); } catch { return ""; } };
 
-// Today's numbers + the reason when the daily limit is what cut the person.
+/** A label + control row with an optional hint line underneath. `hint` may be a string or a node. */
+const field = (label, control, hint) => {
+  const hHint = hint == null ? null : (typeof hint === "string" ? h("span", { class: "sub" }, hint) : hint);
+  return h("div", { class: "field" }, h("label", {}, label), control, hHint);
+};
+/** An <option> for a quota <select>; `dis` disables it (e.g. spread without a bundle end). */
+const opt = (v, label, cur, dis) => h("option", { value: v, selected: cur === v, disabled: !!dis }, label);
+
+/**
+ * Today's numbers + the reason when the daily limit is what cut the person.
+ * @param {object} u - user with a `daily` object
+ * @returns {Node|null}
+ */
 export function dailyToday(u) {
   const q = u.daily;
   if (!q || !q.active) return null;
@@ -20,8 +35,15 @@ export function dailyToday(u) {
     q.blocked ? h("span", { class: "sub" }, `${t("dq.reached")} · ${t("dq.back")} ${fmtTime(q.resets_at)}`) : null);
 }
 
-// The "Daily plan" section of a person's drawer. `run(fn, okMsg)` is the drawer's toast+refresh wrapper.
-export function dailySection(u, dash, run) {
+/**
+ * The "Daily plan" section of a person's drawer. `run(fn, okMsg)` is the drawer's toast+refresh wrapper.
+ * @param {object} u
+ * @param {object} dash
+ * @param {(fn:Function, msg?:string) => Function} run
+ * @param {object} ctx
+ * @returns {Node|null}
+ */
+export function dailySection(u, dash, run, ctx) {
   if (u.protected) return null;
   const q = u.daily || { mode: "off", gb: 0, carry: "spread", split: "open", heavy: {}, self_edit: false };
   const head = h("h4", {}, t("dq.title"));
@@ -29,12 +51,11 @@ export function dailySection(u, dash, run) {
   if (!dash.daily_enabled) return h("div", { class: "dr-sec" }, head, h("p", { class: "sub" }, t("dq.disabled")));
 
   const hasEnd = !!(dash.bundle && dash.bundle.period_end);
-  const opt = (v, label, cur, dis) => h("option", { value: v, selected: cur === v, disabled: !!dis }, label);
-  const mode = h("select", { class: "select" }, [opt("off", t("dq.mode.off"), q.mode), opt("fixed", t("dq.mode.fixed"), q.mode), opt("spread", t("dq.mode.spread") + (hasEnd ? "" : ` (${t("dq.mode.spread.need")})`), q.mode, !hasEnd)]);
+  const mode = h("select", { class: "select" }, [opt("off", t("dq.mode.off"), q.mode), opt("fixed", t("dq.mode.fixed"), q.mode), opt("spread", t("dq.mode.spread") + (hasEnd ? "" : ` (${t("dq.mode.spread.need")})`)), q.mode, !hasEnd)]);
   const gb = h("input", { class: "input", type: "number", min: "0", step: "any", value: String(q.gb || 0), inputmode: "decimal", "aria-label": t("dq.gb") });
   const carry = h("select", { class: "select" }, ["next_day", "spread"].map((v) => opt(v, t("dq.carry." + v), q.carry)));
   const split = h("select", { class: "select" }, ["open", "equal", "fixed"].map((v) => opt(v, t("dq.split." + v), q.split)));
-  const gbField = h("div", { class: "field" }, h("label", {}, t("dq.gb")), gb);
+  const gbField = field(t("dq.gb"), gb);
   const splitHint = h("span", { class: "sub" }, t("dq.split.fixed.hint"));
   const sync = () => { gbField.hidden = mode.value !== "fixed"; splitHint.hidden = split.value !== "fixed"; };
   mode.addEventListener("change", sync); split.addEventListener("change", sync); sync();
@@ -46,8 +67,7 @@ export function dailySection(u, dash, run) {
   const paint = () => {
     const days = Object.keys(heavy).sort();
     list.replaceChildren(...(days.length ? days.map((d) => h("span", { class: "chip" }, `${fmtDay(d)} · ${num(heavy[d])} ${t("common.gb")}`,
-      h("button", { type: "button", class: "dq-x", "aria-label": t("dq.heavy.del"), onclick: () => { delete heavy[d]; paint(); } }, "×")))
-      : [h("span", { class: "sub" }, t("dq.heavy.none"))]));
+      h("button", { type: "button", class: "dq-x", "aria-label": t("dq.heavy.del"), onclick: () => { delete heavy[d]; paint(); } }, "×"))) : [h("span", { class: "sub" }, t("dq.heavy.none")])]));
   };
   paint();
   const today = new Date(), min = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
@@ -66,7 +86,7 @@ export function dailySection(u, dash, run) {
     if (!p) { box.replaceChildren(); return; }
     if (p.error) { box.replaceChildren(h("p", { class: "banner warn", role: "alert" }, p.error)); return; }
     if (!p.schedule || !p.schedule.length) { box.replaceChildren(); return; }
-    const rows = p.schedule.slice(0, 8);
+    const rows = p.schedule.slice(0, PREVIEW_ROWS);
     box.replaceChildren(
       h("div", { class: "kv" },
         h("div", {}, h("span", { class: "k" }, t("dq.prev.today")), h("span", { class: "v" }, `${num(p.cap_gb)} ${t("common.gb")}`)),
@@ -79,7 +99,7 @@ export function dailySection(u, dash, run) {
     const f = form();
     if (f.daily_mode === "off") { previews.delete(u.id); paintPreview(null); return; }
     try {
-      const p = await api.post(`/api/users/${u.id}/daily-plan/preview`, { mode: f.daily_mode, daily_gb: f.daily_gb, carry: f.daily_carry, split: f.daily_split, heavy: f.daily_heavy });
+      const p = await ctx.hooks.useDailyPlan().previewDailyPlan(u.id, { mode: f.daily_mode, daily_gb: f.daily_gb, carry: f.daily_carry, split: f.daily_split, heavy: f.daily_heavy });
       previews.set(u.id, p); paintPreview(p);
     } catch (e) { paintPreview({ error: e.message }); }
   };
@@ -92,9 +112,9 @@ export function dailySection(u, dash, run) {
 
   return h("div", { class: "dr-sec" }, head,
     q.active ? dailyToday(u) : null,
-    h("div", { class: "field" }, h("label", {}, t("dq.mode")), mode, !hasEnd ? h("span", { class: "sub" }, t("dq.mode.spread.no")) : null), gbField,
-    h("div", { class: "field" }, h("label", {}, t("dq.carry")), carry),
-    h("div", { class: "field" }, h("label", {}, t("dq.split")), split),
+    field(t("dq.mode"), mode, !hasEnd ? h("span", { class: "sub" }, t("dq.mode.spread.no")) : null), gbField,
+    field(t("dq.carry"), carry),
+    field(t("dq.split"), split),
     splitHint,
     h("div", { class: "field" }, h("label", {}, t("dq.heavy")), list,
       h("div", { class: "dq-add" }, dayIn, dayGb, h("button", { type: "button", class: "btn sm", onclick: addHeavy }, t("dq.heavy.add"))),
@@ -104,6 +124,12 @@ export function dailySection(u, dash, run) {
 }
 
 // Fixed-share GB of one device (only meaningful when its owner's split is "fixed").
+/**
+ * @param {object} d
+ * @param {object} u
+ * @param {(fn:Function, msg?:string) => Function} run
+ * @returns {Node|null}
+ */
 export function deviceShare(d, u, run) {
   if (!u.daily || u.daily.mode === "off" || u.daily.split !== "fixed") return null;
   const share = h("input", { class: "input", type: "number", min: "0", step: "any", value: String(d.daily_share_gb || 0), inputmode: "decimal", "aria-label": t("dq.share") });
@@ -114,16 +140,27 @@ export function deviceShare(d, u, run) {
 }
 
 // Master switch card for the Quota page.
+/**
+ * @param {boolean} on
+ * @param {Function} toggle
+ * @returns {HTMLElement}
+ */
 export function dailyMasterCard(on, toggle) {
   return h("section", { class: "card c12" },
-    h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("dq.master")), h("span", { class: "sub" }, t("dq.master.d"))), on ? chip("ok", t("common.active")) : null),
+    h("header", { class: "card-h" }, h("div", {}, h("h2", {}, t("dq.master")), h("span", { class: "sub" }, t("dq.master.d"))), on ? chip("ok", t("common.active")) : null),
     h("div", { class: "row-sw" }, h("div", {}, h("b", {}, t("dq.master.sw")), h("span", {}, t("dq.master.sw.d"))), sw(on, t("dq.master.sw"), toggle)));
 }
 
 // "Open for everyone when everyone is out of quota" switch for the Quota page.
+/**
+ * @param {boolean} enabled
+ * @param {boolean} active
+ * @param {Function} toggle
+ * @returns {HTMLElement}
+ */
 export function freeModeCard(enabled, active, toggle) {
   return h("section", { class: "card c12" },
-    h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("fm.title")), h("span", { class: "sub" }, t("fm.d"))), active ? chip("warn", t("fm.active")) : null),
+    h("header", { class: "card-h" }, h("div", {}, h("h2", {}, t("fm.title")), h("span", { class: "sub" }, t("fm.d"))), active ? chip("warn", t("fm.active")) : null),
     active ? h("p", { class: "banner warn", role: "status" }, t("fm.active.d")) : null,
     h("div", { class: "row-sw" }, h("div", {}, h("b", {}, t("fm.sw")), h("span", {}, t("fm.sw.d"))), sw(enabled, t("fm.sw"), toggle)));
 }

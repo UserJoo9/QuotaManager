@@ -36,6 +36,12 @@ def _safe_b64decode(s: str) -> str:
     return base64.b64decode(s.encode("utf-8")).decode("utf-8", errors="replace")
 
 
+def _param(params: dict[str, list[str]], key: str, default: str = "") -> str:
+    """Return the first value for ``key`` in a parsed query string."""
+    vals = params.get(key, [])
+    return vals[0] if vals else default
+
+
 def parse_vless(uri: str) -> tuple[str, dict[str, Any]]:
     """Parse vless:// link into (name, outbound_dict)."""
     parsed = urlparse(uri)
@@ -54,20 +60,16 @@ def parse_vless(uri: str) -> tuple[str, dict[str, Any]]:
     name = unquote(parsed.fragment).strip() if parsed.fragment else f"VLESS-{host}:{port}"
     params = parse_qs(parsed.query)
 
-    def get_p(key: str, default: str = "") -> str:
-        vals = params.get(key, [])
-        return vals[0] if vals else default
-
-    transport_type = get_p("type", "tcp").lower()
-    security = get_p("security", "none").lower()
-    flow = get_p("flow", "")
-    sni = get_p("sni", "")
-    fp = get_p("fp", "")
-    pbk = get_p("pbk", "")
-    sid = get_p("sid", "")
-    path = get_p("path", "/")
-    ws_host = get_p("host", "")
-    service_name = get_p("serviceName", "")
+    transport_type = _param(params, "type", "tcp").lower()
+    security = _param(params, "security", "none").lower()
+    flow = _param(params, "flow", "")
+    sni = _param(params, "sni", "")
+    fp = _param(params, "fp", "")
+    pbk = _param(params, "pbk", "")
+    sid = _param(params, "sid", "")
+    path = _param(params, "path", "/")
+    ws_host = _param(params, "host", "")
+    service_name = _param(params, "serviceName", "")
 
     outbound: dict[str, Any] = {
         "type": "vless",
@@ -192,14 +194,10 @@ def parse_trojan(uri: str) -> tuple[str, dict[str, Any]]:
     name = unquote(parsed.fragment).strip() if parsed.fragment else f"Trojan-{host}:{port}"
     params = parse_qs(parsed.query)
 
-    def get_p(key: str, default: str = "") -> str:
-        vals = params.get(key, [])
-        return vals[0] if vals else default
-
-    sni = get_p("sni", "")
-    transport_type = get_p("type", "tcp").lower()
-    path = get_p("path", "/")
-    ws_host = get_p("host", "")
+    sni = _param(params, "sni", "")
+    transport_type = _param(params, "type", "tcp").lower()
+    path = _param(params, "path", "/")
+    ws_host = _param(params, "host", "")
 
     outbound: dict[str, Any] = {
         "type": "trojan",

@@ -1,4 +1,10 @@
 // Stroke icons on a 24x24 grid (ported from the prototype; "|" separates sub-paths).
+/**
+ * Turn a prototype path string ("M..." segments separated by " M") into the "|"-separated form
+ * consumed by dom.icon().
+ * @param {string} s - prototype path data
+ * @returns {string} "|"-separated sub-paths
+ */
 const P = (s) => s.split(" M").map((x, i) => (i ? "M" + x : x)).join("|");
 export const icons = Object.fromEntries(Object.entries({
   dot: "M12 12h.01",
@@ -24,7 +30,7 @@ export const icons = Object.fromEntries(Object.entries({
   alert: "M12 3.5l9.5 16.5h-19z M12 10v4.5 M12 17.5h.01", info: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z M12 11v5 M12 8h.01",
   userplus: "M15 20v-1.5a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4V20 M8.5 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z M19 8v6 M16 11h6",
   shield: "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z", globe: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z M3 12h18 M12 3a14 14 0 0 1 0 18 M12 3a14 14 0 0 0 0 18",
-  lock: "M5 11h14v9H5z M8 11V8a4 4 0 0 1 8 0v3",
+  clipboard: "M16 3H4v2h12V3z M4 5h16v14H4V5z", lock: "M5 11h14v9H5z M8 11V8a4 4 0 0 1 8 0v3",
   logout: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4 M16 17l5-5-5-5 M21 12H9",
   menu: "M4 6h16 M4 12h16 M4 18h16",
   panel: "M15 6l-6 6 6 6",
