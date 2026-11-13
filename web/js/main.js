@@ -63,17 +63,27 @@ const ROUTES = [
 ];
 
 // ---- Composition root ----
-const container = getContainer();
-const dashboardStore = container.stores.dashboard;
-const prefsStore = container.stores.prefs;
-const liveStore = container.stores.live;
-const hooks = container.hooks;
+let container = null;
+let dashboardStore, prefsStore, liveStore, hooks;
+try {
+  container = getContainer();
+  if (!container) throw new Error("getContainer returned null/undefined");
+  if (!container.stores) throw new Error("container.stores is " + typeof container.stores);
+  if (!container.stores.dashboard) throw new Error("container.stores.dashboard is " + typeof container.stores.dashboard);
+  dashboardStore = container.stores.dashboard;
+  prefsStore = container.stores.prefs;
+  liveStore = container.stores.live;
+  hooks = container.hooks;
+  window.__qm_hooks = hooks;
+  window.__qm_store = dashboardStore;
+  window.__qm_prefs = prefsStore;
+  window.__qm_live = liveStore;
+} catch (e) {
+  document.getElementById("root").innerHTML = `<div style="padding:20px;color:red"><h3>Initialization Error</h3><pre>${e.message}</pre></div>`;
+  throw e;
+}
 
 // Expose hooks globally for pages that haven't been migrated yet
-window.__qm_hooks = hooks;
-window.__qm_store = dashboardStore;
-window.__qm_prefs = prefsStore;
-window.__qm_live = liveStore;
 
 const store = dashboardStore; // alias for backward compatibility in this file
 let stopLive = null, offTimer = null;

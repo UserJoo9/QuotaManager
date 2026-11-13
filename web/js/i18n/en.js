@@ -96,6 +96,7 @@ export default {
   "common.theme": "Switch theme",
   "sub.overview": "A live picture of your bundle and network",
   "sub.people": "people and devices on your network",
+  "rbac.sub": "Roles and permissions for administrators",
   "sub.system": "Appearance, account and updates",
   "sub.vpn": "Tunnel, nodes and who goes through it",
   "ov.live": "Live traffic",

@@ -4152,31 +4152,46 @@ def create_app(
     from quota.alerts import init_alerts_tables
     from quota.db import init_device_group_tables
     import asyncio
-    # Initialize backup tables
-    _loop = asyncio.get_event_loop()
-    _loop.run_until_complete(init_backup_tables(database))
-    # Initialize alerts tables
-    _loop.run_until_complete(init_alerts_tables(database))
-    # Initialize device group tables
-    _loop.run_until_complete(init_device_group_tables(database))
-    # Initialize RBAC tables and default roles
-    _loop.run_until_complete(init_rbac_tables(database))
-    # Create default roles if not exist
-    _loop.run_until_complete(rbac_create_role(database, "admin", "Administrator", "Full access to all policies and settings"))
-    _loop.run_until_complete(rbac_create_role(database, "editor", "Editor", "Can create, edit, and delete policies"))
-    _loop.run_until_complete(rbac_create_role(database, "viewer", "Viewer", "Read-only access to policies and audit log"))
-    _loop.run_until_complete(rbac_create_role(database, "auditor", "Auditor", "Read-only access to audit log only"))
-    # Grant permissions
+
+    def _run_async(coro):
+        """Run an async coroutine to completion.
+
+        Works in both sync and async contexts: if an event loop is already
+        running (e.g. called from _serve()), a fresh loop is used so we don't
+        hit ``RuntimeError: This event loop is already running``; otherwise the
+        running loop is used directly. This guarantees initialization completes
+        before ``create_app`` returns, so RBAC roles/permissions are ready for
+        the first request.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop — safe to use the current loop directly
+            return asyncio.get_event_loop().run_until_complete(coro)
+        # Running loop exists — use a fresh loop for this synchronous init
+        new_loop = asyncio.new_event_loop()
+        try:
+            return new_loop.run_until_complete(coro)
+        finally:
+            new_loop.close()
+
+    _run_async(init_backup_tables(database))
+    _run_async(init_alerts_tables(database))
+    _run_async(init_device_group_tables(database))
+    _run_async(init_rbac_tables(database))
+    _run_async(rbac_create_role(database, "admin", "Administrator", "Full access to all policies and settings"))
+    _run_async(rbac_create_role(database, "editor", "Editor", "Can create, edit, and delete policies"))
+    _run_async(rbac_create_role(database, "viewer", "Viewer", "Read-only access to policies and audit log"))
+    _run_async(rbac_create_role(database, "auditor", "Auditor", "Read-only access to audit log only"))
     for perm in ["policy:create", "policy:read", "policy:update", "policy:delete", "policy:simulate", "policy:view_conflicts", "audit:read", "rbac:manage"]:
-        _loop.run_until_complete(rbac_grant_permission(database, "admin", perm))
+        _run_async(rbac_grant_permission(database, "admin", perm))
     for perm in ["policy:create", "policy:read", "policy:update", "policy:delete", "policy:simulate", "policy:view_conflicts"]:
-        _loop.run_until_complete(rbac_grant_permission(database, "editor", perm))
+        _run_async(rbac_grant_permission(database, "editor", perm))
     for perm in ["policy:read", "policy:simulate", "policy:view_conflicts", "audit:read"]:
-        _loop.run_until_complete(rbac_grant_permission(database, "viewer", perm))
+        _run_async(rbac_grant_permission(database, "viewer", perm))
     for perm in ["audit:read", "policy:view_conflicts"]:
-        _loop.run_until_complete(rbac_grant_permission(database, "auditor", perm))
-    # Assign admin role to admin user
-    _loop.run_until_complete(rbac_assign_role(database, "admin", "admin", assigned_by="system"))
+        _run_async(rbac_grant_permission(database, "auditor", perm))
+    _run_async(rbac_assign_role(database, "admin", "admin", assigned_by="system"))
     init_policy_engine(database, policy_engine, enforcement_registry, current_user_id="admin")
 
     app.include_router(policy_router)
