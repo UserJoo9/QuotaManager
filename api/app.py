@@ -4146,52 +4146,50 @@ def create_app(
     enforcement_registry.register(QuotaEnforcementAdapter(service))
 
     # Initialize policy routes
-    from api.policy_routes import init_policy_engine, router as policy_router, init_rbac_tables
+    from api.policy_routes import init_policy_engine, router as policy_router
     from quota.db import rbac_create_role, rbac_grant_permission, rbac_assign_role
     from quota.backup import init_backup_tables
     from quota.alerts import init_alerts_tables
     from quota.db import init_device_group_tables
     import asyncio
 
-    def _run_async(coro):
-        """Run an async coroutine to completion.
+    async def _ensure_policy_tables() -> None:
+        """Create policy/backup/alert/device-group/RBAC tables and seed roles.
 
-        Works in both sync and async contexts: if an event loop is already
-        running (e.g. called from _serve()), a fresh loop is used so we don't
-        hit ``RuntimeError: This event loop is already running``; otherwise the
-        running loop is used directly. This guarantees initialization completes
-        before ``create_app`` returns, so RBAC roles/permissions are ready for
-        the first request.
+        Idempotent (CREATE TABLE IF NOT EXISTS, INSERT OR IGNORE / REPLACE), so
+        running it twice is harmless.
         """
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            # No running loop — safe to use the current loop directly
-            return asyncio.get_event_loop().run_until_complete(coro)
-        # Running loop exists — use a fresh loop for this synchronous init
-        new_loop = asyncio.new_event_loop()
-        try:
-            return new_loop.run_until_complete(coro)
-        finally:
-            new_loop.close()
+        from api.policy_routes import init_rbac_tables
+        await init_backup_tables(database)
+        await init_alerts_tables(database)
+        await init_device_group_tables(database)
+        await init_rbac_tables(database)
+        await rbac_create_role(database, "admin", "Administrator", "Full access to all policies and settings")
+        await rbac_create_role(database, "editor", "Editor", "Can create, edit, and delete policies")
+        await rbac_create_role(database, "viewer", "Viewer", "Read-only access to policies and audit log")
+        await rbac_create_role(database, "auditor", "Auditor", "Read-only access to audit log only")
+        for perm in ["policy:create", "policy:read", "policy:update", "policy:delete", "policy:simulate", "policy:view_conflicts", "audit:read", "rbac:manage"]:
+            await rbac_grant_permission(database, "admin", perm)
+        for perm in ["policy:create", "policy:read", "policy:update", "policy:delete", "policy:simulate", "policy:view_conflicts"]:
+            await rbac_grant_permission(database, "editor", perm)
+        for perm in ["policy:read", "policy:simulate", "policy:view_conflicts", "audit:read"]:
+            await rbac_grant_permission(database, "viewer", perm)
+        for perm in ["audit:read", "policy:view_conflicts"]:
+            await rbac_grant_permission(database, "auditor", perm)
+        await rbac_assign_role(database, "admin", "admin", assigned_by="system")
 
-    _run_async(init_backup_tables(database))
-    _run_async(init_alerts_tables(database))
-    _run_async(init_device_group_tables(database))
-    _run_async(init_rbac_tables(database))
-    _run_async(rbac_create_role(database, "admin", "Administrator", "Full access to all policies and settings"))
-    _run_async(rbac_create_role(database, "editor", "Editor", "Can create, edit, and delete policies"))
-    _run_async(rbac_create_role(database, "viewer", "Viewer", "Read-only access to policies and audit log"))
-    _run_async(rbac_create_role(database, "auditor", "Auditor", "Read-only access to audit log only"))
-    for perm in ["policy:create", "policy:read", "policy:update", "policy:delete", "policy:simulate", "policy:view_conflicts", "audit:read", "rbac:manage"]:
-        _run_async(rbac_grant_permission(database, "admin", perm))
-    for perm in ["policy:create", "policy:read", "policy:update", "policy:delete", "policy:simulate", "policy:view_conflicts"]:
-        _run_async(rbac_grant_permission(database, "editor", perm))
-    for perm in ["policy:read", "policy:simulate", "policy:view_conflicts", "audit:read"]:
-        _run_async(rbac_grant_permission(database, "viewer", perm))
-    for perm in ["audit:read", "policy:view_conflicts"]:
-        _run_async(rbac_grant_permission(database, "auditor", perm))
-    _run_async(rbac_assign_role(database, "admin", "admin", assigned_by="system"))
+    # create_app is sync but has two callers: run.py's async _serve() (a loop is
+    # already running) and sync embedders/tests (no loop). Drive the bootstrap to
+    # completion only when no loop is running; otherwise schedule it on the
+    # running loop and expose the task so the caller can await it before serving
+    # (run.py::_serve does exactly that).
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.get_event_loop().run_until_complete(_ensure_policy_tables())
+    else:
+        app.state.policy_tables_ready = asyncio.ensure_future(_ensure_policy_tables())
+
     init_policy_engine(database, policy_engine, enforcement_registry, current_user_id="admin")
 
     app.include_router(policy_router)

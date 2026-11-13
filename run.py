@@ -2590,6 +2590,12 @@ def main() -> None:
                          ipv6_probe=lambda: gateway.ipv6_probe,
                          ipv6_map_getter=gateway._device_ipv6_map,
                          ipv6_direct_getter=lambda: sorted(gateway._ipv6_direct_macs))
+        # Policy tables/roles bootstrap: create_app scheduled it on the running
+        # loop (it can't await from sync code). Wait for it before uvicorn starts
+        # accepting requests, or the first /api/policies call races the RBAC seed.
+        _policy_ready = getattr(app.state, "policy_tables_ready", None)
+        if _policy_ready is not None:
+            await _policy_ready
         # TLS (web.tls_certfile / web.tls_keyfile): uvicorn terminates HTTPS
         # itself — a self-signed cert is fine (one-time trust step in the
         # browser). When TLS is on, secure_cookies is forced True by the app.
