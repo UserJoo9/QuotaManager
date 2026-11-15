@@ -107,7 +107,24 @@ if [ -z "${QUOTA_TOPOLOGY:-}" ] && [ "$CUR_TOPO" = "wan" ]; then
             _p="$(grep -F "\"$_u\" *" /etc/ppp/chap-secrets 2>/dev/null | head -1 | sed -n 's/^"[^"]*" \* "\(.*\)" \*$/\1/p' || true)"
             [ -n "$_p" ] && export PPPOE_PASSWORD="$_p"
         fi
-        _lan="$(awk '/^[[:space:]]*interface:/{print $2; exit}' "$CONF_DIR/config.yaml" 2>/dev/null || true)"
+        # The client-facing NIC is shaping.interface — written either as a flow
+        # mapping (`shaping: {enabled: true, interface: lan0, ...}`) or as a
+        # block. The old `^interface:` match hit `dhcp.interface: ''` first, so
+        # _lan was the literal '' and the real NIC was never handed to the
+        # setup script (which then auto-detected — and picked ifb0).
+        _lan="$(awk '
+            /^shaping:/ { s = 1
+                if (match($0, /interface: *[A-Za-z0-9_.-]+/)) {
+                    v = substr($0, RSTART, RLENGTH); sub(/interface: */, "", v); print v; exit }
+                next }
+            s && /^[^ ]/ { exit }
+            s && match($0, /interface: *[A-Za-z0-9_.-]+/) {
+                v = substr($0, RSTART, RLENGTH); sub(/interface: */, "", v); print v; exit }
+        ' "$CONF_DIR/config.yaml" 2>/dev/null || true)"
+        if [ -n "$_lan" ] && [ -z "${LAN_IF:-}" ] && [ -e "/sys/class/net/$_lan" ] \
+           && [ ! -e "/sys/devices/virtual/net/$_lan" ]; then
+            export LAN_IF="$_lan"
+        fi
         if [ -n "$_if" ] && [ -n "$_lan" ] && [ "$_if" != "$_lan" ] && [ -z "${WAN_IF:-}" ]; then
             export WAN_IF="$_if"
         fi

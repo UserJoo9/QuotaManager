@@ -6,6 +6,12 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## [Unreleased]
+
+Fixed:
+- Updating to 0.5.6 on a gateway in WAN mode (the box dials PPPoE itself, one network cable) could leave every device without an IP address: the installer picked the internal speed-limit interface `ifb0` instead of the real network card and moved DHCP, the firewall and speed limits onto it. The installer now ignores virtual interfaces and, on an update, keeps the network card you already had.
+- After a restart of the gateway, devices could get an IP but no internet because DNS on the gateway address (`192.168.2.1`) did not answer until DNS was restarted by hand. DNS now follows the gateway address even when it appears a moment after DNS starts.
+
 ## [0.5.6] — 2026-11-15
 
 Added:
