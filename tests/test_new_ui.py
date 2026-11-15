@@ -195,3 +195,22 @@ def test_public_pages_have_a_language_switch():
         for key in re.findall(r"QMI\.t\((['\"])((?:\\.|(?!\1).)*)\1", html):
             k = key[1].replace('\\"', '"').replace("\\'", "'")
             assert f'"{k}"'.replace('"', '"') in d or k in d.replace('\\"', '"'), f"{page}: missing Arabic for {k!r}"
+
+
+def test_passkey_ui_is_wired_and_degrades_without_the_server_feature():
+    """Passkey screens for the WebAuthn API (quota/passkeys.py): a sign-in button
+    on the login card and a card on System > Account. On a gateway without the
+    server feature the card hides itself instead of spinning forever."""
+    from pathlib import Path
+    web = Path(__file__).resolve().parent.parent / "web" / "js"
+    lib = (web / "core" / "passkey.js").read_text(encoding="utf-8")
+    for path in ("/api/passkeys/register/options", "/api/passkeys/register/verify",
+                 "/api/passkeys/login/options", "/api/passkeys/login/verify"):
+        assert path in lib
+    tabs = (web / "pages" / "systemTabs.js").read_text(encoding="utf-8")
+    assert "passkeyCard(ctx)" in tabs and "pk.missing = true" in tabs
+    assert "Array.isArray(d.passkeys)" in tabs
+    main = (web / "main.js").read_text(encoding="utf-8")
+    assert "signInWithPasskey" in main and "hasLocalPasskey()" in main
+    # a rejected passkey is a failed login, not an expired session
+    assert '!path.startsWith("/api/passkeys/login")' in (web / "core" / "api.js").read_text(encoding="utf-8")

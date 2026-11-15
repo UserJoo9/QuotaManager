@@ -49,6 +49,7 @@ from api.app import create_app
 from core import config as cfg_mod
 from core.logging_setup import setup_logging
 from quota import db as _db
+from quota import captive_http as _captive_http
 from quota import dns_rules as _dns_rules
 from quota.arp_scan import ArpScanner
 from quota.dnslog import DnslogTailer
@@ -2583,16 +2584,55 @@ def main() -> None:
         gateway.vpn_core = getattr(app.state, "vpn_manager", None)
         server = uvicorn.Server(server_config)
 
+        # HTTPS dashboard: a plain-HTTP side door serves ONLY the guest portal
+        # (a pending guest's port-80 traffic cannot talk to a TLS socket).
+        side_server = None
+        side_sock = None
+        side_port = int(getattr(cfg.web, "captive_http_port", 0) or 0)
+        if (cfg.web.tls_certfile and cfg.web.tls_keyfile and side_port
+                and side_port != cfg.web.port):
+            try:
+                side_sock = _captive_http.bind_socket(cfg.web.host, side_port)
+                if side_sock is not None:
+                    def _is_pending(ip: str) -> bool:
+                        snap = gateway.holder.get()
+                        return bool(snap and ip in snap.pending_guests)
+                    side_server = _captive_http.make_server(
+                        app, _is_pending, cfg.web.port)
+                    if hasattr(gateway.engine, "portal_port"):
+                        gateway.engine.portal_port = side_port
+                    log.info("guest portal HTTP side door on port %d", side_port)
+            except Exception:  # noqa: BLE001 — optional; never block the dashboard
+                log.exception("guest portal HTTP side door failed to start")
+                side_server = None
+
         async def _stop_listener() -> None:
             await gateway._stop_event.wait()
             server.should_exit = True
+            if side_server is not None:
+                side_server.should_exit = True
 
         stop_task = asyncio.create_task(_stop_listener())
         # Launch kernel/subsystem background init concurrently with web server
         subsystems_task = asyncio.create_task(gateway.startup_subsystems())
+        side_task = None
+        if side_server is not None and side_sock is not None:
+            async def _side_serve() -> None:
+                try:
+                    await side_server.serve(sockets=[side_sock])
+                except Exception:  # noqa: BLE001
+                    log.exception("guest portal HTTP side door stopped")
+            side_task = asyncio.create_task(_side_serve())
         try:
             await server.serve()
         finally:
+            if side_server is not None:
+                side_server.should_exit = True
+            if side_task is not None:
+                try:
+                    await asyncio.wait_for(side_task, timeout=5)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):  # noqa: BLE001
+                    side_task.cancel()
             if not subsystems_task.done():
                 subsystems_task.cancel()
                 try:

@@ -308,6 +308,9 @@ class NftablesEngine:
         self._gateway_allowed: tuple[str, ...] | None = None
         web_cfg = getattr(cfg, "web", None)
         self._web_port: int = int(getattr(web_cfg, "port", 8080) if web_cfg is not None else 8080)
+        #: Port a pending guest's HTTP is redirected to. None = the dashboard port;
+        #: run.py sets the plain-HTTP side door here when the dashboard is HTTPS.
+        self.portal_port: int | None = None
         #: IPs of pending guests programmed into the `pending_guests` captive portal set
         self._last_pending_guests: list[str] = []
 
@@ -414,7 +417,7 @@ class NftablesEngine:
         self._run_best_effort(["add", "chain", f"{FAMILY} {self.table} prerouting",
                               "{ type nat hook prerouting priority -50; policy accept; }"])
         self._run_best_effort(["add", "rule", f"{FAMILY} {self.table} prerouting",
-                              f"ip saddr @pending_guests tcp dport 80 redirect to :{self._web_port}"])
+                              f"ip saddr @pending_guests tcp dport 80 redirect to :{self.portal_port or self._web_port}"])
         # `flush table` removes rules but NOT named counter objects. After a
         # restart the per-device counters keep their cumulative totals and the
         # in-memory delta baseline (_last) is gone, so the first drain would

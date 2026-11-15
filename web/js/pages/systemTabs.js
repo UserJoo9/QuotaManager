@@ -4,6 +4,7 @@ import { api } from "../core/api.js";
 import { sw, chip } from "../components/ui.js";
 import { openDialog } from "../components/dialog.js";
 import { toast } from "../components/toast.js";
+import { passkeyBlocker, createPasskey, deviceLabel, setLocalPasskey, isCancel } from "../core/passkey.js";
 
 // Release notes are Markdown; render the few constructs they use as DOM nodes (never innerHTML).
 // Each block gets dir="auto" so English notes read left-to-right even inside the Arabic UI.
@@ -57,6 +58,45 @@ async function totpDialog(ctx) {
     content: [qr, field(t("acct.2fa.secret"), h("input", { class: "input ltr", readonly: true, value: info.secret || "", onfocus: (e) => e.target.select() }), t("acct.2fa.secret.h")), field(t("acct.2fa.code"), code)],
     onSubmit: async () => { await api.post("/api/totp/enable", { code: code.value.trim() }); toast(t("acct.2fa.on")); await loadTotp(ctx, true); return true; } });
 }
+/* Passkeys: sign in with the device's own lock (fingerprint, face, PIN). Hidden when the
+   server has no passkey support (older build). */
+const pk = { data: null, blocker: undefined, loading: false, at: 0, missing: false, busy: false, armed: null };
+async function loadPasskeys(ctx, force) {
+  if (pk.missing || pk.loading || (!force && pk.data && Date.now() - pk.at < 30000)) return;
+  pk.loading = true;
+  try {
+    if (pk.blocker === undefined) { try { pk.blocker = await passkeyBlocker(); } catch { pk.blocker = "browser"; } }
+    const d = await api.get("/api/passkeys");
+    if (!d || !Array.isArray(d.passkeys)) throw new Error("no passkey support");
+    pk.data = d; pk.at = Date.now();
+  } catch { pk.missing = true; } finally { pk.loading = false; ctx.touch(); }
+}
+function passkeyCard(ctx) {
+  if (pk.missing) return null;
+  loadPasskeys(ctx);
+  const d = pk.data, list = (d && d.passkeys) || [];
+  const why = d && d.reason === "server-missing" ? "server-missing" : pk.blocker;
+  const add = async () => {
+    if (pk.busy) return; pk.busy = true; ctx.touch();
+    try { await createPasskey(deviceLabel()); toast(t("pk.added")); await loadPasskeys(ctx, true); }
+    catch (e) { if (!isCancel(e)) fail(e); } finally { pk.busy = false; ctx.touch(); }
+  };
+  const remove = async (ev, id) => {
+    if (pk.armed !== id) { pk.armed = id; ev.currentTarget.classList.add("armed"); ev.currentTarget.textContent = t("dr.confirm"); setTimeout(() => { if (pk.armed === id) { pk.armed = null; ctx.touch(); } }, 4000); return; }
+    pk.armed = null;
+    try { await api.del("/api/passkeys/" + encodeURIComponent(id)); toast(t("pk.removed")); await loadPasskeys(ctx, true); if (!(pk.data && pk.data.passkeys || []).length) setLocalPasskey(false); } catch (e) { fail(e); }
+  };
+  const when = (ts) => ts ? new Date(ts * 1000).toLocaleDateString() : t("pk.never");
+  return h("section", { class: "card c12" },
+    h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("pk.title")), h("span", { class: "sub" }, t("pk.d"))), d ? chip(list.length ? "ok" : "", list.length ? iso(list.length) : t("acct.2fa.disabled")) : null),
+    !d ? h("div", { class: "skeleton", style: { height: "40px" } }) : h("div", {},
+      list.length ? h("div", { class: "kv" }, list.map((p) => h("div", {},
+        h("span", { class: "k" }, p.name || "Passkey", " · ", t("pk.last"), " ", when(p.last_used)),
+        h("span", { class: "v" }, h("button", { type: "button", class: "btn danger sm", onclick: (ev) => remove(ev, p.id) }, t("pk.remove")))))) : null,
+      why ? h("p", { class: "sub" }, t("pk.block." + why))
+        : h("div", { class: "fa" }, h("button", { type: "button", class: "btn primary", disabled: pk.busy, onclick: add }, icon("shield", 15), t("pk.add")))));
+}
+
 export function accountTab(ctx) {
   if (Date.now() - acct.failAt > 10000) loadTotp(ctx);
   const tp = acct.totp, d = ctx.dashboard, sec = d?.security || {};
@@ -72,6 +112,7 @@ export function accountTab(ctx) {
       h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("acct.2fa")), h("span", { class: "sub" }, t("acct.2fa.d"))), tp ? chip(tp.enabled ? "ok" : tp.pending ? "warn" : "", tp.enabled ? t("acct.2fa.enabled") : tp.pending ? t("acct.2fa.pending") : t("acct.2fa.disabled")) : null),
       tp ? h("div", { class: "fa" }, tp.enabled ? h("button", { type: "button", class: "btn danger sm", onclick: disable }, t("acct.2fa.disable"))
         : h("button", { type: "button", class: "btn primary", onclick: () => totpDialog(ctx) }, icon("shield", 15), tp.pending ? t("acct.2fa.resume") : t("acct.2fa.enable"))) : h("div", { class: "skeleton", style: { height: "40px" } })),
+    passkeyCard(ctx),
     sec.failed_logins_1h != null ? h("section", { class: "card c12" },
       h("header", { class: "card-h" }, h("h3", {}, t("acct.activity"))),
       h("div", { class: "kv" }, h("div", {}, h("span", { class: "k" }, t("acct.failed")), h("span", { class: "v" }, iso(sec.failed_logins_1h))), h("div", {}, h("span", { class: "k" }, t("acct.waf")), h("span", { class: "v" }, iso(sec.waf_blocks_1h ?? 0))))) : null);

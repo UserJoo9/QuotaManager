@@ -1228,6 +1228,12 @@ When a new device connects to the network as a guest before administrative appro
     /guest/pending?continue=<original_url>
     ```
 
+### 2b. HTTPS dashboards: the plain-HTTP side door (`quota/captive_http.py`)
+- With TLS on, uvicorn speaks HTTPS on `web.port`, so a pending guest's redirected port-80 traffic (plain HTTP) cannot be answered there.
+- `run.py` therefore binds `web.captive_http_port` (default 8081, 0 = off) up front (`bind_socket`; a taken port only logs a warning) and runs a second uvicorn server (`make_server`: `lifespan="off"`, no signal handlers) around `CaptiveHttpApp`.
+- `CaptiveHttpApp` passes ONLY portal paths (page, `/api/guest/status`, `/assets/`, OS probes) and pending guests (whose requests the app middleware turns into portal redirects) to the app; every other request gets `307` to `https://<host>:<web.port>`; non-private callers get `403`.
+- `NftablesEngine.portal_port` (set by `run.py` before `engine.start`) makes the `pending_guests` redirect target the side door instead of `web.port`. Portal redirects keep the scheme of the request (`request.url.scheme`).
+
 ### 3. Reactive UI & Auto-Redirect Lifecycle (`web/guest_pending.html`)
 - **Interface Structure**:
   - Dark-themed, RTL-native glassmorphic page displaying detected device hostname/name, IP, MAC address, and live approval status badge.

@@ -30,8 +30,30 @@ log "installing Python runtime into $APP_DIR/.venv"
 if [ ! -x "$APP_DIR/.venv/bin/python" ]; then
     python3 -m venv "$APP_DIR/.venv"
 fi
-"$APP_DIR/.venv/bin/python" -m pip install --disable-pip-version-check --no-input \
-    --quiet --upgrade -r "$APP_DIR/requirements-linux.txt"
+# The dependencies come from PyPI, so this step needs internet. A failure used
+# to end the script silently (the package manager still said "installed") and
+# left a gateway that could not start. Retry, then say exactly what to do.
+pip_ok=0
+for attempt in 1 2 3; do
+    if "$APP_DIR/.venv/bin/python" -m pip install --disable-pip-version-check --no-input \
+        --quiet --upgrade -r "$APP_DIR/requirements-linux.txt"; then
+        pip_ok=1
+        break
+    fi
+    log "could not download the Python dependencies (attempt $attempt of 3)"
+    sleep 5
+done
+if [ "$pip_ok" != 1 ]; then
+    echo "" >&2
+    echo "[quota-manager] ERROR: SETUP IS NOT FINISHED." >&2
+    echo "[quota-manager] The Python dependencies could not be downloaded from pypi.org" >&2
+    echo "[quota-manager] (no internet, or pypi.org is unreachable from this machine)." >&2
+    echo "[quota-manager] Quota Manager will NOT start until this is completed." >&2
+    echo "[quota-manager] Connect this machine to the internet, then run:" >&2
+    echo "[quota-manager]     sudo bash $APP_DIR/scripts/post_install.sh ${1:-}" >&2
+    echo "" >&2
+    exit 1
+fi
 
 if [ -f "$APP_DIR/bin/sing-box" ]; then
     chmod +x "$APP_DIR/bin/sing-box"

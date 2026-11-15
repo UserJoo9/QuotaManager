@@ -169,8 +169,13 @@ export default function overview(ctx) {
   const feed = [];
   const fi = (cls, ic, title, meta, acts) => h("div", { class: "feed-i" }, h("span", { class: "fi " + cls }, icon(ic, 18)), h("div", { class: "fb" }, h("b", {}, title), meta ? h("span", {}, meta) : null, acts ? h("div", { class: "fa" }, acts) : null));
   if (d.internet === false) feed.push(fi("danger", "alert", t("feed.down"), t("feed.down.sub")));
+  // Who is this? Show every device's name, MAC, IP and vendor so the admin can tell exactly which device is asking in.
+  const whoIs = (u) => (u.devices || []).length
+    ? (u.devices || []).map((x) => h("div", { class: "mono", style: { "white-space": "normal", "word-break": "break-all" } },
+      [x.name, iso(x.mac || ""), x.ip ? iso(x.ip) : "", x.vendor && x.vendor !== "Unknown" ? x.vendor : ""].filter(Boolean).join(" · ")))
+    : `0 ${t("pp.devs")}`;
   for (const u of users.filter((x) => x.guest && x.blocked))
-    feed.push(fi("", "userplus", `${u.name} ${t("feed.guest")}`, `${(u.devices || []).length} ${t("pp.devs")}`, [
+    feed.push(fi("", "userplus", `${u.name} ${t("feed.guest")}`, whoIs(u), [
       h("button", { class: "btn primary sm", onclick: act(() => actions.approveGuest(u.id)) }, t("dr.approve")),
       h("button", { class: "btn ghost sm", onclick: act(() => actions.rejectGuest(u.id)) }, t("dr.reject"))]));
   for (const r of d.rogue || []) feed.push(fi("warn", "alert", t("feed.rogue"), [iso(r.mac || ""), r.ip ? iso(r.ip) : "", r.vendor || ""].filter(Boolean).join(" · ")));

@@ -247,3 +247,24 @@ def test_public_pages_allow_their_inline_scripts(captive_env):
             assert r.status_code == 200, path
             assert "script-src 'self' 'unsafe-inline'" in r.headers["content-security-policy"], path
         assert "no-store" in client.get("/guest/pending").headers["cache-control"]
+
+
+def test_portal_redirect_keeps_the_scheme_of_the_request(captive_env):
+    """With HTTPS enforced uvicorn speaks TLS on the web port: redirecting a
+    pending guest to ``http://`` there makes the browser talk plain HTTP to a TLS
+    socket ("server unexpectedly dropped the connection")."""
+    database, service, holder, app = captive_env
+    holder.swap(EngineSnapshot(
+        pending_guests={"192.168.2.55"},
+        ip_to_mac={"192.168.2.55": "11:22:33:44:55:66"},
+        blocked={"11:22:33:44:55:66": True},
+    ))
+    for scheme in ("http", "https"):
+        with TestClient(app, base_url=f"{scheme}://192.168.2.1:8080",
+                        client=("192.168.2.55", 45000)) as c:
+            for path in ("/", "/some/page", "/generate_204", "/hotspot-detect.html",
+                         "/connecttest.txt", "/canonical.html"):
+                r = c.get(path, follow_redirects=False)
+                assert r.status_code == 302, (scheme, path)
+                loc = r.headers["location"]
+                assert loc.startswith(f"{scheme}://192.168.2.1:8080/guest/pending"), (scheme, path, loc)

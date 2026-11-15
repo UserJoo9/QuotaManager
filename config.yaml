@@ -203,6 +203,9 @@ web:
   # one-time trust step in the browser). Both empty = plain HTTP.
   tls_certfile: ""
   tls_keyfile: ""
+  # With HTTPS on, new guests reach the "waiting for approval" page over plain
+  # HTTP on this port (nothing else is served there). 0 = off.
+  # captive_http_port: 8081
   # Serve the FastAPI auto-generated docs (/api/docs + /api/openapi.json)?
   # The schema is a structured endpoint map — keep False except on a trusted
   # dev box. The dashboard itself is the admin surface.

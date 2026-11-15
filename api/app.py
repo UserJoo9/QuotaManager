@@ -3090,7 +3090,7 @@ def create_app(
         snapshot = holder.get() if holder else None
         if snapshot and host in snapshot.pending_guests:
             router_host = request.headers.get("host") or "192.168.2.1:8080"
-            return RedirectResponse(f"http://{router_host}/guest/pending", status_code=302)
+            return RedirectResponse(f"{request.url.scheme}://{router_host}/guest/pending", status_code=302)
         return Response(status_code=204)
 
     @app.get("/hotspot-detect.html")
@@ -3099,7 +3099,7 @@ def create_app(
         snapshot = holder.get() if holder else None
         if snapshot and host in snapshot.pending_guests:
             router_host = request.headers.get("host") or "192.168.2.1:8080"
-            return RedirectResponse(f"http://{router_host}/guest/pending", status_code=302)
+            return RedirectResponse(f"{request.url.scheme}://{router_host}/guest/pending", status_code=302)
         return HTMLResponse("<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>")
 
     @app.get("/connecttest.txt")
@@ -3109,7 +3109,7 @@ def create_app(
         snapshot = holder.get() if holder else None
         if snapshot and host in snapshot.pending_guests:
             router_host = request.headers.get("host") or "192.168.2.1:8080"
-            return RedirectResponse(f"http://{router_host}/guest/pending", status_code=302)
+            return RedirectResponse(f"{request.url.scheme}://{router_host}/guest/pending", status_code=302)
         return PlainTextResponse("Microsoft Connect Test")
 
     @app.get("/canonical.html")
@@ -3118,7 +3118,7 @@ def create_app(
         snapshot = holder.get() if holder else None
         if snapshot and host in snapshot.pending_guests:
             router_host = request.headers.get("host") or "192.168.2.1:8080"
-            return RedirectResponse(f"http://{router_host}/guest/pending", status_code=302)
+            return RedirectResponse(f"{request.url.scheme}://{router_host}/guest/pending", status_code=302)
         return HTMLResponse("<HTML><BODY>Success</BODY></HTML>")
 
     # -- speed shaping (Network tab) ------------------------------------------
@@ -3955,7 +3955,7 @@ def create_app(
                         router_host = request.headers.get("host") or "192.168.2.1:8080"
                         orig_url = str(request.url)
                         return RedirectResponse(
-                            f"http://{router_host}/guest/pending?continue={urllib.parse.quote(orig_url)}",
+                            f"{request.url.scheme}://{router_host}/guest/pending?continue={urllib.parse.quote(orig_url)}",
                             status_code=302
                         )
 

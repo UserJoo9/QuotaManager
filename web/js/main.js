@@ -11,6 +11,7 @@ import { refreshDrawer, closeDrawer } from "./components/drawer.js";
 import { privacyHidden, setPrivacyHidden } from "./core/i18n.js";
 import { toast } from "./components/toast.js";
 import { maybeWelcome } from "./components/welcome.js";
+import { passkeyBlocker, hasLocalPasskey, setLocalPasskey, signInWithPasskey, isCancel } from "./core/passkey.js";
 import overview from "./pages/overview.js";
 import people from "./pages/people.js";
 import system from "./pages/system.js";
@@ -52,6 +53,23 @@ function renderLogin(step = "password", error = "") {
   const label = step === "totp" ? t("login.verify") : t("login.submit");
   const btn = h("button", { class: "btn primary", type: "submit" }, label);
   const busy = (on) => { btn.disabled = on; btn.textContent = on ? t("login.wait") : label; btn.setAttribute("aria-busy", String(on)); };
+  // Passkey sign-in: only on a device that holds one, and only where the browser can do it.
+  const pkBtn = h("button", { class: "btn", type: "button", hidden: true, onclick: async () => {
+    if (loginBusy) return;
+    loginBusy = true; pkBtn.disabled = true;
+    try {
+      await signInWithPasskey();
+      if (store.get().authed) return;
+      loginPw = ""; loginBusy = false;
+      await boot();
+    } catch (ex) {
+      if (store.get().authed || epoch !== loginEpoch || isCancel(ex)) return;
+      const bad = /invalid credentials|unauthorized|401/i.test(ex.message);
+      if (bad) setLocalPasskey(false);
+      err.hidden = false; err.textContent = bad ? t("pk.login.fail") : ex.message;
+    } finally { loginBusy = false; pkBtn.disabled = false; }
+  } }, icon("shield", 15), t("pk.login"));
+  if (step !== "totp" && hasLocalPasskey()) passkeyBlocker().then((b) => { if (b === null && epoch === loginEpoch) pkBtn.hidden = false; }).catch(() => {});
   const form = h("form", { class: "login-card", onsubmit: async (e) => {
     e.preventDefault();
     if (loginBusy) return;
@@ -73,7 +91,7 @@ function renderLogin(step = "password", error = "") {
     h("img", { class: "logo-lg", src: "logo.svg", alt: "" }),
     h("div", {}, h("h1", {}, t("login.title")), h("p", {}, t("login.sub"))),
     step === "totp" ? code : pw, err,
-    btn);
+    btn, pkBtn);
   mount(document.getElementById("root"), h("div", { class: "login" }, form));
   (step === "totp" ? code : pw).focus();
 }

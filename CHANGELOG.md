@@ -6,6 +6,17 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## [0.5.6] — 2026-11-15
+
+Added:
+- The "waiting for approval" card now shows each new device's name, MAC address, IP and maker, so you can tell exactly who is asking to join before you approve. (If the MAC is partly hidden as "••", turn off the privacy hiding in the dashboard settings.)
+- Passkeys: sign in to the dashboard with your device's fingerprint, face or PIN instead of typing the password. Add one from System > Account. Works only when the dashboard is opened over HTTPS by name (for example its Tailscale address), not on a plain IP address. Contributed by Omar Suleiman (@iomarsuleiman).
+
+Fixed:
+- A new device that opened the dashboard over HTTPS saw "Safari can't open the page / the server unexpectedly dropped the connection" instead of the waiting-for-approval page. It now lands on the approval page correctly.
+- With HTTPS turned on, a new guest who opened any website (or whose phone showed "sign in to network") got a dropped connection and never saw the waiting-for-approval page. The page now opens normally for guests while the dashboard itself stays HTTPS-only. (Uses port 8081 on the gateway; change or turn it off with `captive_http_port` in config.yaml.)
+- Installing without a working internet connection used to finish as if everything was fine, but the program could not start. The installer now retries the download and, if it still fails, clearly says the setup is not finished and shows the one command to run once the machine is online.
+
 ## [0.5.5] — 2026-11-09
 
 Added:

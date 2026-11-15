@@ -14,7 +14,7 @@ async function req(method, path, body) {
   const opts = { method, headers: { "Content-Type": "application/json", "X-QM-CSRF": "1" }, credentials: "same-origin" };
   if (body !== undefined) opts.body = JSON.stringify(body);
   const res = await fetch(path, opts);
-  if (res.status === 401 && path !== "/api/login") { onUnauthorized(); throw new Error("unauthorized"); }
+  if (res.status === 401 && path !== "/api/login" && !path.startsWith("/api/passkeys/login")) { onUnauthorized(); throw new Error("unauthorized"); }
   let data = null;
   try { data = await res.json(); } catch { /* empty body */ }
   if (!res.ok) {

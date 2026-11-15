@@ -460,3 +460,15 @@ def test_openwrt_installer_supports_apk_and_opkg():
         assert "install_openwrt.sh" in _read(REPO / readme)
     init = _read(REPO / "scripts" / "quota-manager.openwrt")
     assert ".venv/bin/python" in init
+
+
+def test_post_install_reports_a_failed_dependency_download():
+    """Issue #15: on Arch the pip download failed (no route to pypi.org), the
+    script died silently and pacman still reported a clean install. The script
+    must retry and then tell the admin how to finish the setup."""
+    text = (REPO / "scripts" / "post_install.sh").read_text(encoding="utf-8")
+    assert "for attempt in 1 2 3" in text
+    assert "SETUP IS NOT FINISHED" in text
+    assert 'sudo bash $APP_DIR/scripts/post_install.sh' in text
+    # the failure must stop the script before the gateway is configured
+    assert text.index("SETUP IS NOT FINISHED") < text.index("systemctl stop")

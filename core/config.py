@@ -161,6 +161,9 @@ class WebConfig:
     #: forces ``secure_cookies``. Empty strings = plain HTTP.
     tls_certfile: str = ""
     tls_keyfile: str = ""
+    #: Plain-HTTP port that serves ONLY the guest "waiting for approval" page
+    #: while HTTPS is on (quota/captive_http.py). 0 = off. Unused without TLS.
+    captive_http_port: int = 8081
     #: Serve the FastAPI auto-generated docs (/api/docs Swagger UI + the full
     #: /api/openapi.json schema). OFF by default: the schema is a structured
     #: endpoint map an attacker on a WAN-facing box would mine in seconds.
