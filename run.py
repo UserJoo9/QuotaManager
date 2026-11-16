@@ -33,6 +33,7 @@ import ipaddress
 import json
 import logging
 import os
+import sys
 import re
 import shutil
 import signal
@@ -2488,6 +2489,28 @@ class Gateway:
         log.info("shutdown complete")
 
 
+_LOCK_FH = None
+
+
+def _acquire_single_instance_lock(db_path: str) -> None:
+    """Refuse to start a 2nd copy (two writers => 'database is locked' /
+    corrupt WAL). Uses flock, which the kernel releases on any exit."""
+    global _LOCK_FH
+    try:
+        import fcntl
+        lock = Path(db_path).parent / "quota-gateway.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        _LOCK_FH = open(lock, "w")
+        fcntl.flock(_LOCK_FH, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _LOCK_FH.write(str(os.getpid()))
+        _LOCK_FH.flush()
+    except BlockingIOError:
+        print("Quota Manager is already running - exiting.", file=sys.stderr)
+        sys.exit(1)
+    except (ImportError, OSError):
+        pass
+
+
 def main() -> None:
     args = _parse_args()
     resolved_config_path = cfg_mod.resolve_config_path(args.config)
@@ -2498,6 +2521,7 @@ def main() -> None:
         cfg.log_level = "DEBUG"
 
     setup_logging(cfg.log_level, cfg.log_file)
+    _acquire_single_instance_lock(cfg.db_path)
     log.info("Quota Manager starting (bundle %.1f GB, reset day %d)",
              cfg.bundle.total_gb, cfg.bundle.reset_day)
 
