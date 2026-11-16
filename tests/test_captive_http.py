@@ -24,9 +24,23 @@ GUEST = "192.168.2.55"
 ADMIN = "192.168.2.10"
 
 
+_cached_loop = None
+
+
+def _get_loop():
+    """One event loop for the whole module, never closed - the same pattern as
+    test_guest_captive. aiosqlite binds its worker thread to the loop that
+    opened the connection; closing that loop (or awaiting database.close() on
+    it after TestClient ran the app on its own loop) can hang the teardown."""
+    global _cached_loop
+    if _cached_loop is None or _cached_loop.is_closed():
+        _cached_loop = asyncio.new_event_loop()
+    return _cached_loop
+
+
 @pytest.fixture
 def side(tmp_path):
-    loop = asyncio.new_event_loop()
+    loop = _get_loop()
     database = _db.Database(tmp_path / "side.db")
     service = QuotaService(database, timezone="Africa/Cairo",
                            clock=lambda: datetime(2026, 8, 15, 12, 0, tzinfo=TZ))
@@ -39,9 +53,7 @@ def side(tmp_path):
     app = create_app(database=database, service=service, holder=holder)
     wrapped = captive_http.CaptiveHttpApp(
         app, lambda ip: ip in holder.get().pending_guests, 8080)
-    yield wrapped, holder
-    loop.run_until_complete(database.close())
-    loop.close()
+    return wrapped, holder
 
 
 def _client(wrapped, ip, host="192.168.2.1:8081"):
