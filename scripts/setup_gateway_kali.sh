@@ -87,22 +87,32 @@ PPPOE_PASSWORD="${PPPOE_PASSWORD:-}" # WAN mode: PPPoE password
 # interface. Override with LAN_IF=ethX when auto-detection still misses.
 LAN_IF="${LAN_IF:-}"
 if [ -z "$LAN_IF" ]; then
-    for cand in $(ip route | awk '/default/ {print $5}') \
-                $(ls /sys/class/net | grep -v '^lo$'); do
-        [ -d "/sys/class/net/$cand/wireless" ] && continue                # skip WiFi
-        # Skip virtual interfaces (ifb shaping devices, bridges, veth, tun/tap,
-        # ppp): they report type=1 + carrier=1 just like a real NIC, and ifb0
-        # sorts before lan0/eth0, so it used to win the sysfs fallback and the
-        # whole client side (dnsmasq, firewall, shaping) was bound to it.
-        [ -e "/sys/devices/virtual/net/$cand" ] && continue               # virtual
-        case "$cand" in ifb*|ppp*|tun*|tap*|veth*|docker*|virbr*) continue ;; esac
-        [ "$(cat "/sys/class/net/$cand/type" 2>/dev/null || echo 0)" = "1" ] \
-            || continue                                                    # Ethernet only
-        [ "$(cat "/sys/class/net/$cand/carrier" 2>/dev/null || echo 0)" = "1" ] \
-            || continue                                                    # cable present
-        LAN_IF="$cand"
-        break
+    # Two passes (issue #36):
+    #  1. the default-route NIC. It is trusted even when it is a bridge, bond or
+    #     VLAN (a box can legitimately live on br0), but never a shaping / PPP /
+    #     tunnel / container device.
+    #  2. otherwise scan sysfs for a PHYSICAL NIC only. Software interfaces
+    #     (ifb0, bridges, veth, ...) report type=1 + carrier=1 like a real NIC,
+    #     and in WAN mode (default route on ppp0) ifb0 used to win this scan:
+    #     dnsmasq, the firewall and shaping were then bound to it.
+    _lan_ok() {   # $1 = interface, $2 = "phys" to accept physical NICs only
+        case "$1" in lo|ifb*|ppp*|tun*|tap*|veth*|docker*|virbr*) return 1 ;; esac
+        [ -d "/sys/class/net/$1/wireless" ] && return 1                   # skip WiFi
+        if [ "$2" = phys ] && [ -e "/sys/devices/virtual/net/$1" ]; then return 1; fi
+        [ "$(cat "/sys/class/net/$1/type" 2>/dev/null || echo 0)" = "1" ] \
+            || return 1                                                    # Ethernet only
+        [ "$(cat "/sys/class/net/$1/carrier" 2>/dev/null || echo 0)" = "1" ] \
+            || return 1                                                    # cable present
+        return 0
+    }
+    for cand in $(ip route | awk '/default/ {print $5}'); do
+        if _lan_ok "$cand" any; then LAN_IF="$cand"; break; fi
     done
+    if [ -z "$LAN_IF" ]; then
+        for cand in $(ls /sys/class/net | grep -v '^lo$'); do
+            if _lan_ok "$cand" phys; then LAN_IF="$cand"; break; fi
+        done
+    fi
 fi
 
 CONF_DIR="/etc/quota-gateway"
@@ -541,7 +551,7 @@ if wan_mode; then
 cat > /etc/dnsmasq.d/quota-gateway.conf <<EOF
 # Quota Manager gateway — WAN mode (no router on the LAN; the box dials PPPoE)
 interface=$LAN_IF
-bind-dynamic
+bind-interfaces
 # We are the only DHCP server on this L2 (the AP's is disabled). Be
 # authoritative so a client that reconnects still holding a stale lease is
 # NAKed and re-DISCOVERs onto $CLIENT_NET immediately.
@@ -566,7 +576,7 @@ else
 cat > /etc/dnsmasq.d/quota-gateway.conf <<EOF
 # Quota Manager gateway
 interface=$LAN_IF
-bind-dynamic
+bind-interfaces
 # We are the only DHCP server on this L2 (the router's is disabled). Be
 # authoritative so a client that reconnects still holding the router's old
 # 192.168.1.x lease is NAKed and re-DISCOVERs onto 192.168.2.x immediately

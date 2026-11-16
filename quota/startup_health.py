@@ -337,6 +337,18 @@ def ensure_network_infrastructure(
             ok = False
         else:
             log.info("ensure_network_infrastructure: added %s to %s", cidr, iface)
+            if ip == gateway_ip:
+                # dnsmasq runs with bind-interfaces: it only listens on addresses
+                # that existed when it started. If it started before this address
+                # was (re)added, DNS/DHCP on the gateway IP stay dead until a
+                # restart (issue #36) - so restart it now. try-restart is a no-op
+                # when dnsmasq is not running.
+                code, out = run(["systemctl", "try-restart", "dnsmasq"])
+                if code != 0:
+                    log.warning("could not restart dnsmasq after re-adding %s: %s",
+                                gateway_ip, (out or "").strip())
+                else:
+                    log.info("dnsmasq restarted to listen on %s", gateway_ip)
 
     # Dual-stack: the ULA gateway address must exist or dnsmasq stops sending
     # Router Advertisements and clients silently lose IPv6.

@@ -6,11 +6,13 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
-## [Unreleased]
+## [0.5.7] — 2026-11-16
 
 Fixed:
-- Updating to 0.5.6 on a gateway in WAN mode (the box dials PPPoE itself, one network cable) could leave every device without an IP address: the installer picked the internal speed-limit interface `ifb0` instead of the real network card and moved DHCP, the firewall and speed limits onto it. The installer now ignores virtual interfaces and, on an update, keeps the network card you already had.
-- After a restart of the gateway, devices could get an IP but no internet because DNS on the gateway address (`192.168.2.1`) did not answer until DNS was restarted by hand. DNS now follows the gateway address even when it appears a moment after DNS starts.
+- Updating a gateway in WAN mode (the box dials PPPoE itself) could leave every device without an IP address: the installer picked the internal speed-limit interface `ifb0` instead of the real network card and moved DHCP, the firewall and speed limits onto it. This only happened when the network card's name sorts after `ifb0` (for example `lan0`, `net0`, `usb0`); the usual names (`eth0`, `enp…`, `eno…`, `ens…`) were not affected. The installer now only auto-picks real network cards and, on an update, keeps the card you already had. Reported and fixed by @amr-elgharip2006.
+- If your gateway was hit by this, updating to 0.5.7 repairs it. To repair it by hand: `sudo LAN_IF=<your card> bash /opt/quota-manager/scripts/post_install.sh`.
+- After a restart of the gateway, devices could get an IP but no internet because DNS on the gateway address (`192.168.2.1`) did not answer until DNS was restarted by hand. The gateway now restarts DNS by itself when it has to re-add that address at startup.
+- Installing the Arch package (seen on CachyOS) stopped with "Network is unreachable" and left the program not set up, even with working internet. The installer now finishes the setup by itself about a minute after the package is installed. If you already hit this on 0.5.6, run `sudo bash /opt/quota-manager/scripts/post_install.sh arch` once, or just install 0.5.7.
 
 ## [0.5.6] — 2026-11-15
 

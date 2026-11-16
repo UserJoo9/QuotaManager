@@ -15,7 +15,6 @@ Background (v0.5.6 upgrade on a single-NIC WAN box, Debian 12 arm64, NIC lan0):
 """
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import subprocess
@@ -138,17 +137,42 @@ def test_post_install_reads_shaping_interface(tmp_path, name):
     assert out.stdout.strip() == EXPECTED[name]
 
 
-def test_post_install_exports_lan_if_only_for_a_real_nic():
+def test_post_install_never_hands_back_a_shaping_or_tunnel_device():
     text = POST.read_text()
     assert 'export LAN_IF="$_lan"' in text
-    assert "/sys/devices/virtual/net/$_lan" in text, \
+    guard = text.index('case "$_lan" in ifb*|ppp*')
+    assert guard < text.index('export LAN_IF="$_lan"'), \
         "a stale ifb0 in config.yaml must not be handed back as LAN_IF"
 
 
+@needs_bash
+def test_default_route_on_a_bridge_bond_or_vlan_is_trusted(tmp_path):
+    """A box that lives on br0/bond0/eth0.10 keeps it: skipping every virtual
+    NIC picked the enslaved port (no address on it) or nothing at all."""
+    nics = {"br0": {"type": 1, "carrier": 1, "virtual": True},
+            "enp3s0": {"type": 1, "carrier": 1},
+            "ifb0": {"type": 1, "carrier": 1, "virtual": True}}
+    assert _run_detect(tmp_path / "a", nics, "br0") == "br0"
+    nics = {"bond0": {"type": 1, "carrier": 1, "virtual": True},
+            "eth0.10": {"type": 1, "carrier": 1, "virtual": True}}
+    assert _run_detect(tmp_path / "b", nics, "bond0") == "bond0"
+
+
+@needs_bash
+def test_default_route_on_a_shaping_or_container_device_is_never_trusted(tmp_path):
+    nics = {"docker0": {"type": 1, "carrier": 1, "virtual": True},
+            "eth0": {"type": 1, "carrier": 1},
+            "ifb0": {"type": 1, "carrier": 1, "virtual": True}}
+    for route in ("ifb0", "docker0"):
+        assert _run_detect(tmp_path / route, nics, route) == "eth0"
+
+
 @pytest.mark.parametrize("script", [SETUP, TOPO])
-def test_dnsmasq_main_conf_uses_bind_dynamic(script):
-    """bind-interfaces misses the client gateway IP when it is added after
-    dnsmasq starts; bind-dynamic follows address changes."""
+def test_dnsmasq_main_conf_keeps_bind_interfaces(script):
+    """bind-dynamic cannot coexist with a bind-interfaces line in another
+    /etc/dnsmasq.d file (dnsmasq refuses to start), so the main conf keeps
+    bind-interfaces; the late-address case is handled by startup_health
+    restarting dnsmasq after it re-adds the gateway address."""
     text = script.read_text()
-    assert not re.search(r"^bind-interfaces$", text, re.M), script.name
-    assert len(re.findall(r"^bind-dynamic$", text, re.M)) == 2, script.name
+    assert not re.search(r"^bind-dynamic$", text, re.M), script.name
+    assert len(re.findall(r"^bind-interfaces$", text, re.M)) == 2, script.name

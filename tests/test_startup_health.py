@@ -206,6 +206,27 @@ class TestEnsureNetworkInfrastructure:
         added = [c[3] for c in fake.adds()]
         assert added == ["192.168.2.1/24", "192.168.1.110/24"]
 
+    def test_dnsmasq_is_restarted_after_the_gateway_address_is_readded(self, tmp_path: Path) -> None:
+        """dnsmasq (bind-interfaces) that started before the gateway address
+        existed never listens on it - restart it once the address is back."""
+        other = "2: eth0    inet 10.9.9.5/24 brd 10.9.9.255 scope global eth0\n"
+        fake = FakeIp({ADDR_SHOW: (0, other), ADDR_SHOW_DEV: (0, other)})
+        ensure_network_infrastructure(
+            gateway_ip="192.168.2.1", uplink_ip="192.168.1.110", lan_cidr=24,
+            run=fake, proc_ipforward=_fwd_on(tmp_path),
+            sysfs_net=make_net(("eth0", "1", "1")))
+        assert fake.calls.count(["systemctl", "try-restart", "dnsmasq"]) == 1
+
+    def test_dnsmasq_is_left_alone_when_nothing_was_missing(self, tmp_path: Path) -> None:
+        out = ("2: eth0    inet 192.168.1.110/24 brd 192.168.1.255 scope global eth0\n"
+               "2: eth0    inet 192.168.2.1/24 brd 192.168.2.255 scope global eth0\n")
+        fake = FakeIp({ADDR_SHOW: (0, out), ADDR_SHOW_DEV: (0, out)})
+        ensure_network_infrastructure(
+            gateway_ip="192.168.2.1", uplink_ip="192.168.1.110", lan_cidr=24,
+            run=fake, proc_ipforward=_fwd_on(tmp_path),
+            sysfs_net=make_net(("eth0", "1", "1")))
+        assert not [c for c in fake.calls if c[:1] == ["systemctl"]]
+
     def test_healthy_system_makes_no_changes(self, tmp_path: Path) -> None:
         """Both addresses present — nothing is re-added (idempotent)."""
         out = ("2: eth0    inet 192.168.1.110/24 brd 192.168.1.255 scope global eth0\n"

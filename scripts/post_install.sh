@@ -30,20 +30,40 @@ log "installing Python runtime into $APP_DIR/.venv"
 if [ ! -x "$APP_DIR/.venv/bin/python" ]; then
     python3 -m venv "$APP_DIR/.venv"
 fi
-# The dependencies come from PyPI, so this step needs internet. A failure used
-# to end the script silently (the package manager still said "installed") and
-# left a gateway that could not start. Retry, then say exactly what to do.
+# The dependencies come from PyPI, so this step needs internet.
+#
+# Some package managers run install scripts with NO network access (seen with
+# pacman on CachyOS: pip fails with "Network is unreachable" inside the
+# transaction while the very same command works right after it). So when the
+# download fails here, hand the rest of the setup to systemd, which runs it a few
+# seconds later outside the package manager. Only when that is not possible, or
+# the deferred run fails too, tell the admin how to finish by hand.
 pip_ok=0
-for attempt in 1 2 3; do
+for attempt in 1 2; do
     if "$APP_DIR/.venv/bin/python" -m pip install --disable-pip-version-check --no-input \
-        --quiet --upgrade -r "$APP_DIR/requirements-linux.txt"; then
+        --quiet --retries 1 --upgrade -r "$APP_DIR/requirements-linux.txt"; then
         pip_ok=1
         break
     fi
-    log "could not download the Python dependencies (attempt $attempt of 3)"
-    sleep 5
+    log "could not download the Python dependencies (attempt $attempt of 2)"
+    sleep 3
 done
 if [ "$pip_ok" != 1 ]; then
+    SETUP_UNIT=quota-manager-setup
+    if [ "${QUOTA_DEFERRED:-}" != 1 ] && command -v systemd-run >/dev/null 2>&1 \
+            && [ -d /run/systemd/system ]; then
+        systemctl stop "$SETUP_UNIT.timer" "$SETUP_UNIT.service" >/dev/null 2>&1 || true
+        systemctl reset-failed "$SETUP_UNIT.service" >/dev/null 2>&1 || true
+        if systemd-run --quiet --collect --unit="$SETUP_UNIT" --on-active=5 \
+                --setenv=QUOTA_DEFERRED=1 \
+                /bin/bash "$APP_DIR/scripts/post_install.sh" "${1:-}" >/dev/null 2>&1; then
+            log "no network inside the package manager - the setup will finish by itself"
+            log "in about a minute. Follow it with: journalctl -fu $SETUP_UNIT"
+            log "If the dashboard does not open after that, run:"
+            log "    sudo bash $APP_DIR/scripts/post_install.sh ${1:-}"
+            exit 0
+        fi
+    fi
     echo "" >&2
     echo "[quota-manager] ERROR: SETUP IS NOT FINISHED." >&2
     echo "[quota-manager] The Python dependencies could not be downloaded from pypi.org" >&2
@@ -121,8 +141,12 @@ if [ -z "${QUOTA_TOPOLOGY:-}" ] && [ "$CUR_TOPO" = "wan" ]; then
             s && match($0, /interface: *[A-Za-z0-9_.-]+/) {
                 v = substr($0, RSTART, RLENGTH); sub(/interface: */, "", v); print v; exit }
         ' "$CONF_DIR/config.yaml" 2>/dev/null || true)"
-        if [ -n "$_lan" ] && [ -z "${LAN_IF:-}" ] && [ -e "/sys/class/net/$_lan" ] \
-           && [ ! -e "/sys/devices/virtual/net/$_lan" ]; then
+        # Hand the box's own NIC back to the setup script - a bridge/bond/VLAN
+        # is a valid choice the admin made. Never a shaping/PPP/tunnel device:
+        # a config already broken by the ifb0 bug must fall through to the
+        # (fixed) auto-detect instead of being locked onto ifb0.
+        case "$_lan" in ifb*|ppp*|tun*|tap*|veth*|docker*|virbr*) _lan="" ;; esac
+        if [ -n "$_lan" ] && [ -z "${LAN_IF:-}" ] && [ -e "/sys/class/net/$_lan" ]; then
             export LAN_IF="$_lan"
         fi
         if [ -n "$_if" ] && [ -n "$_lan" ] && [ "$_if" != "$_lan" ] && [ -z "${WAN_IF:-}" ]; then

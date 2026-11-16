@@ -164,7 +164,7 @@ _dnsmasq_wan() {
     cat > /etc/dnsmasq.d/quota-gateway.conf <<EOF
 # Quota Manager gateway — WAN mode (no router on the LAN; the box dials PPPoE)
 interface=$LAN_IF
-bind-dynamic
+bind-interfaces
 # We are the only DHCP server on this L2 (the AP's is disabled). Be
 # authoritative so a client that reconnects still holding a stale lease is
 # NAKed and re-DISCOVERs onto $CLIENT_NET immediately.
@@ -191,7 +191,7 @@ _dnsmasq_lan() {
     cat > /etc/dnsmasq.d/quota-gateway.conf <<EOF
 # Quota Manager gateway
 interface=$LAN_IF
-bind-dynamic
+bind-interfaces
 # We are the only DHCP server on this L2 (the router's is disabled). Be
 # authoritative so a client that reconnects still holding the router's old
 # 192.168.1.x lease is NAKed and re-DISCOVERs onto $CLIENT_NET immediately

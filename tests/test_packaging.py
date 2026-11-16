@@ -463,12 +463,17 @@ def test_openwrt_installer_supports_apk_and_opkg():
 
 
 def test_post_install_reports_a_failed_dependency_download():
-    """Issue #15: on Arch the pip download failed (no route to pypi.org), the
-    script died silently and pacman still reported a clean install. The script
-    must retry and then tell the admin how to finish the setup."""
+    """Issue #15: on Arch (CachyOS) pip has no network inside the pacman
+    transaction, yet the same script works right after it. The script must hand
+    the setup to systemd (outside the package manager) and only when that is
+    impossible, or the deferred run fails too, tell the admin how to finish."""
     text = (REPO / "scripts" / "post_install.sh").read_text(encoding="utf-8")
-    assert "for attempt in 1 2 3" in text
+    assert "for attempt in 1 2" in text
+    # deferred run outside the package manager, never re-deferring itself
+    assert "systemd-run" in text and "--on-active=" in text
+    assert "--setenv=QUOTA_DEFERRED=1" in text
+    assert '"${QUOTA_DEFERRED:-}" != 1' in text
     assert "SETUP IS NOT FINISHED" in text
     assert 'sudo bash $APP_DIR/scripts/post_install.sh' in text
-    # the failure must stop the script before the gateway is configured
-    assert text.index("SETUP IS NOT FINISHED") < text.index("systemctl stop")
+    # deferral is tried before giving up, and both come before the gateway setup
+    assert text.index("systemd-run") < text.index("SETUP IS NOT FINISHED") < text.index('systemctl stop "$SERVICE"')
