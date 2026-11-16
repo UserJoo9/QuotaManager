@@ -140,7 +140,7 @@ wget -O /tmp/install_openwrt.sh https://raw.githubusercontent.com/UserJoo9/Quota
 sh /tmp/install_openwrt.sh
 ```
 
-> OpenWrt support is **experimental**: x86_64 and aarch64 routers/PCs work best (the Python packages ship ready-made binaries for them). If it fails, open an issue with the full output.
+> OpenWrt support is **experimental**. On x86_64/aarch64 the normal Python packages are used; on mipsel/mips/arm (e.g. MT7621 routers) the installer switches to a pure-Python set (`requirements-openwrt.txt`, pydantic v1) because those platforms have no Rust toolchain. The installer also adds a `systemctl` shim, a procd service that keeps the database on `/overlay` (persistent), and a swap file on low-RAM routers. Run `python3 /opt/QuotaManager/run.py --doctor` to check dependencies and paths. If it fails, open an issue with the full output.
 
 ---
 

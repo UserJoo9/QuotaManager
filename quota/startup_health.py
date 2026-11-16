@@ -20,6 +20,8 @@ app from starting (the rest of the stack degrades gracefully).
 
 from __future__ import annotations
 
+from core.oscompat import service_cmd
+
 import logging
 import subprocess
 from pathlib import Path
@@ -343,7 +345,7 @@ def ensure_network_infrastructure(
                 # was (re)added, DNS/DHCP on the gateway IP stay dead until a
                 # restart (issue #36) - so restart it now. try-restart is a no-op
                 # when dnsmasq is not running.
-                code, out = run(["systemctl", "try-restart", "dnsmasq"])
+                code, out = run(service_cmd("try-restart", "dnsmasq"))
                 if code != 0:
                     log.warning("could not restart dnsmasq after re-adding %s: %s",
                                 gateway_ip, (out or "").strip())

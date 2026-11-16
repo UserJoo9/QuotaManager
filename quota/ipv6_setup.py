@@ -18,6 +18,8 @@ an updated one converge on identical files.
 
 from __future__ import annotations
 
+from core.oscompat import service_cmd
+
 import ipaddress
 import logging
 import re
@@ -267,6 +269,10 @@ def ensure_box_ignores_ula_dns(*, prefix: str, iface: str, run: RunCommand | Non
             return False
         code, out = run(["nmcli", "-t", "-f", "NAME,DEVICE", "con", "show", "--active"])
         if code != 0:
+            from core.oscompat import is_openwrt
+            if is_openwrt():  # netifd/dnsmasq own resolv.conf there; no NetworkManager
+                log.debug("ipv6 setup: OpenWrt has no nmcli; skipping box DNS fix")
+                return False
             log.warning("ipv6 setup: the box's own DNS points at the ULA but nmcli is "
                         "unavailable — remove the fd00: nameserver manually")
             return False
@@ -309,11 +315,11 @@ def rollback_if_dnsmasq_down(*, run: RunCommand | None = None,
     try:
         if not frag.exists():
             return False
-        code, _ = run(["systemctl", "is-active", "--quiet", "dnsmasq"])
+        code, _ = run(service_cmd("is-active", "dnsmasq", quiet=True))
         if code == 0:
             return False
         frag.unlink()
-        run(["systemctl", "restart", "dnsmasq"])
+        run(service_cmd("restart", "dnsmasq"))
         log.error("ipv6 setup: dnsmasq was down with the IPv6 fragment present — "
                   "removed %s and restarted dnsmasq (IPv6 router advertisements off)", frag)
         return True

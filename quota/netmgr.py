@@ -42,6 +42,7 @@ from typing import Callable, Optional
 import yaml
 
 from core import config as cfg_mod
+from core.oscompat import service_cmd
 from quota import db as _db
 
 log = logging.getLogger("quota.netmgr")
@@ -172,7 +173,7 @@ class TopologyManager:
         # Detached (new session) so the restart survives this process being
         # killed by systemd. The 2 s delay lets the HTTP/WS responses flush
         # before the gateway goes down.
-        subprocess.Popen(["sh", "-c", "sleep 2 && systemctl restart quota-gateway"],
+        subprocess.Popen(["sh", "-c", "sleep 2 && " + " ".join(service_cmd("restart", "quota-gateway"))],
                          start_new_session=True)
 
     def _default_addr_cmd(self) -> str:

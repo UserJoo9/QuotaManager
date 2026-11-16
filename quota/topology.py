@@ -14,6 +14,8 @@ of the app keeps working (mirrors the engine's graceful degradation).
 
 from __future__ import annotations
 
+from core.oscompat import service_cmd
+
 import logging
 import re
 import socket
@@ -162,12 +164,12 @@ def restart_pppoe(interface: str = "ppp0",
     injectable for tests (default: a subprocess).
     """
     run = run_command or _default_run_command
-    rc, out = run(["systemctl", "restart", "quota-wan-ppp"])
+    rc, out = run(service_cmd("restart", "quota-wan-ppp"))
     if rc != 0:
         return {"restarted": False, "state": "unknown",
                 "detail": out.strip() or
                 f"systemctl restart quota-wan-ppp exited {rc}"}
-    code, out2 = run(["systemctl", "is-active", "quota-wan-ppp"])
+    code, out2 = run(service_cmd("is-active", "quota-wan-ppp"))
     text = (out2 or "").strip().lower()
     state = text if text in ("active", "inactive") else "unknown"
     return {"restarted": True, "state": state,
