@@ -514,7 +514,9 @@ class Database:
                 "is writable — on the Linux gateway run the app as root (or "
                 "chown /var/lib/quota-gateway to the service user)") from exc
         self._conn.row_factory = aiosqlite.Row
+        await self._conn.execute("PRAGMA busy_timeout=30000")
         await self._conn.execute("PRAGMA journal_mode=WAL")
+        await self._conn.execute("PRAGMA synchronous=NORMAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._conn.executescript(SCHEMA)
         # Legacy cleanup: the old guest-deletion `suppressed_macs` table (v20,

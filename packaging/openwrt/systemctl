@@ -1,0 +1,35 @@
+#!/bin/sh
+# Minimal systemctl shim for OpenWrt (BusyBox/procd). Maps the few calls
+# QuotaManager makes onto /etc/init.d/<service>. Install to /usr/bin/systemctl.
+# Usage: systemctl [--quiet|--now|--no-block ...] <verb> <unit>
+verb=""; unit=""
+for a in "$@"; do
+    case "$a" in
+        -*) ;;
+        *) if [ -z "$verb" ]; then verb="$a"; else unit="$a"; fi ;;
+    esac
+done
+unit="${unit%.service}"
+case "$unit" in
+    quota-gateway) unit=quota-manager ;;
+esac
+init="/etc/init.d/$unit"
+running() {
+    case "$unit" in
+        dnsmasq) pidof dnsmasq >/dev/null 2>&1 ;;
+        quota-manager) pgrep -f "run.py" >/dev/null 2>&1 || ps | grep -q "[r]un.py" ;;
+        *) pidof "$unit" >/dev/null 2>&1 ;;
+    esac
+}
+case "$verb" in
+    daemon-reload|daemon-reexec) exit 0 ;;
+    is-active)  running && { echo active; exit 0; } || { echo inactive; exit 3; } ;;
+    try-restart) running || exit 0; verb=restart ;;
+esac
+[ -x "$init" ] || { echo "systemctl shim: $init not found" >&2; exit 5; }
+case "$verb" in
+    start|stop|restart|reload) exec "$init" "$verb" ;;
+    enable)  "$init" enable ;;
+    disable) "$init" disable ;;
+    *) echo "systemctl shim: unsupported verb '$verb'" >&2; exit 1 ;;
+esac

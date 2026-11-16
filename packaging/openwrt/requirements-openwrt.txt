@@ -1,0 +1,9 @@
+# Pure-Python set for OpenWrt (no Rust/C toolchain). Install python3-cryptography,
+# python3-yaml (apk) first, then: pip install --break-system-packages -r this
+pydantic<2
+fastapi<0.116
+starlette<0.47
+uvicorn
+websockets
+aiosqlite
+cbor2<6

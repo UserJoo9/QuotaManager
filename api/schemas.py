@@ -5,7 +5,15 @@ from __future__ import annotations
 import ipaddress
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
+try:  # pydantic v2
+    from pydantic import field_validator
+except ImportError:  # pydantic v1 (OpenWrt: no Rust toolchain for pydantic-core)
+    from pydantic import validator as _v1_validator
+
+    def field_validator(*fields, **kw):
+        kw.pop("mode", None)
+        return _v1_validator(*fields, allow_reuse=True, **kw)
 
 
 def _cap_field() -> Field:

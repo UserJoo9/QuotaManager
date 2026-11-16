@@ -1779,7 +1779,8 @@ def create_app(
         if firewall is None:
             raise HTTPException(404, "firewall disabled in config")
         current = dict(await firewall.load_config())
-        incoming = body.model_dump(exclude_none=True)
+        incoming = (body.model_dump(exclude_none=True) if hasattr(body, "model_dump")
+                    else body.dict(exclude_none=True))
         current.update(incoming)
         if firewall.topology != "wan":
             if current.get("port_forwards") or current.get("dmz"):
