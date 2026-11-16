@@ -18,6 +18,8 @@ an updated one converge on identical files.
 
 from __future__ import annotations
 
+from core.oscompat import service_cmd
+
 import ipaddress
 import logging
 import re
@@ -309,11 +311,11 @@ def rollback_if_dnsmasq_down(*, run: RunCommand | None = None,
     try:
         if not frag.exists():
             return False
-        code, _ = run(["systemctl", "is-active", "--quiet", "dnsmasq"])
+        code, _ = run(service_cmd("is-active", "dnsmasq", quiet=True))
         if code == 0:
             return False
         frag.unlink()
-        run(["systemctl", "restart", "dnsmasq"])
+        run(service_cmd("restart", "dnsmasq"))
         log.error("ipv6 setup: dnsmasq was down with the IPv6 fragment present — "
                   "removed %s and restarted dnsmasq (IPv6 router advertisements off)", frag)
         return True

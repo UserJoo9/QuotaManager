@@ -59,6 +59,7 @@ from api import waf as _waf
 _MAC_RE_API = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
 from core import passwords as _passwords
 from core import timeutil
+from core.oscompat import service_cmd
 from core.config import WafConfig, WebConfig
 from quota import daily_plan as _dp
 from quota import db as _db
@@ -1955,7 +1956,7 @@ def create_app(
         try:
             subprocess.Popen(
                 ["sh", "-c",
-                 "sleep 2 && systemctl restart quota-gateway"],
+                 "sleep 2 && " + " ".join(service_cmd("restart", "quota-gateway"))],
                 start_new_session=True)
         except Exception as exc:  # noqa: BLE001
             log.warning("could not schedule restart: %s", exc)
@@ -2022,7 +2023,7 @@ def create_app(
         try:
             subprocess.Popen(
                 ["sh", "-c",
-                 "sleep 2 && systemctl restart quota-gateway"],
+                 "sleep 2 && " + " ".join(service_cmd("restart", "quota-gateway"))],
                 start_new_session=True)
         except Exception as exc:  # noqa: BLE001
             log.warning("could not schedule restart: %s", exc)

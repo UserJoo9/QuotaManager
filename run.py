@@ -49,6 +49,7 @@ import uvicorn
 from api.app import create_app
 from core import config as cfg_mod
 from core.logging_setup import setup_logging
+from core.oscompat import service_cmd
 from quota import db as _db
 from quota import captive_http as _captive_http
 from quota import dns_rules as _dns_rules
@@ -222,7 +223,7 @@ def _reload_dnsmasq() -> None:
     except (OSError, subprocess.SubprocessError) as exc:
         log.warning("could not run `dnsmasq --test` (%s) — restarting anyway", exc)
     try:
-        subprocess.run(["systemctl", "restart", "dnsmasq"],
+        subprocess.run(service_cmd("restart", "dnsmasq"),
                        capture_output=True, text=True, timeout=15, check=True)
         log.info("dnsmasq restarted to apply DHCP refusal changes")
     except (OSError, subprocess.SubprocessError) as exc:

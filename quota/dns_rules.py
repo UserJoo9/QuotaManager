@@ -37,6 +37,8 @@ here changes that; it is called out so it is not sold as airtight.
 
 from __future__ import annotations
 
+from core.oscompat import service_cmd
+
 import logging
 import re
 import subprocess
@@ -709,7 +711,7 @@ class DnsRuleManager:
         except (OSError, subprocess.SubprocessError) as exc:
             log.warning("could not run `dnsmasq --test` (%s) — reloading anyway", exc)
         try:
-            subprocess.run(["systemctl", "restart", "dnsmasq"],
+            subprocess.run(service_cmd("restart", "dnsmasq"),
                            capture_output=True, text=True, timeout=15, check=True)
             log.info("dnsmasq restarted to apply DNS filtering rule changes")
         except (OSError, subprocess.SubprocessError) as exc:
