@@ -39,6 +39,7 @@ from typing import Any, Optional
 from core import timeutil
 from quota import daily_plan as _dp
 from quota import db as _db
+from quota.guest_state import is_pending_guest
 from quota.vendor import vendor_for
 
 log = logging.getLogger("quota.service")
@@ -558,6 +559,11 @@ class QuotaService:
             return _db.BLOCK_ADMIN
         if dev.block_state == _db.BLOCK_ADMIN:
             return _db.BLOCK_ADMIN
+        if is_pending_guest(
+                user.guest if user is not None else False,
+                user.block_state if user is not None else None,
+                dev.block_state):
+            return _db.BLOCK_GUEST_PENDING
         if allow_listed:
             return _db.BLOCK_OK
         if user_quota_blocked and not dev.bypass and not has_device_booster:
@@ -903,6 +909,8 @@ class QuotaService:
                 # render/enforcement time, never persisted as 'quota' — a
                 # persisted flag would desync the Gateway card's toggle.
                 continue
+            if is_pending_guest(user.guest, user.block_state, dev.block_state):
+                continue  # pending guest state lasts until approval or rejection
             if dev.block_state == _db.BLOCK_ADMIN:
                 continue  # per-device manual override stays until lifted
             if user.block_state == _db.BLOCK_ADMIN:

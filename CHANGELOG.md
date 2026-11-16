@@ -6,6 +6,13 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## [Unreleased]
+
+Added:
+- Administrators can create one-use guest vouchers with an optional expiry,
+  review their status, and revoke unused codes. Guests can enter a voucher on
+  the waiting page to receive the allowance assigned to that code.
+
 ## [0.5.7] — 2026-11-16
 
 Fixed:

@@ -242,6 +242,25 @@
       margin-bottom: 20px;
       font-weight: 500;
     }
+    .voucher-form {
+      display: grid;
+      gap: 10px;
+      margin: 16px 0 20px;
+      text-align: start;
+    }
+    .voucher-form label { color: var(--text); font-size: .9rem; font-weight: 600; }
+    .voucher-form input {
+      width: 100%; min-height: 44px; padding: 10px 12px; border-radius: 10px;
+      color: var(--text); background: var(--surface-2); border: 1px solid var(--line-2);
+      font: inherit; text-align: left; direction: ltr;
+    }
+    .voucher-form input:focus-visible, .voucher-form button:focus-visible {
+      outline: 3px solid var(--accent); outline-offset: 2px;
+    }
+    .voucher-feedback { display: grid; gap: 3px; min-height: 1.4em; font-size: .86rem; color: var(--text-2); }
+    .voucher-feedback-en { direction: ltr; text-align: left; unicode-bidi: plaintext; }
+    .voucher-feedback[data-kind="error"] { color: var(--danger); }
+    .voucher-feedback[data-kind="success"] { color: var(--ok); }
     .live-indicator {
       width: 7px;
       height: 7px;
@@ -361,6 +380,18 @@
         <span id="live-text">يتم الفحص التلقائي للحالة كل 3 ثوانٍ...</span>
       </div>
 
+      <form class="voucher-form" id="voucher-form" hidden>
+        <label for="voucher-code">استخدم قسيمة ضيف (Use a guest voucher)</label>
+        <input id="voucher-code" name="code" type="text" maxlength="64"
+               autocomplete="off" autocapitalize="characters" spellcheck="false"
+               dir="ltr" required>
+        <button class="btn btn-primary" id="voucher-submit" type="submit">
+          تفعيل القسيمة (Redeem voucher)
+        </button>
+        <p class="voucher-feedback" id="voucher-feedback" role="status"
+           aria-live="polite" aria-atomic="true" hidden></p>
+      </form>
+
       <div id="action-container">
         <button class="btn btn-secondary" id="check-btn" onclick="checkStatus(true)">
           🔄 تحقق من الحالة الآن (Check Now)
@@ -378,9 +409,100 @@
 
   <script>
     const urlParams = new URLSearchParams(window.location.search);
-    const continueUrl = urlParams.get('continue') || 'https://www.google.com';
+    function safeContinueUrl(value) {
+      try {
+        const url = new URL(value || 'https://www.google.com', window.location.origin);
+        return ['http:', 'https:'].includes(url.protocol)
+          ? url.href : 'https://www.google.com';
+      } catch (_) {
+        return 'https://www.google.com';
+      }
+    }
+    const continueUrl = safeContinueUrl(urlParams.get('continue'));
     let pollInterval = null;
     let isApproved = false;
+    const voucherForm = document.getElementById('voucher-form');
+    const voucherCode = document.getElementById('voucher-code');
+    const voucherSubmit = document.getElementById('voucher-submit');
+    const voucherFeedback = document.getElementById('voucher-feedback');
+
+    function showVoucherFeedback(kind, arabic, english) {
+      voucherFeedback.dataset.kind = kind;
+      const arabicText = document.createElement('span');
+      arabicText.lang = 'ar';
+      arabicText.dir = 'rtl';
+      arabicText.textContent = arabic;
+      const englishText = document.createElement('span');
+      englishText.className = 'voucher-feedback-en';
+      englishText.lang = 'en';
+      englishText.dir = 'ltr';
+      englishText.textContent = english;
+      voucherFeedback.replaceChildren(arabicText, englishText);
+      voucherFeedback.hidden = false;
+    }
+
+    voucherForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (!voucherCode.value.trim() || voucherSubmit.disabled) return;
+      voucherSubmit.disabled = true;
+      voucherSubmit.setAttribute('aria-busy', 'true');
+      showVoucherFeedback('info', 'جارٍ التحقق من القسيمة…', 'Checking voucher…');
+      try {
+        const response = await fetch('/api/guest/voucher/redeem', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: voucherCode.value.trim() })
+        });
+        const errorBody = !response.ok
+          ? await response.json().catch(() => ({})) : {};
+        const reason = errorBody?.detail?.code;
+        if (response.status === 429) {
+          const seconds = Number(response.headers.get('Retry-After'));
+          const minutes = Math.max(1, Math.ceil((seconds > 0 ? seconds : 60) / 60));
+          const arabicMinutes = minutes === 1 ? 'دقيقة واحدة'
+            : minutes === 2 ? 'دقيقتين'
+            : `${minutes} ${minutes <= 10 ? 'دقائق' : 'دقيقة'}`;
+          showVoucherFeedback('error', `محاولات كثيرة. جرّب تاني بعد ${arabicMinutes}.`,
+            `Too many attempts. Try again in ${minutes} ${minutes === 1 ? 'minute' : 'minutes'}.`);
+        } else if (reason === 'guest_mode_disabled' || reason === 'new_guests_paused') {
+          showVoucherFeedback('error', 'القسائم غير متاحة حاليًا. تواصل مع المسؤول.',
+            'Vouchers are unavailable right now. Contact the administrator.');
+        } else if (reason === 'device_unrecognized') {
+          showVoucherFeedback('error', 'تعذر التعرف على جهازك. أعد الاتصال بالشبكة.',
+            'Could not identify your device. Reconnect to the network.');
+        } else if (reason === 'device_blocked') {
+          showVoucherFeedback('error', 'هذا الجهاز محظور. تواصل مع مسؤول الشبكة.',
+            'This device is blocked. Contact the network administrator.');
+        } else if (reason === 'guest_not_pending') {
+          showVoucherFeedback('error', 'هذا الجهاز لا ينتظر الموافقة الآن.',
+            'This device is not waiting for approval.');
+        } else if (reason === 'guest_account_shared') {
+          showVoucherFeedback('error', 'حساب الضيف مرتبط بأجهزة أخرى؛ اطلب مساعدة المسؤول.',
+            'This guest account is shared with other devices. Contact the administrator.');
+        } else if (response.status === 422) {
+          showVoucherFeedback('error', 'صيغة القسيمة غير صحيحة.',
+            'The voucher format is invalid.');
+        } else if (!response.ok && response.status >= 500) {
+          showVoucherFeedback('error', 'الخدمة غير متاحة مؤقتًا. حاول لاحقًا.',
+            'The service is temporarily unavailable. Try again shortly.');
+        } else if (!response.ok) {
+          showVoucherFeedback('error', 'القسيمة غير صالحة أو منتهية.',
+            'The voucher is invalid, expired, or already used.');
+        } else {
+          voucherCode.value = '';
+          showVoucherFeedback('success', 'تم قبول القسيمة. جارٍ تفعيل اتصالك.',
+            'Voucher accepted. Activating your connection.');
+          await checkStatus(true);
+        }
+      } catch (_) {
+        showVoucherFeedback('error', 'تعذر الاتصال بالبوابة. تحقق من الشبكة.',
+          'Could not reach the portal. Check your network.');
+      } finally {
+        voucherSubmit.disabled = false;
+        voucherSubmit.removeAttribute('aria-busy');
+      }
+    });
 
     async function checkStatus(manual = false) {
       const checkBtn = document.getElementById('check-btn');
@@ -420,6 +542,7 @@
       const msgEn = document.getElementById('msg-en');
       const liveBox = document.getElementById('live-status-box');
       const actionBox = document.getElementById('action-container');
+      voucherForm.hidden = data.status !== 'pending';
 
       if (data.approved || (!data.blocked && data.is_guest) || (data.status === 'ok' && !data.is_guest)) {
         // --- Approved State ---

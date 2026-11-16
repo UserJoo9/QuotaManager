@@ -940,18 +940,31 @@ class Gateway:
                     return
                 elif await self.service.is_guest_mode():
                     # Guest mode is active: new guest devices are registered in the
-                    # pending lock (0 GB allowance, admin-cut) until admin approves.
+                    # pending lock (0 GB allowance) until admin approval or a
+                    # guest voucher redemption. Keep this distinct from an
+                    # explicit administrator rejection.
+                    guest_limit_reached = (
+                        await self.database.count_guest_users()
+                        >= await self.service.guest_limit())
+                    guest_state = (
+                        _db.BLOCK_ADMIN if guest_limit_reached
+                        else _db.BLOCK_GUEST_PENDING)
                     dev = await self.database.upsert_device(
                         mac, name="", quota_mode=_db.QUOTA_FIXED,
                         fixed_gb=0.0, guest=True)
                     await self.database.set_device_state(
-                        dev.id, _db.BLOCK_ADMIN)
+                        dev.id, guest_state)
                     if dev.user_id:
                         await self.database.update_user(
-                            dev.user_id, block_state=_db.BLOCK_ADMIN)
-                    await self.database.add_event(
-                        f"New GUEST on network: {dev.mac} ({ip}) — "
-                        f"awaiting admin approval", "info", dev.id)
+                            dev.user_id, block_state=guest_state)
+                    if guest_limit_reached:
+                        await self.database.add_event(
+                            f"New GUEST blocked: {dev.mac} ({ip}) — "
+                            "guest limit reached", "warn", dev.id)
+                    else:
+                        await self.database.add_event(
+                            f"New GUEST on network: {dev.mac} ({ip}) — "
+                            "awaiting admin approval", "info", dev.id)
                 else:
                     # Brand-new device: mint its user in the DISABLED
                     # onboarding lock — 0 GB, no auto share, kernel-cut until
