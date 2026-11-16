@@ -44,6 +44,11 @@ from ipaddress import ip_address
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+if "--doctor" in sys.argv:  # must work even when fastapi/etc. are missing
+    from core.doctor import run_doctor
+    _cfg = sys.argv[sys.argv.index("--config") + 1] if "--config" in sys.argv[:-1] else None
+    sys.exit(run_doctor(_cfg))
+
 import uvicorn
 
 from api.app import create_app
@@ -256,6 +261,8 @@ def _parse_args() -> argparse.Namespace:
         help="override web port (can also set QUOTA_PORT env var)",
     )
     p.add_argument("--debug", action="store_true", help="enable debug logging")
+    p.add_argument("--doctor", action="store_true",
+                   help="check dependencies/paths for this host and exit")
     return p.parse_args()
 
 
@@ -469,6 +476,12 @@ class Gateway:
         Runs in < 20 ms so the web server can bind port 8080 and serve the UI
         immediately without waiting for kernel rules or network commands.
         """
+        from core.oscompat import is_tmpfs
+        if is_tmpfs(str(Path(self.cfg.db_path).parent)):
+            log.error("db_path %s is on a RAM filesystem (tmpfs): ALL settings "
+                      "and usage are lost on reboot. On OpenWrt keep it on "
+                      "/overlay (see scripts/quota-manager.openwrt).",
+                      self.cfg.db_path)
         await self.database.connect()
         # A dashboard WAN-toggle applies on the NEXT restart: the DB override
         # must land on cfg BEFORE the engine/scanner are built below (they read
@@ -1178,6 +1191,23 @@ class Gateway:
         snap = await asyncio.to_thread(probe.snapshot)
         self._wifi_probe_state = snap
 
+    async def _maybe_backup_tick(self) -> None:
+        """Copy the DB to ``backups/`` at most once per 24 h (first copy ~2 min
+        after start, so a crash-looping box does not spam copies)."""
+        now = time.time()
+        due = getattr(self, "_next_backup_at", None)
+        if due is None:
+            self._next_backup_at = now + 120
+            return
+        if now < due:
+            return
+        self._next_backup_at = now + 86400
+        try:
+            path = await asyncio.to_thread(self.database.backup_sync)
+            log.info("database backup written: %s", path)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("database backup failed: %s", exc)
+
     async def _maybe_latency_tick(self) -> None:
         """Probe every leased client by ARP round-trip time.
 
@@ -1471,6 +1501,9 @@ class Gateway:
         # 1b4. ARP-RTT probe (any hardware). Slow cadence,
         #      off the event loop (raw sockets + sleeps in a worker thread).
         await self._timed("_maybe_latency_tick", self._maybe_latency_tick())
+
+        # 1b5. Daily consistent DB copy (cheap; worker thread; never raises).
+        await self._timed("_maybe_backup_tick", self._maybe_backup_tick())
 
         # 1c. Rogue/unmanaged-host scan on a slow cadence (60 s): static-IP
         #     devices are not in the lease file, so they never show in the
@@ -2514,6 +2547,9 @@ def _acquire_single_instance_lock(db_path: str) -> None:
 
 def main() -> None:
     args = _parse_args()
+    if args.doctor:  # normally short-circuited before the heavy imports
+        from core.doctor import run_doctor
+        sys.exit(run_doctor(args.config))
     resolved_config_path = cfg_mod.resolve_config_path(args.config)
     cfg = cfg_mod.load_config(resolved_config_path)
     if args.port is not None:

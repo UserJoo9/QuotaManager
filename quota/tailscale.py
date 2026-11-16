@@ -25,6 +25,8 @@ the dashboard can render, with a ``state`` and a human ``message``.
 
 from __future__ import annotations
 
+from core.oscompat import service_cmd
+
 import json
 import logging
 import re
@@ -237,7 +239,7 @@ class TailscaleManager:
             if rc != 0:
                 self._last_error = f"install failed (exit {rc})"
             else:
-                self._run(["systemctl", "enable", "--now", "tailscaled"])
+                self._run(service_cmd("enable", "tailscaled", extra=["--now"]))
                 self._install_step = INSTALL_STEPS
                 self._notify("installed")
         except Exception as e:  # noqa: BLE001
@@ -270,7 +272,7 @@ class TailscaleManager:
             if cur["state"] == "connected":
                 return cur
             if cur["state"] == "daemon_down":
-                self._run(["systemctl", "enable", "--now", "tailscaled"])
+                self._run(service_cmd("enable", "tailscaled", extra=["--now"]))
                 time.sleep(1.0)
             # (Re)start a background ``up``: it waits for the sign-in to finish.
             self._kill_proc()

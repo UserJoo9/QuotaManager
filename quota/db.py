@@ -532,6 +532,15 @@ class Database:
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA synchronous=NORMAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
+        try:
+            rows = await self._conn.execute_fetchall("PRAGMA quick_check")
+            verdict = str(rows[0][0]) if rows else "ok"
+            if verdict.lower() != "ok":
+                log.error("database %s FAILED quick_check (%s) — restore the "
+                          "latest copy from %s", self.path, verdict,
+                          Path(self.path).parent / "backups")
+        except Exception as exc:  # noqa: BLE001  (never block startup on the probe)
+            log.warning("database quick_check could not run: %s", exc)
         await self._conn.executescript(SCHEMA)
         # Legacy cleanup: the old guest-deletion `suppressed_macs` table (v20,
         # pre-blacklist) is orphaned — delete->deny-list replaced it and nothing
@@ -786,6 +795,32 @@ class Database:
             await self.conn.commit()
             await self.add_event(
                 f"Migrated {len(rows)} device(s) to per-user quotas", "info")
+
+    def backup_sync(self, keep: int = 3) -> str:
+        """Consistent online copy (SQLite backup API, safe with WAL) into
+        ``<db dir>/backups/``; keeps the newest *keep* copies. Blocking — call
+        via ``asyncio.to_thread``. Returns the new file's path."""
+        import sqlite3
+        import time as _time
+        dest_dir = Path(self.path).parent / "backups"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"quota-{_time.strftime('%Y%m%d-%H%M%S')}.db"
+        src = sqlite3.connect(self.path, timeout=30)
+        try:
+            dst = sqlite3.connect(str(dest))
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+        old = sorted(dest_dir.glob("quota-*.db"))[:-max(1, keep)]
+        for f in old:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+        return str(dest)
 
     async def close(self) -> None:
         if self._conn is not None:

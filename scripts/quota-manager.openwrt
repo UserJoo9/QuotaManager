@@ -5,8 +5,7 @@
 # Manual install:
 #   cp scripts/quota-manager.openwrt /etc/init.d/quota-manager
 #   chmod +x /etc/init.d/quota-manager
-#   /etc/init.d/quota-manager enable
-#   /etc/init.d/quota-manager start
+#   /etc/init.d/quota-manager enable && /etc/init.d/quota-manager start
 
 USE_PROCD=1
 START=95
@@ -14,25 +13,29 @@ STOP=10
 
 PROG="/usr/bin/python3"
 APP_DIR="/opt/QuotaManager"
-# prefer the venv install_openwrt.sh creates (falls back to system python)
+# prefer the venv install_openwrt.sh may create (falls back to system python)
 [ -x "$APP_DIR/.venv/bin/python" ] && PROG="$APP_DIR/.venv/bin/python"
-PIDFILE="/var/run/quota-manager.pid"
+# /var is tmpfs on OpenWrt: keep the database on persistent storage (/overlay
+# = flash or extroot) and expose it at the path config.yaml expects.
+DATA_DIR="/overlay/quota-gateway"
 
 start_service() {
     [ -d "$APP_DIR" ] || {
         echo "QuotaManager directory not found at $APP_DIR" >&2
         return 1
     }
+    # optional swap file (created by install_openwrt.sh on low-RAM routers)
+    [ -f /overlay/swapfile ] && swapon /overlay/swapfile 2>/dev/null
+    mkdir -p "$DATA_DIR" /var/lib /var/log/quota-gateway
+    if [ ! -L /var/lib/quota-gateway ]; then
+        rm -rf /var/lib/quota-gateway
+        ln -s "$DATA_DIR" /var/lib/quota-gateway
+    fi
 
     procd_open_instance
-    procd_set_param command "$PROG" "$APP_DIR/run.py"
-    procd_set_param respawn 3600 5 0
+    procd_set_param command "$PROG" "$APP_DIR/run.py" --config "$APP_DIR/config.yaml"
+    procd_set_param respawn 3600 10 5
     procd_set_param stdout 1
     procd_set_param stderr 1
-    procd_set_param pidfile "$PIDFILE"
     procd_close_instance
-}
-
-stop_service() {
-    [ -f "$PIDFILE" ] && kill "$(cat "$PIDFILE")" 2>/dev/null
 }

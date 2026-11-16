@@ -6,6 +6,17 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## [Unreleased]
+
+Added:
+- OpenWrt: the installer now works on MIPS/ARM routers (pure-Python packages), keeps your settings on persistent storage so they survive a reboot, retries flaky downloads, and adds swap on low-memory routers.
+- `python3 run.py --doctor` checks the packages, tools and folders the gateway needs and says what is missing.
+- The database is now copied once a day to a `backups` folder next to it (newest 3 kept) and checked at startup.
+
+Fixed:
+- Starting a second copy of the gateway by mistake no longer corrupts or locks the database ("database is locked"); the second copy exits.
+- The gateway can restart DNS/DHCP and its own service on systems without systemd (OpenWrt).
+
 ## [0.5.7] — 2026-11-16
 
 Fixed:

@@ -26,6 +26,7 @@ def has_systemd(root: str = "/") -> bool:
 
 
 def service_cmd(action: str, name: str, *, quiet: bool = False,
+                extra: list[str] | None = None,
                 openwrt: bool | None = None) -> list[str]:
     """argv for ``systemctl <action> <name>`` or its OpenWrt equivalent.
 
@@ -38,7 +39,7 @@ def service_cmd(action: str, name: str, *, quiet: bool = False,
         cmd = ["systemctl", action]
         if quiet:
             cmd.append("--quiet")
-        return cmd + [name]
+        return cmd + list(extra or []) + [name]
     name = _OPENWRT_NAMES.get(name, name)
     verb = {"try-restart": "restart", "is-active": "running"}.get(action, action)
     return [f"/etc/init.d/{name}", verb]
