@@ -82,6 +82,27 @@ esac
 # passkeys (optional; needs cryptography from the package manager)
 $PIP --no-deps webauthn==2.5.2 || log "webauthn skipped (passkeys disabled)"
 
+# --- dnsmasq (OpenWrt generates its config from /etc/config/dhcp) ------------
+# The app writes its DNS-filter/tag fragments into /etc/dnsmasq.d and reads
+# leases from /var/lib/misc/dnsmasq.leases (config.yaml defaults). Stock OpenWrt
+# loads neither, so point dnsmasq at them via uci.
+mkdir -p /etc/dnsmasq.d /var/lib/misc
+if uci -q get dhcp.@dnsmasq[0] >/dev/null 2>&1; then
+    uci -q set dhcp.@dnsmasq[0].confdir='/etc/dnsmasq.d'
+    uci -q set dhcp.@dnsmasq[0].leasefile='/var/lib/misc/dnsmasq.leases'
+    uci -q set dhcp.@dnsmasq[0].logdhcp='1'
+    uci commit dhcp
+    log "dnsmasq: confdir=/etc/dnsmasq.d, leasefile=/var/lib/misc/dnsmasq.leases"
+fi
+cat > /etc/dnsmasq.d/quota-dnslog.conf <<'DNSEOF'
+# Written by install_openwrt.sh - browsing-history log read by QuotaManager
+log-queries=extra
+log-facility=/var/log/quota-dnsmasq.log
+DNSEOF
+# ifb (speed limits) loads at boot via kmod autoload; make sure it is up now
+modprobe ifb 2>/dev/null || true
+/etc/init.d/dnsmasq restart 2>/dev/null || true
+
 install -m 755 "$APP_DIR/scripts/systemctl.openwrt" /usr/bin/systemctl
 install -m 755 "$APP_DIR/scripts/quota-manager.openwrt" /etc/init.d/quota-manager
 mkdir -p /overlay/quota-gateway

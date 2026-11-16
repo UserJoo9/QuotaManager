@@ -26,7 +26,8 @@ start_service() {
     }
     # optional swap file (created by install_openwrt.sh on low-RAM routers)
     [ -f /overlay/swapfile ] && swapon /overlay/swapfile 2>/dev/null
-    mkdir -p "$DATA_DIR" /var/lib /var/log/quota-gateway
+    mkdir -p "$DATA_DIR" /var/lib /var/lib/misc /var/log/quota-gateway
+    modprobe ifb 2>/dev/null
     if [ ! -L /var/lib/quota-gateway ]; then
         rm -rf /var/lib/quota-gateway
         ln -s "$DATA_DIR" /var/lib/quota-gateway

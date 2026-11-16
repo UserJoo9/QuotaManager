@@ -269,6 +269,10 @@ def ensure_box_ignores_ula_dns(*, prefix: str, iface: str, run: RunCommand | Non
             return False
         code, out = run(["nmcli", "-t", "-f", "NAME,DEVICE", "con", "show", "--active"])
         if code != 0:
+            from core.oscompat import is_openwrt
+            if is_openwrt():  # netifd/dnsmasq own resolv.conf there; no NetworkManager
+                log.debug("ipv6 setup: OpenWrt has no nmcli; skipping box DNS fix")
+                return False
             log.warning("ipv6 setup: the box's own DNS points at the ULA but nmcli is "
                         "unavailable — remove the fd00: nameserver manually")
             return False
