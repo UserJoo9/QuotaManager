@@ -42,26 +42,38 @@ export default function people(ctx) {
     const st = userStatus(u), devs = [...(u.devices || [])].sort((a, b) => (b.gateway ? 1 : 0) - (a.gateway ? 1 : 0)), isOpen = openIds.has(u.id);
     const toggle = () => { if (isOpen) openIds.delete(u.id); else openIds.add(u.id); ctx.touch(); };
     const online = devs.filter((x) => x.connected).length;
+    const blockedDevs = devs.filter((x) => x.blocked);
+    const isPartialCut = blockedDevs.length > 0 && devs.length > 1;
+    const isDis = u.quota_mode === "disabled";
     return h("div", {},
-      h("div", { class: "urow" + (u.blocked ? " is-off" : "") },
+      h("div", { class: "urow" + (u.blocked ? " is-off" : isPartialCut ? " has-blocked-dev" : "") },
         h("button", { type: "button", class: "chev" + (isOpen ? " open" : ""), "aria-expanded": String(isOpen), "aria-label": u.name, onclick: toggle }, icon("chev", 18)),
         h("div", { class: "u-id", onclick: () => open(u) }, avatar(u.name, u.id),
-          h("div", {}, h("div", { class: "u-name" }, u.name, u.protected ? chip("", t("common.protected")) : null, u.guest ? chip("accent", t("common.guest")) : null),
+          h("div", {}, h("div", { class: "u-name" }, u.name, u.protected ? chip("", t("common.protected")) : null, u.guest ? chip("accent", t("common.guest")) : null, isPartialCut ? chip("warn", `${blockedDevs.length}/${devs.length} ${t("pp.devs_cut")}`) : null),
             h("div", { class: "u-sub" }, `${num(devs.length, 0)} ${t("pp.devs")} · ${num(online, 0)} ${t("pp.on")}`))),
         h("div", { class: "u-use" }, h("div", { class: "u-num" }, h("b", {}, `${num(u.used_gb)} ${t("common.gb")}`), h("span", {}, u.allowance_gb > 0 ? `${t("ov.of")} ${num(u.allowance_gb)}` : t("pp.unlimited")), u.allowance_gb > 0 ? h("em", {}, `${num(u.percent, 0)}%`) : null),
           bar(u.allowance_gb > 0 ? u.percent : 0), netLine(u.used_gb, u.lan_used_gb),
           u.daily && u.daily.active ? h("span", { class: "sub dq-mini" + (u.daily.blocked ? " over" : "") }, `${t("dq.today")}: ${num(u.daily.used_gb)} ${t("ov.of")} ${num(u.daily.cap_gb)} ${t("common.gb")}`) : null),
         h("div", { class: "u-stat" }, chip(st.cls.replace("chip", "").trim(), st.text)),
-        sw(!u.blocked, t("pp.access"), act(() => actions.blockUser(u.id, !u.blocked)))),
+        sw(!u.blocked, t("pp.access"), act(() => {
+          if (isDis && u.blocked) { toast(t("dr.quota_needed"), "warn"); return; }
+          return actions.blockUser(u.id, !u.blocked);
+        }))),
       isOpen ? h("div", { class: "drows" }, devs.length ? devs.map((x) => {
         const lv = liveBy.get(x.id);
-        return h("div", { class: "drow" },
+        const dIsOff = x.blocked;
+        const dIsUnassigned = dIsOff && isDis;
+        const dCls = "drow" + (dIsUnassigned ? " is-unassigned" : dIsOff ? " is-off" : "");
+        return h("div", { class: dCls },
           h("button", { type: "button", class: "d-main", onclick: () => openDev(u, x) }, h("span", { class: "d-ic" }, icon(devIcon(x), 16)),
             h("span", {}, h("span", { class: "d-name" }, x.name || x.mac), h("span", { class: "d-meta" }, h("span", { class: "mono" }, iso(x.mac)), x.ip ? h("span", { class: "mono" }, iso(x.ip)) : null))),
           h("div", { class: "d-use" }, h("div", { class: "c-num" }, h("b", {}, `${num(x.device_used_gb)} ${t("common.gb")}`), h("span", {}, u.allowance_gb > 0 ? `${num((x.device_used_gb / u.allowance_gb) * 100, 0)}%` : "")),
             bar(u.allowance_gb > 0 ? (x.device_used_gb / u.allowance_gb) * 100 : 0), netLine(x.device_used_gb, x.lan_used_gb)),
           h("div", { class: "d-live" }, x.connected ? [h("span", {}, "↓ ", h("b", {}, fmtBps(lv?.down_bps || 0))), h("span", {}, "↑ ", h("b", {}, fmtBps(lv?.up_bps || 0)))] : h("span", {}, t("pp.st.offline"))),
-          x.gateway ? h("span", {}) : sw(!x.blocked, t("pp.access"), act(() => actions.blockDevice(x.id, !x.blocked))));
+          x.gateway ? h("span", {}) : sw(!x.blocked, t("pp.access"), act(() => {
+            if (isDis && x.blocked) { toast(t("dr.quota_needed"), "warn"); return; }
+            return actions.blockDevice(x.id, !x.blocked);
+          })));
       }) : h("div", { class: "empty" }, t("pp.nodevices"))) : null);
   }
   const input = h("input", { type: "search", placeholder: t("pp.search"), value: query, "aria-label": t("pp.search"), oninput: (e) => { query = e.target.value; fill(); } });

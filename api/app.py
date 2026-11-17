@@ -2211,6 +2211,10 @@ def create_app(
             await database.update_user(dev.user_id, **ufields)
         if body.block is not None:
             await service.set_admin_block(device_id, body.block)
+            if body.block is False and dev.user_id is not None:
+                u = await database.get_user(dev.user_id)
+                if u is not None and u.quota_mode == _db.QUOTA_DISABLED:
+                    await database.update_user(dev.user_id, quota_mode=_db.QUOTA_AUTO)
         await service.recompute_allowances()
         if body.user_id is not None and body.user_id != dev.user_id:
             await database.add_event(
@@ -2451,6 +2455,8 @@ def create_app(
             await database.update_user(user_id, **fields)
         if body.block is not None:
             await service.set_admin_block_user(user_id, body.block)
+            if body.block is False and user.quota_mode == _db.QUOTA_DISABLED and "quota_mode" not in fields:
+                await database.update_user(user_id, quota_mode=_db.QUOTA_AUTO)
         await service.recompute_allowances()
         _schedule_shaping_sync()  # the user's aggregate cap lands in tc now
         # A VPN-bypass edit must re-program the policy-routing exclusions now.

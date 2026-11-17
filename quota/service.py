@@ -528,10 +528,10 @@ class QuotaService:
         usage-vs-allowance gate only; a manual admin cut (user/device level)
         still resolves through ``resolve_device_state``.
         """
-        if user is not None and user.quota_mode == _db.QUOTA_DISABLED:
-            return True
         if user is not None and user.exempt_quota:
             return False
+        if user is not None and user.quota_mode == _db.QUOTA_DISABLED:
+            return True
         if self.free_mode and not (user is not None and user.protected):
             return False  # everyone is out of quota: the box opens for all
         return QuotaService.quota_blocked_for(user, allowance, used_gb)
