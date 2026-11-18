@@ -6,6 +6,21 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## [0.5.8] — 2026-11-20
+
+Added:
+- The dashboard now says **why** a person or device has no internet: not assigned a quota yet, paused by the admin, monthly quota used up, or daily limit reached. Cut devices and people are highlighted in the list, and a person with only some devices cut shows "2/3 cut".
+- New devices that are waiting for a quota show as "Unassigned" instead of "Blocked", and the quota dropdown shows "Disabled (0 GB - unassigned)" instead of misleadingly showing "Auto".
+
+Changed:
+- Preparing for the project's new name (Netrex): the update check now looks for new releases under the new project address first and under the current one as a fallback, so updates keep arriving before, during and after the move. Nothing changes for you now.
+- On Debian/Ubuntu, if your gateway still gets updates from the old apt address, it now switches to the new address by itself as soon as the new one is online, so `apt update` keeps working after the move. Nothing to do by hand.
+
+Fixed:
+- A new device that joined the network (0 GB, waiting for a quota) stayed cut even after "Unlimited usage" was switched on. Unlimited now opens it immediately. Reported by @Y3bs.
+- Switching Internet access on for a device or person that is still waiting for a quota now takes effect at once: they join the shared pool. Before, the switch flipped back and looked broken.
+- Installing on systems whose package manager has no internet during installation (Arch / CachyOS) no longer prints a wall of connection errors: the installer notices in two seconds and finishes the setup in the background. If that quick check is wrong (a slow connection, or a custom pip mirror instead of pypi.org), the installer still tries the normal download before reporting a problem.
+
 ## [0.5.7] — 2026-11-16
 
 Fixed:
