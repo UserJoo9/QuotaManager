@@ -20,11 +20,6 @@ ENV/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.playwright-mcp/
-.serena/
-graphify-out/
-specs/
-.specify/memory/constitution.md
 .coverage
 htmlcov/
 
