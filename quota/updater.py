@@ -34,6 +34,29 @@ log = logging.getLogger("quota.updater")
 #: per-version notes (both are the release pipeline's outputs).
 DEFAULT_REPO = "UserJoo9/QuotaManager"
 
+#: The project is being renamed (Netrex). The GitHub repository will move to
+#: ``NEW_REPO`` and GitHub redirects the old name, but a box must not depend on
+#: a redirect staying alive: it asks the new name first and falls back to the
+#: legacy one, so the same build works before, during and after the rename.
+NEW_REPO = "UserJoo9/Netrex"
+LEGACY_REPO = "UserJoo9/QuotaManager"
+
+
+def repo_candidates(configured: str) -> list[str]:
+    """Release repositories to try, in order (the first that answers wins).
+
+    A default/legacy/new name expands to ``[NEW_REPO, LEGACY_REPO]``. A custom
+    value (a fork, a mirror) is used ALONE: a fork must never silently start
+    pulling the upstream project's releases. The first answer wins - the
+    versions of two candidates are deliberately never compared, so a stale or
+    unrelated repository under the other name can never out-vote the first.
+    """
+    known = {NEW_REPO.lower(), LEGACY_REPO.lower()}
+    name = (configured or "").strip()
+    if not name or name.lower() in known:
+        return [NEW_REPO, LEGACY_REPO]
+    return [name]
+
 #: package type -> (asset suffix, deterministic asset name). The release
 #: pipeline names every asset this way, so a release with an empty asset list
 #: still resolves to a download URL.
@@ -222,6 +245,9 @@ class Updater:
                  install_kind: str | None = None
                  ) -> None:
         self.database = database
+        self.repos = repo_candidates(repo)
+        #: the repository that answered last (releases, CHANGELOG, asset URLs
+        #: all come from it); the configured one until a lookup has run
         self.repo = repo
         self.current_version = current_version
         self.interval_sec = interval_sec
@@ -262,6 +288,26 @@ class Updater:
             if s.get("error"):
                 s["error"] = ""
                 await self.database.set_setting("updates_state", json.dumps(s))
+
+    async def _fetch_release(self) -> dict[str, Any]:
+        """``/releases/latest`` from the first candidate repository that
+        answers (404 before a rename, a network error, ...). Remembers which
+        one answered in ``self.repo``; raises the last error when none do."""
+        last: Exception | None = None
+        for repo in self.repos:
+            try:
+                release = await asyncio.to_thread(
+                    self._fetch_json, _releases_api(repo))
+            except Exception as exc:  # noqa: BLE001 — try the next name
+                last = exc
+                log.info("release lookup on %s failed: %s", repo, exc)
+                continue
+            if repo != self.repo:
+                log.info("updates now come from %s", repo)
+            self.repo = repo
+            return release
+        raise last if last is not None else RuntimeError(
+            "no update repository configured")
 
     # -- public surface ------------------------------------------------------
 
@@ -319,8 +365,7 @@ class Updater:
             return await self.state()
         self._checking = True
         try:
-            release = await asyncio.to_thread(
-                self._fetch_json, _releases_api(self.repo))
+            release = await self._fetch_release()
             latest = str(release.get("tag_name", "") or "").lstrip("v")
             if not parse_version(latest):
                 raise ValueError(f"unexpected release tag {latest!r}")
@@ -383,8 +428,7 @@ class Updater:
                 latest = st["latest_version"]
                 if not st["available"]:
                     return {"ok": False, "reason": "no update available"}
-                release = await asyncio.to_thread(
-                    self._fetch_json, _releases_api(self.repo))
+                release = await self._fetch_release()
                 kind = self.install_kind
                 asset_url = self._find_asset_url(release, latest, kind)
                 if not asset_url:

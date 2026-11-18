@@ -1293,8 +1293,32 @@ same release pipeline that publishes the `.deb` (see the release section):
   snapshot carries an `update` key so the banner appears without a reload; the
   dashboard banners once per version (`localStorage quota_update_banner`).
 
+**Repository rename (Netrex).** `repo_candidates()` expands the default / legacy
+/ new name into `[UserJoo9/Netrex, UserJoo9/QuotaManager]`; `Updater._fetch_release`
+asks them in that order and the FIRST that answers wins (`self.repo` then feeds
+the CHANGELOG and asset URLs). Versions of two candidates are deliberately never
+compared (a stale/unrelated repo under the other name must not out-vote the
+first), and a custom `updates.repo` (a fork) is used alone, never expanded.
+`urllib` follows GitHub's rename redirect on its own, but the fallback means a
+box never depends on it staying alive.
+
+**apt source follow-up** (`quota/apt_source.py`). The signed apt repo is the
+`gh-pages` branch served by GitHub Pages at `https://<owner>.github.io/<repo>/`,
+and **GitHub does not redirect Pages when a repo is renamed**, so boxes whose
+`/etc/apt/sources.list.d/*.list|*.sources` name the old address would stop
+getting apt updates. `migrate_apt_source()` (called from the maintenance tick via
+`Gateway._apt_source_tick`, every 6 h, off the event loop) rewrites the URL only
+after `<new>/dists/stable/Release` answers with `Codename: stable`; the key
+(`signed-by`) is unchanged. No source naming the old address = no network, no
+disk (idempotent; second run is a no-op). The workflow publishes to whatever
+repo it runs in (`github.repository`), so it needs no change for the rename.
+When the repo is renamed, keep the apt `Origin`/`Label` in `apt-repo.yml`
+unchanged for that release: apt refuses a changed Label until
+`apt-get update --allow-releaseinfo-change`.
+
 Tests: `tests/test_updater.py` (version math, CHANGELOG parse, check gate,
-install under systemd-run/apt fakes). The release workflow's GitHub check and
+install under systemd-run/apt fakes, the rename fallback order),
+`tests/test_apt_source.py` (apt source migration). The release workflow's GitHub check and
 the parser both use the same version grammar — `quota/version.py` is the single
 source of truth for both the box and the `.deb`.
 
@@ -1894,7 +1918,10 @@ QuotaManager/
 │   │                         #   restart_pppoe() = public-IP renewal (v24)
 │   ├── updater.py            # self-update checks (Admin tab): version compare vs the
 │   │                         #   latest GitHub release, CHANGELOG.md parse, 24 h gate,
-│   │                         #   persisted updates_state, optional .deb auto-install
+│   │                         #   persisted updates_state, optional .deb auto-install;
+│   │                         #   repo_candidates(): new name first, legacy fallback
+│   ├── apt_source.py         # moves /etc/apt sources to the renamed project's Pages
+│   │                         #   address once it serves the signed repo (idempotent)
 │   ├── netmgr.py             # TopologyManager: the WAN tab's live LAN/WAN switch
 │   ├── vendor.py             # MAC OUI -> manufacturer (IEEE registry, lazy load)
 │   ├── oui.txt               # bundled IEEE MA-L/MA-M/MA-S database (53.5k prefixes)
@@ -1953,6 +1980,7 @@ QuotaManager/
     ├── test_wifi_probe.py    # airodump CSV parse + probe snapshot + thread smoke
     ├── test_updater.py       # version math + CHANGELOG parse + GitHub check +
     │                         #   systemd-run/apt install (fakes, no network)
+    ├── test_apt_source.py    # apt source -> new Pages address (fakes, tmp dir)
     └── test_run_wiring.py    # run.py wiring + live boot + bundle reconcile +
                               #   dnsmasq lease sync + live-counter regression
 ```

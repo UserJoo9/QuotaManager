@@ -373,3 +373,90 @@ def test_tarball_with_escaping_member_is_refused(tmp_path):
                  run_command=lambda argv, timeout=15: (0, ""))
     ok, out = up._install_package("tarball", str(tgz))
     assert not ok and "unsafe" in out
+
+
+
+# -- the repository rename: ask the new name first, keep the old as a fallback --
+
+def _answers(table):
+    """fetch_json fake: ``table`` maps a repo to a release dict, or an
+    exception instance to raise; records the order of the repos asked."""
+    asked = []
+
+    def fetch(url, timeout=20):
+        repo = url.split("/repos/")[1].split("/releases")[0]
+        asked.append(repo)
+        out = table[repo]
+        if isinstance(out, Exception):
+            raise out
+        return out
+    fetch.asked = asked
+    return fetch
+
+
+def test_repo_candidates_known_names_expand_custom_stays_alone():
+    from quota.updater import LEGACY_REPO, NEW_REPO, repo_candidates
+    both = [NEW_REPO, LEGACY_REPO]
+    assert repo_candidates("UserJoo9/QuotaManager") == both
+    assert repo_candidates("userjoo9/netrex") == both
+    assert repo_candidates("") == both
+    # a fork must never silently start pulling the upstream project's releases
+    assert repo_candidates("someone/fork") == ["someone/fork"]
+
+
+def test_new_name_is_asked_first_and_wins():
+    fetch = _answers({"UserJoo9/Netrex": RELEASE, "UserJoo9/QuotaManager": OSError("x")})
+    up = Updater(FakeDb(), current_version="0.2.0", fetch_json=fetch,
+                 fetch_text=lambda url, timeout=20: CHANGELOG)
+    st = run(up.check_now())
+    assert st["latest_version"] == "0.3.1"
+    assert fetch.asked == ["UserJoo9/Netrex"]       # the legacy name is never needed
+    assert up.repo == "UserJoo9/Netrex"
+
+
+def test_before_the_rename_the_legacy_name_answers():
+    """The new repository does not exist yet (404): the same build must keep
+    updating from the legacy name, and every follow-up URL uses it."""
+    fetch = _answers({"UserJoo9/Netrex": OSError("HTTP Error 404: Not Found"),
+                      "UserJoo9/QuotaManager": {"tag_name": "v0.3.1", "assets": []}})
+    texts = []
+    up = Updater(FakeDb(), current_version="0.2.0", fetch_json=fetch,
+                 fetch_text=lambda url, timeout=20: texts.append(url) or CHANGELOG,
+                 install_kind="deb")
+    st = run(up.check_now())
+    assert st["available"] is True and st["error"] == ""
+    assert fetch.asked == ["UserJoo9/Netrex", "UserJoo9/QuotaManager"]
+    assert up.repo == "UserJoo9/QuotaManager"
+    assert "UserJoo9/QuotaManager/main/CHANGELOG.md" in texts[0]
+    url = up._find_asset_url({"assets": []}, "0.3.1", "deb")
+    assert url.startswith("https://github.com/UserJoo9/QuotaManager/releases/download/v0.3.1/")
+
+
+def test_versions_of_two_repositories_are_never_compared():
+    """First answer wins: a newer tag under the second name is ignored."""
+    old = {"tag_name": "v9.9.9", "assets": []}
+    fetch = _answers({"UserJoo9/Netrex": RELEASE, "UserJoo9/QuotaManager": old})
+    up = Updater(FakeDb(), current_version="0.2.0", fetch_json=fetch,
+                 fetch_text=lambda url, timeout=20: CHANGELOG)
+    assert run(up.check_now())["latest_version"] == "0.3.1"
+
+
+def test_both_names_failing_reports_the_error_and_keeps_last_known():
+    db = FakeDb()
+    ok = Updater(db, current_version="0.2.0", fetch_json=lambda url, timeout=20: RELEASE,
+                 fetch_text=lambda url, timeout=20: CHANGELOG)
+    run(ok.check_now())
+    fetch = _answers({"UserJoo9/Netrex": OSError("offline"),
+                      "UserJoo9/QuotaManager": OSError("offline too")})
+    down = Updater(db, current_version="0.2.0", fetch_json=fetch)
+    st = run(down.check_now())
+    assert st["available"] is True and "offline" in st["error"]
+    assert fetch.asked == ["UserJoo9/Netrex", "UserJoo9/QuotaManager"]
+
+
+def test_custom_repo_is_the_only_one_asked():
+    fetch = _answers({"me/fork": RELEASE})
+    up = Updater(FakeDb(), repo="me/fork", current_version="0.2.0", fetch_json=fetch,
+                 fetch_text=lambda url, timeout=20: CHANGELOG)
+    run(up.check_now())
+    assert fetch.asked == ["me/fork"] and up.repo == "me/fork"
