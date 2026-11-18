@@ -54,17 +54,23 @@ if [ "$can_defer" = 1 ]; then
     fi
 fi
 
+# Download the dependencies (two tries). Sets pip_ok=1 on success.
 pip_ok=0
-if [ "$net_ok" = 1 ]; then
+try_pip() {
     for attempt in 1 2; do
         if "$APP_DIR/.venv/bin/python" -m pip install --disable-pip-version-check --no-input \
             --quiet --retries 1 --upgrade -r "$APP_DIR/requirements-linux.txt"; then
             pip_ok=1
-            break
+            return 0
         fi
         log "could not download the Python dependencies (attempt $attempt of 2)"
         sleep 3
     done
+    return 1
+}
+
+if [ "$net_ok" = 1 ]; then
+    try_pip || true
 fi
 if [ "$pip_ok" != 1 ]; then
     if [ "$can_defer" = 1 ]; then
@@ -78,6 +84,14 @@ if [ "$pip_ok" != 1 ]; then
             exit 0
         fi
     fi
+    # The quick probe may have been wrong (slow link, a pip mirror instead of
+    # pypi.org): when it skipped pip and deferring was impossible, try pip now
+    # before telling the admin the setup failed.
+    if [ "$net_ok" != 1 ]; then
+        try_pip || true
+    fi
+fi
+if [ "$pip_ok" != 1 ]; then
     echo "" >&2
     echo "[quota-manager] ERROR: SETUP IS NOT FINISHED." >&2
     echo "[quota-manager] The Python dependencies could not be downloaded from pypi.org" >&2

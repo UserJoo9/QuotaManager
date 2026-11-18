@@ -477,3 +477,83 @@ def test_post_install_reports_a_failed_dependency_download():
     assert 'sudo bash $APP_DIR/scripts/post_install.sh' in text
     # deferral is tried before giving up, and both come before the gateway setup
     assert text.index("systemd-run") < text.index("SETUP IS NOT FINISHED") < text.index('systemctl stop "$SERVICE"')
+
+
+
+# --- behaviour of the dependency-download step (post_install.sh) -------------
+# The step runs for real in a shell with fake `python3` (the network probe),
+# fake venv python (pip), fake systemd-run/systemctl and a no-op sleep.
+
+def _run_download_step(tmp_path, *, probe_ok, pip_ok, systemd_ok):
+    import shutil
+    text = (REPO / "scripts" / "post_install.sh").read_text(encoding="utf-8").replace("\r\n", "\n")
+    start = text.index("SETUP_UNIT=quota-manager-setup")
+    end = text.index('if [ -f "$APP_DIR/bin/sing-box" ]')
+    fragment = text[start:end]
+    fake_run = tmp_path / "run_systemd"
+    fake_run.mkdir()
+    fragment = fragment.replace("/run/systemd/system", str(fake_run))
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    calls = tmp_path / "calls.log"
+    calls.write_text("")
+
+    def fake(name, ok, tag):
+        f = bindir / name
+        f.write_text(f'#!/bin/sh\necho "{tag}" >> "{calls}"\nexit {0 if ok else 1}\n')
+        f.chmod(0o755)
+
+    fake("python3", probe_ok, "probe")
+    fake("systemd-run", systemd_ok, "systemd-run")
+    fake("systemctl", True, "systemctl")
+    (bindir / "sleep").write_text("#!/bin/sh\nexit 0\n")
+    (bindir / "sleep").chmod(0o755)
+    app = tmp_path / "app"
+    (app / ".venv" / "bin").mkdir(parents=True)
+    venv_python = app / ".venv" / "bin" / "python"
+    venv_python.write_text(f'#!/bin/sh\necho "pip" >> "{calls}"\nexit {0 if pip_ok else 1}\n')
+    venv_python.chmod(0o755)
+    script = tmp_path / "step.sh"
+    script.write_text(
+        "log() { echo \"[test] $*\"; }\n"
+        f"APP_DIR='{app}'\n"
+        "set -e\n" + fragment + "\necho CONTINUED\n")
+    env = {"PATH": f"{bindir}:/usr/bin:/bin", "HOME": str(tmp_path)}
+    r = subprocess.run(["/bin/bash", str(script)], capture_output=True, text=True, env=env, timeout=30)
+    shutil.rmtree(fake_run, ignore_errors=True)
+    return r, [c for c in calls.read_text().split() if c]
+
+
+def test_download_step_connected_installs_without_deferring(tmp_path):
+    r, calls = _run_download_step(tmp_path, probe_ok=True, pip_ok=True, systemd_ok=True)
+    assert r.returncode == 0 and "CONTINUED" in r.stdout, r.stderr
+    assert "systemd-run" not in calls and calls.count("pip") == 1
+
+
+def test_download_step_sandbox_without_network_defers_to_systemd(tmp_path):
+    r, calls = _run_download_step(tmp_path, probe_ok=False, pip_ok=False, systemd_ok=True)
+    assert r.returncode == 0 and "CONTINUED" not in r.stdout, r.stderr
+    assert "systemd-run" in calls
+    assert "pip" not in calls, "pip must not even start when the probe found no network"
+    assert "finish automatically" in r.stdout
+
+
+def test_download_step_pip_failure_with_working_probe_still_defers(tmp_path):
+    r, calls = _run_download_step(tmp_path, probe_ok=True, pip_ok=False, systemd_ok=True)
+    assert r.returncode == 0 and "CONTINUED" not in r.stdout, r.stderr
+    assert calls.count("pip") == 2 and "systemd-run" in calls
+
+
+def test_download_step_wrong_probe_and_no_systemd_still_tries_pip(tmp_path):
+    """A slow link or a pip mirror (pypi.org unreachable but pip works) makes
+    the probe fail; if deferring is refused too, pip must still be tried
+    instead of reporting 'setup not finished' without ever running it."""
+    r, calls = _run_download_step(tmp_path, probe_ok=False, pip_ok=True, systemd_ok=False)
+    assert r.returncode == 0 and "CONTINUED" in r.stdout, r.stderr
+    assert "systemd-run" in calls and "pip" in calls
+
+
+def test_download_step_nothing_works_reports_not_finished(tmp_path):
+    r, calls = _run_download_step(tmp_path, probe_ok=False, pip_ok=False, systemd_ok=False)
+    assert r.returncode == 1 and "CONTINUED" not in r.stdout
+    assert "SETUP IS NOT FINISHED" in r.stderr

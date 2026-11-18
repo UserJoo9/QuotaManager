@@ -55,10 +55,7 @@ export default function people(ctx) {
           bar(u.allowance_gb > 0 ? u.percent : 0), netLine(u.used_gb, u.lan_used_gb),
           u.daily && u.daily.active ? h("span", { class: "sub dq-mini" + (u.daily.blocked ? " over" : "") }, `${t("dq.today")}: ${num(u.daily.used_gb)} ${t("ov.of")} ${num(u.daily.cap_gb)} ${t("common.gb")}`) : null),
         h("div", { class: "u-stat" }, chip(st.cls.replace("chip", "").trim(), st.text)),
-        sw(!u.blocked, t("pp.access"), act(() => {
-          if (isDis && u.blocked) { toast(t("dr.quota_needed"), "warn"); return; }
-          return actions.blockUser(u.id, !u.blocked);
-        }))),
+        sw(!u.blocked, t("pp.access"), act(() => actions.blockUser(u.id, !u.blocked)))),
       isOpen ? h("div", { class: "drows" }, devs.length ? devs.map((x) => {
         const lv = liveBy.get(x.id);
         const dIsOff = x.blocked;
@@ -70,10 +67,7 @@ export default function people(ctx) {
           h("div", { class: "d-use" }, h("div", { class: "c-num" }, h("b", {}, `${num(x.device_used_gb)} ${t("common.gb")}`), h("span", {}, u.allowance_gb > 0 ? `${num((x.device_used_gb / u.allowance_gb) * 100, 0)}%` : "")),
             bar(u.allowance_gb > 0 ? (x.device_used_gb / u.allowance_gb) * 100 : 0), netLine(x.device_used_gb, x.lan_used_gb)),
           h("div", { class: "d-live" }, x.connected ? [h("span", {}, "↓ ", h("b", {}, fmtBps(lv?.down_bps || 0))), h("span", {}, "↑ ", h("b", {}, fmtBps(lv?.up_bps || 0)))] : h("span", {}, t("pp.st.offline"))),
-          x.gateway ? h("span", {}) : sw(!x.blocked, t("pp.access"), act(() => {
-            if (isDis && x.blocked) { toast(t("dr.quota_needed"), "warn"); return; }
-            return actions.blockDevice(x.id, !x.blocked);
-          })));
+          x.gateway ? h("span", {}) : sw(!x.blocked, t("pp.access"), act(() => actions.blockDevice(x.id, !x.blocked))));
       }) : h("div", { class: "empty" }, t("pp.nodevices"))) : null);
   }
   const input = h("input", { type: "search", placeholder: t("pp.search"), value: query, "aria-label": t("pp.search"), oninput: (e) => { query = e.target.value; fill(); } });

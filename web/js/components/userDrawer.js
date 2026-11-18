@@ -119,10 +119,7 @@ export function openDeviceDrawer(userId, deviceId, getDashboard, refresh) {
     ];
     if (!d.gateway) {
       body.push(h("div", { class: "kv" }, h("div", { class: "row-sw" }, h("div", {}, h("b", {}, t("pp.access")), h("span", {}, d.blocked ? (isDis ? t("pp.st.unassigned") : t("pp.st.blocked")) : t("common.active"))),
-        sw(!d.blocked, t("pp.access"), run(() => {
-          if (isDis && d.blocked) { toast(t("dr.quota_needed"), "warn"); return; }
-          return actions.blockDevice(d.id, !d.blocked);
-        })))));
+        sw(!d.blocked, t("pp.access"), run(() => actions.blockDevice(d.id, !d.blocked))))));
       const reason = deviceCutReason(d, u);
       if (reason) body.push(h("p", { class: "banner " + (isDis || d.daily_blocked ? "warn" : "danger"), role: "alert" }, h("b", {}, `${t("dr.cut.title")}: `), reason));
     }
@@ -153,10 +150,7 @@ export function openUserDrawer(userId, getDashboard, refresh) {
       h("div", { class: "dr-sec" }, netSplit({ wan: u.used_gb, lan: u.lan_used_gb })),
     ];
     body.push(h("div", { class: "kv" }, h("div", { class: "row-sw" }, h("div", {}, h("b", {}, t("pp.access")), h("span", {}, u.blocked ? (u.quota_mode === "disabled" ? t("pp.st.unassigned") : t("pp.st.blocked")) : t("common.active"))),
-      sw(!u.blocked, t("pp.access"), run(() => {
-        if (u.quota_mode === "disabled" && u.blocked) { toast(t("dr.quota_needed"), "warn"); return; }
-        return actions.blockUser(u.id, !u.blocked);
-      })))));
+      sw(!u.blocked, t("pp.access"), run(() => actions.blockUser(u.id, !u.blocked))))));
     const reason = userCutReason(u);
     if (reason && !u.protected) {
       body.push(h("p", { class: "banner " + (u.quota_mode === "disabled" || (u.daily && u.daily.blocked) ? "warn" : "danger"), role: "alert" }, h("b", {}, `${t("dr.cut.title")}: `), reason));

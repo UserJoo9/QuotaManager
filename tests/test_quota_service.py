@@ -459,11 +459,11 @@ def test_allowances_disabled_user_gets_zero_and_claims_no_share(database):
     run(scenario())
 
 
-def test_user_quota_blocked_disabled_always_cut(database):
-    """The onboarding lock is unconditional: a disabled user is quota-blocked
-    at ANY usage/allowance — a top-up can't unlock it, the exemption flag
-    can't lift it (the admin's positive shared/fixed assignment is the only
-    way out)."""
+def test_user_quota_blocked_disabled_cut_unless_unlimited(database):
+    """The onboarding lock holds at ANY usage/allowance — a top-up can't unlock
+    it. The admin's Unlimited (exempt) switch is checked BEFORE the lock, so it
+    does lift it (issue #40: the check order used to ignore Unlimited and the
+    device stayed cut); a positive shared/fixed assignment also ends the lock."""
     async def scenario():
         d = await database()
         svc = QuotaService(d, timezone="Africa/Cairo")
@@ -472,7 +472,10 @@ def test_user_quota_blocked_disabled_always_cut(database):
         assert svc.user_quota_blocked(dis, 5.0, 0.0) is True  # top-up can't unlock
         await d.update_user(dis.id, exempt_quota=True)
         dis = await d.get_user(dis.id)
-        assert svc.user_quota_blocked(dis, 0.0, 0.0) is True  # exemption loses
+        assert svc.user_quota_blocked(dis, 0.0, 0.0) is False  # Unlimited wins over the lock
+        await d.update_user(dis.id, exempt_quota=False)
+        dis = await d.get_user(dis.id)
+        assert svc.user_quota_blocked(dis, 0.0, 0.0) is True  # switch it off: locked again
         # assigning the rule ends the lock: shared/fixed behave as before
         await d.update_user(dis.id, quota_mode=_db.QUOTA_AUTO, exempt_quota=False)
         dis = await d.get_user(dis.id)

@@ -522,8 +522,10 @@ class QuotaService:
         """Is the user quota-blocked, honouring the quota-exemption flag?
 
         A DISABLED user (a fresh auto-registered device awaiting the admin's
-        shared/fixed assignment) is ALWAYS quota-blocked — 0 GB, regardless of
-        usage, top-ups or the exemption flag. An exempt user is never
+        shared/fixed assignment) is quota-blocked — 0 GB, regardless of usage
+        or top-ups — UNLESS the admin switched the Unlimited (exempt) flag on:
+        the exemption is checked first, so "Unlimited" really opens a device
+        that is still unassigned (issue #40). An exempt user is never
         quota-blocked, whatever their usage — the exemption lifts the
         usage-vs-allowance gate only; a manual admin cut (user/device level)
         still resolves through ``resolve_device_state``.

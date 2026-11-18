@@ -3028,3 +3028,79 @@ def test_daily_off_means_no_daily_block_in_dashboard(tmp_path):
         _login(c)
         usr = next(x for x in c.get("/api/users").json() if x["id"] == u.id)
         assert usr["daily"]["active"] is False and usr["blocked"] is False
+
+
+
+# --- issue #40: Enable / Unlimited must work on an unassigned (disabled) device ---
+
+def _seed_disabled(db, mac="aa:bb:cc:dd:ee:a1", name="Phone"):
+    async def _seed():
+        u = await db.create_user("New", _db.QUOTA_DISABLED, 0.0)
+        d = await db.upsert_device(mac, name=name, user_id=u.id)
+        return u.id, d.id
+    return _get_loop().run_until_complete(_seed())
+
+
+def _user_view(c, uid):
+    return next(u for u in c.get("/api/dashboard").json()["users"] if u["id"] == uid)
+
+
+def test_enable_on_a_disabled_user_moves_it_to_the_shared_pool(client):
+    c, db, _ = client
+    _login(c)
+    uid, _did = _seed_disabled(db)
+    assert _user_view(c, uid)["blocked"] is True
+    r = c.patch(f"/api/users/{uid}", json={"block": False})
+    assert r.status_code == 200, r.text
+    u = _user_view(c, uid)
+    assert u["quota_mode"] == "auto" and u["blocked"] is False
+
+
+def test_enable_on_a_disabled_users_device_moves_its_owner_to_the_shared_pool(client):
+    c, db, _ = client
+    _login(c)
+    uid, did = _seed_disabled(db)
+    r = c.patch(f"/api/devices/{did}", json={"block": False})
+    assert r.status_code == 200, r.text
+    u = _user_view(c, uid)
+    assert u["quota_mode"] == "auto" and u["blocked"] is False
+
+
+def test_enable_does_not_override_a_quota_mode_sent_in_the_same_request(client):
+    c, db, _ = client
+    _login(c)
+    uid, _did = _seed_disabled(db)
+    r = c.patch(f"/api/users/{uid}",
+                json={"block": False, "quota_mode": _db.QUOTA_FIXED, "fixed_gb": 5.0})
+    assert r.status_code == 200, r.text
+    u = _user_view(c, uid)
+    assert u["quota_mode"] == "fixed" and u["blocked"] is False
+
+
+def test_enable_leaves_assigned_users_alone(client):
+    c, db, _ = client
+    _login(c)
+    async def _seed():
+        u = await db.create_user("Fixed", _db.QUOTA_FIXED, 3.0)
+        await db.upsert_device("aa:bb:cc:dd:ee:a2", name="Tab", user_id=u.id)
+        return u.id
+    uid = _get_loop().run_until_complete(_seed())
+    assert c.patch(f"/api/users/{uid}", json={"block": True}).status_code == 200
+    assert c.patch(f"/api/users/{uid}", json={"block": False}).status_code == 200
+    u = _user_view(c, uid)
+    assert u["quota_mode"] == "fixed" and u["blocked"] is False
+
+
+def test_unlimited_opens_an_unassigned_user(client):
+    """The Unlimited switch used to be ignored on a disabled user (the lock was
+    checked first) so the device stayed cut."""
+    c, db, _ = client
+    _login(c)
+    uid, _did = _seed_disabled(db)
+    r = c.patch(f"/api/users/{uid}", json={"exempt_quota": True})
+    assert r.status_code == 200, r.text
+    u = _user_view(c, uid)
+    assert u["quota_mode"] == "disabled" and u["blocked"] is False
+    # turning Unlimited off puts the onboarding lock back
+    assert c.patch(f"/api/users/{uid}", json={"exempt_quota": False}).status_code == 200
+    assert _user_view(c, uid)["blocked"] is True
