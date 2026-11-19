@@ -480,6 +480,9 @@
         } else if (reason === 'guest_account_shared') {
           showVoucherFeedback('error', 'حساب الضيف مرتبط بأجهزة أخرى؛ اطلب مساعدة المسؤول.',
             'This guest account is shared with other devices. Contact the administrator.');
+        } else if (reason === 'voucher_storage_unsupported') {
+          showVoucherFeedback('error', 'خدمة القسائم غير مهيأة على قاعدة البيانات الحالية. تواصل مع المسؤول.',
+            'Guest vouchers are unavailable with this database configuration. Contact the administrator.');
         } else if (response.status === 422) {
           showVoucherFeedback('error', 'صيغة القسيمة غير صحيحة.',
             'The voucher format is invalid.');

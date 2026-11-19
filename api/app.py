@@ -3109,6 +3109,8 @@ def create_app(
                 if reason == "voucher_invalid":
                     voucher_attempts.record_invalid(dev.mac)
                     raise HTTPException(400, {"code": "voucher_invalid"})
+                if reason == "voucher_storage_unsupported":
+                    raise HTTPException(503, {"code": "voucher_storage_unsupported"})
                 raise HTTPException(500, {"code": "voucher_service_error"})
 
         await service.recompute_allowances()

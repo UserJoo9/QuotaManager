@@ -328,6 +328,48 @@ def test_guest_voucher_requires_live_identity_and_redacts_invalid_input(captive_
     assert _get_loop().run_until_complete(database.get_user(dev.user_id)).guest
 
 
+def test_guest_voucher_memory_database_returns_clear_error():
+    database = _db.Database(":memory:")
+    service = QuotaService(
+        database, timezone="Africa/Cairo",
+        clock=lambda: datetime(2026, 8, 15, 12, 0, tzinfo=TZ))
+    holder = SnapshotHolder()
+    _get_loop().run_until_complete(database.connect())
+
+    async def _setup_guest():
+        await service.ensure_period()
+        await service.set_guest_mode(True)
+        dev = await database.upsert_device(
+            "aa:bb:cc:dd:ee:30", name="Pending guest",
+            quota_mode=_db.QUOTA_FIXED, fixed_gb=0.0, guest=True)
+        await database.set_device_state(dev.id, _db.BLOCK_GUEST_PENDING)
+        await database.update_user(dev.user_id,
+                                   block_state=_db.BLOCK_GUEST_PENDING)
+        return dev, await database.create_guest_voucher("memory-1234", 1.0)
+
+    try:
+        dev, voucher = _get_loop().run_until_complete(_setup_guest())
+        holder.swap(EngineSnapshot(
+            pending_guests={"192.168.2.30"},
+            ip_to_mac={"192.168.2.30": dev.mac},
+            blocked={dev.mac: True},
+        ))
+        app = create_app(database, service, holder)
+
+        with TestClient(app, client=("192.168.2.30", 45000)) as guest:
+            response = guest.post("/api/guest/voucher/redeem",
+                                  json={"code": voucher.code})
+
+        assert response.status_code == 503
+        assert response.json() == {
+            "detail": {"code": "voucher_storage_unsupported"}}
+        saved = _get_loop().run_until_complete(
+            database.get_guest_voucher(voucher.code))
+        assert saved is not None and saved.used_at is None
+    finally:
+        _get_loop().run_until_complete(database.close())
+
+
 def test_guest_voucher_invalid_attempts_are_limited_per_device(captive_env):
     database, service, holder, app = captive_env
     _get_loop().run_until_complete(service.set_guest_mode(True))

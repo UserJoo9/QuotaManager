@@ -118,6 +118,27 @@ def test_concurrent_redemption_grants_one_voucher_only(tmp_path):
     asyncio.run(scenario())
 
 
+def test_memory_database_rejects_redemption_with_clear_reason():
+    async def scenario():
+        database = _db.Database(":memory:")
+        await database.connect()
+        try:
+            await database.create_guest_voucher("memory-1234", 1.0)
+            device = await _pending_guest(
+                database, "aa:bb:cc:dd:ee:30")
+
+            result = await database.redeem_guest_voucher_for_device(
+                "memory-1234", device.mac)
+
+            assert result == (False, "voucher_storage_unsupported", None)
+            voucher = await database.get_guest_voucher("memory-1234")
+            assert voucher is not None and voucher.used_at is None
+        finally:
+            await database.close()
+
+    asyncio.run(scenario())
+
+
 def test_expired_and_revoked_vouchers_do_not_redeem(tmp_path):
     async def scenario():
         database = _db.Database(tmp_path / "voucher-ineligible.db")

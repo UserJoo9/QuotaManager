@@ -2089,11 +2089,14 @@ class Database:
         voucher claim and both account updates without interleaving with tasks
         queued on the app connection. This requires a file-backed database:
         separate SQLite ``:memory:`` connections do not share a database.
+        In-memory databases return ``voucher_storage_unsupported`` explicitly.
         """
         code_clean = str(code or "").strip().upper()
         mac_clean = str(mac or "").strip().lower()
         if not code_clean or not mac_clean:
             return False, "voucher_invalid", None
+        if self.path == ":memory:":
+            return False, "voucher_storage_unsupported", None
 
         conn = await aiosqlite.connect(self.path)
         conn.row_factory = aiosqlite.Row

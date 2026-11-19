@@ -1298,7 +1298,9 @@ only the entered code; it never supplies a MAC address or user ID.
     holds the SQLite lock, `BEGIN IMMEDIATE` waits up to five seconds before
     SQLite reports `SQLITE_BUSY`. Voucher redemption therefore requires a
     file-backed SQLite database; independent SQLite `:memory:` connections do
-    not share the application's tables.
+    not share the application's tables. With `:memory:`, redemption returns
+    `voucher_storage_unsupported` and the public endpoint responds with HTTP
+    503 instead of querying a blank second database.
   - After commit, the API recomputes allowances, schedules a shaping sync, and
     writes an audit event. The portal polls `/api/guest/status`; when the
     snapshot reports approval, the existing success and redirect lifecycle
