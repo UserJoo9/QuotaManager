@@ -197,6 +197,7 @@ Handy to know:
 - **My usage page:** any device can open `http://192.168.2.1:8080/milestone` (no login) to see its own remaining allowance.
 - The dashboard opens at the same address as always (`http://<gateway>:8080/`). Old bookmarks to `/ui/` forward there automatically.
 - **WAN | LAN switch** above the Overview chart: the same live speed, daily usage and top devices, for the internet or for traffic inside your home (NAS, router, the gateway itself).
+- **Guest vouchers:** in **Network** → *Guest vouchers*, create a one-time code with a GB allowance (and an optional expiry or note). A guest waiting on the portal page types the code and gets that allowance right away, without you approving them by hand. Each code works once; unused codes can be revoked from the same list. Waiting guests show as *Pending approval* in People & devices.
 - **Sharing**: drop files or folders on the Share page, or send them straight to another device on the WiFi (up to 50 MB; several files or folders arrive as one ZIP).
 - Risky buttons (kick, blacklist, enable HTTPS, remove an allow/block entry, clear all) ask you to **tap twice** — the second tap confirms.
 
