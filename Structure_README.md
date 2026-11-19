@@ -1293,7 +1293,12 @@ only the entered code; it never supplies a MAC address or user ID.
     `BEGIN IMMEDIATE`. It validates and claims the unused, unexpired,
     unrevoked code, then applies the voucher allowance and clears the pending
     block on the guest user and device in the same transaction. Concurrent
-    redemptions therefore cannot spend the same code twice.
+    redemptions therefore cannot spend the same code twice. This transaction
+    uses a second connection with `busy_timeout=5000`: when another writer
+    holds the SQLite lock, `BEGIN IMMEDIATE` waits up to five seconds before
+    SQLite reports `SQLITE_BUSY`. Voucher redemption therefore requires a
+    file-backed SQLite database; independent SQLite `:memory:` connections do
+    not share the application's tables.
   - After commit, the API recomputes allowances, schedules a shaping sync, and
     writes an audit event. The portal polls `/api/guest/status`; when the
     snapshot reports approval, the existing success and redirect lifecycle

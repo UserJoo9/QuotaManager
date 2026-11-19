@@ -85,14 +85,17 @@ export function openDeviceDrawer(userId, deviceId, getDashboard, refresh) {
     const users = getDashboard()?.users || [], u = users.find((x) => x.id === userId), d = u && (u.devices || []).find((x) => x.id === deviceId);
     if (!d) { closeDrawer(); return { title: "", body: [], footer: [] }; }
     const pct = u.allowance_gb > 0 ? (d.device_used_gb / u.allowance_gb) * 100 : 0;
+    const pending = d.block_state === "guest_pending";
+    const statusText = pending ? t("pp.st.pending") : d.blocked ? t("pp.st.blocked") : d.connected ? t("pp.st.online") : t("pp.st.offline");
+    const statusClass = pending ? "accent" : d.blocked ? "danger" : d.connected ? "ok" : "";
     const body = [
       h("div", { class: "dr-sec" }, h("h4", {}, t("dr.thisperiod")),
         h("div", { class: "big" }, num(d.device_used_gb), h("small", {}, `${t("common.gb")} · ${u.name}`)),
         u.allowance_gb > 0 ? bar(pct) : null,
-        h("div", {}, chip(d.blocked ? "danger" : d.connected ? "ok" : "", d.blocked ? t("pp.st.blocked") : d.connected ? t("pp.st.online") : t("pp.st.offline")))),
+        h("div", {}, chip(statusClass, statusText))),
       h("div", { class: "dr-sec" }, netSplit({ wan: d.device_used_gb, wanUp: d.device_up_gb, wanDown: d.device_down_gb, lan: d.lan_used_gb, lanUp: d.lan_up_gb, lanDown: d.lan_down_gb })),
     ];
-    if (!d.gateway) body.push(h("div", { class: "kv" }, h("div", { class: "row-sw" }, h("div", {}, h("b", {}, t("pp.access")), h("span", {}, d.blocked ? t("pp.st.blocked") : t("common.active"))),
+    if (!d.gateway) body.push(h("div", { class: "kv" }, h("div", { class: "row-sw" }, h("div", {}, h("b", {}, t("pp.access")), h("span", {}, pending ? t("pp.st.pending") : d.blocked ? t("pp.st.blocked") : t("common.active"))),
       sw(!d.blocked, t("pp.access"), run(() => actions.blockDevice(d.id, !d.blocked))))));
     body.push(h("div", { class: "dr-sec" }, h("div", { class: "kv" },
       h("div", {}, h("span", { class: "k" }, t("dr.mac")), h("span", { class: "v mono" }, iso(d.mac))),
@@ -120,14 +123,14 @@ export function openUserDrawer(userId, getDashboard, refresh) {
         bar(u.allowance_gb > 0 ? u.percent : 0), h("div", {}, chip(st.cls.replace("chip", "").trim(), st.text))),
       h("div", { class: "dr-sec" }, netSplit({ wan: u.used_gb, lan: u.lan_used_gb })),
     ];
-    body.push(h("div", { class: "kv" }, h("div", { class: "row-sw" }, h("div", {}, h("b", {}, t("pp.access")), h("span", {}, u.blocked ? t("pp.st.blocked") : t("common.active"))),
+    body.push(h("div", { class: "kv" }, h("div", { class: "row-sw" }, h("div", {}, h("b", {}, t("pp.access")), h("span", {}, u.block_state === "guest_pending" ? t("pp.st.pending") : u.blocked ? t("pp.st.blocked") : t("common.active"))),
       sw(!u.blocked, t("pp.access"), run(() => actions.blockUser(u.id, !u.blocked))))));
     const gw = getDashboard()?.gateway;
     if (u.protected && gw && gw.blocked_desired && gw.blocked_programmed === false) body.push(h("p", { class: "banner warn", role: "alert" }, t("dr.gw.warn")));
     else if (u.protected && u.blocked) body.push(h("p", { class: "banner info" }, t("dr.gw.cut")));
     if (u.guest) {
       const a = [];
-      if (u.blocked) a.push(h("button", { class: "btn primary sm", onclick: run(() => actions.approveGuest(u.id)) }, icon("check", 15), t("dr.approve")));
+      if (u.block_state === "guest_pending") a.push(h("button", { class: "btn primary sm", onclick: run(() => actions.approveGuest(u.id)) }, icon("check", 15), t("dr.approve")));
       a.push(h("button", { class: "btn ghost sm", onclick: run(() => actions.makeRegular(u.id)) }, t("dr.regular")));
       a.push(danger(`rej${u.id}`, t("dr.reject"), () => actions.rejectGuest(u.id)));
       body.push(h("div", { class: "fa" }, a));

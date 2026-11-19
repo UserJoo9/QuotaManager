@@ -2083,7 +2083,13 @@ class Database:
 
     async def redeem_guest_voucher_for_device(
             self, code: str, mac: str) -> tuple[bool, str, Optional[float]]:
-        """Atomically claim a voucher and approve its eligible pending guest."""
+        """Atomically claim a voucher and approve its eligible pending guest.
+
+        Redemption uses a second connection so ``BEGIN IMMEDIATE`` covers the
+        voucher claim and both account updates without interleaving with tasks
+        queued on the app connection. This requires a file-backed database:
+        separate SQLite ``:memory:`` connections do not share a database.
+        """
         code_clean = str(code or "").strip().upper()
         mac_clean = str(mac or "").strip().lower()
         if not code_clean or not mac_clean:

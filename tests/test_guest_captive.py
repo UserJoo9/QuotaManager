@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.app import create_app
-from core.config import Config
+from core.config import Config, ReportConfig
 from quota import db as _db
 from quota.engine import EngineSnapshot, SnapshotHolder
 from quota.nftables import NftablesEngine
@@ -257,6 +257,50 @@ def test_guest_voucher_admin_lifecycle_and_redemption(captive_env):
     saved = _get_loop().run_until_complete(database.get_device(device_id=dev.id))
     assert user.fixed_gb == saved.fixed_gb == 2.5
     assert user.block_state == saved.block_state == _db.BLOCK_OK
+
+
+def test_pending_guest_is_reported_as_blocked_in_dashboard_and_report(captive_env):
+    database, service, holder, app = captive_env
+    _get_loop().run_until_complete(service.set_guest_mode(True))
+
+    async def _setup_guest():
+        dev = await database.upsert_device(
+            "aa:bb:cc:dd:ee:91", name="Pending guest",
+            quota_mode=_db.QUOTA_FIXED, fixed_gb=0.0, guest=True)
+        await database.set_device_state(dev.id, _db.BLOCK_GUEST_PENDING)
+        await database.update_user(dev.user_id,
+                                   block_state=_db.BLOCK_GUEST_PENDING)
+        await database.set_lease(dev.mac, "192.168.2.91")
+        return dev
+
+    dev = _get_loop().run_until_complete(_setup_guest())
+    holder.swap(EngineSnapshot(
+        pending_guests={"192.168.2.91"},
+        ip_to_mac={"192.168.2.91": dev.mac},
+        blocked={dev.mac: True},
+    ))
+
+    with TestClient(app, client=("192.168.2.10", 45000)) as admin:
+        assert admin.post("/api/login", json={"password": "admin"}).status_code == 200
+        dashboard = admin.get("/api/dashboard").json()
+        user = next(u for u in dashboard["users"] if u["id"] == dev.user_id)
+        device = next(d for d in dashboard["devices"] if d["id"] == dev.id)
+        assert (user["blocked"], user["block_state"]) == (
+            True, _db.BLOCK_GUEST_PENDING)
+        assert (device["blocked"], device["block_state"]) == (
+            True, _db.BLOCK_GUEST_PENDING)
+
+    report_app = create_app(
+        database, service, holder,
+        report_config=ReportConfig(
+            enabled=True, allowed_ips=["192.168.2.0/24"]))
+    with TestClient(report_app, client=("192.168.2.10", 45000)) as report:
+        response = report.get("/api/report")
+        assert response.status_code == 200, response.text
+        user = next(u for u in response.json()["users"]
+                    if u["id"] == dev.user_id)
+        assert (user["blocked"], user["block_state"]) == (
+            True, _db.BLOCK_GUEST_PENDING)
 
 
 def test_guest_voucher_requires_live_identity_and_redacts_invalid_input(captive_env):

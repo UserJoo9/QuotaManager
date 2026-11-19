@@ -592,6 +592,18 @@ def create_app(
             "lan_used_gb": round((lan_usage.get("up", 0) + lan_usage.get("down", 0)) / GB, 3),
         }
 
+    def _pending_guest_user_ids(users: list[_db.User],
+                                devices: list[_db.Device]) -> set[int]:
+        """Return guest users with at least one device still awaiting approval."""
+        users_by_id = {user.id: user for user in users}
+        pending: set[int] = set()
+        for device in devices:
+            user = users_by_id.get(device.user_id)
+            if user and is_pending_guest(
+                    user.guest, user.block_state, device.block_state):
+                pending.add(user.id)
+        return pending
+
     def _recharge_view(p: _db.RechargePack) -> dict[str, Any]:
         return {
             "id": p.id,
@@ -672,6 +684,7 @@ def create_app(
         allow_macs = {m.lower() for m in await database.get_mac_list("allow")}
         daily = await service.daily_state()
         daily_cut = set() if free_on else service.daily_blocked_devices(daily, devices)
+        pending_guest_user_ids = _pending_guest_user_ids(users, devices)
 
         # Per-user aggregate views (allowance + usage + resolved block state).
         user_views: dict[int, dict[str, Any]] = {}
@@ -688,7 +701,10 @@ def create_app(
             quota_blocked = monthly_blocked or daily_blocked
             admin_blocked = u.block_state == _db.BLOCK_ADMIN
             state = (_db.BLOCK_ADMIN if admin_blocked
-                     else (_db.BLOCK_QUOTA if quota_blocked else _db.BLOCK_OK))
+                     else (_db.BLOCK_GUEST_PENDING
+                           if u.id in pending_guest_user_ids
+                           else (_db.BLOCK_QUOTA if quota_blocked
+                                 else _db.BLOCK_OK)))
             user_views[u.id] = {
                 "id": u.id, "name": u.name, "quota_mode": u.quota_mode,
                 "fixed_gb": u.fixed_gb,
@@ -712,7 +728,8 @@ def create_app(
                 "percent": round(used_gb / allowance * 100, 1) if allowance > 0 else 0.0,
                 # LOCAL (LAN) traffic of all this user's devices (monitoring only)
                 "lan_used_gb": round(sum(lan_by_user.get(u.id, {"up": 0, "down": 0}).values()) / GB, 3),
-                "blocked": admin_blocked or quota_blocked,
+                "blocked": (admin_blocked or u.id in pending_guest_user_ids
+                            or quota_blocked),
                 "block_state": state,
                 "quota_blocked": quota_blocked,
                 "daily": _daily_user_view(u, dst, daily_on),
@@ -1042,6 +1059,7 @@ def create_app(
         await service.refresh_free_mode()
         allowances = bundle.allowances
         live = holder.get()
+        pending_guest_user_ids = _pending_guest_user_ids(users, devices)
 
         total_used = sum((u["up"] + u["down"]) / GB
                          for u in usage_by_user.values())
@@ -1053,6 +1071,7 @@ def create_app(
             allowance = allowances.get(u.id, 0.0)
             quota_blocked = service.user_quota_blocked(u, allowance, used_gb)
             admin_blocked = u.block_state == _db.BLOCK_ADMIN
+            pending_guest = u.id in pending_guest_user_ids
             user_rows.append({
                 "id": u.id,
                 "name": u.name,
@@ -1064,10 +1083,11 @@ def create_app(
                 "used_gb": round(used_gb, 3),
                 "used_bytes": int(usage.get("up", 0) + usage.get("down", 0)),
                 "percent": round(used_gb / allowance * 100, 1) if allowance > 0 else 0.0,
-                "blocked": admin_blocked or quota_blocked,
+                "blocked": admin_blocked or pending_guest or quota_blocked,
                 "block_state": (_db.BLOCK_ADMIN if admin_blocked
-                                else (_db.BLOCK_QUOTA if quota_blocked
-                                      else _db.BLOCK_OK)),
+                                else (_db.BLOCK_GUEST_PENDING if pending_guest
+                                      else (_db.BLOCK_QUOTA if quota_blocked
+                                            else _db.BLOCK_OK))),
                 "devices": [],
             })
         by_uid = {u["id"]: u for u in user_rows}

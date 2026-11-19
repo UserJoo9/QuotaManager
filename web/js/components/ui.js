@@ -35,8 +35,9 @@ export function fmtBps(bps) {
 // status of a person: {k, text, cls}
 export function userStatus(u) {
   const online = (u.devices || []).some((d) => d.connected);
+  if (u.block_state === "guest_pending") return { k: "pending", text: t("pp.st.pending"), cls: "chip accent" };
   if (u.blocked && u.daily && u.daily.blocked && u.block_state === "quota" && !(u.percent >= 100)) return { k: "daily", text: t("pp.st.daily"), cls: "chip warn" };
-  if (u.blocked) return u.guest ? { k: "pending", text: t("pp.st.pending"), cls: "chip accent" } : { k: "blocked", text: t("pp.st.blocked"), cls: "chip danger" };
+  if (u.blocked) return { k: "blocked", text: t("pp.st.blocked"), cls: "chip danger" };
   return online ? { k: "online", text: t("pp.st.online"), cls: "chip ok" } : { k: "offline", text: t("pp.st.offline"), cls: "chip" };
 }
 export const chip = (cls, text) => h("span", { class: "chip " + (cls || "") }, text);

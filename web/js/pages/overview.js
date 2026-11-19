@@ -174,7 +174,7 @@ export default function overview(ctx) {
     ? (u.devices || []).map((x) => h("div", { class: "mono", style: { "white-space": "normal", "word-break": "break-all" } },
       [x.name, iso(x.mac || ""), x.ip ? iso(x.ip) : "", x.vendor && x.vendor !== "Unknown" ? x.vendor : ""].filter(Boolean).join(" · ")))
     : `0 ${t("pp.devs")}`;
-  for (const u of users.filter((x) => x.guest && x.blocked))
+  for (const u of users.filter((x) => x.block_state === "guest_pending"))
     feed.push(fi("", "userplus", `${u.name} ${t("feed.guest")}`, whoIs(u), [
       h("button", { class: "btn primary sm", onclick: act(() => actions.approveGuest(u.id)) }, t("dr.approve")),
       h("button", { class: "btn ghost sm", onclick: act(() => actions.rejectGuest(u.id)) }, t("dr.reject"))]));
