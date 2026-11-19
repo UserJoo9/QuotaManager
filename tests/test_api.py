@@ -2443,7 +2443,8 @@ def test_updates_round_trip(tmp_path):
         fetch_json=lambda url, timeout=20: RELEASE,
         fetch_text=lambda url, timeout=20: CHANGELOG,
         download=lambda url, dest, timeout=120: None,
-        run_command=lambda argv, timeout=15: installed.append(argv) or (0, ""))
+        run_command=lambda argv, timeout=15: installed.append(argv) or (0, ""),
+        install_kind="deb")
     app = create_app(database, service, holder, updater=up)
     try:
         with TestClient(app) as c:

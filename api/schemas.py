@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import math
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator
@@ -182,6 +183,27 @@ class GuestUpdate(BaseModel):
     speed_limit_mbps: Optional[float] = Field(None, ge=0, le=100000)
     #: Refuse brand-new devices while allowing already-registered ones.
     stop_new: Optional[bool] = None
+
+
+class GuestVoucherCreate(BaseModel):
+    """Issue a single-use guest voucher."""
+
+    quota_gb: float = Field(..., ge=0.01, le=100000)
+    expires_at: Optional[float] = None
+    comment: str = Field("", max_length=200)
+
+    @field_validator("expires_at")
+    @classmethod
+    def _finite_expiry(cls, value: Optional[float]) -> Optional[float]:
+        if value is not None and not math.isfinite(value):
+            raise ValueError("expires_at must be a finite timestamp")
+        return value
+
+
+class GuestVoucherRedeem(BaseModel):
+    """Submitted voucher; requester identity is resolved from the gateway."""
+
+    code: str = Field(..., min_length=1, max_length=64)
 
 
 class MacListsUpdate(BaseModel):

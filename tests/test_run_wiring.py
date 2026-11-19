@@ -509,8 +509,8 @@ def test_guest_mode_auto_registers_guest_device(tmp_path):
             gw.database.get_user(dev.user_id))
         assert user is not None and user.guest, "new device must become a GUEST"
         # Pending admin approval: device & user are admin-blocked with 0 allowance
-        assert dev.block_state == db_mod.BLOCK_ADMIN
-        assert user.block_state == db_mod.BLOCK_ADMIN
+        assert dev.block_state == db_mod.BLOCK_GUEST_PENDING
+        assert user.block_state == db_mod.BLOCK_GUEST_PENDING
         assert user.quota_mode == db_mod.QUOTA_FIXED
         assert (user.fixed_gb or 0.0) == 0.0
 

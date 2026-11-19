@@ -31,6 +31,8 @@ from typing import Any, Callable, Optional
 import yaml
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                PlainTextResponse, RedirectResponse,
                                StreamingResponse)
@@ -44,7 +46,7 @@ from api.schemas import (BundleUpdate, ConsumptionSpoofRequest, DeviceCreate,
                          DnsServerUpdate, DomainRuleCreate, DomainRuleUpdate,
                          FirewallBanRequest, FirewallConfigUpdate,
                          FirewallGeoUpdate, FirewallUnbanRequest,
-                         GuestUpdate,
+                         GuestUpdate, GuestVoucherCreate, GuestVoucherRedeem,
                          LoginRequest, MacListsUpdate,
                          MilestoneNotify, MilestoneDailyPlan,
                          NetworkUpdate, PasskeyFinish, PasskeyRename, PasswordUpdate, RechargeCreate, SetupComplete,
@@ -63,6 +65,8 @@ from core.config import WafConfig, WebConfig
 from quota import daily_plan as _dp
 from quota import db as _db
 from quota import dns_rules as _dns_rules
+from quota.guest_state import is_pending_guest
+from quota.guest_vouchers import VoucherAttemptLimiter, generate_voucher_code
 from quota import totp as _totp
 try:  # Optional for existing installations that have not installed the new dependency.
     from quota import passkeys as _passkeys
@@ -326,6 +330,18 @@ def create_app(
                   openapi_url="/api/openapi.json" if web_cfg.docs_enabled
                   else None)
 
+    voucher_attempts = VoucherAttemptLimiter()
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(request: Request,
+                               exc: RequestValidationError) -> Response:
+        if request.url.path == "/api/guest/voucher/redeem":
+            # A voucher is a bearer token; do not echo submitted data in 422s.
+            return JSONResponse(
+                status_code=422,
+                content={"detail": {"code": "voucher_request_invalid"}})
+        return await request_validation_exception_handler(request, exc)
+
     _vpn_manager: VpnManager = (
         vpn_manager if isinstance(vpn_manager, VpnManager)
         else VpnManager(
@@ -576,6 +592,18 @@ def create_app(
             "lan_used_gb": round((lan_usage.get("up", 0) + lan_usage.get("down", 0)) / GB, 3),
         }
 
+    def _pending_guest_user_ids(users: list[_db.User],
+                                devices: list[_db.Device]) -> set[int]:
+        """Return guest users with at least one device still awaiting approval."""
+        users_by_id = {user.id: user for user in users}
+        pending: set[int] = set()
+        for device in devices:
+            user = users_by_id.get(device.user_id)
+            if user and is_pending_guest(
+                    user.guest, user.block_state, device.block_state):
+                pending.add(user.id)
+        return pending
+
     def _recharge_view(p: _db.RechargePack) -> dict[str, Any]:
         return {
             "id": p.id,
@@ -656,6 +684,7 @@ def create_app(
         allow_macs = {m.lower() for m in await database.get_mac_list("allow")}
         daily = await service.daily_state()
         daily_cut = set() if free_on else service.daily_blocked_devices(daily, devices)
+        pending_guest_user_ids = _pending_guest_user_ids(users, devices)
 
         # Per-user aggregate views (allowance + usage + resolved block state).
         user_views: dict[int, dict[str, Any]] = {}
@@ -672,7 +701,10 @@ def create_app(
             quota_blocked = monthly_blocked or daily_blocked
             admin_blocked = u.block_state == _db.BLOCK_ADMIN
             state = (_db.BLOCK_ADMIN if admin_blocked
-                     else (_db.BLOCK_QUOTA if quota_blocked else _db.BLOCK_OK))
+                     else (_db.BLOCK_GUEST_PENDING
+                           if u.id in pending_guest_user_ids
+                           else (_db.BLOCK_QUOTA if quota_blocked
+                                 else _db.BLOCK_OK)))
             user_views[u.id] = {
                 "id": u.id, "name": u.name, "quota_mode": u.quota_mode,
                 "fixed_gb": u.fixed_gb,
@@ -696,7 +728,8 @@ def create_app(
                 "percent": round(used_gb / allowance * 100, 1) if allowance > 0 else 0.0,
                 # LOCAL (LAN) traffic of all this user's devices (monitoring only)
                 "lan_used_gb": round(sum(lan_by_user.get(u.id, {"up": 0, "down": 0}).values()) / GB, 3),
-                "blocked": admin_blocked or quota_blocked,
+                "blocked": (admin_blocked or u.id in pending_guest_user_ids
+                            or quota_blocked),
                 "block_state": state,
                 "quota_blocked": quota_blocked,
                 "daily": _daily_user_view(u, dst, daily_on),
@@ -1026,6 +1059,7 @@ def create_app(
         await service.refresh_free_mode()
         allowances = bundle.allowances
         live = holder.get()
+        pending_guest_user_ids = _pending_guest_user_ids(users, devices)
 
         total_used = sum((u["up"] + u["down"]) / GB
                          for u in usage_by_user.values())
@@ -1037,6 +1071,7 @@ def create_app(
             allowance = allowances.get(u.id, 0.0)
             quota_blocked = service.user_quota_blocked(u, allowance, used_gb)
             admin_blocked = u.block_state == _db.BLOCK_ADMIN
+            pending_guest = u.id in pending_guest_user_ids
             user_rows.append({
                 "id": u.id,
                 "name": u.name,
@@ -1048,10 +1083,11 @@ def create_app(
                 "used_gb": round(used_gb, 3),
                 "used_bytes": int(usage.get("up", 0) + usage.get("down", 0)),
                 "percent": round(used_gb / allowance * 100, 1) if allowance > 0 else 0.0,
-                "blocked": admin_blocked or quota_blocked,
+                "blocked": admin_blocked or pending_guest or quota_blocked,
                 "block_state": (_db.BLOCK_ADMIN if admin_blocked
-                                else (_db.BLOCK_QUOTA if quota_blocked
-                                      else _db.BLOCK_OK)),
+                                else (_db.BLOCK_GUEST_PENDING if pending_guest
+                                      else (_db.BLOCK_QUOTA if quota_blocked
+                                            else _db.BLOCK_OK))),
                 "devices": [],
             })
         by_uid = {u["id"]: u for u in user_rows}
@@ -2969,6 +3005,127 @@ def create_app(
                 "speed_limit_mbps": await service.guest_speed_limit_mbps(),
                 "stop_new": await service.stop_new_connections()}
 
+    # -- Guest vouchers --------------------------------------------------------
+
+    def _guest_voucher_payload(voucher: _db.GuestVoucher) -> dict[str, Any]:
+        if voucher.revoked_at is not None:
+            status = "revoked"
+        elif voucher.used_at is not None:
+            status = "used"
+        elif voucher.expires_at is not None and voucher.expires_at <= time.time():
+            status = "expired"
+        else:
+            status = "unused"
+        return {
+            "code": voucher.code,
+            "quota_gb": voucher.quota_gb,
+            "created_at": voucher.created_at,
+            "expires_at": voucher.expires_at,
+            "used_at": voucher.used_at,
+            "used_mac": voucher.used_mac,
+            "revoked_at": voucher.revoked_at,
+            "comment": voucher.comment,
+            "status": status,
+        }
+
+    @app.post("/api/guest/vouchers", status_code=201,
+              dependencies=[Depends(_require_auth)])
+    async def create_guest_voucher(body: GuestVoucherCreate) -> dict[str, Any]:
+        if body.expires_at is not None and body.expires_at <= time.time():
+            raise HTTPException(422, "expires_at must be in the future")
+        voucher = await database.create_guest_voucher(
+            generate_voucher_code(), body.quota_gb,
+            expires_at=body.expires_at, comment=body.comment)
+        await database.add_event(
+            f"Guest voucher created ({voucher.quota_gb:g} GB)", "info")
+        return _guest_voucher_payload(voucher)
+
+    @app.get("/api/guest/vouchers", dependencies=[Depends(_require_auth)])
+    async def list_guest_vouchers() -> dict[str, Any]:
+        vouchers = await database.list_guest_vouchers(active_only=False)
+        return {"vouchers": [_guest_voucher_payload(v) for v in vouchers]}
+
+    @app.post("/api/guest/vouchers/{code}/revoke",
+              dependencies=[Depends(_require_auth)])
+    async def revoke_guest_voucher(code: str) -> dict[str, Any]:
+        voucher = await database.get_guest_voucher(code)
+        if voucher is None:
+            raise HTTPException(404, "Guest voucher not found")
+        if voucher.used_at is not None or voucher.revoked_at is not None:
+            raise HTTPException(409, "Guest voucher is no longer revocable")
+        if not await database.revoke_guest_voucher(code):
+            raise HTTPException(409, "Guest voucher is no longer revocable")
+        await database.add_event("Guest voucher revoked", "warn")
+        return {"ok": True, "status": "revoked"}
+
+    @app.post("/api/guest/voucher/redeem")
+    async def redeem_guest_voucher(body: GuestVoucherRedeem,
+                                   request: Request) -> dict[str, Any]:
+        if not await service.is_guest_mode():
+            raise HTTPException(403, {"code": "guest_mode_disabled"})
+        if await service.stop_new_connections():
+            raise HTTPException(403, {"code": "new_guests_paused"})
+
+        host = request.client.host if request.client else ""
+        snapshot = holder.get() if holder else None
+        mac = (str(snapshot.ip_to_mac.get(host, "") or "").strip().lower()
+               if snapshot else "")
+        dev = await database.get_device(mac=mac) if mac else None
+        if dev is None or not dev.user_id:
+            raise HTTPException(403, {"code": "device_unrecognized"})
+
+        deny_macs = {str(value).strip().lower()
+                     for value in await database.get_mac_list("deny")}
+        kicked_getter = getattr(service, "active_kicked_macs", None)
+        kicked_macs = kicked_getter() if callable(kicked_getter) else set()
+        kicked_macs = {str(value).strip().lower() for value in kicked_macs}
+        if dev.mac.lower() in deny_macs or dev.mac.lower() in kicked_macs:
+            raise HTTPException(403, {"code": "device_blocked"})
+
+        user = await database.get_user(dev.user_id)
+        if user is None or not is_pending_guest(
+                user.guest, user.block_state, dev.block_state):
+            raise HTTPException(403, {"code": "guest_not_pending"})
+
+        async with voucher_attempts.serialize(dev.mac):
+            kicked_getter = getattr(service, "active_kicked_macs", None)
+            kicked_macs = kicked_getter() if callable(kicked_getter) else set()
+            if dev.mac.lower() in {str(value).strip().lower()
+                                   for value in kicked_macs}:
+                raise HTTPException(403, {"code": "device_blocked"})
+            retry_after = voucher_attempts.retry_after(dev.mac)
+            if retry_after:
+                raise HTTPException(
+                    429, {"code": "voucher_cooldown"},
+                    headers={"Retry-After": str(retry_after)})
+
+            ok, reason, quota_gb = await database.redeem_guest_voucher_for_device(
+                body.code, dev.mac)
+            if not ok:
+                if reason == "guest_mode_disabled":
+                    raise HTTPException(403, {"code": "guest_mode_disabled"})
+                if reason == "new_guests_paused":
+                    raise HTTPException(403, {"code": "new_guests_paused"})
+                if reason == "guest_not_pending":
+                    raise HTTPException(403, {"code": "guest_not_pending"})
+                if reason == "device_blocked":
+                    raise HTTPException(403, {"code": "device_blocked"})
+                if reason == "guest_account_shared":
+                    raise HTTPException(403, {"code": "guest_account_shared"})
+                if reason == "voucher_invalid":
+                    voucher_attempts.record_invalid(dev.mac)
+                    raise HTTPException(400, {"code": "voucher_invalid"})
+                if reason == "voucher_storage_unsupported":
+                    raise HTTPException(503, {"code": "voucher_storage_unsupported"})
+                raise HTTPException(500, {"code": "voucher_service_error"})
+
+        await service.recompute_allowances()
+        _schedule_shaping_sync()
+        await database.add_event(
+            f"Guest voucher redeemed for {dev.mac} ({quota_gb:g} GB)",
+            "info", dev.id)
+        return {"ok": True, "status": "approved", "quota_gb": quota_gb}
+
     # -- Guest Mode (Admin Accept / Reject) -----------------------------------
 
     @app.post("/api/guest/{device_id}/approve", dependencies=[Depends(_require_auth)])
@@ -4041,6 +4198,7 @@ def create_app(
                     is_allowed = (
                         path.startswith("/guest/pending") or
                         path.startswith("/api/guest/status") or
+                        path == "/api/guest/voucher/redeem" or
                         path.startswith("/assets/") or
                         path == "/favicon.ico"
                     )

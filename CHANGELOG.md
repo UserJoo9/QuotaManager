@@ -9,6 +9,7 @@ match it. Release notes are composed from a version's section below.)_
 ## [0.5.8] — 2026-11-20
 
 Added:
+- **Guest vouchers.** Administrators can create one-use guest vouchers with an optional expiry, review their status and revoke unused codes. A guest on the waiting page can enter a voucher to receive the allowance assigned to that code. Pending guests now show as "Pending approval" in the dashboard instead of looking like a quota cut. Contributed by @compnew2006.
 - The dashboard now says **why** a person or device has no internet: not assigned a quota yet, paused by the admin, monthly quota used up, or daily limit reached. Cut devices and people are highlighted in the list, and a person with only some devices cut shows "2/3 cut".
 - New devices that are waiting for a quota show as "Unassigned" instead of "Blocked", and the quota dropdown shows "Disabled (0 GB - unassigned)" instead of misleadingly showing "Auto".
 

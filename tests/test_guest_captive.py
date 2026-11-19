@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.app import create_app
-from core.config import Config
+from core.config import Config, ReportConfig
 from quota import db as _db
 from quota.engine import EngineSnapshot, SnapshotHolder
 from quota.nftables import NftablesEngine
@@ -206,6 +206,217 @@ def test_guest_status_api_and_admin_approval_lifecycle(captive_env):
         r_browse = guest_client.get("/search?q=hello", follow_redirects=False)
         # Not redirected to /guest/pending!
         assert r_browse.status_code != 302 or "/guest/pending" not in r_browse.headers.get("location", "")
+
+
+def test_guest_voucher_admin_lifecycle_and_redemption(captive_env):
+    database, service, holder, app = captive_env
+    _get_loop().run_until_complete(service.set_guest_mode(True))
+
+    async def _setup_guest():
+        dev = await database.upsert_device(
+            "aa:bb:cc:dd:ee:89", name="Voucher guest",
+            quota_mode=_db.QUOTA_FIXED, fixed_gb=0.0, guest=True)
+        await database.set_device_state(dev.id, _db.BLOCK_GUEST_PENDING)
+        await database.update_user(dev.user_id,
+                                   block_state=_db.BLOCK_GUEST_PENDING)
+        await database.set_lease(dev.mac, "192.168.2.89")
+        return dev
+
+    dev = _get_loop().run_until_complete(_setup_guest())
+    holder.swap(EngineSnapshot(
+        pending_guests={"192.168.2.89"},
+        ip_to_mac={"192.168.2.89": dev.mac},
+        blocked={dev.mac: True},
+    ))
+
+    with TestClient(app, client=("192.168.2.10", 45000)) as admin:
+        assert admin.post("/api/guest/vouchers", json={"quota_gb": 2.5}).status_code == 401
+        assert admin.post("/api/login", json={"password": "admin"}).status_code == 200
+        created = admin.post("/api/guest/vouchers", json={
+            "quota_gb": 2.5, "comment": "Weekend visitor"})
+        assert created.status_code == 201, created.text
+        voucher = created.json()
+        assert voucher["status"] == "unused"
+        assert voucher["quota_gb"] == 2.5
+        code = voucher["code"]
+
+        guest = TestClient(app, client=("192.168.2.89", 45000))
+        redeemed = guest.post("/api/guest/voucher/redeem", json={"code": code.lower()})
+        assert redeemed.status_code == 200, redeemed.text
+        assert redeemed.json() == {
+            "ok": True, "status": "approved", "quota_gb": 2.5}
+        assert code not in redeemed.text
+        guest.close()
+
+        listed = admin.get("/api/guest/vouchers")
+        assert listed.status_code == 200
+        assert listed.json()["vouchers"][0]["status"] == "used"
+        assert admin.post(f"/api/guest/vouchers/{code}/revoke").status_code == 409
+
+    user = _get_loop().run_until_complete(database.get_user(dev.user_id))
+    saved = _get_loop().run_until_complete(database.get_device(device_id=dev.id))
+    assert user.fixed_gb == saved.fixed_gb == 2.5
+    assert user.block_state == saved.block_state == _db.BLOCK_OK
+
+
+def test_pending_guest_is_reported_as_blocked_in_dashboard_and_report(captive_env):
+    database, service, holder, app = captive_env
+    _get_loop().run_until_complete(service.set_guest_mode(True))
+
+    async def _setup_guest():
+        dev = await database.upsert_device(
+            "aa:bb:cc:dd:ee:91", name="Pending guest",
+            quota_mode=_db.QUOTA_FIXED, fixed_gb=0.0, guest=True)
+        await database.set_device_state(dev.id, _db.BLOCK_GUEST_PENDING)
+        await database.update_user(dev.user_id,
+                                   block_state=_db.BLOCK_GUEST_PENDING)
+        await database.set_lease(dev.mac, "192.168.2.91")
+        return dev
+
+    dev = _get_loop().run_until_complete(_setup_guest())
+    holder.swap(EngineSnapshot(
+        pending_guests={"192.168.2.91"},
+        ip_to_mac={"192.168.2.91": dev.mac},
+        blocked={dev.mac: True},
+    ))
+
+    with TestClient(app, client=("192.168.2.10", 45000)) as admin:
+        assert admin.post("/api/login", json={"password": "admin"}).status_code == 200
+        dashboard = admin.get("/api/dashboard").json()
+        user = next(u for u in dashboard["users"] if u["id"] == dev.user_id)
+        device = next(d for d in dashboard["devices"] if d["id"] == dev.id)
+        assert (user["blocked"], user["block_state"]) == (
+            True, _db.BLOCK_GUEST_PENDING)
+        assert (device["blocked"], device["block_state"]) == (
+            True, _db.BLOCK_GUEST_PENDING)
+
+    report_app = create_app(
+        database, service, holder,
+        report_config=ReportConfig(
+            enabled=True, allowed_ips=["192.168.2.0/24"]))
+    with TestClient(report_app, client=("192.168.2.10", 45000)) as report:
+        response = report.get("/api/report")
+        assert response.status_code == 200, response.text
+        user = next(u for u in response.json()["users"]
+                    if u["id"] == dev.user_id)
+        assert (user["blocked"], user["block_state"]) == (
+            True, _db.BLOCK_GUEST_PENDING)
+
+
+def test_guest_voucher_requires_live_identity_and_redacts_invalid_input(captive_env):
+    database, service, holder, app = captive_env
+    _get_loop().run_until_complete(service.set_guest_mode(True))
+
+    async def _setup_guest():
+        dev = await database.upsert_device(
+            "aa:bb:cc:dd:ee:90", name="Pending guest",
+            quota_mode=_db.QUOTA_FIXED, fixed_gb=0.0, guest=True)
+        await database.set_device_state(dev.id, _db.BLOCK_GUEST_PENDING)
+        await database.update_user(dev.user_id,
+                                   block_state=_db.BLOCK_GUEST_PENDING)
+        await database.set_lease(dev.mac, "192.168.2.90")
+        return dev
+
+    dev = _get_loop().run_until_complete(_setup_guest())
+    with TestClient(app, client=("192.168.2.90", 45000)) as guest:
+        unknown = guest.post("/api/guest/voucher/redeem", json={"code": "UNUSED"})
+        assert unknown.status_code == 403
+        assert unknown.json()["detail"] == {"code": "device_unrecognized"}
+        malformed = guest.post("/api/guest/voucher/redeem", json={"code": ["secret"]})
+        assert malformed.status_code == 422
+        assert "secret" not in malformed.text
+    assert _get_loop().run_until_complete(database.get_user(dev.user_id)).guest
+
+
+def test_guest_voucher_memory_database_returns_clear_error():
+    database = _db.Database(":memory:")
+    service = QuotaService(
+        database, timezone="Africa/Cairo",
+        clock=lambda: datetime(2026, 8, 15, 12, 0, tzinfo=TZ))
+    holder = SnapshotHolder()
+    _get_loop().run_until_complete(database.connect())
+
+    async def _setup_guest():
+        await service.ensure_period()
+        await service.set_guest_mode(True)
+        dev = await database.upsert_device(
+            "aa:bb:cc:dd:ee:30", name="Pending guest",
+            quota_mode=_db.QUOTA_FIXED, fixed_gb=0.0, guest=True)
+        await database.set_device_state(dev.id, _db.BLOCK_GUEST_PENDING)
+        await database.update_user(dev.user_id,
+                                   block_state=_db.BLOCK_GUEST_PENDING)
+        return dev, await database.create_guest_voucher("memory-1234", 1.0)
+
+    try:
+        dev, voucher = _get_loop().run_until_complete(_setup_guest())
+        holder.swap(EngineSnapshot(
+            pending_guests={"192.168.2.30"},
+            ip_to_mac={"192.168.2.30": dev.mac},
+            blocked={dev.mac: True},
+        ))
+        app = create_app(database, service, holder)
+
+        with TestClient(app, client=("192.168.2.30", 45000)) as guest:
+            response = guest.post("/api/guest/voucher/redeem",
+                                  json={"code": voucher.code})
+
+        assert response.status_code == 503
+        assert response.json() == {
+            "detail": {"code": "voucher_storage_unsupported"}}
+        saved = _get_loop().run_until_complete(
+            database.get_guest_voucher(voucher.code))
+        assert saved is not None and saved.used_at is None
+    finally:
+        _get_loop().run_until_complete(database.close())
+
+
+def test_guest_voucher_invalid_attempts_are_limited_per_device(captive_env):
+    database, service, holder, app = captive_env
+    _get_loop().run_until_complete(service.set_guest_mode(True))
+
+    async def _setup_guests():
+        devices = []
+        for suffix in (91, 92):
+            mac = f"aa:bb:cc:dd:ee:{suffix}"
+            ip = f"192.168.2.{suffix}"
+            dev = await database.upsert_device(
+                mac, name="Pending guest", quota_mode=_db.QUOTA_FIXED,
+                fixed_gb=0.0, guest=True)
+            await database.set_device_state(dev.id, _db.BLOCK_GUEST_PENDING)
+            await database.update_user(dev.user_id,
+                                       block_state=_db.BLOCK_GUEST_PENDING)
+            await database.set_lease(mac, ip)
+            devices.append((dev, ip))
+        return devices
+
+    devices = _get_loop().run_until_complete(_setup_guests())
+    holder.swap(EngineSnapshot(
+        ip_to_mac={ip: dev.mac for dev, ip in devices},
+        pending_guests={ip for _, ip in devices},
+        blocked={dev.mac: True for dev, _ in devices},
+    ))
+
+    with TestClient(app, client=("192.168.2.10", 45000)) as admin:
+        assert admin.post("/api/login", json={"password": "admin"}).status_code == 200
+        code = admin.post("/api/guest/vouchers", json={"quota_gb": 1.5}).json()["code"]
+
+        first_ip = devices[0][1]
+        with TestClient(app, client=(first_ip, 45000)) as first_guest:
+            for _ in range(5):
+                failed = first_guest.post(
+                    "/api/guest/voucher/redeem", json={"code": "wrong-code"})
+                assert failed.status_code == 400
+                assert "wrong-code" not in failed.text
+            throttled = first_guest.post(
+                "/api/guest/voucher/redeem", json={"code": code})
+            assert throttled.status_code == 429
+            assert int(throttled.headers["Retry-After"]) > 0
+
+        second_ip = devices[1][1]
+        with TestClient(app, client=(second_ip, 45000)) as second_guest:
+            redeemed = second_guest.post(
+                "/api/guest/voucher/redeem", json={"code": code})
+            assert redeemed.status_code == 200, redeemed.text
 
 
 def test_nftables_pending_guests_kernel_sync():

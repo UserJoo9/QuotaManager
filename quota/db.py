@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +34,12 @@ log = logging.getLogger("quota.db")
 import aiosqlite
 
 from quota.engine import GATEWAY_MAC
+from quota.guest_state import (
+    BLOCK_ADMIN,
+    BLOCK_GUEST_PENDING,
+    BLOCK_OK,
+    is_pending_guest,
+)
 
 # ---------------------------------------------------------------------------
 # Domain enums (kept as plain strings so the schema stays simple)
@@ -43,9 +50,7 @@ QUOTA_AUTO = "auto"
 QUOTA_DISABLED = "disabled"  # onboarding lock: 0 GB until the admin assigns
                              # shared (auto) or fixed; always quota-blocked
 
-BLOCK_OK = "ok"          # allowed, within quota
 BLOCK_QUOTA = "quota"    # exceeded monthly allowance
-BLOCK_ADMIN = "admin_off"  # manually switched off by admin
 
 # Domain-rule scope + action enums (see quota/dns_rules.py for the same
 # constants used by the dnsmasq renderer — kept independent so db.py never
@@ -192,6 +197,7 @@ class GuestVoucher:
     used_at: Optional[float] = None
     used_mac: str = ""
     comment: str = ""
+    revoked_at: Optional[float] = None
 
 
 @dataclass
@@ -465,7 +471,8 @@ CREATE TABLE IF NOT EXISTS guest_vouchers (
     expires_at REAL,
     used_at    REAL,
     used_mac   TEXT NOT NULL DEFAULT '',
-    comment    TEXT NOT NULL DEFAULT ''
+    comment    TEXT NOT NULL DEFAULT '',
+    revoked_at REAL
 );
 
 -- Bundle recharges queue (add-on packs)
@@ -531,6 +538,13 @@ class Database:
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._conn.executescript(SCHEMA)
+        cursor = await self._conn.execute("PRAGMA table_info(guest_vouchers)")
+        voucher_columns = {row["name"] for row in await cursor.fetchall()}
+        await cursor.close()
+        if "revoked_at" not in voucher_columns:
+            await self._conn.execute(
+                "ALTER TABLE guest_vouchers ADD COLUMN revoked_at REAL")
+            await self._conn.commit()
         # Legacy cleanup: the old guest-deletion `suppressed_macs` table (v20,
         # pre-blacklist) is orphaned — delete->deny-list replaced it and nothing
         # references it anymore. Idempotent; a fresh DB simply has no such table.
@@ -2022,11 +2036,18 @@ class Database:
                                    expires_at: Optional[float] = None,
                                    comment: str = "") -> GuestVoucher:
         code_clean = code.strip().upper()
+        quota = float(quota_gb)
+        if not math.isfinite(quota) or not 0.01 <= quota <= 100000:
+            raise ValueError("guest voucher quota must be between 0.01 and 100000 GB")
+        if expires_at is not None and not math.isfinite(float(expires_at)):
+            raise ValueError("guest voucher expiry must be a finite timestamp")
         now = time.time()
         await self.conn.execute(
             """INSERT INTO guest_vouchers (code, quota_gb, created_at, expires_at, comment)
                VALUES (?, ?, ?, ?, ?)""",
-            (code_clean, round(max(0.01, float(quota_gb)), 3), now, expires_at, comment.strip()))
+            (code_clean, quota, now,
+             float(expires_at) if expires_at is not None else None,
+             comment.strip()))
         await self.conn.commit()
         res = await self.get_guest_voucher(code_clean)
         assert res is not None
@@ -2042,7 +2063,8 @@ class Database:
             now = time.time()
             rows = await self.conn.execute_fetchall(
                 """SELECT * FROM guest_vouchers
-                   WHERE used_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
+                   WHERE used_at IS NULL AND revoked_at IS NULL
+                     AND (expires_at IS NULL OR expires_at > ?)
                    ORDER BY created_at DESC""",
                 (now,))
         else:
@@ -2050,37 +2072,126 @@ class Database:
                 "SELECT * FROM guest_vouchers ORDER BY created_at DESC")
         return [_row_to_guest_voucher(r) for r in rows]
 
-    async def redeem_guest_voucher(self, code: str, mac: str) -> tuple[bool, str, Optional[float]]:
-        """Attempt to redeem voucher ``code`` for ``mac``.
-
-        Returns: (success: bool, message: str, quota_gb: Optional[float])
-        """
-        code_clean = code.strip().upper()
-        mac_clean = mac.strip().lower()
-        now = time.time()
-        v = await self.get_guest_voucher(code_clean)
-        if v is None:
-            return False, "Invalid access code", None
-        if v.used_at is not None:
-            return False, "This code has already been used", None
-        if v.expires_at is not None and v.expires_at <= now:
-            return False, "This access code has expired", None
-
+    async def revoke_guest_voucher(self, code: str) -> bool:
+        """Revoke an unused voucher without deleting its administrative history."""
         cur = await self.conn.execute(
-            """UPDATE guest_vouchers
-               SET used_at = ?, used_mac = ?
-               WHERE code = ? AND used_at IS NULL""",
-            (now, mac_clean, code_clean))
-        await self.conn.commit()
-        if cur.rowcount == 0:
-            return False, "Code already redeemed", None
-        return True, "Redeemed successfully", v.quota_gb
-
-    async def delete_guest_voucher(self, code: str) -> bool:
-        cur = await self.conn.execute(
-            "DELETE FROM guest_vouchers WHERE code=?", (code.strip().upper(),))
+            """UPDATE guest_vouchers SET revoked_at = ?
+               WHERE code = ? AND used_at IS NULL AND revoked_at IS NULL""",
+            (time.time(), code.strip().upper()))
         await self.conn.commit()
         return cur.rowcount > 0
+
+    async def redeem_guest_voucher_for_device(
+            self, code: str, mac: str) -> tuple[bool, str, Optional[float]]:
+        """Atomically claim a voucher and approve its eligible pending guest.
+
+        Redemption uses a second connection so ``BEGIN IMMEDIATE`` covers the
+        voucher claim and both account updates without interleaving with tasks
+        queued on the app connection. This requires a file-backed database:
+        separate SQLite ``:memory:`` connections do not share a database.
+        In-memory databases return ``voucher_storage_unsupported`` explicitly.
+        """
+        code_clean = str(code or "").strip().upper()
+        mac_clean = str(mac or "").strip().lower()
+        if not code_clean or not mac_clean:
+            return False, "voucher_invalid", None
+        if self.path == ":memory:":
+            return False, "voucher_storage_unsupported", None
+
+        conn = await aiosqlite.connect(self.path)
+        conn.row_factory = aiosqlite.Row
+        try:
+            await conn.execute("PRAGMA foreign_keys=ON")
+            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute("BEGIN IMMEDIATE")
+            settings_cursor = await conn.execute(
+                "SELECT key, value FROM settings WHERE key IN (?, ?)",
+                ("guest_mode", "stop_new_connections"))
+            settings = {str(item["key"]): str(item["value"])
+                        for item in await settings_cursor.fetchall()}
+            await settings_cursor.close()
+            if settings.get("guest_mode", "0") != "1":
+                await conn.rollback()
+                return False, "guest_mode_disabled", None
+            if settings.get("stop_new_connections", "0") == "1":
+                await conn.rollback()
+                return False, "new_guests_paused", None
+
+            cursor = await conn.execute(
+                """SELECT v.quota_gb, v.used_at, v.expires_at, v.revoked_at,
+                          d.id device_id, d.user_id, d.block_state device_state,
+                          u.guest, u.block_state user_state
+                   FROM guest_vouchers v
+                   JOIN devices d ON lower(d.mac)=?
+                   JOIN users u ON u.id=d.user_id
+                   WHERE v.code=?""",
+                (mac_clean, code_clean))
+            row = await cursor.fetchone()
+            await cursor.close()
+            now = time.time()
+            if row is None:
+                await conn.rollback()
+                return False, "voucher_invalid", None
+
+            deny_cursor = await conn.execute(
+                "SELECT 1 FROM mac_lists WHERE kind='deny' AND lower(mac)=?",
+                (mac_clean,))
+            denied = await deny_cursor.fetchone()
+            await deny_cursor.close()
+            if denied is not None:
+                await conn.rollback()
+                return False, "device_blocked", None
+            if not is_pending_guest(
+                    bool(row["guest"]), row["user_state"], row["device_state"]):
+                await conn.rollback()
+                return False, "guest_not_pending", None
+
+            count_cursor = await conn.execute(
+                "SELECT COUNT(*) FROM devices WHERE user_id=?",
+                (row["user_id"],))
+            device_count = int((await count_cursor.fetchone())[0])
+            await count_cursor.close()
+            if device_count != 1:
+                await conn.rollback()
+                return False, "guest_account_shared", None
+            if row["used_at"] is not None or row["revoked_at"] is not None:
+                await conn.rollback()
+                return False, "voucher_invalid", None
+            if row["expires_at"] is not None and row["expires_at"] <= now:
+                await conn.rollback()
+                return False, "voucher_invalid", None
+
+            quota_gb = float(row["quota_gb"])
+            claim = await conn.execute(
+                """UPDATE guest_vouchers SET used_at=?, used_mac=?
+                   WHERE code=? AND used_at IS NULL AND revoked_at IS NULL
+                     AND (expires_at IS NULL OR expires_at > ?)""",
+                (now, mac_clean, code_clean, now))
+            if claim.rowcount != 1:
+                await conn.rollback()
+                return False, "voucher_invalid", None
+
+            user_update = await conn.execute(
+                """UPDATE users SET quota_mode=?, fixed_gb=?, block_state=?
+                   WHERE id=? AND guest=1 AND block_state IN (?, ?)""",
+                (QUOTA_FIXED, quota_gb, BLOCK_OK, row["user_id"],
+                 BLOCK_GUEST_PENDING, BLOCK_OK))
+            device_update = await conn.execute(
+                """UPDATE devices SET quota_mode=?, fixed_gb=?, block_state=?
+                   WHERE id=? AND user_id=? AND block_state IN (?, ?)""",
+                (QUOTA_FIXED, quota_gb, BLOCK_OK, row["device_id"],
+                 row["user_id"], BLOCK_GUEST_PENDING, BLOCK_OK))
+            if user_update.rowcount != 1 or device_update.rowcount != 1:
+                await conn.rollback()
+                return False, "guest_not_pending", None
+
+            await conn.commit()
+            return True, "redeemed", quota_gb
+        except Exception:
+            await conn.rollback()
+            raise
+        finally:
+            await conn.close()
 
 
 def _row_to_device(row: Any) -> Device:
@@ -2180,6 +2291,8 @@ def _row_to_guest_voucher(row: Any) -> GuestVoucher:
         used_at=float(row["used_at"]) if row["used_at"] is not None else None,
         used_mac=row["used_mac"] or "",
         comment=row["comment"] or "",
+        revoked_at=(float(row["revoked_at"])
+                    if row["revoked_at"] is not None else None),
     )
 
 

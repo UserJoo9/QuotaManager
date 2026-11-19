@@ -80,7 +80,7 @@ const mkDanger = (run) => (key, label, fn, closeAfter) => h("button", {
   } }, armed.has(key) ? t("dr.confirm") : label);
 
 export function userCutReason(u) {
-  if (!u || !u.blocked) return null;
+  if (!u || !u.blocked || u.block_state === "guest_pending") return null;
   if (u.quota_mode === "disabled") return t("dr.cut.hint.disabled");
   if (u.block_state === "admin_off") return t("dr.cut.hint.admin");
   if (u.daily && u.daily.blocked) return t("dr.cut.hint.daily");
@@ -90,7 +90,7 @@ export function userCutReason(u) {
 }
 
 export function deviceCutReason(d, u) {
-  if (!d || !d.blocked) return null;
+  if (!d || !d.blocked || d.block_state === "guest_pending") return null;
   if (d.block_state === "admin_off") return t("dr.cut.hint.admin");
   if (d.daily_blocked) return t("dr.cut.hint.daily");
   if (u) {
@@ -110,15 +110,18 @@ export function openDeviceDrawer(userId, deviceId, getDashboard, refresh) {
     if (!d) { closeDrawer(); return { title: "", body: [], footer: [] }; }
     const pct = u.allowance_gb > 0 ? (d.device_used_gb / u.allowance_gb) * 100 : 0;
     const isDis = u && u.quota_mode === "disabled";
+    const pending = d.block_state === "guest_pending";
+    const statusText = pending ? t("pp.st.pending") : d.blocked ? (isDis ? t("pp.st.unassigned") : t("pp.st.blocked")) : d.connected ? t("pp.st.online") : t("pp.st.offline");
+    const statusClass = pending ? "accent" : d.blocked ? (isDis ? "warn" : "danger") : d.connected ? "ok" : "";
     const body = [
       h("div", { class: "dr-sec" }, h("h4", {}, t("dr.thisperiod")),
         h("div", { class: "big" }, num(d.device_used_gb), h("small", {}, `${t("common.gb")} · ${u.name}`)),
         u.allowance_gb > 0 ? bar(pct) : null,
-        h("div", {}, chip(d.blocked ? (isDis ? "warn" : "danger") : d.connected ? "ok" : "", d.blocked ? (isDis ? t("pp.st.unassigned") : t("pp.st.blocked")) : d.connected ? t("pp.st.online") : t("pp.st.offline")))),
+        h("div", {}, chip(statusClass, statusText))),
       h("div", { class: "dr-sec" }, netSplit({ wan: d.device_used_gb, wanUp: d.device_up_gb, wanDown: d.device_down_gb, lan: d.lan_used_gb, lanUp: d.lan_up_gb, lanDown: d.lan_down_gb })),
     ];
     if (!d.gateway) {
-      body.push(h("div", { class: "kv" }, h("div", { class: "row-sw" }, h("div", {}, h("b", {}, t("pp.access")), h("span", {}, d.blocked ? (isDis ? t("pp.st.unassigned") : t("pp.st.blocked")) : t("common.active"))),
+      body.push(h("div", { class: "kv" }, h("div", { class: "row-sw" }, h("div", {}, h("b", {}, t("pp.access")), h("span", {}, pending ? t("pp.st.pending") : d.blocked ? (isDis ? t("pp.st.unassigned") : t("pp.st.blocked")) : t("common.active"))),
         sw(!d.blocked, t("pp.access"), run(() => actions.blockDevice(d.id, !d.blocked))))));
       const reason = deviceCutReason(d, u);
       if (reason) body.push(h("p", { class: "banner " + (isDis || d.daily_blocked ? "warn" : "danger"), role: "alert" }, h("b", {}, `${t("dr.cut.title")}: `), reason));
@@ -149,7 +152,7 @@ export function openUserDrawer(userId, getDashboard, refresh) {
         bar(u.allowance_gb > 0 ? u.percent : 0), h("div", {}, chip(st.cls.replace("chip", "").trim(), st.text))),
       h("div", { class: "dr-sec" }, netSplit({ wan: u.used_gb, lan: u.lan_used_gb })),
     ];
-    body.push(h("div", { class: "kv" }, h("div", { class: "row-sw" }, h("div", {}, h("b", {}, t("pp.access")), h("span", {}, u.blocked ? (u.quota_mode === "disabled" ? t("pp.st.unassigned") : t("pp.st.blocked")) : t("common.active"))),
+    body.push(h("div", { class: "kv" }, h("div", { class: "row-sw" }, h("div", {}, h("b", {}, t("pp.access")), h("span", {}, u.block_state === "guest_pending" ? t("pp.st.pending") : u.blocked ? (u.quota_mode === "disabled" ? t("pp.st.unassigned") : t("pp.st.blocked")) : t("common.active"))),
       sw(!u.blocked, t("pp.access"), run(() => actions.blockUser(u.id, !u.blocked))))));
     const reason = userCutReason(u);
     if (reason && !u.protected) {
@@ -160,7 +163,7 @@ export function openUserDrawer(userId, getDashboard, refresh) {
     else if (u.protected && u.blocked) body.push(h("p", { class: "banner info" }, t("dr.gw.cut")));
     if (u.guest) {
       const a = [];
-      if (u.blocked) a.push(h("button", { class: "btn primary sm", onclick: run(() => actions.approveGuest(u.id)) }, icon("check", 15), t("dr.approve")));
+      if (u.block_state === "guest_pending") a.push(h("button", { class: "btn primary sm", onclick: run(() => actions.approveGuest(u.id)) }, icon("check", 15), t("dr.approve")));
       a.push(h("button", { class: "btn ghost sm", onclick: run(() => actions.makeRegular(u.id)) }, t("dr.regular")));
       a.push(danger(`rej${u.id}`, t("dr.reject"), () => actions.rejectGuest(u.id)));
       body.push(h("div", { class: "fa" }, a));

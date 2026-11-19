@@ -1246,6 +1246,70 @@ When a new device connects to the network as a guest before administrative appro
     3. `/api/guest/status` returns `{"status": "approved", "quota_gb": ...}`.
     4. The page instantly switches to emerald green (✅), plays a success animation, displays the granted quota slice, and initiates a 3-second countdown redirect to the guest's original requested URL or Google search.
 
+### 4. Guest voucher subsystem
+
+The voucher flow lets an administrator issue a one-time allowance to a pending
+guest without approving the guest manually. The dashboard's Network page
+(`web/js/pages/network.js`) creates, lists, and revokes vouchers through the
+authenticated admin API. The captive page (`web/guest_pending.html`) submits
+only the entered code; it never supplies a MAC address or user ID.
+
+- **Code generation and controls** (`quota/guest_vouchers.py`, `api/app.py`):
+  - Codes are generated with Python's `secrets` module from an alphabet that
+    omits visually ambiguous characters, grouped as four blocks of four
+    characters (80 bits of randomness).
+  - An administrator supplies `quota_gb` (0.01–100000 GB), an optional future
+    Unix timestamp `expires_at`, and an optional comment of up to 200
+    characters. A voucher can be revoked only before it has been redeemed.
+  - Invalid attempts are serialized and counted per normalized device MAC. The
+    default limiter starts a 15-minute cooldown after five invalid attempts in
+    a rolling 15-minute window, and bounds its in-memory device buckets.
+- **Persistence** (`quota/db.py`):
+  - SQLite stores vouchers in `guest_vouchers`, keyed by `code`. The row records
+    the allowance, creation and optional expiry timestamps, redemption time and
+    device MAC, administrator comment, and optional revocation timestamp.
+  - `status` is derived when returned by the API: `revoked`, `used`, `expired`,
+    or `unused` (in that precedence order). Startup adds `revoked_at` to an
+    older `guest_vouchers` table when needed.
+
+  | Column | SQLite type | Meaning |
+  |---|---|---|
+  | `code` | `TEXT PRIMARY KEY` | Normalized voucher code |
+  | `quota_gb` | `REAL NOT NULL` | Allowance granted to the guest user and device |
+  | `created_at` | `REAL NOT NULL` | Creation time as a Unix timestamp |
+  | `expires_at` | `REAL` | Optional expiry Unix timestamp |
+  | `used_at` | `REAL` | Redemption Unix timestamp; null until claimed |
+  | `used_mac` | `TEXT NOT NULL DEFAULT ''` | Normalized device MAC that redeemed it |
+  | `comment` | `TEXT NOT NULL DEFAULT ''` | Optional administrator note |
+  | `revoked_at` | `REAL` | Revocation Unix timestamp; null while not revoked |
+
+- **Redemption and identity** (`api/app.py`, `quota/db.py`):
+  - The request source IP is matched to the gateway's current
+    `EngineSnapshot.ip_to_mac`, then to its registered device and guest user.
+    Redemption is allowed only while guest mode is enabled and new guests are
+    not paused; the device must be a pending guest, must not be deny-listed or
+    actively kicked, and its guest account must own exactly one device.
+  - `Database.redeem_guest_voucher_for_device` opens a SQLite transaction with
+    `BEGIN IMMEDIATE`. It validates and claims the unused, unexpired,
+    unrevoked code, then applies the voucher allowance and clears the pending
+    block on the guest user and device in the same transaction. Concurrent
+    redemptions therefore cannot spend the same code twice. This transaction
+    uses a second connection with `busy_timeout=5000`: when another writer
+    holds the SQLite lock, `BEGIN IMMEDIATE` waits up to five seconds before
+    SQLite reports `SQLITE_BUSY`. Voucher redemption therefore requires a
+    file-backed SQLite database; independent SQLite `:memory:` connections do
+    not share the application's tables. With `:memory:`, redemption returns
+    `voucher_storage_unsupported` and the public endpoint responds with HTTP
+    503 instead of querying a blank second database.
+  - After commit, the API recomputes allowances, schedules a shaping sync, and
+    writes an audit event. The portal polls `/api/guest/status`; when the
+    snapshot reports approval, the existing success and redirect lifecycle
+    takes over.
+
+The dashboard endpoints require an authenticated admin session. Redemption is
+available to a pending guest through the captive portal and uses the gateway's
+resolved client identity. Validation errors do not echo the submitted code.
+
 ---
 
 ## The dashboard (web UI)
@@ -1779,6 +1843,10 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | GET/POST | `/api/bundle` | read / update bundle (`total_gb`, `reset_day`, or `add_gb` to recharge mid-month). A POST makes the dashboard the bundle owner (`bundle_source=dashboard`) |
 | POST | `/api/reset-month` | force an early period roll-over |
 | GET/POST | `/api/guest` | guest mode: auto-register new devices with their own small allowance; also the **guest-limit** cap (`limit`, default 2 — stops MAC-spoofing spam; **lowering it immediately admin-cuts the NEWEST over-cap guest users' devices**, oldest stay, raising never un-blocks), a default **guest speed limit** (`speed_limit_mbps`, 0 = unlimited — the tc shaper applies it as every guest account's aggregate ceiling, `min` with an explicit user cap) and the **STOP NEW CONNECTIONS** gate (`stop_new`) — dnsmasq *refuses* brand-new devices outright (app-owned `dhcp-host=<mac>,ignore` fragment, persisted refuse list, row-less kernel cut) while registered ones keep joining |
+| POST | `/api/guest/vouchers` | **Admin session required** — issue a voucher (`{"quota_gb": 1.5, "expires_at": 2000000000, "comment": "..."}`; `expires_at` and `comment` optional). Returns `201` with the generated code, allowance, timestamps, comment, and derived status. `quota_gb` is 0.01–100000 GB; expiry must be a future Unix timestamp |
+| GET | `/api/guest/vouchers` | **Admin session required** — list all vouchers, including used, expired, and revoked rows, with derived status and redemption MAC/time |
+| POST | `/api/guest/vouchers/{code}/revoke` | **Admin session required** — revoke an unused voucher without deleting its history; `404` if missing, `409` if already used or revoked |
+| POST | `/api/guest/voucher/redeem` | **Captive guest** — redeem `{"code": "..."}`. The gateway derives the device from the request IP and current lease snapshot; it requires an eligible pending guest. Success returns `{ok, status: "approved", quota_gb}`. Invalid code returns `400`; malformed requests return `422`; policy/identity failures return `403`; per-device cooldown returns `429` with `Retry-After`. Submitted codes are not echoed in validation errors |
 | GET/POST | `/api/network` | speed-shaping settings: `enabled`, `total_down_mbps`, `total_up_mbps`, `aqm` — plus `vpn_share: {enabled, interface, status?}` from the DB (status = the cached applied state, present only when a manager is wired — `vpn_share.enabled: false` in config.yaml means boot without one) and `decline_random_macs` (a brand-new device with a randomized MAC is **refused at the DHCP level** — `dhcp-host=<mac>,ignore`, no device row; the POST accepts a one-shot `decline_random_macs_existing: true` to sweep devices already joined — only MACs with no vendor OUI, so legacy locally-administered products are never touched) |
 | GET/POST | `/api/mac-lists` | the operator MAC whitelist/blacklist: `{"allow": [...], "deny": [...]}` (each key optional, MACs lowercased/deduped/sorted on save, stored in the `mac_lists` table with a `(mac, kind)` key so a MAC can sit in BOTH lists). Enforcement is resolved, never persisted: `resolve_device_state` precedence = **deny list > user admin cut > device admin cut > allow list > quota (unless bypass) > ok** — a blacklisted MAC is always blocked even with `bypass` or an allow-list entry; a whitelisted MAC is never quota-blocked (manual cuts still win). Removing a MAC from a list restores it on the next 15 s tick. **Deletes write to the deny list**: `DELETE /api/users/{id}` / `DELETE /api/devices/{id}` blacklist every involved MAC permanently (see the quota-model section) |
 | GET/POST | `/api/updates` | self-update state + toggles: read `{enabled, auto_install, checked_at, latest_version, error, changelog, last_install}` / write `{enabled}` (`set_enabled` — a disabled box never dials GitHub, even a forced check refuses; re-enabling clears the last error). **404 when the updater isn't wired** (`updates.enabled: false` in config.yaml) |
