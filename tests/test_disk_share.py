@@ -55,6 +55,14 @@ def _mgr(tmp_path, run=None, samba=True):
                                which=lambda b: "/usr/sbin/smbd" if samba else None)
 
 
+def test_lsblk_skips_disks_mounted_elsewhere():
+    """A data disk the system mounts on /opt (the app itself lives there on
+    some boxes) or one auto-mounted on /media is in use: never offered."""
+    data = json.loads(json.dumps(LSBLK))
+    data["blockdevices"][2]["mountpoints"] = ["/opt"]
+    assert {d["uuid"] for d in ds.disks_from_lsblk(data)} == {"7A3C55D23C558B6F"}
+
+
 def test_lsblk_never_offers_the_system_disk():
     disks = ds.disks_from_lsblk(LSBLK)
     uuids = {d["uuid"] for d in disks}
@@ -110,8 +118,7 @@ def test_apply_reports_missing_and_foreign_mounts(tmp_path):
     problems = _mgr(tmp_path, run).apply([
         {"name": "Gone", "uuid": "0000-0000", "writable": True},
         {"name": "data", "uuid": "1111-2222-3333", "writable": True}])
-    assert any("not connected" in p for p in problems)
-    assert any("already mounted at /media/usb" in p for p in problems)
+    assert len([p for p in problems if "not connected" in p]) == 2  # in use elsewhere = not offered
     assert not any(c[0] == "mount" for c in run.calls)
 
 
@@ -141,7 +148,9 @@ def _client(tmp_path, mgr):
 
 
 def test_api_share_and_unshare(tmp_path):
-    run = FakeRun()
+    lsblk = json.loads(json.dumps(LSBLK))
+    lsblk["blockdevices"][2]["mountpoints"] = [None]     # second data disk, unmounted
+    run = FakeRun(lsblk)
     app, database = _client(tmp_path, _mgr(tmp_path, run))
     with TestClient(app) as c:
         assert c.get("/api/disks").status_code == 401
