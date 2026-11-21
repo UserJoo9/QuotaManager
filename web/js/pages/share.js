@@ -5,6 +5,7 @@ import { chip, fmtBytes } from "../components/ui.js";
 import { openDialog } from "../components/dialog.js";
 import { toast } from "../components/toast.js";
 import liveCard from "./shareLive.js";
+import disksCard from "./shareDisks.js";
 
 const sh = { data: null, loading: false, at: 0, failAt: 0, sel: new Set(), up: null, ttl: 7200, text: "", armed: false, armedFiles: false, drag: false, timer: null, err: "" };
 const mine = () => location.hash === "#/share";
@@ -135,6 +136,7 @@ export default function share(ctx) {
           h("button", { type: "button", class: "btn danger sm", disabled: !files.length && !texts.length, onclick: clearAll }, t("sh.clear")))),
       zone),
     liveCard(ctx),
+    disksCard(ctx),
     h("section", { class: "card c7" },
       h("header", { class: "card-h" }, h("h3", {}, t("sh.shared")), files.length ? h("div", { style: { display: "flex", gap: "8px", "flex-wrap": "wrap" } },
         h("a", { class: "btn ghost sm", href: `/api/share/download-zip?ids=${encodeURIComponent(files.filter((f) => !f.is_expired).map((f) => f.id).join(","))}`, download: "" }, t("sh.zipall")),

@@ -10,6 +10,8 @@ match it. Release notes are composed from a version's section below.)_
 
 Added:
 - **Turn the gateway off from the dashboard** (System → Power). It stops everything the gateway runs and keeps it off after a reboot, removes its firewall and speed-limit rules, and can also power the computer off. Turn DHCP back on in the router first (and, if it is bridged, let it dial the ISP itself again), or the home stays offline. To turn it back on: `sudo systemctl enable --now dnsmasq quota-gateway`.
+- **Network drives** (Share page). Share a hard disk plugged into the gateway, or a folder another PC or the router already shares, with every phone, PC and TV at home at one address (`\\192.168.2.1\<name>` or `smb://192.168.2.1/<name>`), read-write or read-only, no password. The page installs Samba the first time, and shares come back on their own after a reboot or update. The system disk is never offered.
+- **Restart and factory reset** (System → Power). Restart the gateway or reboot the whole machine from the dashboard. Factory reset puts every setting back to how a fresh install starts, without uninstalling: optionally keep people, devices, fixed IPs, the bundle, this month's usage and the dashboard password. The line mode (LAN/WAN) and the PPPoE login always stay so the internet keeps working, and the database is backed up to `/var/lib/quota-gateway/backups/` first.
 - In WAN mode the gateway now notices a PPPoE session that is connected but carries no internet (on We/ETIS lines this shows up as a `100.127.x.x` address) and re-dials by itself after two minutes, waiting longer between attempts (3, 5, 10, then 15 minutes) so the line is never hammered.
 
 Fixed:
