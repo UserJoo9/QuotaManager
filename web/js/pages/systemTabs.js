@@ -196,8 +196,36 @@ function powerOffDialog(ctx) {
       return true;
     } });
 }
+function restartDialog(ctx, machine) {
+  openDialog({ title: t(machine ? "pw.rb.title" : "pw.rs.title"), sub: t(machine ? "pw.rb.sub" : "pw.rs.sub"), submitLabel: t(machine ? "pw.rb.go" : "pw.rs.go"),
+    content: [h("p", { class: "sub" }, t("pw.rs.note"))],
+    onSubmit: async () => { await api.post("/api/system/restart", { machine }); toast(t(machine ? "pw.rb.done" : "pw.rs.done")); return true; } });
+}
+function resetDialog(ctx) {
+  const keep = h("input", { type: "checkbox", id: "pw-keep", checked: true });
+  const word = h("input", { class: "input ltr", required: true, autocomplete: "off", placeholder: "RESET" });
+  openDialog({ title: t("pw.fr.title"), sub: t("pw.fr.sub"), submitLabel: t("pw.fr.go"),
+    content: [
+      h("label", { class: "row-sw", for: "pw-keep", style: { padding: "10px 0", cursor: "pointer" } },
+        h("div", {}, h("b", {}, t("pw.fr.keep")), h("span", {}, t("pw.fr.keep.d"))), keep),
+      h("p", { class: "sub" }, t("pw.fr.always")),
+      h("div", { class: "field" }, h("label", {}, t("pw.fr.type")), word)],
+    onSubmit: async () => {
+      if (word.value.trim() !== "RESET") throw new Error(t("pw.fr.type"));
+      await api.post("/api/system/factory-reset", { keep_users: keep.checked, confirm: "RESET" });
+      toast(t("pw.fr.done")); setTimeout(() => location.reload(), 15000); return true;
+    } });
+}
 export function powerTab(ctx) {
   return h("div", { class: "grid" },
+    h("section", { class: "card c6" },
+      h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("pw.rs.card")), h("span", { class: "sub" }, t("pw.rs.card.d")))),
+      h("div", { class: "fa" },
+        h("button", { type: "button", class: "btn ghost", onclick: () => restartDialog(ctx, false) }, t("pw.rs.go")),
+        h("button", { type: "button", class: "btn ghost", onclick: () => restartDialog(ctx, true) }, t("pw.rb.go")))),
+    h("section", { class: "card c6" },
+      h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("pw.fr.title")), h("span", { class: "sub" }, t("pw.fr.card.d")))),
+      h("div", { class: "fa" }, h("button", { type: "button", class: "btn danger", onclick: () => resetDialog(ctx) }, t("pw.fr.go")))),
     h("section", { class: "card c12" },
       h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("pw.title")), h("span", { class: "sub" }, t("pw.d"))),
         pw.done ? chip("danger", t("pw.st.off")) : null),
