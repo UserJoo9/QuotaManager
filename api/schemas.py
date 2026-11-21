@@ -436,6 +436,13 @@ class WanTest(BaseModel):
     wan_if: Optional[str] = None
 
 
+class GatewayOff(BaseModel):
+    """Turn the whole gateway off (System > Power). ``poweroff`` also shuts
+    the machine down once the services are stopped."""
+
+    poweroff: bool = False
+
+
 class WanRenewConfig(BaseModel):
     """WAN public-IP auto-renew schedule (the dashboard WAN tab).
 

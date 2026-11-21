@@ -14,7 +14,8 @@ from __future__ import annotations
 import socket
 
 from quota.topology import (
-    check_internet, check_internet_dns, detect_ppp, restart_pppoe)
+    check_internet, check_internet_dns, detect_ppp, ensure_ppp_peer_options,
+    is_cgnat, restart_pppoe)
 
 
 def _mk_fake(responses: dict[str, tuple[int, str]]) -> callable:
@@ -201,33 +202,83 @@ def test_internet_dns_falls_through_to_second_server():
 # restart_pppoe — the WAN-tab "renew public IP" restart (fake systemctl)
 # ---------------------------------------------------------------------------
 
+def _no_sleep(_s):
+    return None
+
+
+def test_restart_pppoe_waits_between_stop_and_start():
+    """An instant re-dial lands as a second session on the same username and
+    gets a dead 100.127.x address (issue #41): stop, wait, then start."""
+    events = []
+
+    def run(argv):
+        events.append(argv[1])
+        return (0, "active\n")
+
+    restart_pppoe("ppp0", run_command=run, settle_s=7,
+                  sleep=lambda s: events.append(("sleep", s)))
+    assert events[:3] == ["stop", ("sleep", 7), "start"]
+
+
+def test_restart_pppoe_failed_start_is_honest():
+    def run(argv):
+        return (1, "start failed") if argv[1] == "start" else (0, "")
+
+    out = restart_pppoe("ppp0", run_command=run, sleep=_no_sleep)
+    assert out["restarted"] is False
+    assert "start failed" in out["detail"]
+
+
+def test_is_cgnat():
+    assert is_cgnat("100.127.66.162")
+    assert is_cgnat("100.64.0.1")
+    assert not is_cgnat("10.54.159.52")
+    assert not is_cgnat("197.121.113.253")
+    assert not is_cgnat("not-an-ip")
+
+
+def test_ensure_ppp_peer_options_adds_only_missing(tmp_path):
+    peer = tmp_path / "quota-wan"
+    peer.write_text("plugin pppoe.so\nlan0\npersist\nholdoff 5\n# lcp-echo-interval 1\n")
+    assert ensure_ppp_peer_options(str(peer)) is True
+    text = peer.read_text()
+    assert "holdoff 5" in text and "holdoff 20" not in text  # admin's value kept
+    assert "\nlcp-echo-interval 10\n" in text
+    assert "\nlcp-echo-failure 6\n" in text
+    assert ensure_ppp_peer_options(str(peer)) is False  # idempotent
+
+
+def test_ensure_ppp_peer_options_missing_file_is_noop(tmp_path):
+    assert ensure_ppp_peer_options(str(tmp_path / "nope")) is False
+
 def test_restart_pppoe_restarts_and_reports_active():
     """A successful restart reports restarted=True and the service's state."""
     calls = []
 
     def run(argv):
         calls.append(argv)
-        if argv[0] == "systemctl" and argv[1] == "restart":
+        if argv[0] == "systemctl" and argv[1] in ("stop", "start"):
             return (0, "")
         return (0, "active\n")  # is-active
 
-    out = restart_pppoe("ppp0", run_command=run)
+    out = restart_pppoe("ppp0", run_command=run, sleep=_no_sleep)
     assert out["restarted"] is True
     assert out["state"] == "active"
     assert "ppp0" in out["detail"]
-    assert calls[0] == ["systemctl", "restart", "quota-wan-ppp"]
-    assert calls[1] == ["systemctl", "is-active", "quota-wan-ppp"]
+    assert calls == [["systemctl", "stop", "quota-wan-ppp"],
+                     ["systemctl", "start", "quota-wan-ppp"],
+                     ["systemctl", "is-active", "quota-wan-ppp"]]
 
 
 def test_restart_pppoe_reports_inactive_state():
     """After a restart the unit can read inactive (pppd exiting) — still a
     restart attempt, honestly reported."""
     def run(argv):
-        if argv[0] == "systemctl" and argv[1] == "restart":
+        if argv[0] == "systemctl" and argv[1] in ("stop", "start"):
             return (0, "")
         return (0, "inactive\n")
 
-    out = restart_pppoe("ppp0", run_command=run)
+    out = restart_pppoe("ppp0", run_command=run, sleep=_no_sleep)
     assert out["restarted"] is True
     assert out["state"] == "inactive"
 
@@ -237,7 +288,8 @@ def test_restart_pppoe_failed_restart_is_honest():
     out = restart_pppoe(
         "ppp0",
         run_command=lambda argv:
-            (1, "Failed to restart quota-wan-ppp.service: Unit not found."))
+            (1, "Failed to stop quota-wan-ppp.service: Unit not found."),
+        sleep=_no_sleep)
     assert out["restarted"] is False
     assert out["state"] == "unknown"
     assert "Unit not found" in out["detail"]
@@ -247,7 +299,8 @@ def test_restart_pppoe_missing_systemctl_degrades():
     """No systemctl (Windows dev box / no root) => restarted=False, no raise."""
     out = restart_pppoe(
         "ppp0",
-        run_command=lambda argv: (127, "command not found"))
+        run_command=lambda argv: (127, "command not found"),
+        sleep=_no_sleep)
     assert out["restarted"] is False
     assert out["state"] == "unknown"
     assert "command not found" in out["detail"]
@@ -256,10 +309,10 @@ def test_restart_pppoe_missing_systemctl_degrades():
 def test_restart_pppoe_unknown_is_active_answer_mapped():
     """An is-active answer outside active/inactive maps to "unknown"."""
     def run(argv):
-        if argv[0] == "systemctl" and argv[1] == "restart":
+        if argv[0] == "systemctl" and argv[1] in ("stop", "start"):
             return (0, "")
         return (0, "activating\n")  # transitional
 
-    out = restart_pppoe("ppp0", run_command=run)
+    out = restart_pppoe("ppp0", run_command=run, sleep=_no_sleep)
     assert out["restarted"] is True
     assert out["state"] == "unknown"

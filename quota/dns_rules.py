@@ -537,6 +537,7 @@ def render_rules(rules: Iterable[Any], dns_servers: Iterable[tuple[str, Optional
         ),
     )
 
+    scoped_skipped = 0
     for rule in ordered:
         if not getattr(rule, "enabled", True):
             continue
@@ -557,23 +558,40 @@ def render_rules(rules: Iterable[Any], dns_servers: Iterable[tuple[str, Optional
                 continue
         else:  # block
             target = "0.0.0.0"
-        for tag in _tags_for(scope, scope_id, device_ids_by_user):
-            prefix = f"tag:{tag} " if tag else ""
-            if target is None:
-                # Re-point the domain at the normal upstream chain for this
-                # tag scope, clearing any broader-scope blackhole for it.
-                lines.append(f"{prefix}server=/{domain}/#")
-            else:
-                lines.append(f"{prefix}address=/{domain}/{target}")
+        if scope != SCOPE_GLOBAL:
+            # dnsmasq has no per-client form of address=/server=: a line such
+            # as "tag:qmdev7 address=/x/0.0.0.0" is a syntax error, and one
+            # bad line stops dnsmasq from starting at all, which takes DHCP
+            # and DNS down for the whole network. Skip it instead.
+            scoped_skipped += 1
+            continue
+        if target is None:
+            # Re-point the domain at the normal upstream chain, clearing any
+            # broader blackhole for it.
+            lines.append(f"server=/{domain}/#")
+        else:
+            lines.append(f"address=/{domain}/{target}")
 
+    if scoped_skipped:
+        log.warning("skipped %d per-user/per-device domain rule(s): dnsmasq "
+                    "can only apply domain rules to every client", scoped_skipped)
+
+    # Per-client DNS servers are handed out over DHCP for that device's tag,
+    # the one per-client DNS knob dnsmasq has. A global override stays an
+    # upstream server= line.
+    per_tag: dict[str, list[str]] = {}
     for scope, scope_id, ip in dns_servers:
-        if not ip or not _is_safe_config_token(ip):
+        if not ip or not _is_safe_config_token(ip) or "," in ip:
             if ip:
                 log.warning("skipping DNS-server override with unsafe value %r", ip)
             continue
         for tag in _tags_for(scope, scope_id, device_ids_by_user):
-            prefix = f"tag:{tag} " if tag else ""
-            lines.append(f"{prefix}server={ip}")
+            if tag is None:
+                lines.append(f"server={ip}")
+            elif ip not in per_tag.setdefault(tag, []):
+                per_tag[tag].append(ip)
+    for tag, ips in per_tag.items():
+        lines.append(f"dhcp-option=tag:{tag},option:dns-server,{','.join(ips)}")
 
     return "\n".join(lines) + "\n"
 
@@ -682,14 +700,41 @@ class DnsRuleManager:
 
         tags_path = Path(self.conf_dir) / self.tags_file
         rules_path = Path(self.conf_dir) / self.rules_file
+        previous = {path: self._read(path) for path in (tags_path, rules_path)}
         tags_changed = self._write_if_changed(tags_path, tags_text)
         rules_changed = self._write_if_changed(rules_path, rules_text)
         changed = tags_changed or rules_changed
         if changed and self.reload_dnsmasq:
-            self._reload()
+            if not self._reload():
+                # Never leave a file dnsmasq rejects in /etc/dnsmasq.d: the
+                # next restart (a reboot, an IPv6 or DHCP change) would fail
+                # and take DHCP + DNS down. Put the last good files back.
+                for path, content in previous.items():
+                    self._restore(path, content)
+                return False
         return changed
 
-    def _reload(self) -> None:
+    @staticmethod
+    def _read(path: Path) -> Optional[str]:
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+    @staticmethod
+    def _restore(path: Path, content: Optional[str]) -> None:
+        try:
+            if content is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_text(content, encoding="utf-8")
+            log.warning("restored the previous %s after dnsmasq rejected the "
+                        "new one", path.name)
+        except OSError as exc:
+            log.error("could not restore %s: %s", path, exc)
+
+    def _reload(self) -> bool:
+        """Validate and restart dnsmasq. False if the config failed validation."""
         # `dnsmasq --test` validates the WHOLE effective config (base file +
         # every conf-dir file), the same check the setup script runs after
         # writing quota-gateway.conf. Everything this module writes comes
@@ -702,7 +747,7 @@ class DnsRuleManager:
             if probe.returncode != 0:
                 log.error("generated dnsmasq config failed validation — NOT "
                           "reloading: %s", probe.stderr.strip())
-                return
+                return False
         except FileNotFoundError:
             log.warning("`dnsmasq` binary not found — skipping the pre-reload "
                        "validation check (reloading anyway)")
@@ -714,3 +759,4 @@ class DnsRuleManager:
             log.info("dnsmasq restarted to apply DNS filtering rule changes")
         except (OSError, subprocess.SubprocessError) as exc:
             log.error("failed to restart dnsmasq after a DNS rule change: %s", exc)
+        return True
