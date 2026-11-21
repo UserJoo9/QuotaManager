@@ -117,19 +117,20 @@ def _flatten(devices: list[dict], parent: dict | None = None) -> list[tuple[dict
     return out
 
 
-def disks_from_lsblk(data: dict) -> list[dict[str, Any]]:
+def disks_from_lsblk(data: dict, root: str = SHARE_ROOT) -> list[dict[str, Any]]:
     """Shareable filesystems from ``lsblk -J`` output.
 
     A whole disk is skipped (with every partition on it) when any of its
-    filesystems is mounted at a system path, so the system disk is never
-    offered.
+    filesystems is mounted anywhere outside ``root`` (``/``, ``/boot``, a data
+    disk on ``/opt``, swap...): that disk belongs to the system, so it is
+    never offered. Unmounted filesystems and our own shares are listed.
     """
     tops = data.get("blockdevices") or []
     system_disks = set()
     for dev, parent in _flatten(tops):
         top = parent or dev
-        mounts = set(dev.get("mountpoints") or []) | {dev.get("mountpoint")}
-        if mounts & SYSTEM_MOUNTS:
+        mounts = {m for m in (dev.get("mountpoints") or []) + [dev.get("mountpoint")] if m}
+        if mounts & SYSTEM_MOUNTS or any(not m.startswith(root.rstrip("/") + "/") for m in mounts):
             system_disks.add(top.get("name"))
     out = []
     for dev, parent in _flatten(tops):
@@ -203,7 +204,7 @@ class DiskShareManager:
             log.warning("lsblk failed: %s", out)
             return []
         try:
-            return disks_from_lsblk(json.loads(out))
+            return disks_from_lsblk(json.loads(out), self.root)
         except ValueError:
             return []
 
