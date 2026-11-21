@@ -6,6 +6,18 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## [Unreleased]
+
+Added:
+- **Turn the gateway off from the dashboard** (System → Power). It stops everything the gateway runs and keeps it off after a reboot, removes its firewall and speed-limit rules, and can also power the computer off. Turn DHCP back on in the router first (and, if it is bridged, let it dial the ISP itself again), or the home stays offline. To turn it back on: `sudo systemctl enable --now dnsmasq quota-gateway`.
+- **Network drives** (Share page). Share a hard disk plugged into the gateway, or a folder another PC or the router already shares, with every phone, PC and TV at home at one address (`\\192.168.2.1\<name>` or `smb://192.168.2.1/<name>`), read-write or read-only, no password. The page installs Samba the first time, and shares come back on their own after a reboot or update. The system disk is never offered.
+- **Restart and factory reset** (System → Power). Restart the gateway or reboot the whole machine from the dashboard. Factory reset puts every setting back to how a fresh install starts, without uninstalling: optionally keep people, devices, fixed IPs, the bundle, this month's usage and the dashboard password. The line mode (LAN/WAN) and the PPPoE login always stay so the internet keeps working, and the database is backed up to `/var/lib/quota-gateway/backups/` first.
+- In WAN mode the gateway now notices a PPPoE session that is connected but carries no internet (on We/ETIS lines this shows up as a `100.127.x.x` address) and re-dials by itself after two minutes, waiting longer between attempts (3, 5, 10, then 15 minutes) so the line is never hammered.
+
+Fixed:
+- Devices stopped getting an IP address a day or so after a per-person or per-device website block, or a per-device DNS server, was added. Those rules were written in a form DNS does not accept, so the next DNS restart (a reboot, a network change) failed and took DHCP and DNS down for the whole home. Such rules are no longer written that way, a per-device DNS server is now handed to that device directly, and if DNS ever rejects a new rules file the gateway puts the last working one back. Updating repairs an affected gateway on its own. Note: website block/allow rules apply to every device; per-person and per-device website rules are skipped (with a warning in the log) because DNS cannot apply them to one device. Reported by @osamaadel89010-cpu.
+- WAN mode could end up with a dead `100.127.x.x` address. We/ETIS allow one session per account, and three things could open a second one: renewing the public IP re-dialed instantly while the ISP still held the old session; the PPPoE connection re-dialed instantly after a drop; and "Test PPPoE connection" dialed a second session next to the live one. Renewing now waits 10 seconds between hanging up and dialing, the connection waits 20 seconds before re-dialing and notices a dead session within about a minute, and the test checks the live connection instead of dialing again. Existing gateways pick up the new connection settings on the next start.
+
 ## [0.5.8] — 2026-11-20
 
 Added:

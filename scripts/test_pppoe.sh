@@ -73,6 +73,33 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# --- the box's own session is up: report it, never dial a second one --------
+# We/ETIS allow ONE session per username. A throwaway dial next to a live ppp0
+# is either refused ("concurrency control") or, worse, accepted as a second
+# session that gets a dead 100.127.x address and can knock the real session
+# off. So when quota-wan-ppp already holds the line, test THAT link instead.
+if systemctl is-active --quiet quota-wan-ppp 2>/dev/null; then
+    line="$(ip -o -4 addr show dev ppp0 2>/dev/null)" || true
+    LIVE_LOCAL="$(echo "$line" | sed -n 's/.* inet \([0-9.]*\).*/\1/p')"
+    LIVE_PEER="$(echo "$line" | sed -n 's/.* peer \([0-9.]*\).*/\1/p')"
+    if [ -n "$LIVE_LOCAL" ]; then
+        INTERNET=no
+        if ping -c 1 -W 2 -I ppp0 8.8.8.8 >/dev/null 2>&1 ||
+           ping -c 1 -W 2 -I ppp0 1.1.1.1 >/dev/null 2>&1; then
+            INTERNET=yes
+        fi
+        echo "RESULT=success"
+        echo "LOCAL=$LIVE_LOCAL"
+        echo "PEER=$LIVE_PEER"
+        echo "INTERNET=$INTERNET"
+        echo "DETAIL=the box's own PPPoE session is already up on ppp0 (L:$LIVE_LOCAL <-> P:$LIVE_PEER); internet reachable: $INTERNET. No test dial was made: a second session on the same username is refused or gets a dead address."
+        exit 0
+    fi
+    echo "RESULT=link-down"
+    echo "DETAIL=the box is already dialing this line (quota-wan-ppp is running but ppp0 has no address yet). A test dial now would compete with it for the one session the ISP allows; wait a minute, or switch to LAN mode first to test new credentials."
+    exit 0
+fi
+
 # --- back up the real secrets so the test can never leak them ---------------
 [ -f /etc/ppp/chap-secrets ] && cp -a /etc/ppp/chap-secrets "$CHAP_BAK" && HAD_CHAP=1
 [ -f /etc/ppp/pap-secrets ]  && cp -a /etc/ppp/pap-secrets  "$PAP_BAK"  && HAD_PAP=1

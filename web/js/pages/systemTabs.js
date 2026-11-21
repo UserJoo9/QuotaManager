@@ -177,3 +177,61 @@ export function logsTab(ctx) {
       h("button", { type: "button", class: "btn primary sm", onclick: exportLogs }, t("logs.export"))),
     lg.err && !lg.data ? h("div", { class: "empty" }, lg.err) : view);
 }
+
+/* ---------------- Power: turn the whole gateway off ---------------- */
+const pw = { busy: false, done: null };
+function powerOffDialog(ctx) {
+  const box = h("input", { type: "checkbox", id: "pw-poweroff" });
+  openDialog({ title: t("pw.dlg.title"), sub: t("pw.dlg.sub"), submitLabel: t("pw.dlg.go"),
+    content: [
+      h("p", { class: "sub" }, t("pw.dlg.warn")),
+      h("label", { class: "row-sw", for: "pw-poweroff", style: { padding: "10px 0", cursor: "pointer" } },
+        h("div", {}, h("b", {}, t("pw.dlg.machine")), h("span", {}, t("pw.dlg.machine.d"))), box)],
+    onSubmit: async () => {
+      pw.busy = true; ctx.touch();
+      try {
+        const r = await api.post("/api/system/off", { poweroff: box.checked });
+        pw.done = r && r.poweroff ? "machine" : "gateway"; toast(t("pw.done." + pw.done));
+      } finally { pw.busy = false; ctx.touch(); }
+      return true;
+    } });
+}
+function restartDialog(ctx, machine) {
+  openDialog({ title: t(machine ? "pw.rb.title" : "pw.rs.title"), sub: t(machine ? "pw.rb.sub" : "pw.rs.sub"), submitLabel: t(machine ? "pw.rb.go" : "pw.rs.go"),
+    content: [h("p", { class: "sub" }, t("pw.rs.note"))],
+    onSubmit: async () => { await api.post("/api/system/restart", { machine }); toast(t(machine ? "pw.rb.done" : "pw.rs.done")); return true; } });
+}
+function resetDialog(ctx) {
+  const keep = h("input", { type: "checkbox", id: "pw-keep", checked: true });
+  const word = h("input", { class: "input ltr", required: true, autocomplete: "off", placeholder: "RESET" });
+  openDialog({ title: t("pw.fr.title"), sub: t("pw.fr.sub"), submitLabel: t("pw.fr.go"),
+    content: [
+      h("label", { class: "row-sw", for: "pw-keep", style: { padding: "10px 0", cursor: "pointer" } },
+        h("div", {}, h("b", {}, t("pw.fr.keep")), h("span", {}, t("pw.fr.keep.d"))), keep),
+      h("p", { class: "sub" }, t("pw.fr.always")),
+      h("div", { class: "field" }, h("label", {}, t("pw.fr.type")), word)],
+    onSubmit: async () => {
+      if (word.value.trim() !== "RESET") throw new Error(t("pw.fr.type"));
+      await api.post("/api/system/factory-reset", { keep_users: keep.checked, confirm: "RESET" });
+      toast(t("pw.fr.done")); setTimeout(() => location.reload(), 15000); return true;
+    } });
+}
+export function powerTab(ctx) {
+  return h("div", { class: "grid" },
+    h("section", { class: "card c6" },
+      h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("pw.rs.card")), h("span", { class: "sub" }, t("pw.rs.card.d")))),
+      h("div", { class: "fa" },
+        h("button", { type: "button", class: "btn ghost", onclick: () => restartDialog(ctx, false) }, t("pw.rs.go")),
+        h("button", { type: "button", class: "btn ghost", onclick: () => restartDialog(ctx, true) }, t("pw.rb.go")))),
+    h("section", { class: "card c6" },
+      h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("pw.fr.title")), h("span", { class: "sub" }, t("pw.fr.card.d")))),
+      h("div", { class: "fa" }, h("button", { type: "button", class: "btn danger", onclick: () => resetDialog(ctx) }, t("pw.fr.go")))),
+    h("section", { class: "card c12" },
+      h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("pw.title")), h("span", { class: "sub" }, t("pw.d"))),
+        pw.done ? chip("danger", t("pw.st.off")) : null),
+      h("p", { class: "note" }, t("pw.note")),
+      h("p", { class: "sub ltr", dir: "ltr" }, h("code", {}, "sudo systemctl enable --now dnsmasq quota-gateway")),
+      h("div", { class: "fa", style: { "margin-top": "14px" } },
+        h("button", { type: "button", class: "btn danger", disabled: pw.busy || !!pw.done, onclick: () => powerOffDialog(ctx) },
+          icon("ban", 15), t("pw.go")))));
+}

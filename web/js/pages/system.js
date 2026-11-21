@@ -2,7 +2,7 @@ import { h, icon } from "../core/dom.js";
 import { t } from "../core/i18n.js";
 import { getPrefs, setPref, ACCENTS, TONES, PARTICLES, effTheme } from "../core/prefs.js";
 import { chip } from "../components/ui.js";
-import { accountTab, updatesTab, logsTab } from "./systemTabs.js";
+import { accountTab, updatesTab, logsTab, powerTab } from "./systemTabs.js";
 
 let tab = "appearance";
 
@@ -45,8 +45,8 @@ function appearance(ctx) {
 }
 
 export default function system(ctx) {
-  const tabs = ["appearance", "account", "updates", "logs"];
+  const tabs = ["appearance", "account", "updates", "logs", "power"];
   return h("div", { class: "page" },
     h("div", { class: "tabs", role: "tablist" }, tabs.map((k) => h("button", { type: "button", role: "tab", class: tab === k ? "on" : "", "aria-selected": String(tab === k), onclick: () => { tab = k; ctx.touch(); } }, t("sys.tab." + k)))),
-    tab === "account" ? accountTab(ctx) : tab === "updates" ? updatesTab(ctx) : tab === "logs" ? logsTab(ctx) : appearance(ctx));
+    tab === "account" ? accountTab(ctx) : tab === "updates" ? updatesTab(ctx) : tab === "logs" ? logsTab(ctx) : tab === "power" ? powerTab(ctx) : appearance(ctx));
 }

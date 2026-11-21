@@ -19,6 +19,8 @@ touching the real `tc` binary).
 """
 
 
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -124,18 +126,19 @@ def test_render_rules_global_block_has_no_tag_prefix():
     assert "tag:" not in text
 
 
-def test_render_rules_device_scope_is_tag_restricted():
+def test_render_rules_device_scope_is_not_rendered():
+    # dnsmasq has no per-client address=/server=; "tag:qmdev7 address=..."
+    # is a syntax error that stops dnsmasq from starting (issue #41).
     rules = [_FakeRule("device", 7, "block", "tiktok.com")]
     text = dr.render_rules(rules, [], {})
-    assert "tag:qmdev7 address=/tiktok.com/0.0.0.0" in text
+    assert "tiktok.com" not in text
+    assert not any(line.startswith("tag:") for line in text.splitlines())
 
 
-def test_render_rules_user_scope_fans_out_to_every_owned_device():
+def test_render_rules_user_scope_is_not_rendered():
     rules = [_FakeRule("user", 42, "block", "netflix.com")]
-    device_ids_by_user = {42: [1, 2, 3]}
-    text = dr.render_rules(rules, [], device_ids_by_user)
-    for dev_id in (1, 2, 3):
-        assert f"tag:qmdev{dev_id} address=/netflix.com/0.0.0.0" in text
+    text = dr.render_rules(rules, [], {42: [1, 2, 3]})
+    assert "netflix.com" not in text
 
 
 def test_render_rules_redirect_uses_target_ip():
@@ -167,24 +170,44 @@ def test_render_rules_disabled_rule_is_skipped():
     assert "ads.example.com" not in text
 
 
-def test_render_rules_allow_renders_after_block_for_override():
-    # A device-scoped allow for the SAME domain as a global block must come
-    # after it in the file so dnsmasq's "last directive wins" gives the
-    # allow priority for that exact device.
+def test_render_rules_global_allow_renders_after_global_block():
     rules = [
+        _FakeRule("global", None, "allow", "example.com"),
         _FakeRule("global", None, "block", "example.com"),
-        _FakeRule("device", 3, "allow", "example.com"),
     ]
     text = dr.render_rules(rules, [], {})
-    block_idx = text.index("address=/example.com/0.0.0.0")
-    allow_idx = text.index("tag:qmdev3 server=/example.com/#")
-    assert block_idx < allow_idx
+    assert text.index("address=/example.com/0.0.0.0") < text.index("server=/example.com/#")
 
 
 def test_render_rules_dns_server_overrides():
     text = dr.render_rules([], [("device", 5, "1.1.1.1"), ("global", None, "9.9.9.9")], {})
-    assert "tag:qmdev5 server=1.1.1.1" in text
+    assert "dhcp-option=tag:qmdev5,option:dns-server,1.1.1.1" in text
     assert "server=9.9.9.9" in text
+
+
+def test_render_rules_user_dns_servers_merge_into_one_option_per_device():
+    servers = [("user", 42, "1.1.1.3"), ("user", 42, "1.0.0.3"), ("user", 42, "1.1.1.3")]
+    text = dr.render_rules([], servers, {42: [1, 2]})
+    for dev_id in (1, 2):
+        assert text.count(f"dhcp-option=tag:qmdev{dev_id},") == 1
+        assert f"dhcp-option=tag:qmdev{dev_id},option:dns-server,1.1.1.3,1.0.0.3" in text
+
+
+@pytest.mark.skipif(shutil.which("dnsmasq") is None, reason="dnsmasq not installed")
+def test_rendered_rules_pass_real_dnsmasq_syntax_check(tmp_path: Path):
+    rules = [
+        _FakeRule("global", None, "block", "ads.example.com"),
+        _FakeRule("global", None, "allow", "ok.example.com"),
+        _FakeRule("global", None, "redirect", "printer.local", target_ip="192.168.2.50"),
+        _FakeRule("device", 7, "block", "tiktok.com"),
+        _FakeRule("user", 42, "allow", "x.com"),
+    ]
+    servers = [("user", 42, "1.1.1.3"), ("device", 5, "9.9.9.9"), ("global", None, "8.8.4.4")]
+    conf = tmp_path / "quota-domains.conf"
+    conf.write_text(dr.render_rules(rules, servers, {42: [1, 2]}))
+    probe = subprocess.run(["dnsmasq", "--test", "-C", str(conf)],
+                           capture_output=True, text=True)
+    assert probe.returncode == 0, probe.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -381,3 +404,41 @@ def test_render_tags_static_ipv6_reservation():
     assert "dhcp-host=aa:bb:cc:dd:ee:07,set:qmdev7,192.168.2.50,[fd00:da7a:2::50]" in out
     assert "dhcp-host=aa:bb:cc:dd:ee:09,192.168.2.51,[fd00:da7a:2::51]" in out
     assert "dhcp-host=aa:bb:cc:dd:ee:0a,192.168.2.52\n" in out
+
+
+def test_manager_restores_previous_files_when_dnsmasq_rejects_them(tmp_path: Path, monkeypatch):
+    """A file dnsmasq rejects must not stay in /etc/dnsmasq.d: the next
+    dnsmasq restart would fail and take DHCP + DNS down (issue #41)."""
+    manager = dr.DnsRuleManager(conf_dir=str(tmp_path), reload_dnsmasq=True)
+    good = [_FakeRule("global", None, "block", "ads.example.com")]
+    monkeypatch.setattr(manager, "_reload", lambda: True)
+    assert manager.apply([], good, [], {}) is True
+    before = (tmp_path / "quota-domains.conf").read_text()
+
+    monkeypatch.setattr(manager, "_reload", lambda: False)
+    bad = [_FakeRule("global", None, "block", "tracker.example.net")]
+    assert manager.apply([_FakeDevice(1, "aa:bb:cc:dd:ee:01")], bad, [], {}) is False
+    assert (tmp_path / "quota-domains.conf").read_text() == before
+    assert "qmdev1" not in (tmp_path / "quota-tags.conf").read_text()
+
+
+def test_manager_removes_new_file_when_dnsmasq_rejects_it(tmp_path: Path, monkeypatch):
+    manager = dr.DnsRuleManager(conf_dir=str(tmp_path), reload_dnsmasq=True)
+    monkeypatch.setattr(manager, "_reload", lambda: False)
+    rules = [_FakeRule("global", None, "block", "ads.example.com")]
+    assert manager.apply([], rules, [], {}) is False
+    assert not (tmp_path / "quota-domains.conf").exists()
+    assert not (tmp_path / "quota-tags.conf").exists()
+
+
+def test_reload_reports_failed_validation(monkeypatch):
+    manager = dr.DnsRuleManager()
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 1, "", "dnsmasq: bad option at line 2")
+
+    monkeypatch.setattr(dr.subprocess, "run", fake_run)
+    assert manager._reload() is False
+    assert calls == [["dnsmasq", "--test"]]  # never restarted
