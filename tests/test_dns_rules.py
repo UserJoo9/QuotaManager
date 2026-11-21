@@ -181,6 +181,23 @@ def test_render_rules_allow_renders_after_block_for_override():
     assert block_idx < allow_idx
 
 
+def test_render_blocklist_domain_deduplicates_and_preserves_manual_allows():
+    rules = [
+        _FakeRule("global", None, "block", "ads.example.com"),
+        _FakeRule("global", None, "block", "ads.example.com"),
+        _FakeRule("global", None, "allow", "ads.example.com"),
+        _FakeRule("device", 7, "allow", "ads.example.com"),
+    ]
+    text = dr.render_rules(rules, [], {})
+
+    assert text.count("address=/ads.example.com/0.0.0.0") == 1
+    assert text.index("address=/ads.example.com/0.0.0.0") < text.index(
+        "server=/ads.example.com/#")
+    assert "tag:qmdev7 server=/ads.example.com/#" in text
+    assert dr.resolve_domain_status(
+        "ads.example.com", rules[:2], None, None)[0] == "blocked"
+
+
 def test_render_rules_dns_server_overrides():
     text = dr.render_rules([], [("device", 5, "1.1.1.1"), ("global", None, "9.9.9.9")], {})
     assert "tag:qmdev5 server=1.1.1.1" in text

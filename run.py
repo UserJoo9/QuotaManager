@@ -50,6 +50,7 @@ from core import config as cfg_mod
 from core.logging_setup import setup_logging
 from quota import db as _db
 from quota import captive_http as _captive_http
+from quota.dns_blocklists import DnsBlocklistManager
 from quota import dns_rules as _dns_rules
 from quota.arp_scan import ArpScanner
 from quota.dnslog import DnslogTailer
@@ -292,6 +293,7 @@ class Gateway:
         self.engine: NftablesEngine | None = None
         self.shaper: object | None = None  # quota.shaping.TcShaper (tc/ifb)
         self.dns_manager: _dns_rules.DnsRuleManager | None = None  # domain filtering
+        self.dns_blocklist_manager: DnsBlocklistManager | None = None
         #: VPN-share policy routing (quota.vpnshare.VpnShareManager); None
         #: when cfg.vpn_share.enabled is false. Reconciles the client-subnet
         #: routing into the box's tunnel + the engine's gateway-meter
@@ -388,6 +390,7 @@ class Gateway:
         #: default quota.topology.restart_pppoe.
         self._pppoe_restart: Callable[..., dict[str, object]] = restart_pppoe
         self._maintenance_task: asyncio.Task | None = None
+        self._dns_blocklist_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
         #: last audit-trail (events table) prune's clock, for the hourly gate
         self._last_events_prune = time.monotonic()
@@ -471,6 +474,8 @@ class Gateway:
         immediately without waiting for kernel rules or network commands.
         """
         await self.database.connect()
+        if self.dns_blocklist_manager is None:
+            self.dns_blocklist_manager = DnsBlocklistManager(self.database)
         # A dashboard WAN-toggle applies on the NEXT restart: the DB override
         # must land on cfg BEFORE the engine/scanner are built below (they read
         # engine.topology + the resolved local subnets at construction).
@@ -1487,6 +1492,9 @@ class Gateway:
     async def _maintenance_tick(self) -> None:
         # 1. Roll the quota period if stale (covers month boundary).
         await self.service.ensure_period()
+        # Feed retrieval can take seconds and must never extend the tick.
+        # The tracked task checks its own daily due timestamps and limits work.
+        self._schedule_dns_blocklist_refresh()
 
         # 1b. Learn device bindings from dnsmasq's lease file.
         await self._timed("_sync_dnsmasq_leases", self._sync_dnsmasq_leases())
@@ -1939,6 +1947,7 @@ class Gateway:
                 devices = await self.database.list_devices()
                 users = {u.id: u for u in await self.database.list_users()}
                 rules = await self.database.list_domain_rules(enabled_only=True)
+                rules.extend(await self.database.list_enabled_dns_blocklist_rules())
                 device_ids_by_user: dict[int, list[int]] = {}
                 for dev in devices:
                     if dev.user_id is not None:
@@ -1971,6 +1980,28 @@ class Gateway:
                     static_map)
         except Exception:  # noqa: BLE001
             log.exception("failed to sync DNS filtering rules")
+
+    def _schedule_dns_blocklist_refresh(self) -> None:
+        """Start one due-feed check without making the maintenance tick wait."""
+        if self.dns_blocklist_manager is None:
+            return
+        task = self._dns_blocklist_task
+        if task is None or task.done():
+            self._dns_blocklist_task = asyncio.create_task(
+                self._refresh_dns_blocklists())
+
+    async def _refresh_dns_blocklists(self) -> None:
+        manager = self.dns_blocklist_manager
+        if manager is None:
+            return
+        try:
+            changed = await manager.refresh_due()
+            if changed:
+                await self._apply_dns_now()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - optional refresh must not kill gateway
+            log.exception("DNS blocklist refresh task failed")
 
 
     async def _apply_dns_now(self) -> None:
@@ -2494,6 +2525,12 @@ class Gateway:
                 await self._maintenance_task
             except asyncio.CancelledError:
                 pass
+        if self._dns_blocklist_task is not None:
+            self._dns_blocklist_task.cancel()
+            try:
+                await self._dns_blocklist_task
+            except asyncio.CancelledError:
+                pass
         if self.engine is not None:
             self.engine.stop()
         if self.firewall is not None:
@@ -2601,6 +2638,7 @@ def main() -> None:
                          active_ips_getter=gateway._latency_active_ips,
                          tailscale_manager=TailscaleManager(
                              on_system_change=gateway._network_heal),
+                         dns_blocklist_manager=gateway.dns_blocklist_manager,
                          firewall=gateway.firewall,
                          firewall_wan_preapply=gateway._firewall_wan_preapply,
                          updater=gateway.updater,

@@ -536,6 +536,7 @@ def render_rules(rules: Iterable[Any], dns_servers: Iterable[tuple[str, Optional
             1 if getattr(r, "action", ACTION_BLOCK) == ACTION_ALLOW else 0,
         ),
     )
+    seen_block_directives: set[str] = set()
 
     for rule in ordered:
         if not getattr(rule, "enabled", True):
@@ -562,9 +563,14 @@ def render_rules(rules: Iterable[Any], dns_servers: Iterable[tuple[str, Optional
             if target is None:
                 # Re-point the domain at the normal upstream chain for this
                 # tag scope, clearing any broader-scope blackhole for it.
-                lines.append(f"{prefix}server=/{domain}/#")
+                directive = f"{prefix}server=/{domain}/#"
             else:
-                lines.append(f"{prefix}address=/{domain}/{target}")
+                directive = f"{prefix}address=/{domain}/{target}"
+            if action == ACTION_BLOCK:
+                if directive in seen_block_directives:
+                    continue
+                seen_block_directives.add(directive)
+            lines.append(directive)
 
     for scope, scope_id, ip in dns_servers:
         if not ip or not _is_safe_config_token(ip):

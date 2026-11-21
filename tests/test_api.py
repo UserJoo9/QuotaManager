@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import threading
 import time
 from zoneinfo import ZoneInfo
 
@@ -735,6 +736,26 @@ def test_device_consumption_is_per_device(client):
     # ...and the per-user bar reports the same aggregate
     # (find Dad by id — the protected Gateway user is seeded first)
     assert next(u for u in dash["users"] if u["id"] == uid)["used_gb"] == pytest.approx(6.0)
+
+
+def test_history_filter_status_includes_matching_subscribed_feed(client):
+    c, db, _ = client
+    _login(c)
+
+    async def seed():
+        device = await db.upsert_device("aa:bb:cc:dd:ee:f1", name="Phone")
+        await db.create_dns_blocklist(
+            "Ads", "https://lists.example/ads", ["ads.example"])
+        await db.batch_add_dns_history([
+            (device.id, datetime.now().astimezone().strftime("%Y-%m-%d %H:%M"),
+             "video.ads.example", 4)])
+        return device.id
+
+    device_id = _get_loop().run_until_complete(seed())
+    response = c.get(f"/api/history/{device_id}?window=24")
+
+    assert response.status_code == 200
+    assert response.json()["top_domains"][0]["status"] == "blocked"
 
 
 def test_guest_defaults(client):
@@ -2241,6 +2262,10 @@ def test_history_returns_top_domains_and_activity(client):
     assert data["total_queries"] == 9
     assert data["top_domains"][0]["domain"] == "example.com"
     assert data["top_domains"][0]["hits"] == 7
+    _get_loop().run_until_complete(database.create_dns_blocklist(
+        "Feed", "https://lists.example/feed", ["example.com"]))
+    blocked = c.get(f"/api/history/{dev_id}").json()
+    assert blocked["top_domains"][0]["status"] == "blocked"
     assert data["top_domains"][1]["domain"] == "other.net"
     # activity + recent use the wire key the JS renders with
     assert all("bucket_minute" in a for a in data["activity"])
@@ -2529,6 +2554,186 @@ def test_porn_preset_enable_disable(client):
     r = c.get("/api/dns/presets")
     porn = next(p for p in r.json() if p["id"] == "porn")
     assert porn["enabled"] is False
+
+
+def test_dns_rules_page_returns_bounded_manual_rows(client):
+    c, database, _service = client
+    _login(c)
+    _get_loop().run_until_complete(database.create_domain_rules_bulk(
+        "global", "block", [f"page-{i}.example" for i in range(55)]))
+    _get_loop().run_until_complete(database.create_domain_rule(
+        "global", "block", "preset-only.example", source="preset:ads"))
+
+    legacy_response = c.get("/api/dns/rules")
+    assert legacy_response.status_code == 200
+    assert isinstance(legacy_response.json(), list)
+    assert len(legacy_response.json()) == 55
+
+    response = c.get("/api/dns/rules/page?limit=50&offset=50")
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["items"]) == 5
+    assert payload["total"] == 55
+    assert payload["items"][0]["domain"] == "page-50.example"
+    assert payload["limit"] == 50
+    assert payload["offset"] == 50
+
+    capped = c.get("/api/dns/rules/page?limit=500&offset=0")
+    assert capped.status_code == 200
+    assert capped.json()["limit"] == 100
+    assert len(capped.json()["items"]) == 55
+    assert c.get("/api/dns/rules/page?offset=-1").status_code == 422
+    found = c.get("/api/dns/rules/page?q=PAGE-54")
+    assert found.status_code == 200
+    assert found.json()["total"] == 1
+    assert found.json()["items"][0]["domain"] == "page-54.example"
+
+
+def _stub_blocklist_manager(c, monkeypatch, fetcher):
+    from quota.dns_blocklists import BlocklistError
+
+    manager = c.app.state.dns_blocklist_manager
+    manager.fetcher = fetcher
+
+    async def validated(url):
+        if not url.startswith("https://"):
+            raise BlocklistError("invalid_url")
+        return url
+
+    monkeypatch.setattr(manager, "_validate_url", validated)
+    return manager
+
+
+def test_dns_blocklist_api_lifecycle_is_authenticated_and_source_owned(
+        client, monkeypatch):
+    c, database, _service = client
+    unauthenticated = c.get("/api/dns/blocklists")
+    assert unauthenticated.status_code == 401
+    _login(c)
+    manager = _stub_blocklist_manager(
+        c, monkeypatch, lambda _url: {"ads.example", "shared.example"})
+
+    created = c.post("/api/dns/blocklists", json={
+        "name": "Ads", "url": "https://lists.example/ads.txt"})
+    assert created.status_code == 201, created.text
+    item = created.json()
+    assert item["enabled"] is True
+    assert item["last_error"] is None
+    assert item["domain_count"] == 2
+    blocklist_id = item["id"]
+
+    duplicate = c.post("/api/dns/blocklists", json={
+        "name": "Duplicate", "url": "https://lists.example/ads.txt"})
+    assert duplicate.status_code == 409
+    assert duplicate.json() == {"detail": {"code": "duplicate_url"}}
+
+    listed = c.get("/api/dns/blocklists")
+    assert listed.status_code == 200
+    assert [feed["id"] for feed in listed.json()] == [blocklist_id]
+
+    disabled = c.patch(f"/api/dns/blocklists/{blocklist_id}",
+                       json={"enabled": False})
+    assert disabled.status_code == 200
+    assert disabled.json()["enabled"] is False
+    assert _get_loop().run_until_complete(
+        database.list_enabled_dns_blocklist_domains()) == []
+
+    enabled = c.patch(f"/api/dns/blocklists/{blocklist_id}",
+                      json={"enabled": True})
+    assert enabled.status_code == 200
+    assert enabled.json()["enabled"] is True
+
+    manager.fetcher = lambda _url: {"shared.example", "new.example"}
+    refreshed = c.post(f"/api/dns/blocklists/{blocklist_id}/refresh", json={})
+    assert refreshed.status_code == 200, refreshed.text
+    assert refreshed.json()["domain_count"] == 2
+    assert _get_loop().run_until_complete(
+        database.list_enabled_dns_blocklist_domains()) == [
+            "new.example", "shared.example"]
+
+    deleted = c.delete(f"/api/dns/blocklists/{blocklist_id}")
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] is True
+    assert c.get("/api/dns/blocklists").json() == []
+
+
+def test_dns_blocklist_api_returns_stable_errors_and_keeps_last_good_rows(
+        client, monkeypatch):
+    from quota.dns_blocklists import BlocklistError
+
+    c, database, _service = client
+    _login(c)
+    manager = _stub_blocklist_manager(
+        c, monkeypatch, lambda _url: {"ads.example"})
+    invalid = c.post("/api/dns/blocklists", json={
+        "url": "http://lists.example/feed"})
+    assert invalid.status_code == 422
+    assert invalid.json() == {"detail": {"code": "invalid_url"}}
+
+    created = c.post("/api/dns/blocklists", json={
+        "name": "Ads", "url": "https://lists.example/ads.txt"})
+    assert created.status_code == 201
+    blocklist_id = created.json()["id"]
+
+    def fail(_url):
+        raise BlocklistError("fetch_failed")
+
+    manager.fetcher = fail
+    failed = c.post(f"/api/dns/blocklists/{blocklist_id}/refresh", json={})
+    assert failed.status_code == 502
+    assert failed.json() == {"detail": {"code": "fetch_failed"}}
+    source = _get_loop().run_until_complete(
+        database.get_dns_blocklist(blocklist_id))
+    assert source["last_error"] == "fetch_failed"
+    assert _get_loop().run_until_complete(
+        database.list_enabled_dns_blocklist_domains()) == ["ads.example"]
+
+    missing = c.post("/api/dns/blocklists/999/refresh", json={})
+    assert missing.status_code == 404
+    assert missing.json() == {"detail": {"code": "not_found"}}
+
+
+def test_dns_blocklists_routes_require_auth_for_mutations(client):
+    c, _database, _service = client
+    assert c.post("/api/dns/blocklists", json={
+        "url": "https://lists.example/feed"}).status_code == 401
+    assert c.patch("/api/dns/blocklists/1", json={"enabled": False}).status_code == 401
+    assert c.delete("/api/dns/blocklists/1").status_code == 401
+
+
+def test_dns_blocklist_api_applies_only_when_effective_rules_change(
+        tmp_path, monkeypatch):
+    database = _db.Database(tmp_path / "dns-apply.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    _get_loop().run_until_complete(database.connect())
+    _get_loop().run_until_complete(database.set_setting("free_when_exhausted", "0"))
+    apply_called = threading.Event()
+
+    async def dns_apply():
+        apply_called.set()
+
+    app = create_app(database, service, SnapshotHolder(), dns_apply=dns_apply)
+    with TestClient(app) as c:
+        _login(c)
+        manager = _stub_blocklist_manager(
+            c, monkeypatch, lambda _url: {"ads.example"})
+        created = c.post("/api/dns/blocklists", json={
+            "url": "https://lists.example/feed"})
+        assert created.status_code == 201
+        assert apply_called.wait(2)
+
+        apply_called.clear()
+        unchanged = c.post(
+            f"/api/dns/blocklists/{created.json()['id']}/refresh", json={})
+        assert unchanged.status_code == 200
+        assert not apply_called.wait(0.1)
+
+        manager.fetcher = lambda _url: {"new.example"}
+        changed = c.post(
+            f"/api/dns/blocklists/{created.json()['id']}/refresh", json={})
+        assert changed.status_code == 200
+        assert apply_called.wait(2)
+    _get_loop().run_until_complete(database.close())
 
 
 def test_admin_spoof_consumption(client):
