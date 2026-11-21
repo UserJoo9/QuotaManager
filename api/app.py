@@ -55,7 +55,8 @@ from api.schemas import (BundleUpdate, ConsumptionSpoofRequest, DeviceCreate,
                          UpdateSettings, UserCreate, UserUpdate,
                          VpnConnectRequest, VpnNodeCreate, VpnNodeUpdate,
                          VpnRoutingUpdateRequest, VpnSettingsUpdate,
-                         WanRenewConfig, WanTest, WanUpdate, TailscaleDisconnect)
+                         GatewayOff, WanRenewConfig, WanTest, WanUpdate,
+                         TailscaleDisconnect)
 from api import waf as _waf
 
 _MAC_RE_API = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
@@ -2067,6 +2068,25 @@ def create_app(
                 "deleted": deleted,
                 "message": "HTTPS removed — the dashboard will restart over "
                            "plain HTTP."}
+
+    @app.post("/api/system/off", dependencies=[Depends(_require_auth)])
+    async def gateway_off(body: GatewayOff) -> dict[str, Any]:
+        """Turn the whole gateway off and keep it off across reboots
+        (System > Power): stops + disables quota-wan-ppp, dnsmasq and this
+        service, removes the nftables tables and tc shaping, and optionally
+        powers the machine off. Runs a few seconds after this answers.
+        Turning it back on needs a shell on the box:
+        ``sudo systemctl enable --now dnsmasq quota-gateway``."""
+        from quota import power as _power
+        try:
+            result = await asyncio.to_thread(_power.schedule_gateway_off, body.poweroff)
+        except RuntimeError as exc:
+            log.error("gateway turn-off failed: %s", exc)
+            raise HTTPException(500, f"could not turn the gateway off: {exc}")
+        await database.add_event(
+            "Gateway turned off from the dashboard"
+            + (" (machine powering off)" if body.poweroff else ""), "warn")
+        return result
 
     @app.post("/api/wan/test", dependencies=[Depends(_require_auth)])
     async def test_wan(body: WanTest) -> dict[str, Any]:

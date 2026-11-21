@@ -3013,3 +3013,79 @@ def test_ipv6_wan_closed_while_vpn_share_is_on(tmp_path):
     gw._last_vpn_status = {"state": "off"}
     gw.ipv6_probe.wan_ipv6_active = False
     assert gw._ipv6_wan_wanted() is False
+
+
+# ---------------------------------------------------------------------------
+# WAN dead-session watchdog (issue #41): ppp0 up with a dead 100.127.x address
+# ---------------------------------------------------------------------------
+
+def _watchdog_gw(tmp_path):
+    gw = Gateway(_cfg(tmp_path))
+    renews: list[float] = []
+
+    async def fake_renew():
+        renews.append(1.0)
+        return {"restarted": True, "state": "active", "detail": ""}
+
+    gw._renew_wan_ip = fake_renew
+    return gw, renews
+
+
+_DEAD = {"topology": "wan", "ppp0": "up", "ppp_ip": "100.127.66.162", "internet": False}
+
+
+def test_wan_watchdog_redials_a_dead_session_after_the_grace_period(tmp_path):
+    gw, renews = _watchdog_gw(tmp_path)
+    loop = asyncio.new_event_loop()
+    try:
+        tick = lambda now: loop.run_until_complete(gw._wan_dead_session_tick(_DEAD, now=now))
+        assert tick(0.0) is False          # first sighting only starts the clock
+        assert tick(60.0) is False         # still inside the grace period
+        assert tick(120.0) is True         # dead for 120 s -> re-dial
+        assert len(renews) == 1
+    finally:
+        loop.close()
+
+
+def test_wan_watchdog_backs_off_between_redials(tmp_path):
+    gw, renews = _watchdog_gw(tmp_path)
+    loop = asyncio.new_event_loop()
+    try:
+        tick = lambda now: loop.run_until_complete(gw._wan_dead_session_tick(_DEAD, now=now))
+        tick(0.0); tick(120.0)             # re-dial 1 at t=120, next allowed t>=300
+        tick(130.0); assert tick(250.0) is False  # grace passed, back-off not
+        assert tick(300.0) is True         # re-dial 2, next allowed t>=600
+        tick(310.0); assert tick(500.0) is False
+        assert len(renews) == 2
+    finally:
+        loop.close()
+
+
+def test_wan_watchdog_resets_when_internet_returns(tmp_path):
+    gw, renews = _watchdog_gw(tmp_path)
+    loop = asyncio.new_event_loop()
+    try:
+        tick = lambda st, now: loop.run_until_complete(gw._wan_dead_session_tick(st, now=now))
+        tick(_DEAD, 0.0); tick(_DEAD, 120.0)
+        ok = dict(_DEAD, ppp_ip="10.54.159.52", internet=True)
+        tick(ok, 130.0)
+        assert gw._wan_redials == 0 and gw._wan_dead_since is None
+        tick(_DEAD, 140.0)
+        assert tick(_DEAD, 260.0) is True  # back-off cleared, only the grace applies
+    finally:
+        loop.close()
+
+
+@pytest.mark.parametrize("status", [
+    {"topology": "lan", "ppp0": "n/a", "internet": False},
+    {"topology": "wan", "ppp0": "down", "ppp_ip": "", "internet": False},
+])
+def test_wan_watchdog_leaves_lan_mode_and_a_down_dial_alone(tmp_path, status):
+    gw, renews = _watchdog_gw(tmp_path)
+    loop = asyncio.new_event_loop()
+    try:
+        for now in (0.0, 200.0, 1000.0):
+            assert loop.run_until_complete(gw._wan_dead_session_tick(status, now=now)) is False
+        assert renews == []
+    finally:
+        loop.close()
