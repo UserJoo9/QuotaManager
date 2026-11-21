@@ -41,7 +41,8 @@ from contextlib import asynccontextmanager
 
 from api.schemas import (BundleUpdate, ConsumptionSpoofRequest, DeviceCreate,
                          DeviceUpdate, DnsImportRequest, DnsPresetEnable,
-                         DnsQuickRule,
+                         DnsQuickRule, DnsBlocklistCreate,
+                         DnsBlocklistUpdate,
                          DailyPreview, DailyToggle, RogueAction,
                          DnsServerUpdate, DomainRuleCreate, DomainRuleUpdate,
                          FirewallBanRequest, FirewallConfigUpdate,
@@ -65,6 +66,7 @@ from core.config import WafConfig, WebConfig
 from quota import daily_plan as _dp
 from quota import db as _db
 from quota import dns_rules as _dns_rules
+from quota.dns_blocklists import BlocklistError, DnsBlocklistManager
 from quota.guest_state import is_pending_guest
 from quota.guest_vouchers import VoucherAttemptLimiter, generate_voucher_code
 from quota import totp as _totp
@@ -112,6 +114,41 @@ def _normalize_domains(raw_domains: set[str]) -> tuple[list[str], int]:
         except ValueError:
             skipped += 1
     return domains, skipped
+
+
+def _blocklist_error_response(exc: BlocklistError) -> HTTPException:
+    """Map internal blocklist failures to stable, non-sensitive API errors."""
+    statuses = {
+        "invalid_url": 422,
+        "unsafe_destination": 422,
+        "unsupported_feed": 422,
+        "empty_feed": 422,
+        "duplicate_url": 409,
+        "capacity_exceeded": 409,
+        "not_found": 404,
+        "fetch_failed": 502,
+        "too_many_redirects": 502,
+        "response_too_large": 413,
+        "too_many_domains": 413,
+    }
+    code = exc.code if exc.code in statuses else "fetch_failed"
+    return HTTPException(status_code=statuses.get(code, 502),
+                         detail={"code": code})
+
+
+def _dns_blocklist_view(item: dict[str, Any]) -> dict[str, Any]:
+    """Return only the public subscription metadata expected by the UI."""
+    return {
+        "id": int(item["id"]),
+        "name": item["name"],
+        "url": item["url"],
+        "enabled": bool(item["enabled"]),
+        "created_at": item["created_at"],
+        "last_attempt_at": item["last_attempt_at"],
+        "last_success_at": item["last_success_at"],
+        "domain_count": int(item["domain_count"]),
+        "last_error": item["last_error"],
+    }
 
 
 def _read_log_tail(path: str | Path | None, limit: int = 300) -> dict[str, Any]:
@@ -313,6 +350,7 @@ def create_app(
     ipv6_map_getter: Optional[Callable[[], dict[str, str]]] = None,
     ipv6_direct_getter: Optional[Callable[[], list[str]]] = None,
     tailscale_manager: Optional[object] = None,
+    dns_blocklist_manager: DnsBlocklistManager | None = None,
 ) -> FastAPI:
     web_cfg: WebConfig = web_config or WebConfig()
     tailscale = tailscale_manager or TailscaleManager()
@@ -340,6 +378,10 @@ def create_app(
             return JSONResponse(
                 status_code=422,
                 content={"detail": {"code": "voucher_request_invalid"}})
+        if request.url.path.startswith("/api/dns/blocklists"):
+            return JSONResponse(
+                status_code=422,
+                content={"detail": {"code": "invalid_request"}})
         return await request_validation_exception_handler(request, exc)
 
     _vpn_manager: VpnManager = (
@@ -350,6 +392,8 @@ def create_app(
         )
     )
     app.state.vpn_manager = _vpn_manager
+    _dns_blocklist_manager = dns_blocklist_manager or DnsBlocklistManager(database)
+    app.state.dns_blocklist_manager = _dns_blocklist_manager
 
 
     def _now() -> _dt.datetime:
@@ -1641,6 +1685,10 @@ def create_app(
         # rule reaches it); the "all devices" aggregate only has global-scope
         # rules to go on, since no single device context applies to it.
         rules = await database.list_domain_rules(enabled_only=True)
+        observed_domains = {item["domain"] for item in hist["top_domains"]}
+        observed_domains.update(item["domain"] for item in recent)
+        rules.extend(await database.list_enabled_dns_blocklist_rules_for_domains(
+            observed_domains))
         status_user_id = dev.user_id if did is not None else None
 
         domain_status_cache: dict[tuple[str, int | None, int | None], str] = {}
@@ -2628,6 +2676,88 @@ def create_app(
         if not include_presets:
             rules = [r for r in rules if not (r.source and r.source.startswith("preset:"))]
         return [_rule_view(r) for r in rules]
+
+    @app.get("/api/dns/rules/page", dependencies=[Depends(_require_auth)])
+    async def page_dns_rules(limit: int = 50, offset: int = 0,
+                             q: str = "", scope: Optional[str] = None,
+                             scope_id: Optional[int] = None) -> dict[str, Any]:
+        if offset < 0:
+            raise HTTPException(422, detail={"code": "invalid_offset"})
+        if len(q) > 253:
+            raise HTTPException(422, detail={"code": "invalid_query"})
+        page = await database.page_domain_rules(
+            min(max(limit, 1), 100), offset, q.strip(), scope, scope_id)
+        return {**page, "items": [_rule_view(rule) for rule in page["items"]]}
+
+    @app.get("/api/dns/blocklists", dependencies=[Depends(_require_auth)])
+    async def list_dns_blocklists() -> list[dict[str, Any]]:
+        return [_dns_blocklist_view(item)
+                for item in await _dns_blocklist_manager.list()]
+
+    @app.post("/api/dns/blocklists", status_code=201,
+              dependencies=[Depends(_require_auth)])
+    async def add_dns_blocklist(body: DnsBlocklistCreate) -> dict[str, Any]:
+        try:
+            item, changed = await _dns_blocklist_manager.add(
+                body.name or "", body.url)
+        except BlocklistError as exc:
+            raise _blocklist_error_response(exc) from None
+        await database.add_event(
+            f"DNS blocklist added: {item['name'] or item['id']} "
+            f"({item['domain_count']} domains)", "info")
+        if changed:
+            _schedule_dns_apply()
+        return _dns_blocklist_view(item)
+
+    @app.post("/api/dns/blocklists/{blocklist_id}/refresh",
+              dependencies=[Depends(_require_auth)])
+    async def refresh_dns_blocklist(blocklist_id: int) -> dict[str, Any]:
+        try:
+            item, changed = await _dns_blocklist_manager.refresh(blocklist_id)
+        except BlocklistError as exc:
+            raise _blocklist_error_response(exc) from None
+        await database.add_event(
+            f"DNS blocklist refreshed: {item['name'] or item['id']} "
+            f"({item['domain_count']} domains)", "info")
+        if changed:
+            _schedule_dns_apply()
+        return _dns_blocklist_view(item)
+
+    @app.patch("/api/dns/blocklists/{blocklist_id}",
+               dependencies=[Depends(_require_auth)])
+    async def update_dns_blocklist(blocklist_id: int,
+                                   body: DnsBlocklistUpdate) -> dict[str, Any]:
+        prior = await database.get_dns_blocklist(blocklist_id)
+        if prior is None:
+            raise HTTPException(404, detail={"code": "not_found"})
+        try:
+            changed = await _dns_blocklist_manager.set_enabled(
+                blocklist_id, body.enabled)
+        except BlocklistError as exc:
+            raise _blocklist_error_response(exc) from None
+        item = await database.get_dns_blocklist(blocklist_id)
+        if item is None:
+            raise HTTPException(404, detail={"code": "not_found"})
+        if bool(prior["enabled"]) != bool(item["enabled"]):
+            await database.add_event(
+                f"DNS blocklist {'enabled' if item['enabled'] else 'disabled'}: "
+                f"{item['name'] or item['id']}", "info")
+        if changed:
+            _schedule_dns_apply()
+        return _dns_blocklist_view(item)
+
+    @app.delete("/api/dns/blocklists/{blocklist_id}",
+                dependencies=[Depends(_require_auth)])
+    async def delete_dns_blocklist(blocklist_id: int) -> dict[str, Any]:
+        try:
+            changed = await _dns_blocklist_manager.remove(blocklist_id)
+        except BlocklistError as exc:
+            raise _blocklist_error_response(exc) from None
+        await database.add_event(
+            f"DNS blocklist removed: {blocklist_id}", "info")
+        if changed:
+            _schedule_dns_apply()
+        return {"id": blocklist_id, "deleted": True}
 
     @app.post("/api/dns/rules", status_code=201, dependencies=[Depends(_require_auth)])
     async def create_dns_rule(body: DomainRuleCreate) -> dict[str, Any]:

@@ -6,6 +6,14 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## Unreleased
+
+Added:
+- **Custom DNS blocklists.** Add a direct link to a domain list from the Security page, then refresh, enable, disable, or remove one or more lists. Enabled lists apply across the network and refresh daily; if a source is unavailable or its contents are invalid, the last working copy stays in use. Large manual DNS rule lists can now be searched and browsed page by page.
+
+Changed:
+- The Security page no longer presents the number of entries downloaded from a list as a count of blocked activity. DNS lists work on domains, so they cannot target one video or URL path within a site.
+
 ## [0.5.8] — 2026-11-20
 
 Added:
