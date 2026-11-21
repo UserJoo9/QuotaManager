@@ -536,6 +536,7 @@ def render_rules(rules: Iterable[Any], dns_servers: Iterable[tuple[str, Optional
             1 if getattr(r, "action", ACTION_BLOCK) == ACTION_ALLOW else 0,
         ),
     )
+    seen_block_directives: set[str] = set()
 
     scoped_skipped = 0
     for rule in ordered:
@@ -571,6 +572,13 @@ def render_rules(rules: Iterable[Any], dns_servers: Iterable[tuple[str, Optional
             lines.append(f"server=/{domain}/#")
         else:
             lines.append(f"address=/{domain}/{target}")
+        directive = (f"server=/{domain}/#" if target is None
+                     else f"address=/{domain}/{target}")
+        if action == ACTION_BLOCK:
+            if directive in seen_block_directives:
+                continue
+            seen_block_directives.add(directive)
+        lines.append(directive)
 
     if scoped_skipped:
         log.warning("skipped %d per-user/per-device domain rule(s): dnsmasq "

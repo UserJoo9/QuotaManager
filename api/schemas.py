@@ -396,6 +396,37 @@ class DnsPresetEnable(BaseModel):
     scope_id: Optional[int] = None
 
 
+class DnsBlocklistCreate(BaseModel):
+    """Subscribe to one directly reachable HTTPS blocklist feed."""
+
+    name: Optional[str] = Field(None, max_length=120)
+    url: str = Field(..., min_length=1, max_length=2048)
+
+    @field_validator("name")
+    @classmethod
+    def _clean_name(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if any(ord(char) < 32 for char in cleaned):
+            raise ValueError("name contains unsupported control characters")
+        return cleaned or None
+
+    @field_validator("url")
+    @classmethod
+    def _clean_url(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned or any(ord(char) < 32 or char.isspace() for char in cleaned):
+            raise ValueError("url must be a valid HTTPS address")
+        return cleaned
+
+
+class DnsBlocklistUpdate(BaseModel):
+    """Change whether an existing DNS blocklist subscription is active."""
+
+    enabled: bool
+
+
 class DnsImportRequest(BaseModel):
     """Paste raw hosts-format or AdBlock-Plus-format blocklist text and turn
     it into domain_rules rows (source='import'). ``format`` picks the
