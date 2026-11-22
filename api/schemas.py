@@ -443,6 +443,58 @@ class GatewayOff(BaseModel):
     poweroff: bool = False
 
 
+class DiskShareAccess(BaseModel):
+    """Who may open a share: ``access="all"`` = every device with internet at
+    the ``writable`` level, ``"selected"`` = only the devices listed;
+    ``devices`` gives single devices their own level ("rw" | "ro" | "none")."""
+
+    writable: bool = True
+    access: str = Field("all", pattern="^(all|selected)$")
+    devices: dict[str, str] = Field(default_factory=dict)
+
+
+class SystemRestart(BaseModel):
+    """Restart the gateway service, or (``machine``) reboot the computer."""
+
+    machine: bool = False
+
+
+class FactoryReset(BaseModel):
+    """Factory reset (System > Power). ``confirm`` must be the word RESET so a
+    stray request can never wipe the box. ``keep_users`` keeps people,
+    devices, the bundle, this period's usage and the dashboard login."""
+
+    keep_users: bool = False
+    confirm: str = Field(..., pattern="^RESET$")
+
+
+class DiskShareCreate(BaseModel):
+    """Share storage on the home network (SMB).
+
+    ``source="disk"``: a disk plugged into the gateway, by ``uuid``.
+    ``source="network"``: a folder another PC or router already shares,
+    ``remote`` = ``//host/share``; ``user``/``password`` when it needs a
+    login (the password goes to a root-only file, never the DB).
+    """
+
+    source: str = Field("disk", pattern="^(disk|network)$")
+    name: str = Field(..., pattern="^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
+    writable: bool = True
+    access: str = Field("all", pattern="^(all|selected)$")
+    devices: dict[str, str] = Field(default_factory=dict)
+    uuid: Optional[str] = Field(None, pattern="^[A-Za-z0-9-]{4,64}$")
+    remote: Optional[str] = Field(None, max_length=300)
+    user: Optional[str] = Field(None, pattern="^[A-Za-z0-9._@\\\\-]{0,64}$")
+    password: Optional[str] = Field(None, max_length=256)
+
+    @field_validator("password")
+    @classmethod
+    def _one_line(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and any(c in v for c in "\r\n\x00"):
+            raise ValueError("password must be a single line")
+        return v
+
+
 class WanRenewConfig(BaseModel):
     """WAN public-IP auto-renew schedule (the dashboard WAN tab).
 

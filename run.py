@@ -291,6 +291,8 @@ class Gateway:
         self.holder = SnapshotHolder()
         self.engine: NftablesEngine | None = None
         self.shaper: object | None = None  # quota.shaping.TcShaper (tc/ifb)
+        #: quota.disk_share.DiskShareManager, wired in main() (Share > Network drives)
+        self.disk_shares: object | None = None
         self.dns_manager: _dns_rules.DnsRuleManager | None = None  # domain filtering
         #: VPN-share policy routing (quota.vpnshare.VpnShareManager); None
         #: when cfg.vpn_share.enabled is false. Reconciles the client-subnet
@@ -1658,6 +1660,17 @@ class Gateway:
             v["ip"] for mac, v in state.items()
             if v.get("ip") and v.get("guest") and v.get("blocked")
         }
+        # Shared disks follow the same cut: a device without internet (over
+        # quota, paused, unassigned, guest waiting) cannot open them either.
+        if self.disk_shares is not None:
+            denied = {v["ip"] for v in state.values() if v.get("ip") and v.get("blocked")}
+            ip_by_mac = {mac: v["ip"] for mac, v in state.items() if v.get("ip")}
+            try:
+                await self._timed("_sync_disk_share_access",
+                                  asyncio.to_thread(self.disk_shares.set_clients,
+                                                    denied, ip_by_mac))
+            except Exception:  # noqa: BLE001 — never let a share problem stop the tick
+                log.exception("disk shares: access sync failed")
         engine_available = False
         gateway_blocked = None
         if self.engine is not None:
@@ -2657,8 +2670,16 @@ def main() -> None:
                 if net not in seen:
                     cfg.waf.local_subnets.append(net)
                     seen.add(net)
+        from quota.disk_share import DiskShareManager
+        lan_if = (getattr(gateway.shaper, "iface", "")
+                  or getattr(cfg.shaping, "interface", "")
+                  or getattr(cfg.dhcp, "interface", "") or "")
+        gateway.disk_shares = DiskShareManager(
+            lan_if=lan_if,
+            allowed_nets=list(local_nets or []) or ([client_net] if client_net else []))
         app = create_app(gateway.database, gateway.service, gateway.holder,
                          log_path=cfg.log_file,
+                         disk_share_manager=gateway.disk_shares,
                          topology_manager=gateway.topology_manager,
                          shaping_sync=gateway._reshaping_now,
                          report_config=report_cfg,

@@ -6,6 +6,12 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## [Unreleased]
+
+Added:
+- **Network drives** (Share page). Share a hard disk or flash drive plugged into the gateway, or a folder another PC or the router already shares, with the devices at home at one address (`\\192.168.2.1\<name>` or `smb://192.168.2.1/<name>`), no password. For each share you choose who gets in: every device with internet, or only the devices you pick, and each device can be given read-write, read-only or no access. Devices that are cut off (quota used up, paused, a guest still waiting for approval) never get in. Shares are only reachable from the home network, never from the internet side, and come back on their own after a reboot or when a disk is plugged back in. The page installs Samba the first time. The system disk is never offered.
+- **Restart and factory reset** (System → Power). Restart the gateway or reboot the whole machine from the dashboard. Factory reset puts every setting back to how a fresh install starts, without uninstalling: optionally keep people, devices, fixed IPs, the bundle, this month's usage and the dashboard password. The line mode (LAN/WAN) and the PPPoE login always stay so the internet keeps working, and the database is backed up to `/var/lib/quota-gateway/backups/` first.
+
 ## [0.5.9] — 2026-11-22
 
 Added:
