@@ -32,7 +32,7 @@ log = logging.getLogger("quota.updater")
 #: GitHub repo holding the releases (owner/repo). Releases carry one asset per
 #: package type (see ASSET_KINDS); the repo's ``CHANGELOG.md`` supplies the
 #: per-version notes (both are the release pipeline's outputs).
-DEFAULT_REPO = "UserJoo9/QuotaManager"
+DEFAULT_REPO = "UserJoo9/Netrex"
 
 #: The project is being renamed (Netrex). The GitHub repository will move to
 #: ``NEW_REPO`` and GitHub redirects the old name, but a box must not depend on

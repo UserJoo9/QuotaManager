@@ -102,7 +102,7 @@ function sidebar(s) {
   const b = s.dashboard?.bundle, pct = b && b.total_gb > 0 ? Math.round((b.used_gb / b.total_gb) * 100) : 0;
   const rail = getPrefs().rail;
   return h("aside", { class: "side" },
-    h("div", { class: "brand" }, h("img", { class: "logo", src: "logo.svg", alt: "" }), h("div", { class: "wm" }, "Quota", h("b", {}, "Manager")),
+    h("div", { class: "brand" }, h("img", { class: "logo", src: "logo.svg", alt: "" }), h("div", { class: "wm" }, "Net", h("b", {}, "rex")),
       h("button", { type: "button", class: "collapse-btn", "aria-label": rail ? t("common.expand") : t("common.collapse"), title: rail ? t("common.expand") : t("common.collapse"),
         onclick: () => { setPref("rail", !rail); renderShell(); } }, icon("panel", 18))),
     h("nav", { class: "nav", "aria-label": "Main" }, groups.map((g) => h("div", { class: "nav-group" }, h("div", { class: "nav-glabel" }, t(g.k)),
@@ -143,7 +143,7 @@ function renderShell() {
           h("button", { type: "button", class: "icon-btn", "aria-label": t("common.theme"), title: t("common.theme"), onclick: () => { setPref("theme", dark ? "light" : "dark"); rerender(true); } }, icon(dark ? "sun" : "moon")))),
       page)));
 }
-function rerender(full) { if (full) { setLang(getPrefs().lang); document.title = "QuotaManager"; } if (store.get().authed) renderShell(); else renderLogin(); }
+function rerender(full) { if (full) { setLang(getPrefs().lang); document.title = "Netrex"; } if (store.get().authed) renderShell(); else renderLogin(); }
 
 let hiddenDirty = false;
 document.addEventListener("visibilitychange", () => { if (!document.hidden && hiddenDirty && store.get().authed) { hiddenDirty = false; drawChanged(null, store.get()); } });

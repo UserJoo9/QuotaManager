@@ -11,7 +11,7 @@ Architecture: all
 Depends: python3 (>= 3.10), python3-venv, python3-pip, dnsmasq, nftables,
          iproute2, kmod, ppp, ca-certificates
 Maintainer: Youssef Alkhodary <youssef.alkhodary@users.noreply.github.com>
-Homepage: https://github.com/UserJoo9/QuotaManager
+Homepage: https://github.com/UserJoo9/Netrex
 Description: Fair-split metered-internet quota gateway
  Split a metered internet bundle fairly across users and devices. A person's
  allowance covers all their devices; when it runs out every device they own is

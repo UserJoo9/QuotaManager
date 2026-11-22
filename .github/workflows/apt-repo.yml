@@ -1,7 +1,7 @@
 # Publish a signed apt repository to the gh-pages branch.
 #
 # Consumes the .deb produced by the `release` workflow and publishes it to a
-# signed apt repo hosted on GitHub Pages (https://UserJoo9.github.io/QuotaManager/)
+# signed apt repo hosted on GitHub Pages (https://UserJoo9.github.io/Netrex/)
 # so Linux users can `apt-get install quota-manager` and upgrade via
 # `apt-get update && apt-get upgrade`.
 #

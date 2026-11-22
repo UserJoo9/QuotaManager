@@ -56,7 +56,7 @@ def test_guest_pending_page_serves_html(captive_env):
         assert "text/html" in r.headers["content-type"]
         assert "بانتظار موافقة المسؤول" in r.text
         assert "Awaiting Administrator Approval" in r.text
-        assert "Quota Manager" in r.text
+        assert "Netrex" in r.text
 
 
 def test_captive_probes_redirect_pending_guests(captive_env):

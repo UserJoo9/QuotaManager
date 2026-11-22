@@ -34,7 +34,7 @@ def generate_secret() -> str:
     return base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
 
 
-def otpauth_uri(secret: str, issuer: str = "QuotaManager",
+def otpauth_uri(secret: str, issuer: str = "Netrex",
                 label: str = "admin") -> str:
     """The ``otpauth://`` provisioning URI for scanning with an authenticator."""
     return (f"otpauth://totp/{label}?secret={secret}"

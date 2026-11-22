@@ -58,7 +58,7 @@ A="$W/archpkg"
 mkdir -p "$A/opt"
 cp -a "$STAGE/opt/quota-manager" "$A/opt/"
 SIZE="$(du -sb "$A/opt" | cut -f1)"
-printf 'pkgname = quota-manager\npkgbase = quota-manager\npkgver = %s-1\npkgdesc = Fair-split metered-internet quota gateway\nurl = https://github.com/UserJoo9/QuotaManager\nbuilddate = %s\npackager = Quota Manager CI\nsize = %s\narch = any\nlicense = MIT\ndepend = python>=3.10\ndepend = python-pip\ndepend = dnsmasq\ndepend = nftables\ndepend = iproute2\ndepend = kmod\ndepend = ppp\ndepend = ca-certificates\n' \
+printf 'pkgname = quota-manager\npkgbase = quota-manager\npkgver = %s-1\npkgdesc = Fair-split metered-internet quota gateway\nurl = https://github.com/UserJoo9/Netrex\nbuilddate = %s\npackager = Quota Manager CI\nsize = %s\narch = any\nlicense = MIT\ndepend = python>=3.10\ndepend = python-pip\ndepend = dnsmasq\ndepend = nftables\ndepend = iproute2\ndepend = kmod\ndepend = ppp\ndepend = ca-certificates\n' \
     "${VERSION}" "$(date +%s)" "${SIZE}" > "$A/.PKGINFO"
 cp packaging/arch/quota-manager.install "$A/.INSTALL"
 tar -C "$A" --owner=0 --group=0 --numeric-owner --zstd \

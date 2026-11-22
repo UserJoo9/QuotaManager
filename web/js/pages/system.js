@@ -41,7 +41,7 @@ function appearance(ctx) {
           h("div", { class: "bar", style: { "max-width": "420px" } }, h("i", { style: { width: "62%" } })))),
       h("section", { class: "card c12" }, h("header", { class: "card-h" }, h("h3", {}, t("sys.about"))),
         h("div", { class: "kv" },
-          ctx.dashboard?.version ? h("div", {}, h("span", { class: "k" }, "QuotaManager"), h("span", { class: "v mono" }, "v" + ctx.dashboard.version)) : null)));
+          ctx.dashboard?.version ? h("div", {}, h("span", { class: "k" }, "Netrex"), h("span", { class: "v mono" }, "v" + ctx.dashboard.version)) : null)));
 }
 
 export default function system(ctx) {

@@ -2108,7 +2108,7 @@ def test_milestone_page_is_public(tmp_path):
     r = _client_from(app, "192.168.2.55").get("/milestone")
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
-    assert b"Quota" in r.content
+    assert b"Netrex" in r.content
     assert "assets/pub.css" in r.text
     _get_loop().run_until_complete(database.close())
 

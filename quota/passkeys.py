@@ -33,7 +33,7 @@ from webauthn.helpers.structs import (AttestationConveyancePreference, Authentic
                                       ResidentKeyRequirement, UserVerificationRequirement)
 
 SETTING_KEY = "passkeys"
-RP_NAME = "QuotaManager"
+RP_NAME = "Netrex"
 USER_ID = b"quotamanager-admin"
 CHALLENGE_TTL = 120.0
 MAX_PASSKEYS = 20
@@ -139,7 +139,7 @@ class PasskeyManager:
             raise PasskeyError("too-many")
         opts = generate_registration_options(
             rp_id=rp_id, rp_name=RP_NAME, user_id=USER_ID, user_name="admin",
-            user_display_name="QuotaManager admin", timeout=60000,
+            user_display_name="Netrex admin", timeout=60000,
             attestation=AttestationConveyancePreference.NONE,
             authenticator_selection=AuthenticatorSelectionCriteria(
                 authenticator_attachment=AuthenticatorAttachment.PLATFORM,

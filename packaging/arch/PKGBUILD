@@ -7,7 +7,7 @@ pkgver=0.0.0
 pkgrel=1
 pkgdesc='Fair-split metered-internet quota gateway'
 arch=('any')
-url='https://github.com/UserJoo9/QuotaManager'
+url='https://github.com/UserJoo9/Netrex'
 license=('MIT')
 depends=('python>=3.10' 'python-pip' 'dnsmasq' 'nftables' 'iproute2' 'kmod' 'ppp' 'ca-certificates')
 install=quota-manager.install

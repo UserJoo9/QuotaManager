@@ -1,5 +1,5 @@
 export default {
-  app: "QuotaManager", tagline: "إنترنت عادل لكل مستخدم",
+  app: "Netrex", tagline: "إنترنت عادل لكل مستخدم",
   "nav.main": "الرئيسية", "nav.manage": "الإدارة", "nav.more": "المزيد",
   "nav.overview": "نظرة عامة", "nav.people": "الأشخاص والأجهزة", "nav.quota": "الحصص", "nav.network": "الشبكة",
   "nav.internet": "الإنترنت", "nav.security": "الأمان", "nav.vpn": "VPN", "nav.insights": "التحليلات",
@@ -917,7 +917,7 @@ export default {
   "pk.block.not-https": "مفاتيح المرور بتشتغل على HTTPS بس. فعّل HTTPS من صفحة الأمان، أو افتح اللوحة من عنوان Tailscale.",
   "pk.block.browser": "المتصفح ده مش بيدعم مفاتيح المرور.",
   "pk.block.no-platform": "الجهاز ده مفيهوش بصمة أو وجه أو PIN يقدر المتصفح يستخدمه.",
-  "pk.block.server-missing": "دعم مفاتيح المرور لسه مش متثبت على الجهاز. حدّث أو أعد تثبيت Quota Manager.",
+  "pk.block.server-missing": "دعم مفاتيح المرور لسه مش متثبت على الجهاز. حدّث أو أعد تثبيت Netrex.",
   "sys.tab.power": "التشغيل",
   "pw.title": "إيقاف البوابة",
   "pw.d": "إيقاف النظام كله، ويفضل مقفول حتى بعد إعادة التشغيل.",

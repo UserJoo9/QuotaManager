@@ -6,6 +6,11 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## [Unreleased]
+
+Changed:
+- **Quota Manager is now called Netrex.** Same project, same features and the same settings: only the name and logo changed. Your people, devices, usage and dashboard login stay as they are, and the update installs the usual way from the dashboard or apt. The GitHub page moved to `github.com/UserJoo9/Netrex` (old links forward there), and gateways on 0.5.8 or newer switch their apt source to the new address on their own. If your gateway is older than 0.5.8 and you update with apt, update once from the dashboard first, or point the apt source at `https://UserJoo9.github.io/Netrex` (see the README).
+
 ## [0.5.9] — 2026-11-22
 
 Added:

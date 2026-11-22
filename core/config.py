@@ -450,7 +450,7 @@ class UpdateConfig:
 
     enabled: bool = True
     #: GitHub owner/repo holding the releases + the CHANGELOG.md.
-    repo: str = "UserJoo9/QuotaManager"
+    repo: str = "UserJoo9/Netrex"
     #: Release-check cadence (hours).
     interval_hours: int = 24
 

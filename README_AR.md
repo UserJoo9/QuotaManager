@@ -1,8 +1,10 @@
 <p align="center">
-  <img src="docs/logo/logo.svg" width="96" height="96" alt="شعار Quota Manager">
+  <img src="docs/logo/logo.svg" width="96" height="96" alt="شعار Netrex">
 </p>
 
-<h1 align="center">Quota Manager</h1>
+<h1 align="center">Netrex</h1>
+
+<p align="center"><b>Quota Manager بقى اسمه Netrex.</b> نفس المشروع ونفس المميزات، الاسم بس اللي اتغيّر. الأجهزة المتثبّت عليها البرنامج بتتحدّث عادي من اللوحة أو من apt.</p>
 
 <p align="center">
   وزّع باقة الإنترنت المحدودة بعدل بين كل اللي في البيت.
@@ -14,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/overview-ar.png" alt="لوحة تحكم Quota Manager — نظرة عامة"><br><br>
+  <img src="docs/screenshots/overview-ar.png" alt="لوحة تحكم Netrex — نظرة عامة"><br><br>
   <img src="docs/screenshots/people-ar.png" alt="الأشخاص والأجهزة">
 </p>
 
@@ -38,7 +40,7 @@
 جهاز صغير شغال طول الوقت بيتحط بين الراوتر وأجهزتك. الراوتر بيفضل بيبث الواي فاي، والجهاز ده بيدّي العناوين ويعدّ الاستهلاك.
 
 <p align="center">
-  <img src="docs/diagrams/AR_sketch_diagram.png" width="640" alt="طريقة اتصال Quota Manager">
+  <img src="docs/diagrams/AR_sketch_diagram.png" width="640" alt="طريقة اتصال Netrex">
 </p>
 
 ---
@@ -66,9 +68,9 @@
 ```bash
 sudo apt-get update
 sudo install -d /etc/apt/keyrings
-curl -fsSL https://UserJoo9.github.io/QuotaManager/quota-manager.gpg | \
+curl -fsSL https://UserJoo9.github.io/Netrex/quota-manager.gpg | \
   sudo gpg --dearmor -o /etc/apt/keyrings/quota-manager.gpg
-echo "deb [signed-by=/etc/apt/keyrings/quota-manager.gpg] https://UserJoo9.github.io/QuotaManager stable main" | \
+echo "deb [signed-by=/etc/apt/keyrings/quota-manager.gpg] https://UserJoo9.github.io/Netrex stable main" | \
   sudo tee /etc/apt/sources.list.d/quota-manager.list
 sudo apt-get update
 sudo apt-get install quota-manager
@@ -76,7 +78,7 @@ sudo apt-get install quota-manager
 
 <div dir="rtl">
 
-تفضّل ملف واحد؟ نزّل `quota-manager_<version>_all.deb` من [الإصدارات](https://github.com/UserJoo9/QuotaManager/releases) ونفّذ `sudo apt install ./quota-manager_*_all.deb`.
+تفضّل ملف واحد؟ نزّل `quota-manager_<version>_all.deb` من [الإصدارات](https://github.com/UserJoo9/Netrex/releases) ونفّذ `sudo apt install ./quota-manager_*_all.deb`.
 
 بعدها كمّل على [الإعداد الأول](#الإعداد-الأول).
 
@@ -127,7 +129,7 @@ OpenWrt 22.03+ وذاكرة 128MB أو أكتر (في الراوترات الص�
 </div>
 
 ```bash
-wget -O /tmp/install_openwrt.sh https://raw.githubusercontent.com/UserJoo9/QuotaManager/main/scripts/install_openwrt.sh
+wget -O /tmp/install_openwrt.sh https://raw.githubusercontent.com/UserJoo9/Netrex/main/scripts/install_openwrt.sh
 sh /tmp/install_openwrt.sh
 ```
 

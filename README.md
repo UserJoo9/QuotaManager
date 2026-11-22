@@ -1,8 +1,10 @@
 <p align="center">
-  <img src="docs/logo/logo.svg" width="96" height="96" alt="Quota Manager logo">
+  <img src="docs/logo/logo.svg" width="96" height="96" alt="Netrex logo">
 </p>
 
-<h1 align="center">Quota Manager</h1>
+<h1 align="center">Netrex</h1>
+
+<p align="center"><b>Quota Manager is now Netrex.</b> Same project, same features, new name. Existing installs update normally from the dashboard or apt.</p>
 
 <p align="center">
   Share one limited internet bundle fairly between everyone at home.
@@ -14,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/overview-en.png" alt="Quota Manager dashboard — overview"><br><br>
+  <img src="docs/screenshots/overview-en.png" alt="Netrex dashboard — overview"><br><br>
   <img src="docs/screenshots/people-en.png" alt="People and devices">
 </p>
 
@@ -36,7 +38,7 @@ Every person gets a monthly allowance (a fixed number of GB, or an equal share o
 A small always-on computer sits between your router and your devices. Your router keeps WiFi; this computer hands out the addresses and counts the traffic.
 
 <p align="center">
-  <img src="docs/diagrams/EN_sketch_diagram.png" width="640" alt="How Quota Manager connects">
+  <img src="docs/diagrams/EN_sketch_diagram.png" width="640" alt="How Netrex connects">
 </p>
 
 ---
@@ -62,17 +64,17 @@ Works on **Debian, Kali and Ubuntu** (apt), **Fedora** (rpm), **Arch / Manjaro**
 ```bash
 sudo apt-get update
 sudo install -d /etc/apt/keyrings
-curl -fsSL https://UserJoo9.github.io/QuotaManager/quota-manager.gpg | \
+curl -fsSL https://UserJoo9.github.io/Netrex/quota-manager.gpg | \
   sudo gpg --dearmor -o /etc/apt/keyrings/quota-manager.gpg
-echo "deb [signed-by=/etc/apt/keyrings/quota-manager.gpg] https://UserJoo9.github.io/QuotaManager stable main" | \
+echo "deb [signed-by=/etc/apt/keyrings/quota-manager.gpg] https://UserJoo9.github.io/Netrex stable main" | \
   sudo tee /etc/apt/sources.list.d/quota-manager.list
 sudo apt-get update
 sudo apt-get install quota-manager
 ```
 
-Prefer a single file? Download `quota-manager_<version>_all.deb` from [Releases](https://github.com/UserJoo9/QuotaManager/releases) and run `sudo apt install ./quota-manager_*_all.deb`.
+Prefer a single file? Download `quota-manager_<version>_all.deb` from [Releases](https://github.com/UserJoo9/Netrex/releases) and run `sudo apt install ./quota-manager_*_all.deb`.
 
-**Other distros** - download the matching file from [Releases](https://github.com/UserJoo9/QuotaManager/releases):
+**Other distros** - download the matching file from [Releases](https://github.com/UserJoo9/Netrex/releases):
 
 ```bash
 # Fedora / RHEL family
@@ -117,7 +119,7 @@ sudo nft list counters | grep -A2 q_up_192_168_2   # bytes grow while a phone br
 
 The card is found automatically (the one holding `192.168.2.1`), so a different name such as `ens34` is fine. After changing the VM's network, restart with `sudo systemctl restart quota-gateway`.
 
-Great for trying Quota Manager before buying anything.
+Great for trying Netrex before buying anything.
 
 ### Old Android phone (rooted)
 
@@ -136,7 +138,7 @@ OpenWrt 22.03+ with 128 MB+ RAM (on small-flash routers, use a USB drive with Ex
 OpenWrt 25.12 replaced `opkg` with `apk`; the installer below detects which one your router has (22.03-24.10 use `opkg`):
 
 ```bash
-wget -O /tmp/install_openwrt.sh https://raw.githubusercontent.com/UserJoo9/QuotaManager/main/scripts/install_openwrt.sh
+wget -O /tmp/install_openwrt.sh https://raw.githubusercontent.com/UserJoo9/Netrex/main/scripts/install_openwrt.sh
 sh /tmp/install_openwrt.sh
 ```
 

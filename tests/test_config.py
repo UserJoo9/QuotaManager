@@ -277,7 +277,7 @@ def test_updates_config_defaults_and_loads():
     and a config-file value lands on the dataclass fields."""
     cfg = cfg_mod.Config()
     assert cfg.updates.enabled is True
-    assert cfg.updates.repo == "UserJoo9/QuotaManager"
+    assert cfg.updates.repo == "UserJoo9/Netrex"
     assert cfg.updates.interval_hours == 24
     import tempfile
     from pathlib import Path
@@ -289,7 +289,7 @@ def test_updates_config_defaults_and_loads():
     assert loaded.updates.enabled is False
     assert loaded.updates.interval_hours == 6
     # untouched keys keep their defaults
-    assert loaded.updates.repo == "UserJoo9/QuotaManager"
+    assert loaded.updates.repo == "UserJoo9/Netrex"
 
 
 def test_updates_config_disable_via_yaml():
