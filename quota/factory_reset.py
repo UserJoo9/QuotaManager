@@ -38,6 +38,9 @@ NETWORK_SETTINGS = ("topology", "topology_source", "pppoe_user", "pppoe_password
 KEEP_USERS_TABLES = frozenset({
     "users", "devices", "static_leases", "bundle_config", "bundle_recharges",
     "usage_daily", "lan_usage_daily", "free_usage", "daily_caps",
+    # owner of each deleted device: without it, keeping usage_daily would give
+    # a deleted device's usage back to the bundle (quota/db.py removed_devices)
+    "removed_devices",
 })
 
 #: settings kept with --keep-users (exact keys, or prefixes ending in "_").

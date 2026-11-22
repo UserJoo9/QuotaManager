@@ -2155,8 +2155,11 @@ def create_app(
                      "user": user, "writable": body.writable}
             entry.update(access=body.access, devices=_clean_share_devices(body.devices))
             if user:
-                await asyncio.to_thread(disk_shares.save_credentials, body.name,
-                                        user, body.password or "")
+                try:
+                    await asyncio.to_thread(disk_shares.save_credentials, body.name,
+                                            user, body.password or "")
+                except ValueError as exc:
+                    raise HTTPException(422, str(exc)) from exc
             label = remote
         else:
             if not body.uuid:

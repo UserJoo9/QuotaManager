@@ -56,7 +56,7 @@ def test_keep_users_keeps_people_usage_and_login(tmp_path):
     db = tmp_path / "quota.db"
     _seed(db)
     out = fr.reset_database(str(db), keep_users=True)
-    assert {"users", "devices", "usage_daily", "bundle_config"} <= set(out["kept"])
+    assert {"users", "devices", "usage_daily", "bundle_config", "removed_devices"} <= set(out["kept"])
     assert "events" in out["cleared"] and "domain_rules" in out["cleared"]
     kept = _settings(db)
     assert {"topology", "pppoe_user", "admin_password", "totp_secret", "passkeys"} <= set(kept)

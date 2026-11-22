@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from api.app import create_app
@@ -209,6 +211,15 @@ def test_parse_shares_network_entries():
     assert ds.parse_shares(raw) == [{"name": "PC", "source": "network",
                                      "remote": "//192.168.1.5/D", "user": "amr",
                                      "writable": True, "access": "all", "devices": {}}]
+
+
+def test_credentials_refuse_line_breaks(tmp_path):
+    mgr = _mgr(tmp_path, FakeRun())
+    mgr.cred_dir = str(tmp_path / "creds")
+    for user, pw in (("amr", "x\ndomain=evil"), ("amr\r", "x"), ("amr", "x\x00")):
+        with pytest.raises(ValueError):
+            mgr.save_credentials("PC", user, pw)
+    assert not (tmp_path / "creds" / "PC").exists()
 
 
 def test_network_folder_is_mounted_with_cifs(tmp_path):

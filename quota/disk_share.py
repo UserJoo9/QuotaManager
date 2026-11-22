@@ -563,6 +563,10 @@ class DiskShareManager:
 
     def save_credentials(self, name: str, user: str, password: str) -> None:
         """Keep a network folder's login in a root-only file (never in the DB)."""
+        # One option per line: a line break would add a mount option of the
+        # caller's choosing (domain=, uid=...) to the credentials file.
+        if any(ch in (user or "") + (password or "") for ch in "\r\n\x00"):
+            raise ValueError("user name and password cannot contain line breaks")
         os.makedirs(self.cred_dir, mode=0o700, exist_ok=True)
         path = self.cred_file(name)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
