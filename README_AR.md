@@ -1,23 +1,57 @@
 <p align="center">
-  <img src="docs/logo/logo.svg" width="96" height="96" alt="شعار Netrex">
+  <img src="docs/brand/banner.png" alt="Netrex — إنترنت عادل لكل اللي في البيت" width="100%">
 </p>
 
-<h1 align="center">Netrex</h1>
-
-<p align="center"><b>Quota Manager بقى اسمه Netrex.</b> نفس المشروع ونفس المميزات، الاسم بس اللي اتغيّر. الأجهزة المتثبّت عليها البرنامج بتتحدّث عادي من اللوحة أو من apt.</p>
-
-<p align="center">
-  وزّع باقة الإنترنت المحدودة بعدل بين كل اللي في البيت.
+<p align="center" dir="rtl">
+  <b>بوابة منزلية مفتوحة المصدر بتوزّع باقة الإنترنت المحدودة بعدل — لكل شخص، على كل أجهزته.</b><br>
+  استهلاك لحظي، وحصص بتتنفّذ فعلًا، وتحكم في السرعة، وحجب إعلانات، وVPN ووصول من برّه البيت، في لوحة واحدة. بالعربي والإنجليزي.
 </p>
 
 <p align="center">
-  <a href="README.md"><img src="https://img.shields.io/badge/English-English-blue" alt="English"></a>
-  <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
+  <a href="https://github.com/UserJoo9/Netrex/releases/latest"><img src="https://img.shields.io/github/v/release/UserJoo9/Netrex?style=for-the-badge&label=release&color=2563EB&labelColor=0B1220" alt="آخر إصدار"></a>
+  <a href="https://github.com/UserJoo9/Netrex/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/UserJoo9/Netrex/ci.yml?branch=main&style=for-the-badge&label=tests&labelColor=0B1220" alt="الاختبارات"></a>
+  <a href="https://github.com/UserJoo9/Netrex/stargazers"><img src="https://img.shields.io/github/stars/UserJoo9/Netrex?style=for-the-badge&color=22D3EE&labelColor=0B1220" alt="النجوم"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22D3EE?style=for-the-badge&labelColor=0B1220" alt="رخصة MIT"></a>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/overview-ar.png" alt="لوحة تحكم Netrex — نظرة عامة"><br><br>
-  <img src="docs/screenshots/people-ar.png" alt="الأشخاص والأجهزة">
+  <img src="https://img.shields.io/badge/Debian%20·%20Ubuntu%20·%20Kali-supported-0B1220?style=flat-square&logo=debian&logoColor=white" alt="Debian, Ubuntu, Kali">
+  <img src="https://img.shields.io/badge/Fedora-supported-0B1220?style=flat-square&logo=fedora&logoColor=white" alt="Fedora">
+  <img src="https://img.shields.io/badge/Arch-supported-0B1220?style=flat-square&logo=archlinux&logoColor=white" alt="Arch">
+  <img src="https://img.shields.io/badge/Raspberry%20Pi-supported-0B1220?style=flat-square&logo=raspberrypi&logoColor=white" alt="Raspberry Pi">
+  <img src="https://img.shields.io/badge/OpenWrt-supported-0B1220?style=flat-square&logo=openwrt&logoColor=white" alt="OpenWrt">
+</p>
+
+<p align="center" dir="rtl">
+  <a href="#التثبيت"><b>التثبيت</b></a> ·
+  <a href="#الإعداد-الأول"><b>الإعداد الأول</b></a> ·
+  <a href="#الاستخدام"><b>المميزات</b></a> ·
+  <a href="#حل-المشاكل"><b>المساعدة</b></a> ·
+  <a href="Structure_README.md"><b>دليل المطوّرين</b></a> ·
+  <a href="README.md"><b>English</b></a>
+</p>
+
+<div dir="rtl">
+
+> [!NOTE]
+> **Quota Manager بقى اسمه Netrex.** نفس المشروع ونفس المميزات ونفس الإعدادات، الاسم بس اللي اتغيّر. الأجهزة المتثبّت عليها البرنامج بتتحدّث عادي من اللوحة أو من apt.
+
+</div>
+
+<p align="center">
+  <img src="docs/screenshots/overview-ar.png" alt="لوحة تحكم Netrex — نظرة عامة" width="100%">
+</p>
+
+<table dir="rtl">
+  <tr>
+    <td width="33%" valign="top"><b>📊 عادل من الأساس</b><br>كل شخص بياخد عدد جيجا ثابت أو نصيب متساوي. كل أجهزته بتسحب منه، ولما يخلص أجهزته هو بس اللي بتقف.</td>
+    <td width="33%" valign="top"><b>⚡ لحظي ولحد الجهاز</b><br>مين بيستخدم إيه دلوقتي، وتاريخ يومي، وأكتر المواقع، وحركة الإنترنت والشبكة الداخلية — متعدّة من نواة لينكس نفسها.</td>
+    <td width="33%" valign="top"><b>🛡️ تحكم في البيت كله</b><br>تحديد سرعات، وحجب إعلانات ومحتوى، وجدار حماية، وقسائم ضيوف، وVPN لأشخاص بعينهم، ووصول من برّه بـ Tailscale.</td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="docs/screenshots/people-ar.png" alt="الأشخاص والأجهزة" width="100%">
 </p>
 
 <div dir="rtl">

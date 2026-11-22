@@ -1,23 +1,53 @@
 <p align="center">
-  <img src="docs/logo/logo.svg" width="96" height="96" alt="Netrex logo">
-</p>
-
-<h1 align="center">Netrex</h1>
-
-<p align="center"><b>Quota Manager is now Netrex.</b> Same project, same features, new name. Existing installs update normally from the dashboard or apt.</p>
-
-<p align="center">
-  Share one limited internet bundle fairly between everyone at home.
+  <img src="docs/brand/banner.png" alt="Netrex — fair internet for everyone at home" width="100%">
 </p>
 
 <p align="center">
-  <a href="README_AR.md"><img src="https://img.shields.io/badge/العربية-Arabic-blue" alt="Arabic"></a>
-  <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
+  <b>The open-source home gateway that shares one limited internet bundle fairly — per person, across every device they own.</b><br>
+  Live usage, hard quotas, speed control, ad blocking, VPN and remote access, in one dashboard. English & Arabic.
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/overview-en.png" alt="Netrex dashboard — overview"><br><br>
-  <img src="docs/screenshots/people-en.png" alt="People and devices">
+  <a href="https://github.com/UserJoo9/Netrex/releases/latest"><img src="https://img.shields.io/github/v/release/UserJoo9/Netrex?style=for-the-badge&label=release&color=2563EB&labelColor=0B1220" alt="Latest release"></a>
+  <a href="https://github.com/UserJoo9/Netrex/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/UserJoo9/Netrex/ci.yml?branch=main&style=for-the-badge&label=tests&labelColor=0B1220" alt="Tests"></a>
+  <a href="https://github.com/UserJoo9/Netrex/stargazers"><img src="https://img.shields.io/github/stars/UserJoo9/Netrex?style=for-the-badge&color=22D3EE&labelColor=0B1220" alt="Stars"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22D3EE?style=for-the-badge&labelColor=0B1220" alt="MIT license"></a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Debian%20·%20Ubuntu%20·%20Kali-supported-0B1220?style=flat-square&logo=debian&logoColor=white" alt="Debian, Ubuntu, Kali">
+  <img src="https://img.shields.io/badge/Fedora-supported-0B1220?style=flat-square&logo=fedora&logoColor=white" alt="Fedora">
+  <img src="https://img.shields.io/badge/Arch-supported-0B1220?style=flat-square&logo=archlinux&logoColor=white" alt="Arch">
+  <img src="https://img.shields.io/badge/Raspberry%20Pi-supported-0B1220?style=flat-square&logo=raspberrypi&logoColor=white" alt="Raspberry Pi">
+  <img src="https://img.shields.io/badge/OpenWrt-supported-0B1220?style=flat-square&logo=openwrt&logoColor=white" alt="OpenWrt">
+</p>
+
+<p align="center">
+  <a href="#install"><b>Install</b></a> ·
+  <a href="#first-setup"><b>First setup</b></a> ·
+  <a href="#using-it"><b>Features</b></a> ·
+  <a href="#troubleshooting"><b>Help</b></a> ·
+  <a href="Structure_README.md"><b>Developer guide</b></a> ·
+  <a href="README_AR.md"><b>العربية</b></a>
+</p>
+
+> [!NOTE]
+> **Quota Manager is now Netrex.** Same project, same features, same settings — just a new name. Existing gateways update normally from the dashboard or apt.
+
+<p align="center">
+  <img src="docs/screenshots/overview-en.png" alt="Netrex dashboard — overview" width="100%">
+</p>
+
+<table>
+  <tr>
+    <td width="33%" valign="top"><b>📊 Fair by design</b><br>Every person gets a fixed GB or an equal share. All their devices draw from it, and only theirs stop when it runs out.</td>
+    <td width="33%" valign="top"><b>⚡ Live, to the device</b><br>Who is using what right now, daily history, top sites, WAN and LAN traffic — counted in the Linux kernel.</td>
+    <td width="33%" valign="top"><b>🛡️ Control the whole home</b><br>Speed limits, ad & content blocking, firewall, guest vouchers, VPN for chosen people, remote access with Tailscale.</td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="docs/screenshots/people-en.png" alt="People and devices" width="100%">
 </p>
 
 ---
