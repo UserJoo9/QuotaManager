@@ -339,6 +339,16 @@ CREATE INDEX IF NOT EXISTS idx_dns_history_bucket ON dns_history(bucket_minute);
 -- Usage that happened while the "everyone is out of quota" free mode was on.
 -- It is real usage (reports show it) but is NOT counted against allowances, so a
 -- pack added afterwards is never eaten by it. See QuotaService.refresh_free_mode.
+-- Owner of a deleted device, so its usage rows keep counting. The bytes left
+-- the ISP bundle when they were used: deleting the device (or its person) must
+-- never hand them back to the bundle or to the person's allowance. user_id is
+-- NULL once the person is deleted too (still counts toward the bundle).
+CREATE TABLE IF NOT EXISTS removed_devices (
+    device_id  INTEGER PRIMARY KEY,
+    user_id    INTEGER,
+    removed_at REAL NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS free_usage (
     device_id  INTEGER NOT NULL,
     date       TEXT NOT NULL,
@@ -921,6 +931,12 @@ class Database:
             "SELECT mac, user_id FROM devices WHERE id=?", (device_id,))
         if deny_list_mac and row is not None:
             await self.add_mac_list("deny", [row["mac"]])
+        if row is not None:
+            # Keep the device's usage attributed to its person: the bytes were
+            # already taken from the bundle (see removed_devices).
+            await self.conn.execute(
+                "INSERT OR REPLACE INTO removed_devices (device_id, user_id, removed_at) "
+                "VALUES (?, ?, ?)", (device_id, row["user_id"], time.time()))
         await self.conn.execute("DELETE FROM devices WHERE id=?", (device_id,))
         # app-layer FK cleanup: the device's DNS history dies with it (usage
         # rows are TTL-bounded by the quota period instead).
@@ -1044,14 +1060,17 @@ class Database:
         for r in rows:
             if deny_list_macs:
                 await self.add_mac_list("deny", [r["mac"]])
+            # Usage rows stay: the bytes already left the bundle. With no
+            # owner left they count toward the bundle total only.
             await self.conn.execute(
-                "DELETE FROM usage_daily WHERE device_id=?", (r["id"],))
-            await self.conn.execute(
-                "DELETE FROM free_usage WHERE device_id=?", (r["id"],))
+                "INSERT OR REPLACE INTO removed_devices (device_id, user_id, removed_at) "
+                "VALUES (?, NULL, ?)", (r["id"], time.time()))
             await self.conn.execute(
                 "DELETE FROM lan_usage_daily WHERE device_id=?", (r["id"],))
             await self.conn.execute("DELETE FROM devices WHERE id=?", (r["id"],))
             await self.delete_domain_rules_by_scope(DNS_SCOPE_DEVICE, r["id"])
+        await self.conn.execute(
+            "UPDATE removed_devices SET user_id=NULL WHERE user_id=?", (user_id,))
         await self.conn.execute("DELETE FROM daily_caps WHERE user_id=?", (user_id,))
         await self.conn.execute("DELETE FROM users WHERE id=?", (user_id,))
         await self.conn.commit()
@@ -1615,6 +1634,21 @@ class Database:
                 cur["down"] = max(0, cur["down"] - (r["down"] or 0))
         return out
 
+    async def get_period_usage_total(self) -> int:
+        """Bytes taken from the bundle this period, by every device that ever
+        used it: deleted devices and deleted people included (their bytes
+        already left the ISP bundle), free-mode usage excluded."""
+        bundle = await self.get_bundle()
+        since = bundle.period_start or ""
+        used = await self._fetch_one(
+            "SELECT COALESCE(SUM(up_bytes + down_bytes), 0) FROM usage_daily "
+            "WHERE date>=?", (since,))
+        free = await self._fetch_one(
+            "SELECT COALESCE(SUM(f.up_bytes + f.down_bytes), 0) FROM free_usage f "
+            "JOIN usage_daily u ON u.device_id = f.device_id AND u.date = f.date "
+            "WHERE f.date>=?", (since,))
+        return max(0, (int(used[0]) if used else 0) - (int(free[0]) if free else 0))
+
     async def get_period_usage_by_device(self) -> dict[int, dict[str, int]]:
         """Alias for get_period_usage(): aggregate usage since period_start, keyed by device_id."""
         return await self.get_period_usage()
@@ -1624,9 +1658,11 @@ class Database:
         bundle = await self.get_bundle()
         since = bundle.period_start or ""
         rows = await self.conn.execute_fetchall(
-            "SELECT d.user_id user_id, SUM(u.up_bytes) up, SUM(u.down_bytes) down "
-            "FROM usage_daily u JOIN devices d ON u.device_id = d.id "
-            "WHERE u.date>=? GROUP BY d.user_id", (since,))
+            "SELECT COALESCE(d.user_id, r.user_id) user_id, SUM(u.up_bytes) up, "
+            "SUM(u.down_bytes) down "
+            "FROM usage_daily u LEFT JOIN devices d ON u.device_id = d.id "
+            "LEFT JOIN removed_devices r ON u.device_id = r.device_id "
+            "WHERE u.date>=? GROUP BY COALESCE(d.user_id, r.user_id)", (since,))
         out: dict[int, dict[str, int]] = {}
         for r in rows:
             if r["user_id"] is None:
@@ -1634,9 +1670,11 @@ class Database:
             out[r["user_id"]] = {"up": r["up"], "down": r["down"]}
         # usage made while free mode was on never counts against the quota
         for r in await self.conn.execute_fetchall(
-                "SELECT d.user_id user_id, SUM(f.up_bytes) up, SUM(f.down_bytes) down "
-                "FROM free_usage f JOIN devices d ON f.device_id = d.id "
-                "WHERE f.date>=? GROUP BY d.user_id", (since,)):
+                "SELECT COALESCE(d.user_id, r.user_id) user_id, SUM(f.up_bytes) up, "
+                "SUM(f.down_bytes) down "
+                "FROM free_usage f LEFT JOIN devices d ON f.device_id = d.id "
+                "LEFT JOIN removed_devices r ON f.device_id = r.device_id "
+                "WHERE f.date>=? GROUP BY COALESCE(d.user_id, r.user_id)", (since,)):
             cur = out.get(r["user_id"])
             if cur is not None:
                 cur["up"] = max(0, cur["up"] - (r["up"] or 0))
@@ -1779,9 +1817,11 @@ class Database:
         "dev_today": {device_id: bytes}}``.
         """
         rows = await self.conn.execute_fetchall(
-            "SELECT d.user_id uid, u.device_id did, u.date date, "
+            "SELECT COALESCE(d.user_id, r.user_id) uid, u.device_id did, u.date date, "
             "u.up_bytes + u.down_bytes b FROM usage_daily u "
-            "JOIN devices d ON u.device_id = d.id WHERE u.date>=? AND u.date<=?",
+            "LEFT JOIN devices d ON u.device_id = d.id "
+            "LEFT JOIN removed_devices r ON u.device_id = r.device_id "
+            "WHERE u.date>=? AND u.date<=?",
             (since or "", day))
         free = {(r["device_id"], r["date"]): r["b"] for r in await self.conn.execute_fetchall(
             "SELECT device_id, date, up_bytes + down_bytes b FROM free_usage "
@@ -1804,11 +1844,15 @@ class Database:
     async def get_user_usage_on(self, user_id: int, day: str) -> int:
         row = await self._fetch_one(
             "SELECT COALESCE(SUM(u.up_bytes + u.down_bytes), 0) FROM usage_daily u "
-            "JOIN devices d ON u.device_id = d.id WHERE d.user_id=? AND u.date=?",
+            "LEFT JOIN devices d ON u.device_id = d.id "
+            "LEFT JOIN removed_devices r ON u.device_id = r.device_id "
+            "WHERE COALESCE(d.user_id, r.user_id)=? AND u.date=?",
             (user_id, day))
         free = await self._fetch_one(
             "SELECT COALESCE(SUM(f.up_bytes + f.down_bytes), 0) FROM free_usage f "
-            "JOIN devices d ON f.device_id = d.id WHERE d.user_id=? AND f.date=?",
+            "LEFT JOIN devices d ON f.device_id = d.id "
+            "LEFT JOIN removed_devices r ON f.device_id = r.device_id "
+            "WHERE COALESCE(d.user_id, r.user_id)=? AND f.date=?",
             (user_id, day))
         return max(0, (int(row[0]) if row else 0) - (int(free[0]) if free else 0))
 

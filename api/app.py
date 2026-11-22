@@ -787,8 +787,8 @@ def create_app(
                        None)
         gw_desired = bool(gw_view["blocked"]) if gw_view else False
 
-        total_used = sum((u["up"] + u["down"]) / GB
-                         for u in usage_by_user.values())
+        total_used_bytes = await database.get_period_usage_total()
+        total_used = total_used_bytes / GB
         days_left = timeutil.days_remaining(_now(), bundle.effective_reset_day)
         return {
             "bundle_source": await database.get_setting("bundle_source", "config"),
@@ -1068,8 +1068,8 @@ def create_app(
         live = holder.get()
         pending_guest_user_ids = _pending_guest_user_ids(users, devices)
 
-        total_used = sum((u["up"] + u["down"]) / GB
-                         for u in usage_by_user.values())
+        total_used_bytes = await database.get_period_usage_total()
+        total_used = total_used_bytes / GB
 
         user_rows = []
         for u in users:
@@ -1131,8 +1131,7 @@ def create_app(
             "bundle": {
                 "total_gb": bundle.total_gb,
                 "used_gb": round(total_used, 3),
-                "used_bytes": int(sum(u["up"] + u["down"]
-                                      for u in usage_by_user.values())),
+                "used_bytes": int(total_used_bytes),
                 "remaining_gb": round(max(0.0, bundle.total_gb - total_used), 3),
                 "reset_day": bundle.reset_day,
                 "period_type": bundle.period_type,

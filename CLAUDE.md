@@ -137,7 +137,8 @@ nftables.conf, IPv6 host config).
 ### Data (`quota/db.py`)
 Tables: `users`, `devices`, `leases`, `static_leases`, `usage_daily`, `settings`,
 `bundle_config`, `bundle_recharges`, `mac_lists`, `events`, `dns_history`, `dns_presets`,
-`domain_rules`, `guest_vouchers`, `vpn_nodes`, `vpn_routing`. `settings` is a key/value
+`domain_rules`, `guest_vouchers`, `vpn_nodes`, `vpn_routing`, `removed_devices` (owner of a
+deleted device, so its usage keeps counting; never delete usage rows on device/user delete). `settings` is a key/value
 store for dashboard-owned state (a dashboard-set value then wins over `config.yaml`, e.g.
 `bundle_source`, `topology_source`). The box itself is a protected user/device under
 `GATEWAY_MAC = 00:00:00:00:00:00`.
