@@ -6,7 +6,7 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
-## [Unreleased]
+## [0.5.10] — 2026-11-22
 
 Added:
 - **Network drives** (Share page). Share a hard disk or flash drive plugged into the gateway, or a folder another PC or the router already shares, with the devices at home at one address (`\\192.168.2.1\<name>` or `smb://192.168.2.1/<name>`), no password. For each share you choose who gets in: every device with internet, or only the devices you pick, and each device can be given read-write, read-only or no access. Devices that are cut off (quota used up, paused, a guest still waiting for approval) never get in. Shares are only reachable from the home network, never from the internet side, and come back on their own after a reboot or when a disk is plugged back in. The page installs Samba the first time. The system disk is never offered. Contributed by @amr-elgharip2006.
