@@ -781,6 +781,10 @@ not installed — WAN mode cannot dial. Install the 'ppp' package, then re-run."
     # authenticate) by default whenever a `user` + secrets file are present, and
     # the BRAS refuses to authenticate to the client ("peer refused to
     # authenticate: terminating link"). noauth keeps the client-side PAP/CHAP.
+    # holdoff 20: wait before re-dialing. The ISP keeps the old session for a
+    # few seconds after a drop and allows ONE session per username (We/ETIS);
+    # an instant re-dial lands as a second session and gets a dead 100.127.x
+    # address or no PADO at all. lcp-echo-*: notice a dead session in ~60 s.
     if [ -n "$PPPOE_USER" ]; then
         cat > /etc/ppp/peers/quota-wan <<EOF
 # Quota Manager PPPoE peer (WAN mode) — dialed by quota-wan-ppp.service
@@ -788,6 +792,9 @@ plugin pppoe.so
 $PPP_IF
 persist
 maxfail 0
+holdoff 20
+lcp-echo-interval 10
+lcp-echo-failure 6
 defaultroute
 replacedefaultroute
 usepeerdns
@@ -812,6 +819,9 @@ plugin pppoe.so
 $PPP_IF
 persist
 maxfail 0
+holdoff 20
+lcp-echo-interval 10
+lcp-echo-failure 6
 defaultroute
 replacedefaultroute
 usepeerdns

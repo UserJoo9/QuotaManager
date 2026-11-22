@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import logging
 import re
+import ipaddress
 import socket
 import subprocess
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -143,8 +145,17 @@ def check_internet_dns(servers: tuple[str, ...] = ("8.8.8.8", "1.1.1.1"),
     return False
 
 
+#: Seconds between stopping and starting the dial. We/ETIS allow one session
+#: per username and keep the old one for a few seconds after it is torn down;
+#: an instant re-dial lands as a SECOND session, which gets a dead 100.127.x
+#: address or no PADO at all.
+PPPOE_SETTLE_S = 10.0
+
+
 def restart_pppoe(interface: str = "ppp0",
-                  run_command: RunCommand | None = None) -> dict[str, object]:
+                  run_command: RunCommand | None = None,
+                  settle_s: float = PPPOE_SETTLE_S,
+                  sleep: Callable[[float], None] = time.sleep) -> dict[str, object]:
     """Restart the PPPoE dial to renew the public IP (the WAN-tab Restart).
 
     In WAN mode the box dials the line itself through the ``quota-wan-ppp``
@@ -162,11 +173,18 @@ def restart_pppoe(interface: str = "ppp0",
     injectable for tests (default: a subprocess).
     """
     run = run_command or _default_run_command
-    rc, out = run(["systemctl", "restart", "quota-wan-ppp"])
+    # stop -> wait -> start, not `restart`: see PPPOE_SETTLE_S.
+    rc, out = run(["systemctl", "stop", "quota-wan-ppp"])
     if rc != 0:
         return {"restarted": False, "state": "unknown",
                 "detail": out.strip() or
-                f"systemctl restart quota-wan-ppp exited {rc}"}
+                f"systemctl stop quota-wan-ppp exited {rc}"}
+    sleep(settle_s)
+    rc, out = run(["systemctl", "start", "quota-wan-ppp"])
+    if rc != 0:
+        return {"restarted": False, "state": "unknown",
+                "detail": out.strip() or
+                f"systemctl start quota-wan-ppp exited {rc}"}
     code, out2 = run(["systemctl", "is-active", "quota-wan-ppp"])
     text = (out2 or "").strip().lower()
     state = text if text in ("active", "inactive") else "unknown"
@@ -174,3 +192,54 @@ def restart_pppoe(interface: str = "ppp0",
             "detail": f"quota-wan-ppp restarted — the PPPoE session re-dialed "
                       f"on {interface} (a fresh public IP if the ISP rotates "
                       f"it per session)"}
+
+
+_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+
+
+def is_cgnat(address: str) -> bool:
+    """True for a carrier-grade-NAT address (100.64.0.0/10).
+
+    On We/ETIS lines a working session gets a 10.x or public address; a
+    100.127.x one is the restricted pool handed to a second session on the
+    same username, which carries no internet.
+    """
+    try:
+        return ipaddress.ip_address(address) in _CGNAT
+    except ValueError:
+        return False
+
+
+#: pppd options every WAN peer file must carry (see scripts/topology.sh).
+PPP_PEER_OPTIONS = ("holdoff 20", "lcp-echo-interval 10", "lcp-echo-failure 6")
+
+
+def ensure_ppp_peer_options(path: str = "/etc/ppp/peers/quota-wan",
+                            options: tuple[str, ...] = PPP_PEER_OPTIONS) -> bool:
+    """Add any missing ``options`` to an existing pppd peer file.
+
+    Boxes set up before these options existed keep their old peer file until
+    the next WAN apply; this brings them in line at startup (golden rule 8).
+    An option whose keyword is already present (any value) is left alone.
+    Returns True when the file was changed. Never raises; a missing or
+    unreadable file is a no-op (LAN mode, tests).
+    """
+    peer = Path(path)
+    try:
+        text = peer.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    present = {line.split()[0] for line in text.splitlines()
+               if line.strip() and not line.lstrip().startswith("#")}
+    missing = [opt for opt in options if opt.split()[0] not in present]
+    if not missing:
+        return False
+    try:
+        peer.write_text(text.rstrip("\n") + "\n" + "\n".join(missing) + "\n",
+                        encoding="utf-8")
+    except OSError as exc:
+        log.warning("could not update %s: %s", path, exc)
+        return False
+    log.info("added %s to %s (takes effect on the next dial)",
+             ", ".join(missing), path)
+    return True

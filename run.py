@@ -63,7 +63,7 @@ from quota.nftables import NftablesEngine
 from quota.tailscale import TailscaleManager
 from quota.service import QuotaService
 from quota.topology import (check_internet, check_internet_dns, detect_ppp,
-                            restart_pppoe)
+                            ensure_ppp_peer_options, is_cgnat, restart_pppoe)
 from quota.updater import Updater
 
 log = logging.getLogger("quota.run")
@@ -387,6 +387,12 @@ class Gateway:
         #: injectable PPPoE dial restarter (tests fake the systemctl calls);
         #: default quota.topology.restart_pppoe.
         self._pppoe_restart: Callable[..., dict[str, object]] = restart_pppoe
+        #: dead-session watchdog (see _wan_dead_session_tick): when the dead
+        #: state was first seen, how many re-dials in a row, and the earliest
+        #: monotonic time the next re-dial may run.
+        self._wan_dead_since: float | None = None
+        self._wan_redials = 0
+        self._wan_next_redial = 0.0
         self._maintenance_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
         #: last audit-trail (events table) prune's clock, for the hourly gate
@@ -745,6 +751,12 @@ class Gateway:
         """
         from quota.startup_health import (  # lazy: subprocess + /proc
             ensure_nat_table, ensure_network_infrastructure)
+
+        # -- PPPoE peer options (holdoff + LCP echo, issue #41) ---------------
+        try:
+            ensure_ppp_peer_options()
+        except Exception:  # noqa: BLE001 — never block startup
+            log.debug("ppp peer option check skipped", exc_info=True)
 
         # -- conntrack byte counters (Live traffic: where the bytes go) -----
         enable_conntrack_accounting()
@@ -1690,19 +1702,25 @@ class Gateway:
                     flows_by_mac[m] = dests
         except Exception:  # noqa: BLE001
             log.debug("flow sampling failed", exc_info=True)
+        wan_status = await self._wan_status()
         # Live counters = the flushed delta, so the dashboard shows real
         # recent traffic instead of always-zero values.
         self.holder.swap(EngineSnapshot(
             by_ip=live_by_ip,
             lan_by_ip=live_lan_by_ip,
             ip_to_mac=ip_to_mac_all, blocked=blocked, rogue=list(self._rogues),
-            wan_status=await self._wan_status(),
+            wan_status=wan_status,
             gateway_blocked=gateway_blocked,
             engine_available=engine_available,
             pending_guests=pending_guests,
             interval_s=flush_interval,
             flows_by_mac=flows_by_mac,
             ts=time.time()))
+
+        # 4b. WAN dead-session watchdog: ppp0 up but no internet -> re-dial
+        #     with a back-off (issue #41).
+        await self._timed("_wan_dead_session_tick",
+                          self._wan_dead_session_tick(wan_status))
 
         # 5. Linux: reconcile the tc speed-shaping tree (settings + live IPs).
         #    update_state is signature-gated, so an unchanged state does not
@@ -2389,6 +2407,59 @@ class Gateway:
         elapsed = (_dt.datetime.now(_dt.timezone.utc) - last_dt).total_seconds()
         if elapsed >= cfg_["minutes"] * 60:
             await self._renew_wan_ip()
+
+    #: ppp0 must be up without internet this long before the first re-dial.
+    WAN_DEAD_AFTER_S = 120.0
+    #: wait after each re-dial before the next one may run (last value repeats).
+    WAN_REDIAL_BACKOFF_S = (180.0, 300.0, 600.0, 900.0)
+
+    async def _wan_dead_session_tick(self, status: dict[str, object],
+                                     now: float | None = None) -> bool:
+        """Re-dial a PPPoE session that is up but carries no internet.
+
+        On We/ETIS lines a second session on the same username (the router
+        still dialing, a re-dial that beat the ISP's cleanup) is handed a dead
+        100.127.x address: pppd is happy, ppp0 has an IP, LCP echoes are
+        answered, and nothing ever notices. This waits WAN_DEAD_AFTER_S with
+        ppp0 up and the internet probe failing, then re-dials through the
+        stop-wait-start restart, backing off between attempts so the line is
+        never hammered. A working probe resets everything. Returns True when
+        it re-dialed this tick.
+        """
+        now = time.monotonic() if now is None else now
+        if status.get("internet"):
+            if self._wan_redials:
+                log.info("wan watchdog: internet is back on %s after %d re-dial(s)",
+                         status.get("ppp_ip") or "ppp0", self._wan_redials)
+            self._wan_dead_since = None
+            self._wan_redials = 0
+            self._wan_next_redial = 0.0
+            return False
+        if status.get("topology") != "wan" or status.get("ppp0") != "up":
+            # No session at all: pppd's own persist + holdoff is re-dialing.
+            self._wan_dead_since = None
+            return False
+        ip = str(status.get("ppp_ip") or "")
+        if self._wan_dead_since is None:
+            self._wan_dead_since = now
+            log.warning(
+                "wan watchdog: ppp0 is up (%s) but the internet is unreachable%s",
+                ip or "no address",
+                " — 100.64.0.0/10 is the restricted pool the ISP gives a second "
+                "session on the same username (is the router still dialing?)"
+                if is_cgnat(ip) else "")
+            return False
+        if now - self._wan_dead_since < self.WAN_DEAD_AFTER_S or now < self._wan_next_redial:
+            return False
+        self._wan_redials += 1
+        log.warning("wan watchdog: re-dialing PPPoE (attempt %d, session %s "
+                    "dead for %.0f s)", self._wan_redials, ip or "?",
+                    now - self._wan_dead_since)
+        await self._renew_wan_ip()
+        backoff = self.WAN_REDIAL_BACKOFF_S
+        self._wan_next_redial = now + backoff[min(self._wan_redials, len(backoff)) - 1]
+        self._wan_dead_since = None
+        return True
 
     async def _wan_status(self) -> dict[str, object]:
         """Live WAN-mode status for the dashboard/API (cheap, every 15 s tick).
