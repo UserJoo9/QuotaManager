@@ -1,1 +1,33 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="256" height="256" role="img" aria-label="Netrex"><defs><linearGradient id="g" x1="10" y1="38" x2="38" y2="10" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#2563EB"/><stop offset="1" stop-color="#22D3EE"/></linearGradient></defs><path d="M13 35V13L35 35V13" fill="none" stroke="url(#g)" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="13" cy="13" r="4.5" fill="#2563EB"/><circle cx="13" cy="35" r="4.5" fill="#2563EB"/><circle cx="35" cy="35" r="4.5" fill="#22D3EE"/><circle cx="35" cy="13" r="4.5" fill="#22D3EE"/><circle cx="24" cy="24" r="2.6" fill="#E0F7FF"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="256" height="256" role="img" aria-label="Netrex">
+  <defs>
+    <linearGradient id="nx-frame" x1="10" y1="90" x2="90" y2="10" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1D4ED8"/>
+      <stop offset=".55" stop-color="#2E8BFF"/>
+      <stop offset="1" stop-color="#3FE3FF"/>
+    </linearGradient>
+    <linearGradient id="nx-bar" x1="30" y1="85" x2="70" y2="35" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3B82F6"/>
+      <stop offset="1" stop-color="#5EEBFF"/>
+    </linearGradient>
+    <radialGradient id="nx-node" cx=".4" cy=".35" r=".7">
+      <stop offset="0" stop-color="#C9FBFF"/>
+      <stop offset=".45" stop-color="#4DF0FF"/>
+      <stop offset="1" stop-color="#14C8F0"/>
+    </radialGradient>
+    <filter id="nx-glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <path d="M13 80V35.5Q13 30 17.8 27.3L45.2 11.7Q50 9 54.8 11.7L82.2 27.3Q87 30 87 35.5V80" fill="none" stroke="url(#nx-frame)" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" opacity=".75"/>
+  <g fill="none" stroke="url(#nx-bar)" stroke-width="8" stroke-linecap="round" opacity=".85">
+    <path d="M32 39V82"/>
+    <path d="M32 39L66 73"/>
+    <path d="M66 39V73"/>
+  </g>
+  <g fill="url(#nx-node)" filter="url(#nx-glow)">
+    <circle cx="32" cy="39" r="8"/>
+    <circle cx="66" cy="39" r="8"/>
+    <circle cx="66" cy="73" r="8"/>
+  </g>
+</svg>
