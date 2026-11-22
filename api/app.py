@@ -332,6 +332,7 @@ def create_app(
     shaping_sync: Optional[Callable[[], object]] = None,
     report_config: object | None = None,
     dns_apply: Optional[Callable[[], object]] = None,
+    dns_force_apply: Optional[Callable[[], object]] = None,
     vpn_apply: Optional[Callable[[], object]] = None,
     vpn_status_getter: Optional[Callable[[], dict]] = None,
     wan_renew: Optional[Callable[[], object]] = None,
@@ -1677,14 +1678,10 @@ def create_app(
         if did is None:
             for item, r in zip(recent, hist["recent"]):
                 item["device_id"] = r["device_id"]
-        # Filter-status annotation: for each domain actually seen, resolve
-        # what the LIVE dnsmasq config would do with it right now (block/
-        # allow/redirect/none) — see quota/dns_rules.resolve_domain_status,
-        # which mirrors dnsmasq's own longest-domain-match + scope
-        # precedence exactly, so this is never an approximation. A specific
-        # device also gets its owning user's scope considered (a user-level
-        # rule reaches it); the "all devices" aggregate only has global-scope
-        # rules to go on, since no single device context applies to it.
+        # Filter-status annotation: for each observed domain, report what the
+        # generated dnsmasq config applies. Only global domain rules are
+        # considered because per-person/per-device directives are skipped by
+        # render_rules (dnsmasq cannot safely scope them by client tag).
         rules = await database.list_domain_rules(enabled_only=True)
         observed_domains = {item["domain"] for item in hist["top_domains"]}
         observed_domains.update(item["domain"] for item in recent)
@@ -2959,9 +2956,12 @@ def create_app(
     async def apply_dns_now() -> dict[str, Any]:
         """Force an immediate dnsmasq regeneration + reload (normally
         automatic after every rule/preset/DNS-server edit above)."""
-        if dns_apply is None:
+        if dns_apply is None and dns_force_apply is None:
             return {"applied": False, "reason": "dns manager not wired"}
-        await dns_apply()
+        if dns_force_apply is not None:
+            await dns_force_apply()
+        else:
+            await dns_apply()
         return {"applied": True}
 
     @app.get("/api/logs", dependencies=[Depends(_require_auth)])

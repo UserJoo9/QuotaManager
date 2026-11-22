@@ -3055,20 +3055,102 @@ def test_sync_dns_rules_includes_enabled_blocklist_domains(tmp_path):
 
     class RecordingDnsManager:
         rules = None
+        calls = 0
 
         def apply(self, _devices, rules, _servers, _by_user, _static_map):
+            self.calls += 1
             self.rules = list(rules)
 
     async def body():
         await gw.database.connect()
         await gw.database.create_dns_blocklist(
             "Feed", "https://lists.example/feed", {"ads.example"})
+        blocklist_reads = 0
+        original_list_rules = gw.database.list_enabled_dns_blocklist_rules
+
+        async def count_blocklist_reads():
+            nonlocal blocklist_reads
+            blocklist_reads += 1
+            return await original_list_rules()
+
+        gw.database.list_enabled_dns_blocklist_rules = count_blocklist_reads
         recorder = RecordingDnsManager()
         gw.dns_manager = recorder
+        await gw._sync_dns_rules()
         await gw._sync_dns_rules()
         assert recorder.rules is not None
         assert [(rule.domain, rule.source) for rule in recorder.rules] == [
             ("ads.example", "blocklist")]
+        assert recorder.calls == 1
+        assert blocklist_reads == 1
+
+        await gw.database.create_dns_blocklist(
+            "Second", "https://lists.example/second", {"tracker.example"})
+        await gw._sync_dns_rules()
+        assert recorder.calls == 2
+        assert blocklist_reads == 2
+
+        await gw.database.create_domain_rule(
+            "global", "block", "manual.example")
+        await gw._sync_dns_rules()
+        assert recorder.calls == 3
+        assert blocklist_reads == 3
+        assert {(rule.domain, rule.source) for rule in recorder.rules} == {
+            ("ads.example", "blocklist"),
+            ("tracker.example", "blocklist"),
+            ("manual.example", "manual"),
+        }
+        await gw.database.create_domain_rule(
+            "global", "block", "manual.example")
+        await gw._apply_dns_now()
+        assert recorder.calls == 3
+
+    try:
+        _get_loop().run_until_complete(body())
+    finally:
+        _get_loop().run_until_complete(gw.shutdown())
+
+
+def test_sync_dns_rules_invalidates_for_device_dns_and_static_lease_changes(
+        tmp_path):
+    gw = Gateway(_cfg(tmp_path))
+
+    class RecordingDnsManager:
+        calls = 0
+        devices = []
+        servers = []
+        static_map = {}
+
+        def apply(self, devices, _rules, servers, _by_user, static_map):
+            self.calls += 1
+            self.devices = list(devices)
+            self.servers = list(servers)
+            self.static_map = dict(static_map)
+
+    async def body():
+        await gw.database.connect()
+        recorder = RecordingDnsManager()
+        gw.dns_manager = recorder
+        await gw._sync_dns_rules()
+        await gw._sync_dns_rules()
+        assert recorder.calls == 1
+
+        dev = await gw.database.upsert_device(
+            "aa:bb:cc:dd:ee:90", name="Client")
+        await gw._sync_dns_rules()
+        assert recorder.calls == 2
+        assert dev.id in [device.id for device in recorder.devices]
+
+        await gw.database.update_user(dev.user_id, dns_server="1.1.1.1")
+        await gw._sync_dns_rules()
+        assert recorder.calls == 3
+        assert ("user", dev.user_id, "1.1.1.1") in recorder.servers
+
+        await gw.database.set_static_lease(
+            dev.mac, "192.168.1.190", "Client")
+        await gw._sync_dns_rules()
+        assert recorder.calls == 4
+        assert recorder.static_map[dev.mac] == ("192.168.1.190", "")
 
     try:
         _get_loop().run_until_complete(body())

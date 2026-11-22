@@ -163,9 +163,23 @@ def fetch_blocklist_domains(url: str) -> set[str]:
     redirects = 0
     while True:
         canonical, addresses = _validated_addresses(current_url)
-        # Every address returned by DNS was checked, and this request uses a
+        # Every address returned by DNS was checked, and each request uses a
         # pinned address so a second DNS lookup cannot redirect to a private IP.
-        status, headers, body = _fetch_response(canonical, addresses[0])
+        # Some gateways have no IPv6 route; try the other validated answers if
+        # the first pinned connection cannot be established.
+        response = None
+        last_fetch_error: BlocklistError | None = None
+        for address in addresses:
+            try:
+                response = _fetch_response(canonical, address)
+                break
+            except BlocklistError as exc:
+                if exc.code != "fetch_failed":
+                    raise
+                last_fetch_error = exc
+        if response is None:
+            raise last_fetch_error or BlocklistError("fetch_failed")
+        status, headers, body = response
         if status in (301, 302, 303, 307, 308):
             location = headers.get("location")
             if not location:

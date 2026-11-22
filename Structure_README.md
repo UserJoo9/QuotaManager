@@ -578,14 +578,26 @@ devices.dns_server ─┘                              (only if content changed)
                                                   systemctl restart dnsmasq
 ```
 
-Both files are rewritten and diffed on every maintenance tick and
-immediately after any `/api/dns/*` (or `/api/{users,devices}/{id}/dns`)
-edit — same signature-gated pattern as the nftables blocked set and the tc
-tree: an unchanged render never touches dnsmasq. Unlike a SIGHUP (which only
-re-reads `/etc/hosts` and lease-adjacent files), new `address=`/`server=`/
-`dhcp-host=` lines need a **restart** to take effect, so a rule change costs
-every client a brief (~1 s) DNS blip — acceptable for an admin edit, not
-something that happens on its own.
+The first maintenance sync after startup applies the current database state.
+After that, each 15-second tick checks the in-process
+`Database.dns_rules_revision` against the last applied revision. If they
+match, `_sync_dns_rules` returns before loading devices, rules, or blocklist
+memberships, so a large feed is not read from SQLite or rendered on every
+tick. Writes that can affect generated DNS files advance the revision:
+domain-rule and preset changes, blocklist membership or enabled-state changes,
+device creation/removal or DNS-server/owner changes, user DNS-server changes,
+and static-lease changes. The immediate API apply uses the same revision gate;
+the explicit **Apply DNS** endpoint bypasses the gate by design. The revision
+is process-local, so a restart always performs a full initial sync.
+
+When a revision changes, both files are rendered and compared with their
+current contents — the same signature-gated pattern as the nftables blocked
+set and tc tree. An unchanged render does not touch dnsmasq. Unlike a SIGHUP
+(which only re-reads `/etc/hosts` and lease-adjacent files), new
+`address=`/`server=`/`dhcp-host=` lines need a **restart** to take effect, so
+a real config change costs every client a brief (~1 s) DNS blip. Before the
+restart, the complete dnsmasq configuration is validated; if it is rejected,
+the previous generated files are restored.
 
 **Blocklist presets** (`ads-tracking`, `social-media`, `streaming`,
 `gambling`) are curated source lists — hosts-format or AdBlock-Plus-format —
@@ -609,8 +621,10 @@ source/domain pair, a cascading foreign key, and a domain index. A domain may
 belong to several feeds: refresh replaces only one feed's memberships,
 disable keeps its cached rows, and removal cascades only that feed. The
 renderer combines distinct domains from enabled feeds with existing enabled
-rules; feed rules are global blocks, while existing manual allows and narrower
-scope rules keep their current precedence.
+rules; feed rules are global blocks, and a manual global allow can override a
+block for the same domain. Per-person and per-device domain rules are skipped
+because dnsmasq cannot safely apply those directives by client tag (see #43).
+Per-client DNS-server overrides remain supported through DHCP tags.
 
 The Security page lets an administrator select individual subscriptions or all
 subscriptions and remove the selection. It sends the existing authenticated

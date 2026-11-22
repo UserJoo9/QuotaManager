@@ -2708,11 +2708,16 @@ def test_dns_blocklist_api_applies_only_when_effective_rules_change(
     _get_loop().run_until_complete(database.connect())
     _get_loop().run_until_complete(database.set_setting("free_when_exhausted", "0"))
     apply_called = threading.Event()
+    force_apply_called = threading.Event()
 
     async def dns_apply():
         apply_called.set()
 
-    app = create_app(database, service, SnapshotHolder(), dns_apply=dns_apply)
+    async def dns_force_apply():
+        force_apply_called.set()
+
+    app = create_app(database, service, SnapshotHolder(), dns_apply=dns_apply,
+                     dns_force_apply=dns_force_apply)
     with TestClient(app) as c:
         _login(c)
         manager = _stub_blocklist_manager(
@@ -2733,6 +2738,10 @@ def test_dns_blocklist_api_applies_only_when_effective_rules_change(
             f"/api/dns/blocklists/{created.json()['id']}/refresh", json={})
         assert changed.status_code == 200
         assert apply_called.wait(2)
+
+        forced = c.post("/api/dns/apply")
+        assert forced.status_code == 200
+        assert force_apply_called.wait(2)
     _get_loop().run_until_complete(database.close())
 
 

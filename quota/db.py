@@ -540,9 +540,18 @@ class Database:
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
         self._conn: aiosqlite.Connection | None = None
+        self._dns_rules_revision = 0
         #: set by QuotaService while free mode is on: new usage is also recorded
         #: in free_usage so it can be excluded from the quota maths.
         self.free_mode = False
+
+    @property
+    def dns_rules_revision(self) -> int:
+        """In-process generation for inputs used by the dnsmasq renderer."""
+        return self._dns_rules_revision
+
+    def _bump_dns_rules_revision(self) -> None:
+        self._dns_rules_revision += 1
 
     async def connect(self) -> None:
         if self._conn is not None:
@@ -878,6 +887,7 @@ class Database:
                 (mac, name, quota_mode, fixed_gb, now, user_id,
                  limit_down_mbps, limit_up_mbps))
             await self.conn.commit()
+            self._bump_dns_rules_revision()
         row = await self._fetch_one("SELECT * FROM devices WHERE mac=?", (mac,))
         return _row_to_device(row)  # type: ignore[arg-type]
 
@@ -926,9 +936,12 @@ class Database:
         if not sets:
             return await self.get_device(device_id)
         args.append(device_id)
-        await self.conn.execute(
+        cursor = await self.conn.execute(
             f"UPDATE devices SET {', '.join(sets)} WHERE id=?", args)
         await self.conn.commit()
+        if cursor.rowcount and any(
+                key in {"user_id", "dns_server"} for key in fields):
+            self._bump_dns_rules_revision()
         return await self.get_device(device_id)
 
     async def delete_device(self, device_id: int,
@@ -944,7 +957,9 @@ class Database:
             "SELECT mac, user_id FROM devices WHERE id=?", (device_id,))
         if deny_list_mac and row is not None:
             await self.add_mac_list("deny", [row["mac"]])
-        await self.conn.execute("DELETE FROM devices WHERE id=?", (device_id,))
+        cursor = await self.conn.execute("DELETE FROM devices WHERE id=?", (device_id,))
+        if cursor.rowcount:
+            self._bump_dns_rules_revision()
         # app-layer FK cleanup: the device's DNS history dies with it (usage
         # rows are TTL-bounded by the quota period instead).
         await self.conn.execute(
@@ -1045,9 +1060,11 @@ class Database:
         if not sets:
             return await self.get_user(user_id)
         args.append(user_id)
-        await self.conn.execute(
+        cursor = await self.conn.execute(
             f"UPDATE users SET {', '.join(sets)} WHERE id=?", args)
         await self.conn.commit()
+        if cursor.rowcount and "dns_server" in fields:
+            self._bump_dns_rules_revision()
         return await self.get_user(user_id)
 
     async def delete_user(self, user_id: int, cascade: bool = True,
@@ -1076,7 +1093,9 @@ class Database:
             await self.conn.execute("DELETE FROM devices WHERE id=?", (r["id"],))
             await self.delete_domain_rules_by_scope(DNS_SCOPE_DEVICE, r["id"])
         await self.conn.execute("DELETE FROM daily_caps WHERE user_id=?", (user_id,))
-        await self.conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+        cursor = await self.conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+        if cursor.rowcount:
+            self._bump_dns_rules_revision()
         await self.conn.commit()
         await self.delete_domain_rules_by_scope(DNS_SCOPE_USER, user_id)
         return len(rows)
@@ -1267,6 +1286,12 @@ class Database:
         mac_clean = mac.lower().strip()
         ip_clean = ip.strip()
         ip6_clean = ip6.strip().lower()
+        previous = await self._fetch_one(
+            "SELECT ip, ip6, hostname FROM static_leases WHERE mac=?",
+            (mac_clean,))
+        dns_output_changed = (previous is None or
+                              (previous["ip"], previous["ip6"])
+                              != (ip_clean, ip6_clean))
         now = time.time()
         await self.conn.execute(
             """INSERT INTO static_leases (mac, ip, ip6, hostname, created_at)
@@ -1279,6 +1304,8 @@ class Database:
         # Also update the active lease table so it reflects immediately
         await self.set_lease(mac_clean, ip_clean)
         await self.conn.commit()
+        if dns_output_changed:
+            self._bump_dns_rules_revision()
         row = await self._fetch_one("SELECT * FROM static_leases WHERE mac=?", (mac_clean,))
         return dict(row) if row else {}
 
@@ -1289,6 +1316,8 @@ class Database:
             (mac.lower().strip(),),
         )
         await self.conn.commit()
+        if cur.rowcount:
+            self._bump_dns_rules_revision()
         return cur.rowcount > 0
 
     # -- bundle config ------------------------------------------------------
@@ -1908,6 +1937,10 @@ class Database:
         because SQLite treats every NULL as distinct, and scope_id is NULL
         for every global rule; see the ``domain_rules`` table comment in
         SCHEMA and ``_migrate_domain_rules_scope_key``."""
+        previous = await self._fetch_one(
+            "SELECT target_ip, enabled FROM domain_rules "
+            "WHERE scope=? AND scope_id IS ? AND domain=? AND action=?",
+            (scope, scope_id, domain, action))
         now = time.time()
         await self.conn.execute(
             """INSERT INTO domain_rules
@@ -1919,6 +1952,10 @@ class Database:
             (scope, scope_id, action, domain, target_ip, int(enabled),
              source, now))
         await self.conn.commit()
+        if (previous is None or
+                (previous["target_ip"], bool(previous["enabled"]))
+                != (target_ip, bool(enabled))):
+            self._bump_dns_rules_revision()
         row = await self._fetch_one(
             "SELECT * FROM domain_rules WHERE scope=? AND scope_id IS ? "
             "AND domain=? AND action=?", (scope, scope_id, domain, action))
@@ -1951,6 +1988,7 @@ class Database:
                  enabled=excluded.enabled, source=excluded.source""",
             rows)
         await self.conn.commit()
+        self._bump_dns_rules_revision()
         return len(rows)
 
     async def get_domain_rule(self, rule_id: int) -> DomainRule | None:
@@ -1987,15 +2025,22 @@ class Database:
                 args.append(int(value) if key == "enabled" else value)
         if not sets:
             return await self.get_domain_rule(rule_id)
+        current = await self.get_domain_rule(rule_id)
         args.append(rule_id)
-        await self.conn.execute(
+        cursor = await self.conn.execute(
             f"UPDATE domain_rules SET {', '.join(sets)} WHERE id=?", args)
         await self.conn.commit()
+        if cursor.rowcount and current is not None and any(
+                getattr(current, key) != (bool(value) if key == "enabled" else value)
+                for key, value in fields.items() if key in allowed):
+            self._bump_dns_rules_revision()
         return await self.get_domain_rule(rule_id)
 
     async def delete_domain_rule(self, rule_id: int) -> None:
-        await self.conn.execute("DELETE FROM domain_rules WHERE id=?", (rule_id,))
+        cursor = await self.conn.execute("DELETE FROM domain_rules WHERE id=?", (rule_id,))
         await self.conn.commit()
+        if cursor.rowcount:
+            self._bump_dns_rules_revision()
 
     async def delete_domain_rules_by_source(self, source: str) -> int:
         """Delete every rule with an exact ``source`` match (used to remove
@@ -2007,6 +2052,8 @@ class Database:
         await self.conn.execute(
             "DELETE FROM domain_rules WHERE source=?", (source,))
         await self.conn.commit()
+        if rows:
+            self._bump_dns_rules_revision()
         return len(rows)
 
     async def delete_domain_rules_by_scope(self, scope: str, scope_id: int | None) -> int:
@@ -2019,6 +2066,8 @@ class Database:
             "DELETE FROM domain_rules WHERE scope=? AND scope_id IS ?",
             (scope, scope_id))
         await self.conn.commit()
+        if rows:
+            self._bump_dns_rules_revision()
         return len(rows)
 
     # -- DNS blocklist presets ------------------------------------------------
@@ -2037,6 +2086,9 @@ class Database:
                                scope: str = DNS_SCOPE_GLOBAL,
                                scope_id: int | None = None,
                                domain_count: int = 0) -> None:
+        previous = (await self._fetch_one(
+            "SELECT enabled, scope, scope_id FROM dns_presets WHERE preset_id=?",
+            (preset_id,)) if preset_id == "porn" else None)
         await self.conn.execute(
             """INSERT INTO dns_presets (preset_id, enabled, scope, scope_id,
                  domain_count, updated_at)
@@ -2047,11 +2099,18 @@ class Database:
                  updated_at=excluded.updated_at""",
             (preset_id, int(enabled), scope, scope_id, domain_count, time.time()))
         await self.conn.commit()
+        if preset_id == "porn" and (
+                previous is None
+                or (bool(previous["enabled"]), previous["scope"], previous["scope_id"])
+                != (bool(enabled), scope, scope_id)):
+            self._bump_dns_rules_revision()
 
     async def delete_preset_state(self, preset_id: str) -> None:
-        await self.conn.execute(
+        cursor = await self.conn.execute(
             "DELETE FROM dns_presets WHERE preset_id=?", (preset_id,))
         await self.conn.commit()
+        if preset_id == "porn" and cursor.rowcount:
+            self._bump_dns_rules_revision()
 
     # -- URL-fed DNS blocklists ---------------------------------------------
 
@@ -2081,6 +2140,8 @@ class Database:
             raise
         item = await self.get_dns_blocklist(blocklist_id)
         assert item is not None
+        if enabled:
+            self._bump_dns_rules_revision()
         return item
 
     async def get_dns_blocklist(self, blocklist_id: int) -> dict[str, Any] | None:
@@ -2144,6 +2205,8 @@ class Database:
                    WHERE id=?""",
                 (refreshed_at, refreshed_at, len(new_domains), blocklist_id))
             await self.conn.commit()
+            if source["enabled"] and changed_domains:
+                self._bump_dns_rules_revision()
             return effective_changed
         except Exception:
             await self.conn.rollback()
@@ -2198,6 +2261,7 @@ class Database:
                 "UPDATE dns_blocklists SET enabled=? WHERE id=?",
                 (int(enabled), blocklist_id))
             await self.conn.commit()
+            self._bump_dns_rules_revision()
             return changed
         except Exception:
             await self.conn.rollback()
@@ -2216,6 +2280,8 @@ class Database:
             await self.conn.execute(
                 "DELETE FROM dns_blocklists WHERE id=?", (blocklist_id,))
             await self.conn.commit()
+            if row["enabled"]:
+                self._bump_dns_rules_revision()
             return changed
         except Exception:
             await self.conn.rollback()

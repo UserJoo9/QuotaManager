@@ -29,20 +29,36 @@ def test_blocklist_memberships_are_source_owned(tmp_path):
     async def body():
         db = _db.Database(tmp_path / "lists.db")
         await db.connect()
+        revision = db.dns_rules_revision
         first = await db.create_dns_blocklist(
             "Feed A", "https://lists.example/a", ["ads.example", "shared.example"])
+        assert db.dns_rules_revision > revision
+        revision = db.dns_rules_revision
         second = await db.create_dns_blocklist(
             "Feed B", "https://lists.example/b", ["shared.example"])
+        assert db.dns_rules_revision > revision
 
         assert await db.list_enabled_dns_blocklist_domains() == [
             "ads.example", "shared.example"]
+        revision = db.dns_rules_revision
         assert await db.set_dns_blocklist_enabled(second["id"], False) is False
+        assert db.dns_rules_revision > revision
         assert await db.list_enabled_dns_blocklist_domains() == [
             "ads.example", "shared.example"]
+        revision = db.dns_rules_revision
         assert await db.set_dns_blocklist_enabled(second["id"], True) is False
+        assert db.dns_rules_revision > revision
+
+        revision = db.dns_rules_revision
+        assert await db.replace_dns_blocklist_domains(
+            second["id"], ["shared.example", "tracker.example"], 10.0) is True
+        assert db.dns_rules_revision > revision
+        revision = db.dns_rules_revision
 
         assert await db.delete_dns_blocklist(first["id"]) is True
-        assert await db.list_enabled_dns_blocklist_domains() == ["shared.example"]
+        assert db.dns_rules_revision > revision
+        assert await db.list_enabled_dns_blocklist_domains() == [
+            "shared.example", "tracker.example"]
         assert await db.get_dns_blocklist(second["id"]) is not None
         await db.close()
 
@@ -135,6 +151,28 @@ def test_fetch_blocklist_domains_parses_hosts_and_adblock(monkeypatch):
         "https://lists.example/hosts") == {"ads.example", "tracker.example"}
     assert dns_blocklists.fetch_blocklist_domains(
         "https://lists.example/abp") == {"ads.example", "video.example"}
+
+
+def test_fetch_blocklist_domains_tries_other_validated_addresses(monkeypatch):
+    from quota import dns_blocklists
+
+    ipv6 = "2001:4860:4860::8888"
+    ipv4 = "8.8.8.8"
+    monkeypatch.setattr(
+        dns_blocklists, "_resolve_addresses", lambda _host: {ipv6, ipv4})
+    calls = []
+
+    def fetch(_url, address):
+        calls.append(address)
+        if address == ipv6:
+            raise dns_blocklists.BlocklistError("fetch_failed")
+        return 200, {}, b"0.0.0.0 ads.example\n"
+
+    monkeypatch.setattr(dns_blocklists, "_fetch_response", fetch)
+
+    assert dns_blocklists.fetch_blocklist_domains(
+        "https://lists.example/list") == {"ads.example"}
+    assert calls == [ipv6, ipv4]
 
 
 def test_fetch_blocklist_domains_rejects_html_and_empty_feed(monkeypatch):
