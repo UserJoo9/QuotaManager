@@ -518,6 +518,8 @@ export default {
   "dns.scope.global": "Everyone",
   "dns.scope.user": "Person",
   "dns.scope.device": "Device",
+  "dns.scope.na": "Not applied",
+  "dns.scope.na.h": "Website rules only work for everyone. A rule for one person or one device is saved but not enforced. Choose \"Everyone\" to block or allow a site.",
   "dns.target": "Who",
   "dns.import": "Import a blocklist",
   "dns.import.d": "Paste a hosts-format or AdBlock Plus list.",

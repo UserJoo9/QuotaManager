@@ -552,15 +552,19 @@ other three. It rides entirely on the DHCP+DNS server the box already runs
 by default, alongside `quota-gateway.conf` and `quota-dnslog.conf`):
 
 - **`quota-tags.conf`** — `dhcp-host=<mac>,set:qmdev<id>` for every known
-  device. This is the whole mechanism that makes *per-device* or *per-user*
-  rules possible: dnsmasq selects config lines by DHCP tag, so binding a MAC
-  to a tag is the "is this rule for THIS device" selector.
-- **`quota-domains.conf`** — the actual rules, as tag-restricted
-  `address=/domain/target` (block/redirect) or `server=/domain/#`
-  (allow-list override) lines, plus tag-restricted `server=<ip>` lines for
-  per-user/per-device upstream DNS servers. A user-scoped rule/override is
-  fanned out to one line per device that user currently owns (dnsmasq only
-  understands per-device tags).
+  device. dnsmasq selects **DHCP options** by tag, so this is the selector for a
+  per-device (or per-user) DNS server handed out over DHCP
+  (`dhcp-option=tag:qmdev<id>,option:dns-server,<ip>`). It does NOT work for
+  `address=` / `server=/domain/` lines: those cannot carry a tag, and a
+  `tag:qmdev… address=…` line is a syntax error that stops dnsmasq at the next
+  restart (issue #41). Per-person / per-device **domain** rules are therefore
+  saved but never rendered (the render logs a warning; the dashboard shows
+  "Not applied").
+- **`quota-domains.conf`** — the global rules only: `address=/domain/target`
+  (block/redirect) or `server=/domain/#` (allow-list override), plus a global
+  `server=<ip>` upstream override. Per-user/per-device upstream DNS servers
+  are `dhcp-option=tag:qmdev<id>,option:dns-server,<ips>` lines (a user-scoped
+  override fans out to one tag per device that user owns).
 
 ```
 domain_rules (DB) ──┐
@@ -2114,7 +2118,7 @@ The suite covers:
   dev-only `scope link` fallback, error propagation, the pin, reconcile
   idempotence + self-heal, teardown.
 - **Domain filtering** — `quota/dns_rules.py`: hosts/ABP parsing, wildcard
-  scopes, resolution order, the tag-scoped dnsmasq render + reload gate.
+  scopes, resolution order, the dnsmasq render (global domain rules; per-device DNS servers via DHCP) + validate/rollback reload gate.
 - **The self-updater** — `quota/updater.py`: version compare grammar, the
   CHANGELOG parser (newest-first, `[Unreleased]` skipped, far-behind lists all
   intermediate versions), the 24 h gate + persisted state, check-disabled

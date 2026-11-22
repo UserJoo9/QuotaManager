@@ -216,6 +216,7 @@ and `tests/test_packaging.py` guard repo hygiene — read their failure messages
 
 ## 9. Known limits (keep honest)
 
+dnsmasq cannot apply a domain rule (`address=`/`server=`) to one client, so per-person / per-device domain rules are saved but never rendered (a `tag:` prefix on those lines is a syntax error that stops dnsmasq at the next restart, issue #41); only per-device DNS *servers* work, via DHCP `dhcp-option=tag:…,option:dns-server`.
 `quota_firewall` bans/geo and the captive portal are IPv4 only; static IPv6 reservations only
 bind DHCPv6 clients (Android/iOS use SLAAC); the dashboard binds IPv4; counting is read every
 ~15 s (approximate); IPv6 has not been validated against a real IPv6 ISP yet (the probe keeps

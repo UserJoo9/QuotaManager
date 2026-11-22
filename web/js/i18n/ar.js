@@ -517,6 +517,8 @@ export default {
   "dns.scope.global": "الكل",
   "dns.scope.user": "شخص",
   "dns.scope.device": "جهاز",
+  "dns.scope.na": "غير مطبّقة",
+  "dns.scope.na.h": "قواعد المواقع بتشتغل على الكل بس. القاعدة اللي لشخص أو جهاز واحد بتتحفظ لكن مش بتتنفّذ. اختار \"الكل\" علشان تحجب أو تسمح بموقع.",
   "dns.target": "مين",
   "dns.import": "استيراد قائمة حجب",
   "dns.import.d": "الصق قائمة بصيغة hosts أو AdBlock Plus.",

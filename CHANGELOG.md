@@ -6,7 +6,7 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
-## [Unreleased]
+## [0.5.9] — 2026-11-22
 
 Added:
 - **Turn the gateway off from the dashboard** (System → Power). It stops everything the gateway runs and keeps it off after a reboot, removes its firewall and speed-limit rules, and can also power the computer off. Turn DHCP back on in the router first (and, if it is bridged, let it dial the ISP itself again), or the home stays offline. To turn it back on: `sudo systemctl enable --now dnsmasq quota-gateway`.

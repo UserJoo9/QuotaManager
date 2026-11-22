@@ -31,6 +31,13 @@ function scopeTarget(scopeSel, d) {
   const fill = () => { const tg = targets(d); target.replaceChildren(...(tg[scopeSel.value] || []).map(([id, n]) => h("option", { value: String(id) }, n))); target.hidden = scopeSel.value === "global"; };
   scopeSel.addEventListener("change", fill); fill(); return target;
 }
+// dnsmasq can only apply a website rule to everyone, so a per-person or
+// per-device rule is saved but not enforced; say so where it is created.
+function scopeNote(scopeSel) {
+  const note = h("p", { class: "note" }, t("dns.scope.na.h"));
+  const sync = () => { note.hidden = scopeSel.value === "global"; };
+  scopeSel.addEventListener("change", sync); sync(); return note;
+}
 const scopeSelect = (cur = "global") => h("select", { class: "select" }, ["global", "user", "device"].map((s) => h("option", { value: s, selected: cur === s }, t("dns.scope." + s))));
 
 export default function dnsTab(ctx) {
@@ -63,7 +70,7 @@ export default function dnsTab(ctx) {
     const ip = h("input", { class: "input ltr", placeholder: "192.168.2.1", spellcheck: "false" }), ipF = field(t("dns.redirect.ip"), ip); ipF.hidden = action !== "redirect";
     act2.onchange = () => { ipF.hidden = act2.value !== "redirect"; };
     openDialog({ title: t("dns.rule.add"), sub: t("dns.rule.sub"), submitLabel: t("add.submit"),
-      content: [field(t("dns.domain"), domain), h("div", { class: "form-row" }, field(t("dns.act"), act2), field(t("dns.scope"), scope)), field(t("dns.target"), target), ipF, h("span", { class: "sub" }, t("dns.domain.h"))],
+      content: [field(t("dns.domain"), domain), h("div", { class: "form-row" }, field(t("dns.act"), act2), field(t("dns.scope"), scope)), field(t("dns.target"), target), scopeNote(scope), ipF, h("span", { class: "sub" }, t("dns.domain.h"))],
       onSubmit: async () => {
         const body = { scope: scope.value, scope_id: scope.value === "global" ? null : +target.value || null, action: act2.value, domain: domain.value.trim(), enabled: true };
         if (act2.value === "redirect") body.target_ip = ip.value.trim();
@@ -105,7 +112,7 @@ export default function dnsTab(ctx) {
       h("header", { class: "card-h" }, h("div", {}, h("h3", {}, t("dns.rules")), h("span", { class: "sub" }, t("dns.rules.d"))), h("button", { type: "button", class: "btn primary sm", onclick: () => ruleDialog() }, icon("plus", 15), t("dns.rule.add"))),
       dns.rules.length ? h("div", {}, dns.rules.map((r) => h("div", { class: "crow", style: { "grid-template-columns": "90px minmax(120px,1fr) minmax(120px,1fr) auto" } },
         chip(r.action === "allow" ? "ok" : r.action === "redirect" ? "accent" : "danger", r.action === "redirect" ? `→ ${r.target_ip || ""}` : t("dns.act." + r.action)),
-        h("div", { class: "c-name ltr" }, r.domain), h("div", { class: "c-name" }, scopeLabel(r, d), h("span", { class: "mono" }, r.source || "")), delRule(r))))
+        h("div", { class: "c-name ltr" }, r.domain), h("div", { class: "c-name" }, scopeLabel(r, d), r.scope !== "global" ? chip("warn", t("dns.scope.na")) : null, h("span", { class: "mono" }, r.source || "")), delRule(r))))
         : h("div", { class: "empty" }, t("dns.rules.none"))),
 
     h("section", { class: "card c12" },
