@@ -6,6 +6,11 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## [Unreleased]
+
+Fixed:
+- Deleting a device (or a person) gave the data it had used back to the bundle and to that person's allowance, so removing a device that had used 30 GB made 30 GB "free" again. The internet provider already counted those GB, so they now keep counting: for the person who used them, and for the bundle even after the person is deleted. Data used by devices deleted before this update counts toward the bundle again after updating, without being assigned to anyone. Correcting a person's usage by hand (usage calibration) also works on their total, deleted devices included.
+
 ## [0.5.9] — 2026-11-22
 
 Added:

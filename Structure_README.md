@@ -262,7 +262,12 @@ The monthly allowance lives on a **user**, not a device (`users` table;
 - **Auto users** equally share the bundle remainder after fixed users take their
   GB off the top.
 - A user's usage is the **sum of their devices'** usage (join
-  `usage_daily` → `devices` → `user`).
+  `usage_daily` → `devices` → `user`), **deleted devices included**: deleting a
+  device records its owner in `removed_devices`, and the usage queries fall back
+  to that owner. Deleting a person keeps the usage rows with no owner. The
+  bundle's "used" is `get_period_usage_total()` = every `usage_daily` row this
+  period minus `free_usage`, so neither delete ever hands bytes back to the
+  bundle (the ISP already counted them).
 
 ```
 fixed_total   = Σ fixed_gb of all fixed-mode users
@@ -272,7 +277,7 @@ auto_share    = remaining / number of auto-mode users
 allowance(u)  = fixed_gb(u)   if mode = fixed
               = auto_share    if mode = auto
 
-used(u)       = Σ usage_daily of all devices owned by u
+used(u)       = Σ usage_daily of all devices owned by u (deleted ones too)
 
 blocked(u)    = used(u) ≥ allowance(u)   OR   admin switched the user off
 
