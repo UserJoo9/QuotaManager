@@ -454,6 +454,29 @@ CREATE TABLE IF NOT EXISTS dns_presets (
     updated_at   REAL NOT NULL DEFAULT 0
 );
 
+-- User-managed URL subscriptions are kept separate from manual domain rules
+-- and built-in presets. A domain can belong to multiple feeds; deleting or
+-- disabling one source must not remove another source's ownership.
+CREATE TABLE IF NOT EXISTS dns_blocklists (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL DEFAULT '',
+    url             TEXT NOT NULL UNIQUE,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    created_at      REAL NOT NULL,
+    last_attempt_at REAL,
+    last_success_at REAL,
+    domain_count    INTEGER NOT NULL DEFAULT 0,
+    last_error      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS dns_blocklist_domains (
+    blocklist_id INTEGER NOT NULL REFERENCES dns_blocklists(id) ON DELETE CASCADE,
+    domain       TEXT NOT NULL,
+    PRIMARY KEY (blocklist_id, domain)
+);
+CREATE INDEX IF NOT EXISTS idx_dns_blocklist_domains_domain
+    ON dns_blocklist_domains(domain);
+
 -- Static DHCP reservations (MAC <-> fixed IP mapping)
 CREATE TABLE IF NOT EXISTS static_leases (
     mac        TEXT PRIMARY KEY,
@@ -517,9 +540,18 @@ class Database:
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
         self._conn: aiosqlite.Connection | None = None
+        self._dns_rules_revision = 0
         #: set by QuotaService while free mode is on: new usage is also recorded
         #: in free_usage so it can be excluded from the quota maths.
         self.free_mode = False
+
+    @property
+    def dns_rules_revision(self) -> int:
+        """In-process generation for inputs used by the dnsmasq renderer."""
+        return self._dns_rules_revision
+
+    def _bump_dns_rules_revision(self) -> None:
+        self._dns_rules_revision += 1
 
     async def connect(self) -> None:
         if self._conn is not None:
@@ -855,6 +887,7 @@ class Database:
                 (mac, name, quota_mode, fixed_gb, now, user_id,
                  limit_down_mbps, limit_up_mbps))
             await self.conn.commit()
+            self._bump_dns_rules_revision()
         row = await self._fetch_one("SELECT * FROM devices WHERE mac=?", (mac,))
         return _row_to_device(row)  # type: ignore[arg-type]
 
@@ -903,9 +936,12 @@ class Database:
         if not sets:
             return await self.get_device(device_id)
         args.append(device_id)
-        await self.conn.execute(
+        cursor = await self.conn.execute(
             f"UPDATE devices SET {', '.join(sets)} WHERE id=?", args)
         await self.conn.commit()
+        if cursor.rowcount and any(
+                key in {"user_id", "dns_server"} for key in fields):
+            self._bump_dns_rules_revision()
         return await self.get_device(device_id)
 
     async def delete_device(self, device_id: int,
@@ -921,7 +957,9 @@ class Database:
             "SELECT mac, user_id FROM devices WHERE id=?", (device_id,))
         if deny_list_mac and row is not None:
             await self.add_mac_list("deny", [row["mac"]])
-        await self.conn.execute("DELETE FROM devices WHERE id=?", (device_id,))
+        cursor = await self.conn.execute("DELETE FROM devices WHERE id=?", (device_id,))
+        if cursor.rowcount:
+            self._bump_dns_rules_revision()
         # app-layer FK cleanup: the device's DNS history dies with it (usage
         # rows are TTL-bounded by the quota period instead).
         await self.conn.execute(
@@ -1022,9 +1060,11 @@ class Database:
         if not sets:
             return await self.get_user(user_id)
         args.append(user_id)
-        await self.conn.execute(
+        cursor = await self.conn.execute(
             f"UPDATE users SET {', '.join(sets)} WHERE id=?", args)
         await self.conn.commit()
+        if cursor.rowcount and "dns_server" in fields:
+            self._bump_dns_rules_revision()
         return await self.get_user(user_id)
 
     async def delete_user(self, user_id: int, cascade: bool = True,
@@ -1053,7 +1093,9 @@ class Database:
             await self.conn.execute("DELETE FROM devices WHERE id=?", (r["id"],))
             await self.delete_domain_rules_by_scope(DNS_SCOPE_DEVICE, r["id"])
         await self.conn.execute("DELETE FROM daily_caps WHERE user_id=?", (user_id,))
-        await self.conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+        cursor = await self.conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+        if cursor.rowcount:
+            self._bump_dns_rules_revision()
         await self.conn.commit()
         await self.delete_domain_rules_by_scope(DNS_SCOPE_USER, user_id)
         return len(rows)
@@ -1244,6 +1286,12 @@ class Database:
         mac_clean = mac.lower().strip()
         ip_clean = ip.strip()
         ip6_clean = ip6.strip().lower()
+        previous = await self._fetch_one(
+            "SELECT ip, ip6, hostname FROM static_leases WHERE mac=?",
+            (mac_clean,))
+        dns_output_changed = (previous is None or
+                              (previous["ip"], previous["ip6"])
+                              != (ip_clean, ip6_clean))
         now = time.time()
         await self.conn.execute(
             """INSERT INTO static_leases (mac, ip, ip6, hostname, created_at)
@@ -1256,6 +1304,8 @@ class Database:
         # Also update the active lease table so it reflects immediately
         await self.set_lease(mac_clean, ip_clean)
         await self.conn.commit()
+        if dns_output_changed:
+            self._bump_dns_rules_revision()
         row = await self._fetch_one("SELECT * FROM static_leases WHERE mac=?", (mac_clean,))
         return dict(row) if row else {}
 
@@ -1266,6 +1316,8 @@ class Database:
             (mac.lower().strip(),),
         )
         await self.conn.commit()
+        if cur.rowcount:
+            self._bump_dns_rules_revision()
         return cur.rowcount > 0
 
     # -- bundle config ------------------------------------------------------
@@ -1885,6 +1937,10 @@ class Database:
         because SQLite treats every NULL as distinct, and scope_id is NULL
         for every global rule; see the ``domain_rules`` table comment in
         SCHEMA and ``_migrate_domain_rules_scope_key``."""
+        previous = await self._fetch_one(
+            "SELECT target_ip, enabled FROM domain_rules "
+            "WHERE scope=? AND scope_id IS ? AND domain=? AND action=?",
+            (scope, scope_id, domain, action))
         now = time.time()
         await self.conn.execute(
             """INSERT INTO domain_rules
@@ -1896,6 +1952,10 @@ class Database:
             (scope, scope_id, action, domain, target_ip, int(enabled),
              source, now))
         await self.conn.commit()
+        if (previous is None or
+                (previous["target_ip"], bool(previous["enabled"]))
+                != (target_ip, bool(enabled))):
+            self._bump_dns_rules_revision()
         row = await self._fetch_one(
             "SELECT * FROM domain_rules WHERE scope=? AND scope_id IS ? "
             "AND domain=? AND action=?", (scope, scope_id, domain, action))
@@ -1928,6 +1988,7 @@ class Database:
                  enabled=excluded.enabled, source=excluded.source""",
             rows)
         await self.conn.commit()
+        self._bump_dns_rules_revision()
         return len(rows)
 
     async def get_domain_rule(self, rule_id: int) -> DomainRule | None:
@@ -1964,15 +2025,22 @@ class Database:
                 args.append(int(value) if key == "enabled" else value)
         if not sets:
             return await self.get_domain_rule(rule_id)
+        current = await self.get_domain_rule(rule_id)
         args.append(rule_id)
-        await self.conn.execute(
+        cursor = await self.conn.execute(
             f"UPDATE domain_rules SET {', '.join(sets)} WHERE id=?", args)
         await self.conn.commit()
+        if cursor.rowcount and current is not None and any(
+                getattr(current, key) != (bool(value) if key == "enabled" else value)
+                for key, value in fields.items() if key in allowed):
+            self._bump_dns_rules_revision()
         return await self.get_domain_rule(rule_id)
 
     async def delete_domain_rule(self, rule_id: int) -> None:
-        await self.conn.execute("DELETE FROM domain_rules WHERE id=?", (rule_id,))
+        cursor = await self.conn.execute("DELETE FROM domain_rules WHERE id=?", (rule_id,))
         await self.conn.commit()
+        if cursor.rowcount:
+            self._bump_dns_rules_revision()
 
     async def delete_domain_rules_by_source(self, source: str) -> int:
         """Delete every rule with an exact ``source`` match (used to remove
@@ -1984,6 +2052,8 @@ class Database:
         await self.conn.execute(
             "DELETE FROM domain_rules WHERE source=?", (source,))
         await self.conn.commit()
+        if rows:
+            self._bump_dns_rules_revision()
         return len(rows)
 
     async def delete_domain_rules_by_scope(self, scope: str, scope_id: int | None) -> int:
@@ -1996,6 +2066,8 @@ class Database:
             "DELETE FROM domain_rules WHERE scope=? AND scope_id IS ?",
             (scope, scope_id))
         await self.conn.commit()
+        if rows:
+            self._bump_dns_rules_revision()
         return len(rows)
 
     # -- DNS blocklist presets ------------------------------------------------
@@ -2014,6 +2086,9 @@ class Database:
                                scope: str = DNS_SCOPE_GLOBAL,
                                scope_id: int | None = None,
                                domain_count: int = 0) -> None:
+        previous = (await self._fetch_one(
+            "SELECT enabled, scope, scope_id FROM dns_presets WHERE preset_id=?",
+            (preset_id,)) if preset_id == "porn" else None)
         await self.conn.execute(
             """INSERT INTO dns_presets (preset_id, enabled, scope, scope_id,
                  domain_count, updated_at)
@@ -2024,11 +2099,319 @@ class Database:
                  updated_at=excluded.updated_at""",
             (preset_id, int(enabled), scope, scope_id, domain_count, time.time()))
         await self.conn.commit()
+        if preset_id == "porn" and (
+                previous is None
+                or (bool(previous["enabled"]), previous["scope"], previous["scope_id"])
+                != (bool(enabled), scope, scope_id)):
+            self._bump_dns_rules_revision()
 
     async def delete_preset_state(self, preset_id: str) -> None:
-        await self.conn.execute(
+        cursor = await self.conn.execute(
             "DELETE FROM dns_presets WHERE preset_id=?", (preset_id,))
         await self.conn.commit()
+        if preset_id == "porn" and cursor.rowcount:
+            self._bump_dns_rules_revision()
+
+    # -- URL-fed DNS blocklists ---------------------------------------------
+
+    async def create_dns_blocklist(self, name: str, url: str,
+                                   domains: list[str] | set[str],
+                                   enabled: bool = True) -> dict[str, Any]:
+        """Create a subscription and its initial membership atomically."""
+        now = time.time()
+        normalized_domains = sorted(set(domains))
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await self.conn.execute(
+                """INSERT INTO dns_blocklists
+                     (name, url, enabled, created_at, last_attempt_at,
+                      last_success_at, domain_count, last_error)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, NULL)""",
+                (name.strip(), url, int(enabled), now, now, now,
+                 len(normalized_domains)))
+            blocklist_id = int(cursor.lastrowid)
+            await cursor.close()
+            await self.conn.executemany(
+                "INSERT INTO dns_blocklist_domains (blocklist_id, domain) VALUES (?, ?)",
+                [(blocklist_id, domain) for domain in normalized_domains])
+            await self.conn.commit()
+        except Exception:
+            await self.conn.rollback()
+            raise
+        item = await self.get_dns_blocklist(blocklist_id)
+        assert item is not None
+        if enabled:
+            self._bump_dns_rules_revision()
+        return item
+
+    async def get_dns_blocklist(self, blocklist_id: int) -> dict[str, Any] | None:
+        row = await self._fetch_one(
+            "SELECT * FROM dns_blocklists WHERE id=?", (blocklist_id,))
+        return dict(row) if row else None
+
+    async def list_dns_blocklists(self) -> list[dict[str, Any]]:
+        rows = await self.conn.execute_fetchall(
+            "SELECT * FROM dns_blocklists ORDER BY id")
+        return [dict(row) for row in rows]
+
+    async def replace_dns_blocklist_domains(
+            self, blocklist_id: int, domains: list[str] | set[str],
+            refreshed_at: float) -> bool:
+        """Replace one source's memberships, preserving other owners.
+
+        Return whether the globally effective blocklist domain set changed.
+        The membership replacement and success metadata update share a single
+        transaction so a failed refresh cannot leave a partial list behind.
+        """
+        new_domains = set(domains)
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            source = await self._fetch_one(
+                "SELECT enabled FROM dns_blocklists WHERE id=?", (blocklist_id,))
+            if source is None:
+                await self.conn.rollback()
+                return False
+            old_rows = await self.conn.execute_fetchall(
+                "SELECT domain FROM dns_blocklist_domains WHERE blocklist_id=?",
+                (blocklist_id,))
+            old_domains = {row["domain"] for row in old_rows}
+            changed_domains = old_domains ^ new_domains
+            effective_changed = False
+            if source["enabled"] and changed_domains:
+                changed_list = list(changed_domains)
+                for start in range(0, len(changed_list), 800):
+                    chunk = changed_list[start:start + 800]
+                    placeholders = ",".join("?" for _ in chunk)
+                    args: list[Any] = [blocklist_id, *chunk]
+                    rows = await self.conn.execute_fetchall(
+                        """SELECT DISTINCT d.domain
+                           FROM dns_blocklist_domains d
+                           JOIN dns_blocklists b ON b.id=d.blocklist_id
+                           WHERE b.enabled=1 AND b.id<>? AND d.domain IN ("""
+                        + placeholders + ")", args)
+                    other_owners = {row["domain"] for row in rows}
+                    if any(domain not in other_owners for domain in chunk):
+                        effective_changed = True
+                        break
+            await self.conn.execute(
+                "DELETE FROM dns_blocklist_domains WHERE blocklist_id=?",
+                (blocklist_id,))
+            await self.conn.executemany(
+                "INSERT INTO dns_blocklist_domains (blocklist_id, domain) VALUES (?, ?)",
+                [(blocklist_id, domain) for domain in sorted(new_domains)])
+            await self.conn.execute(
+                """UPDATE dns_blocklists
+                   SET last_attempt_at=?, last_success_at=?, domain_count=?, last_error=NULL
+                   WHERE id=?""",
+                (refreshed_at, refreshed_at, len(new_domains), blocklist_id))
+            await self.conn.commit()
+            if source["enabled"] and changed_domains:
+                self._bump_dns_rules_revision()
+            return effective_changed
+        except Exception:
+            await self.conn.rollback()
+            raise
+
+    async def record_dns_blocklist_failure(self, blocklist_id: int,
+                                           attempted_at: float,
+                                           error_code: str) -> None:
+        await self.conn.execute(
+            """UPDATE dns_blocklists SET last_attempt_at=?, last_error=?
+               WHERE id=?""",
+            (attempted_at, error_code, blocklist_id))
+        await self.conn.commit()
+
+    async def _blocklist_domains_changed_by_state(
+            self, blocklist_id: int) -> bool:
+        """Whether changing this source's enabled state changes DNS output."""
+        rows = await self.conn.execute_fetchall(
+            "SELECT domain FROM dns_blocklist_domains WHERE blocklist_id=?",
+            (blocklist_id,))
+        domains = [row["domain"] for row in rows]
+        if not domains:
+            return False
+        # On disable, a domain changes only when this is its last active
+        # owner. On enable, it changes only when no other source owns it.
+        for start in range(0, len(domains), 800):
+            chunk = domains[start:start + 800]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = await self.conn.execute_fetchall(
+                """SELECT DISTINCT d.domain
+                   FROM dns_blocklist_domains d
+                   JOIN dns_blocklists b ON b.id=d.blocklist_id
+                   WHERE b.enabled=1 AND b.id<>? AND d.domain IN ("""
+                + placeholders + ")", [blocklist_id, *chunk])
+            other_owners = {row["domain"] for row in rows}
+            if any(domain not in other_owners for domain in chunk):
+                return True
+        return False
+
+    async def set_dns_blocklist_enabled(self, blocklist_id: int,
+                                        enabled: bool) -> bool:
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = await self._fetch_one(
+                "SELECT enabled FROM dns_blocklists WHERE id=?", (blocklist_id,))
+            if row is None or bool(row["enabled"]) == enabled:
+                await self.conn.rollback()
+                return False
+            changed = await self._blocklist_domains_changed_by_state(
+                blocklist_id)
+            await self.conn.execute(
+                "UPDATE dns_blocklists SET enabled=? WHERE id=?",
+                (int(enabled), blocklist_id))
+            await self.conn.commit()
+            self._bump_dns_rules_revision()
+            return changed
+        except Exception:
+            await self.conn.rollback()
+            raise
+
+    async def delete_dns_blocklist(self, blocklist_id: int) -> bool:
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = await self._fetch_one(
+                "SELECT enabled FROM dns_blocklists WHERE id=?", (blocklist_id,))
+            if row is None:
+                await self.conn.rollback()
+                return False
+            changed = (await self._blocklist_domains_changed_by_state(
+                blocklist_id) if row["enabled"] else False)
+            await self.conn.execute(
+                "DELETE FROM dns_blocklists WHERE id=?", (blocklist_id,))
+            await self.conn.commit()
+            if row["enabled"]:
+                self._bump_dns_rules_revision()
+            return changed
+        except Exception:
+            await self.conn.rollback()
+            raise
+
+    async def list_enabled_dns_blocklist_domains(self) -> list[str]:
+        rows = await self.conn.execute_fetchall(
+            """SELECT DISTINCT d.domain
+               FROM dns_blocklist_domains d
+               JOIN dns_blocklists b ON b.id=d.blocklist_id
+               WHERE b.enabled=1 ORDER BY d.domain""")
+        return [row["domain"] for row in rows]
+
+    async def list_enabled_dns_blocklist_rules(self) -> list[DomainRule]:
+        return [DomainRule(id=-1, scope=DNS_SCOPE_GLOBAL,
+                           action=DNS_ACTION_BLOCK, domain=domain,
+                           enabled=True, source="blocklist")
+                for domain in await self.list_enabled_dns_blocklist_domains()]
+
+    async def list_enabled_dns_blocklist_rules_for_domains(
+            self, domains: list[str] | set[str]) -> list[DomainRule]:
+        """Return enabled feed rules that can match the supplied hostnames.
+
+        DNS rules match a domain and all its subdomains, so a query for
+        ``video.ads.example`` must also consider a feed entry for
+        ``ads.example``. Expanding only the observed names to their suffixes
+        avoids loading every subscribed domain for history annotations.
+        """
+        candidates: set[str] = set()
+        for raw_domain in domains:
+            if not isinstance(raw_domain, str):
+                continue
+            domain = raw_domain.strip().lower().rstrip(".")
+            if not domain or len(domain) > 253:
+                continue
+            labels = domain.split(".")
+            candidates.update(".".join(labels[start:])
+                              for start in range(max(0, len(labels) - 1)))
+        if not candidates:
+            return []
+
+        matches: set[str] = set()
+        ordered = sorted(candidates)
+        for start in range(0, len(ordered), 800):
+            chunk = ordered[start:start + 800]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = await self.conn.execute_fetchall(
+                """SELECT DISTINCT d.domain
+                   FROM dns_blocklist_domains d
+                   JOIN dns_blocklists b ON b.id=d.blocklist_id
+                   WHERE b.enabled=1 AND d.domain IN (""" + placeholders + ")",
+                chunk)
+            matches.update(row["domain"] for row in rows)
+        return [DomainRule(id=-1, scope=DNS_SCOPE_GLOBAL,
+                           action=DNS_ACTION_BLOCK, domain=domain,
+                           enabled=True, source="blocklist")
+                for domain in sorted(matches)]
+
+    async def count_enabled_dns_blocklist_domains(
+            self, excluding_id: int | None = None) -> int:
+        sql = """SELECT COUNT(DISTINCT d.domain) AS n
+                 FROM dns_blocklist_domains d
+                 JOIN dns_blocklists b ON b.id=d.blocklist_id
+                 WHERE b.enabled=1"""
+        args: tuple[Any, ...] = ()
+        if excluding_id is not None:
+            sql += " AND b.id<>?"
+            args = (excluding_id,)
+        row = await self._fetch_one(sql, args)
+        return int(row["n"]) if row else 0
+
+    async def count_new_enabled_dns_blocklist_domains(
+            self, domains: list[str] | set[str],
+            excluding_id: int | None = None) -> int:
+        """Count supplied domains not already owned by an enabled source."""
+        unique_domains = set(domains)
+        if not unique_domains:
+            return 0
+        active_domains: set[str] = set()
+        domain_list = list(unique_domains)
+        for start in range(0, len(domain_list), 800):
+            chunk = domain_list[start:start + 800]
+            placeholders = ",".join("?" for _ in chunk)
+            sql = """SELECT DISTINCT d.domain
+                     FROM dns_blocklist_domains d
+                     JOIN dns_blocklists b ON b.id=d.blocklist_id
+                     WHERE b.enabled=1 AND d.domain IN (""" + placeholders + ")"
+            args: list[Any] = list(chunk)
+            if excluding_id is not None:
+                sql += " AND b.id<>?"
+                args.append(excluding_id)
+            rows = await self.conn.execute_fetchall(sql, args)
+            active_domains.update(row["domain"] for row in rows)
+        return len(unique_domains - active_domains)
+
+    async def list_due_dns_blocklists(self, now: float,
+                                      interval_s: float) -> list[dict[str, Any]]:
+        rows = await self.conn.execute_fetchall(
+            """SELECT * FROM dns_blocklists
+               WHERE enabled=1 AND (last_attempt_at IS NULL OR last_attempt_at<=?)
+               ORDER BY id""",
+            (now - interval_s,))
+        return [dict(row) for row in rows]
+
+    async def page_domain_rules(self, limit: int, offset: int, query: str = "",
+                                scope: str | None = None,
+                                scope_id: int | None = None) -> dict[str, Any]:
+        limit = max(1, min(int(limit), 100))
+        offset = max(0, int(offset))
+        clauses = ["source NOT LIKE 'preset:%'"]
+        args: list[Any] = []
+        search = query.strip().lower()
+        if search:
+            clauses.append("instr(lower(domain), ?) > 0")
+            args.append(search)
+        if scope is not None:
+            clauses.append("scope=?")
+            args.append(scope)
+        if scope_id is not None:
+            clauses.append("scope_id=?")
+            args.append(scope_id)
+        where = " AND ".join(clauses)
+        count = await self._fetch_one(
+            f"SELECT COUNT(*) AS n FROM domain_rules WHERE {where}", tuple(args))
+        rows = await self.conn.execute_fetchall(
+            f"SELECT * FROM domain_rules WHERE {where} ORDER BY id LIMIT ? OFFSET ?",
+            [*args, limit, offset])
+        return {"items": [_row_to_domain_rule(row) for row in rows],
+                "total": int(count["n"]) if count else 0,
+                "limit": limit, "offset": offset}
 
     # -- Guest vouchers / access codes (Captive Portal) -----------------------
 

@@ -515,14 +515,11 @@ def render_rules(rules: Iterable[Any], dns_servers: Iterable[tuple[str, Optional
     ``(scope, scope_id, ip)`` triples for the per-user/per-device
     upstream-DNS-server feature.
 
-    Ordering: rules are rendered global-first, then user-scope, then
-    device-scope, and within the same scope, block/redirect before allow.
-    For an EXACT-same-domain-string conflict, dnsmasq's own behaviour is
-    "the later directive for that tag wins", so this ordering lets a
-    narrower scope (or an allow rule) override a broader one. It does NOT
-    matter for the common case of allowing a more specific subdomain of a
-    blocked parent domain — dnsmasq's longest-match already picks the more
-    specific rule regardless of file order.
+    Only global domain rules are rendered: dnsmasq cannot safely scope
+    ``address=`` / ``server=/domain/`` directives to a client tag. Within
+    global rules, block/redirect directives precede allows, so a global
+    allow can override a block for the same domain. A more-specific subdomain
+    still wins by dnsmasq's longest-match rule regardless of file order.
     """
     lines = [
         "# Quota Manager — generated, do not edit by hand.",
@@ -536,6 +533,7 @@ def render_rules(rules: Iterable[Any], dns_servers: Iterable[tuple[str, Optional
             1 if getattr(r, "action", ACTION_BLOCK) == ACTION_ALLOW else 0,
         ),
     )
+    seen_block_directives: set[str] = set()
 
     scoped_skipped = 0
     for rule in ordered:
@@ -568,9 +566,14 @@ def render_rules(rules: Iterable[Any], dns_servers: Iterable[tuple[str, Optional
         if target is None:
             # Re-point the domain at the normal upstream chain, clearing any
             # broader blackhole for it.
-            lines.append(f"server=/{domain}/#")
+            directive = f"server=/{domain}/#"
         else:
-            lines.append(f"address=/{domain}/{target}")
+            directive = f"address=/{domain}/{target}"
+        if action == ACTION_BLOCK:
+            if directive in seen_block_directives:
+                continue
+            seen_block_directives.add(directive)
+        lines.append(directive)
 
     if scoped_skipped:
         log.warning("skipped %d per-user/per-device domain rule(s): dnsmasq "
@@ -600,28 +603,7 @@ def resolve_domain_status(domain: str, rules: Iterable[Any],
                           device_id: Optional[int] = None,
                           user_id: Optional[int] = None
                           ) -> tuple[str, Optional[Any]]:
-    """What would actually happen to a lookup for ``domain`` right now, for
-    ``device_id`` (optionally owned by ``user_id``) — or, with both left
-    ``None``, considering only global-scope rules (the aggregate "all
-    devices" history view, where no single device's rules apply).
-
-    Mirrors dnsmasq's own matching exactly, so this reports the SAME answer
-    the live config would give, not an approximation:
-
-    * longest-domain-match wins first (a rule for ``ads.example.com`` beats
-      one for ``example.com`` regardless of scope) — this is dnsmasq's own
-      matching rule, not an ordering choice made here;
-    * among rules tied on domain length, the same scope/action ordering
-      :func:`render_rules` renders in decides it (global < user < device;
-      allow after block within a scope) — because that ordering is exactly
-      "last directive for this tag wins", the last-sorted candidate here IS
-      the one dnsmasq would actually apply.
-
-    Returns ``(status, rule)`` where ``status`` is one of ``"blocked"``,
-    ``"allowed"``, ``"redirected"``, or ``"none"`` (no rule reaches this
-    domain for this device), and ``rule`` is the winning DomainRule (or
-    ``None`` for ``"none"``).
-    """
+    """Resolve the status the generated dnsmasq config applies to ``domain``.\n\n    ``device_id`` and ``user_id`` remain accepted for API compatibility, but\n    dnsmasq does not support safely scoping domain directives by client tag.\n    Like :func:`render_rules`, this helper therefore considers global rules\n    only; skipped per-person/per-device rules must not be reported as active.\n    Among global rules, the longest domain match wins, and an allow follows a\n    block for an exact same-domain conflict, matching dnsmasq's behavior.\n\n    Returns ``(status, rule)`` where ``status`` is one of ``"blocked"``,\n    ``"allowed"``, ``"redirected"``, or ``"none"``, and ``rule`` is the\n    winning global DomainRule (or ``None`` for ``"none"``).\n    """
     candidates = []
     for rule in rules:
         if not getattr(rule, "enabled", True):
@@ -632,26 +614,13 @@ def resolve_domain_status(domain: str, rules: Iterable[Any],
         if domain != rule_domain and not domain.endswith("." + rule_domain):
             continue  # dnsmasq's own domain match: exact, or a subdomain
         scope = getattr(rule, "scope", SCOPE_GLOBAL)
-        scope_id = getattr(rule, "scope_id", None)
         if scope == SCOPE_GLOBAL:
-            applies = True
-        elif scope == SCOPE_DEVICE:
-            applies = device_id is not None and scope_id == device_id
-        elif scope == SCOPE_USER:
-            applies = user_id is not None and scope_id == user_id
-        else:
-            applies = False
-        if applies:
             candidates.append(rule)
     if not candidates:
         return "none", None
-    # Longest domain match first (dnsmasq's real rule), then the same
-    # scope/action tiebreak render_rules sorts by — "last directive wins"
-    # for equally-specific rules, so the LAST item after this sort is the
-    # one actually in effect.
+    # Longest domain match first, then allow after block for an exact match.
     candidates.sort(key=lambda r: (
         len(getattr(r, "domain", "")),
-        _SCOPE_ORDER.get(getattr(r, "scope", SCOPE_GLOBAL), 0),
         1 if getattr(r, "action", ACTION_BLOCK) == ACTION_ALLOW else 0,
     ))
     winner = candidates[-1]

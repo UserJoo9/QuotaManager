@@ -894,6 +894,7 @@ def test_decline_random_falls_back_to_registered_block_when_fragment_unwritable(
     cfg.dhcp.reload_dnsmasq = False
     gw = Gateway(cfg)
     _get_loop().run_until_complete(gw.startup())
+    _cancel_maintenance(gw)
     try:
         _get_loop().run_until_complete(
             gw.service.set_decline_random_macs(True))
@@ -2954,6 +2955,205 @@ def test_dns_history_disabled_does_nothing(tmp_path):
         state = _get_loop().run_until_complete(
             gw.database.get_setting("dnslog_state", "{}"))
         assert state == "{}", "no read cursor is persisted when disabled"
+    finally:
+        _get_loop().run_until_complete(gw.shutdown())
+
+
+def test_maintenance_tick_schedules_dns_blocklist_check_without_waiting(tmp_path):
+    gw = Gateway(_cfg(tmp_path))
+    scheduled = []
+
+    async def ensure_period():
+        return None
+
+    async def stop_before_other_tick_work():
+        raise RuntimeError("stop test tick")
+
+    gw.service.ensure_period = ensure_period
+    gw._sync_dnsmasq_leases = stop_before_other_tick_work
+    gw.dns_blocklist_manager = object()
+    gw._schedule_dns_blocklist_refresh = lambda: scheduled.append(True)
+    try:
+        with pytest.raises(RuntimeError, match="stop test tick"):
+            _get_loop().run_until_complete(gw._maintenance_tick())
+        assert scheduled == [True]
+    finally:
+        _get_loop().run_until_complete(gw.shutdown())
+
+
+def test_dns_blocklist_refresh_task_is_single_and_applies_only_on_change(tmp_path):
+    gw = Gateway(_cfg(tmp_path))
+    applied = []
+
+    async def body():
+        class PendingManager:
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+                self.calls = 0
+                self.changed = True
+
+            async def refresh_due(self):
+                self.calls += 1
+                self.started.set()
+                await self.release.wait()
+                return self.changed
+
+        manager = PendingManager()
+        gw.dns_blocklist_manager = manager
+
+        async def apply_dns():
+            applied.append(True)
+
+        gw._apply_dns_now = apply_dns
+        gw._schedule_dns_blocklist_refresh()
+        gw._schedule_dns_blocklist_refresh()
+        await asyncio.wait_for(manager.started.wait(), timeout=1)
+        assert manager.calls == 1
+        manager.release.set()
+        await gw._dns_blocklist_task
+        assert applied == [True]
+
+        manager.changed = False
+        gw._schedule_dns_blocklist_refresh()
+        await gw._dns_blocklist_task
+        assert manager.calls == 2
+        assert applied == [True]
+
+    try:
+        _get_loop().run_until_complete(body())
+    finally:
+        _get_loop().run_until_complete(gw.shutdown())
+
+
+def test_shutdown_cancels_and_awaits_dns_blocklist_refresh(tmp_path):
+    gw = Gateway(_cfg(tmp_path))
+
+    async def body():
+        class StuckManager:
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.never = asyncio.Event()
+
+            async def refresh_due(self):
+                self.started.set()
+                await self.never.wait()
+
+        gw.dns_blocklist_manager = StuckManager()
+        gw._schedule_dns_blocklist_refresh()
+        await asyncio.wait_for(gw.dns_blocklist_manager.started.wait(), timeout=1)
+        task = gw._dns_blocklist_task
+        await gw.shutdown()
+        assert task is not None and task.cancelled()
+        assert gw._dns_blocklist_task is task
+
+    _get_loop().run_until_complete(body())
+
+
+def test_sync_dns_rules_includes_enabled_blocklist_domains(tmp_path):
+    gw = Gateway(_cfg(tmp_path))
+
+    class RecordingDnsManager:
+        rules = None
+        calls = 0
+
+        def apply(self, _devices, rules, _servers, _by_user, _static_map):
+            self.calls += 1
+            self.rules = list(rules)
+
+    async def body():
+        await gw.database.connect()
+        await gw.database.create_dns_blocklist(
+            "Feed", "https://lists.example/feed", {"ads.example"})
+        blocklist_reads = 0
+        original_list_rules = gw.database.list_enabled_dns_blocklist_rules
+
+        async def count_blocklist_reads():
+            nonlocal blocklist_reads
+            blocklist_reads += 1
+            return await original_list_rules()
+
+        gw.database.list_enabled_dns_blocklist_rules = count_blocklist_reads
+        recorder = RecordingDnsManager()
+        gw.dns_manager = recorder
+        await gw._sync_dns_rules()
+        await gw._sync_dns_rules()
+        assert recorder.rules is not None
+        assert [(rule.domain, rule.source) for rule in recorder.rules] == [
+            ("ads.example", "blocklist")]
+        assert recorder.calls == 1
+        assert blocklist_reads == 1
+
+        await gw.database.create_dns_blocklist(
+            "Second", "https://lists.example/second", {"tracker.example"})
+        await gw._sync_dns_rules()
+        assert recorder.calls == 2
+        assert blocklist_reads == 2
+
+        await gw.database.create_domain_rule(
+            "global", "block", "manual.example")
+        await gw._sync_dns_rules()
+        assert recorder.calls == 3
+        assert blocklist_reads == 3
+        assert {(rule.domain, rule.source) for rule in recorder.rules} == {
+            ("ads.example", "blocklist"),
+            ("tracker.example", "blocklist"),
+            ("manual.example", "manual"),
+        }
+        await gw.database.create_domain_rule(
+            "global", "block", "manual.example")
+        await gw._apply_dns_now()
+        assert recorder.calls == 3
+
+    try:
+        _get_loop().run_until_complete(body())
+    finally:
+        _get_loop().run_until_complete(gw.shutdown())
+
+
+def test_sync_dns_rules_invalidates_for_device_dns_and_static_lease_changes(
+        tmp_path):
+    gw = Gateway(_cfg(tmp_path))
+
+    class RecordingDnsManager:
+        calls = 0
+        devices = []
+        servers = []
+        static_map = {}
+
+        def apply(self, devices, _rules, servers, _by_user, static_map):
+            self.calls += 1
+            self.devices = list(devices)
+            self.servers = list(servers)
+            self.static_map = dict(static_map)
+
+    async def body():
+        await gw.database.connect()
+        recorder = RecordingDnsManager()
+        gw.dns_manager = recorder
+        await gw._sync_dns_rules()
+        await gw._sync_dns_rules()
+        assert recorder.calls == 1
+
+        dev = await gw.database.upsert_device(
+            "aa:bb:cc:dd:ee:90", name="Client")
+        await gw._sync_dns_rules()
+        assert recorder.calls == 2
+        assert dev.id in [device.id for device in recorder.devices]
+
+        await gw.database.update_user(dev.user_id, dns_server="1.1.1.1")
+        await gw._sync_dns_rules()
+        assert recorder.calls == 3
+        assert ("user", dev.user_id, "1.1.1.1") in recorder.servers
+
+        await gw.database.set_static_lease(
+            dev.mac, "192.168.1.190", "Client")
+        await gw._sync_dns_rules()
+        assert recorder.calls == 4
+        assert recorder.static_map[dev.mac] == ("192.168.1.190", "")
+
+    try:
+        _get_loop().run_until_complete(body())
     finally:
         _get_loop().run_until_complete(gw.shutdown())
 

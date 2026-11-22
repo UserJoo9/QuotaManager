@@ -17,7 +17,7 @@ the project layout, tests, and the release process.
 - [The maintenance loop](#the-maintenance-loop)
 - [Quota model](#quota-model)
 - [Speed shaping](#speed-shaping)
-- [DNS filtering (domain rules, presets, per-client DNS servers)](#dns-filtering-domain-rules-presets-per-client-dns-servers)
+- [DNS filtering (domain rules, presets, subscriptions, per-client DNS servers)](#dns-filtering-domain-rules-presets-subscriptions-per-client-dns-servers)
 - [Strong (WAN) mode](#strong-wan-mode)
 - [Tailscale remote access](#tailscale-remote-access)
 - [VPN share](#vpn-share)
@@ -542,7 +542,7 @@ Two engine-side details worth knowing:
 
 ---
 
-## DNS filtering (domain rules, presets, per-client DNS servers)
+## DNS filtering (domain rules, presets, subscriptions, per-client DNS servers)
 
 `quota/dns_rules.py` is a **third** generated-config layer, alongside
 nftables (packet accounting/blocking), tc (speed shaping), and
@@ -568,7 +568,8 @@ by default, alongside `quota-gateway.conf` and `quota-dnslog.conf`):
 
 ```
 domain_rules (DB) ──┐
-dns_presets  (DB) ──┼─► DnsRuleManager.apply() ─► write quota-tags.conf
+dns_presets  (DB) ──┤
+dns_blocklist_domains (DB) ─┼─► DnsRuleManager.apply() ─► write quota-tags.conf
 users.dns_server ───┤                              write quota-domains.conf
 devices.dns_server ─┘                              (only if content changed)
                                                             │
@@ -577,14 +578,26 @@ devices.dns_server ─┘                              (only if content changed)
                                                   systemctl restart dnsmasq
 ```
 
-Both files are rewritten and diffed on every maintenance tick and
-immediately after any `/api/dns/*` (or `/api/{users,devices}/{id}/dns`)
-edit — same signature-gated pattern as the nftables blocked set and the tc
-tree: an unchanged render never touches dnsmasq. Unlike a SIGHUP (which only
-re-reads `/etc/hosts` and lease-adjacent files), new `address=`/`server=`/
-`dhcp-host=` lines need a **restart** to take effect, so a rule change costs
-every client a brief (~1 s) DNS blip — acceptable for an admin edit, not
-something that happens on its own.
+The first maintenance sync after startup applies the current database state.
+After that, each 15-second tick checks the in-process
+`Database.dns_rules_revision` against the last applied revision. If they
+match, `_sync_dns_rules` returns before loading devices, rules, or blocklist
+memberships, so a large feed is not read from SQLite or rendered on every
+tick. Writes that can affect generated DNS files advance the revision:
+domain-rule and preset changes, blocklist membership or enabled-state changes,
+device creation/removal or DNS-server/owner changes, user DNS-server changes,
+and static-lease changes. The immediate API apply uses the same revision gate;
+the explicit **Apply DNS** endpoint bypasses the gate by design. The revision
+is process-local, so a restart always performs a full initial sync.
+
+When a revision changes, both files are rendered and compared with their
+current contents — the same signature-gated pattern as the nftables blocked
+set and tc tree. An unchanged render does not touch dnsmasq. Unlike a SIGHUP
+(which only re-reads `/etc/hosts` and lease-adjacent files), new
+`address=`/`server=`/`dhcp-host=` lines need a **restart** to take effect, so
+a real config change costs every client a brief (~1 s) DNS blip. Before the
+restart, the complete dnsmasq configuration is validated; if it is rejected,
+the previous generated files are restored.
 
 **Blocklist presets** (`ads-tracking`, `social-media`, `streaming`,
 `gambling`) are curated source lists — hosts-format or AdBlock-Plus-format —
@@ -597,6 +610,63 @@ leaves an orphaned rule set behind. Only the network-address-shaped subset
 of an AdBlock-Plus list (`||domain^`) has a DNS-layer equivalent —
 element-hiding, path, and regex rules are dropped during compilation, which
 is an honest ceiling, not a bug.
+
+**URL-fed blocklist subscriptions** (`dns_blocklists` and
+`dns_blocklist_domains`) are operator-managed sources, independent of both
+`domain_rules` and the built-in `dns_presets`. A source stores its optional
+display name, unique normalized HTTPS URL, enabled flag, creation time, last
+attempt/success timestamps, parsed-domain count, and a sanitized last-error
+category. The membership table has one `(blocklist_id, domain)` row per
+source/domain pair, a cascading foreign key, and a domain index. A domain may
+belong to several feeds: refresh replaces only one feed's memberships,
+disable keeps its cached rows, and removal cascades only that feed. The
+renderer combines distinct domains from enabled feeds with existing enabled
+rules; feed rules are global blocks, and a manual global allow can override a
+block for the same domain. Per-person and per-device domain rules are skipped
+because dnsmasq cannot safely apply those directives by client tag (see #43).
+Per-client DNS-server overrides remain supported through DHCP tags.
+
+The Security page lets an administrator select individual subscriptions or all
+subscriptions and remove the selection. It sends the existing authenticated
+`DELETE /api/dns/blocklists/{id}` request for each source, sequentially. A
+partial failure is reported; sources that remain are kept selected so the
+administrator can retry. This does not remove built-in presets or manual DNS
+rules.
+
+`DnsBlocklistManager` in `quota/dns_blocklists.py` accepts one direct HTTPS
+hosts-format or AdBlock Plus feed at a time. It does not scrape Firebog's
+catalogue page. It fetches and parses before saving a new source, uses the
+existing parser and `normalize_pattern`, validates that every resolved
+destination is public, pins the chosen address for TLS-verified HTTPS, and
+revalidates every redirect. Fetches run outside the asyncio event loop and
+are limited to 45 seconds, 32 MiB, five redirects, and 250,000 normalized
+domains per feed. Enabled custom feeds together are limited to 750,000
+distinct domains. The manager allows two different feeds to refresh at once
+and prevents overlapping refreshes for one feed.
+
+A valid non-empty refresh replaces one feed's memberships and success
+metadata in a single SQLite transaction. A network, validation, parse, or
+capacity failure records a bounded error category and the attempt time, but
+keeps that feed's last good domains and last successful timestamp. An enabled
+feed becomes due 24 hours after its last attempt, so a failing feed is not
+retried on each 15-second maintenance tick. Due refresh work is scheduled in
+the background; a changed effective DNS set goes through the usual
+signature-gated DNS apply. The internal feed-entry count is operational
+metadata; it is not a count of actual blocked requests or users' activity.
+
+The Security page requests at most 50 manual rules at a time, searches on the
+server, and shows previous/next page navigation. The database query caps
+`limit` at 100 and uses deterministic ID ordering. The legacy
+`GET /api/dns/rules` response remains an array for existing callers; the
+dashboard uses `GET /api/dns/rules/page?limit=50&offset=0&q=` with an
+`{items, total, limit, offset}` response. Built-in preset entries are not
+included in this manual-rule page.
+
+The Security summary reports the protection state and selected level without
+calling downloaded feed entries “blocked domains.” DNS filtering only knows
+the queried domain: it cannot block a video ID, URL path, or a specific page
+inside a shared domain. Clients using external DoH/DoT or a hardcoded server
+IP can also bypass DNS-layer rules, as described below.
 
 **Blacklist/allow-list a domain straight from browsing history**: the
 History tab's per-domain rows carry a live status badge (blocked / allowed /
@@ -1838,6 +1908,11 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | GET | `/api/history/{device_id}?window=24&limit=100` | a device's DNS browsing history — `top_domains`, `activity` (minute buckets), `recent` (latest queries), `total_queries`. Auth-gated; `window` hours clamped 1–336, `limit` capped. Bandwidth is NOT duplicated here — the History tab reads live/per-period bytes from the dashboard payload. Every `top_domains`/`recent` row also carries a `status` (`blocked`/`allowed`/`redirected`/`none`) from `dns_rules.resolve_domain_status`, powering the History tab's filter badges + quick-action buttons |
 | GET | `/api/history/live?device_id=` | real-time live traffic ranking and bandwidth monitoring: ranks connected devices by active download/upload bps (derived from `EngineSnapshot`), resolves active platform/application via DNS classification (e.g. YouTube, TikTok, Netflix, Zoom, Steam, Shahid VIP), calculates bandwidth share %, spotlights the `top_consumer` hero card, and feeds the rolling SVG throughput graph. Auth-gated. |
 | GET/POST/PATCH/DELETE | `/api/dns/rules` | domain-filtering rules: list (optionally `?scope=&scope_id=`) / create (`{"scope","scope_id","action":"block"\|"allow"\|"redirect","domain","target_ip"}`) / enable-disable via PATCH / delete |
+| GET | `/api/dns/rules/page?limit=50&offset=0&q=` | bounded manual-rule page: `{items, total, limit, offset}`; the page size defaults to 50 and is capped at 100, query searches domains, and preset-generated rows are excluded. The legacy `/api/dns/rules` array response is retained |
+| GET/POST | `/api/dns/blocklists` | list subscribed feed status / add `{name?, url}` for a direct HTTPS hosts or AdBlock Plus feed; an omitted name defaults to the source hostname. The source is saved enabled only after a valid initial fetch and parse |
+| POST | `/api/dns/blocklists/{id}/refresh` | manually refresh one source; on failure it reports a sanitized error and retains the last successful domain memberships |
+| PATCH | `/api/dns/blocklists/{id}` | set `{ "enabled": true\|false }`; disabling preserves cached memberships |
+| DELETE | `/api/dns/blocklists/{id}` | remove a source and cascade-delete only its owned domain memberships |
 | POST | `/api/dns/rules/quick` | one-click block/allow from a History-tab domain row: `{"domain","action":"block"\|"allow","scope":"global"\|"device","device_id"}` |
 | POST | `/api/dns/import` | paste raw hosts-format or AdBlock-Plus-format blocklist text (`{"text","format":"auto"\|"hosts"\|"adblock","scope","scope_id","action"}`) → bulk-creates domain rules in one transaction |
 | GET | `/api/dns/presets` | list built-in blocklist presets (ads-tracking, social-media, streaming, gambling) with their enabled state + domain count |

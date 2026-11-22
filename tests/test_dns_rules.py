@@ -179,6 +179,42 @@ def test_render_rules_global_allow_renders_after_global_block():
     assert text.index("address=/example.com/0.0.0.0") < text.index("server=/example.com/#")
 
 
+def test_render_blocklist_domain_deduplicates_and_preserves_manual_allows():
+    rules = [
+        _FakeRule("global", None, "block", "ads.example.com"),
+        _FakeRule("global", None, "block", "ads.example.com"),
+        _FakeRule("global", None, "allow", "ads.example.com"),
+        _FakeRule("device", 7, "allow", "ads.example.com"),
+    ]
+    text = dr.render_rules(rules, [], {})
+
+    assert text.count("address=/ads.example.com/0.0.0.0") == 1
+    assert text.index("address=/ads.example.com/0.0.0.0") < text.index(
+        "server=/ads.example.com/#")
+    assert text.count("server=/ads.example.com/#") == 1
+    assert "tag:qmdev7 server=/ads.example.com/#" not in text
+    assert dr.resolve_domain_status(
+        "ads.example.com", rules[:2], None, None)[0] == "blocked"
+
+
+def test_resolve_domain_status_ignores_unrendered_scoped_domain_rules():
+    global_block = _FakeRule("global", None, "block", "ads.example.com")
+    rules = [
+        global_block,
+        _FakeRule("device", 7, "allow", "ads.example.com"),
+        _FakeRule("user", 42, "allow", "ads.example.com"),
+    ]
+
+    status, winner = dr.resolve_domain_status(
+        "ads.example.com", rules, device_id=7, user_id=42)
+
+    assert status == "blocked"
+    assert winner is global_block
+    assert dr.resolve_domain_status(
+        "ads.example.com", rules[1:], device_id=7, user_id=42) == (
+            "none", None)
+
+
 def test_render_rules_dns_server_overrides():
     text = dr.render_rules([], [("device", 5, "1.1.1.1"), ("global", None, "9.9.9.9")], {})
     assert "dhcp-option=tag:qmdev5,option:dns-server,1.1.1.1" in text

@@ -144,6 +144,44 @@ def test_guest_voucher_admin_ui_uses_existing_admin_routes():
     assert ".voucher-row{grid-template-columns:repeat(2,minmax(0,1fr))}" in styles
 
 
+def test_security_dns_uses_bounded_searchable_rule_pages():
+    page = (UI / "js" / "pages" / "securityDns.js").read_text(encoding="utf-8")
+    assert "const RULE_PAGE_SIZE = 50;" in page
+    assert "/api/dns/rules/page?limit=${RULE_PAGE_SIZE}&offset=" in page
+    assert "dns.domains" not in page
+    assert "p.domain_count" not in page
+    assert "dns.ruleTotal" in page
+
+
+def test_security_dns_exposes_direct_feed_subscription_actions():
+    page = (UI / "js" / "pages" / "securityDns.js").read_text(encoding="utf-8")
+    for route in ('api.get("/api/dns/blocklists")',
+                  'api.post("/api/dns/blocklists"',
+                  '/api/dns/blocklists/${',
+                  '/refresh'):
+        assert route in page
+    for lang in ("ar", "en"):
+        keys = _keys(lang)
+        assert {"dns.feed.title", "dns.feed.url", "dns.feed.add",
+                "dns.rules.search", "dns.rules.next"} <= keys
+
+
+def test_security_dns_supports_bulk_feed_selection_and_removal():
+    page = (UI / "js" / "pages" / "securityDns.js").read_text(encoding="utf-8")
+    for control in ("dns-feed-select-all", "dns-feed-select",
+                    "dns-feed-remove-selected", "dns-feed-remove-all"):
+        assert control in page
+    for behavior in ("dns.selectedFeeds", "dns.feed.bulkRemove.title",
+                     "dns.feed.bulkRemove.partial"):
+        assert behavior in page
+    for lang in ("ar", "en"):
+        keys = _keys(lang)
+        assert {"dns.feed.selectAll", "dns.feed.removeSelected",
+                "dns.feed.removeAll", "dns.feed.bulkRemove.title",
+                "dns.feed.bulkRemove.selected", "dns.feed.bulkRemove.all",
+                "dns.feed.bulkRemove.confirm", "dns.feed.bulkRemove.partial"} <= keys
+
+
 def test_guest_voucher_portal_has_accessible_safe_redemption_flow():
     portal = (UI / "guest_pending.html").read_text(encoding="utf-8")
     assert 'id="voucher-form"' in portal
