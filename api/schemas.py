@@ -443,6 +443,16 @@ class GatewayOff(BaseModel):
     poweroff: bool = False
 
 
+class DiskShareAccess(BaseModel):
+    """Who may open a share: ``access="all"`` = every device with internet at
+    the ``writable`` level, ``"selected"`` = only the devices listed;
+    ``devices`` gives single devices their own level ("rw" | "ro" | "none")."""
+
+    writable: bool = True
+    access: str = Field("all", pattern="^(all|selected)$")
+    devices: dict[str, str] = Field(default_factory=dict)
+
+
 class SystemRestart(BaseModel):
     """Restart the gateway service, or (``machine``) reboot the computer."""
 
@@ -470,6 +480,8 @@ class DiskShareCreate(BaseModel):
     source: str = Field("disk", pattern="^(disk|network)$")
     name: str = Field(..., pattern="^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
     writable: bool = True
+    access: str = Field("all", pattern="^(all|selected)$")
+    devices: dict[str, str] = Field(default_factory=dict)
     uuid: Optional[str] = Field(None, pattern="^[A-Za-z0-9-]{4,64}$")
     remote: Optional[str] = Field(None, max_length=300)
     user: Optional[str] = Field(None, pattern="^[A-Za-z0-9._@\\\\-]{0,64}$")

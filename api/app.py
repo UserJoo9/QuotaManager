@@ -55,7 +55,7 @@ from api.schemas import (BundleUpdate, ConsumptionSpoofRequest, DeviceCreate,
                          UpdateSettings, UserCreate, UserUpdate,
                          VpnConnectRequest, VpnNodeCreate, VpnNodeUpdate,
                          VpnRoutingUpdateRequest, VpnSettingsUpdate,
-                         DiskShareCreate, FactoryReset, GatewayOff, SystemRestart,
+                         DiskShareAccess, DiskShareCreate, FactoryReset, GatewayOff, SystemRestart,
                          WanRenewConfig, WanTest, WanUpdate,
                          TailscaleDisconnect)
 from api import waf as _waf
@@ -319,7 +319,8 @@ def create_app(
 ) -> FastAPI:
     web_cfg: WebConfig = web_config or WebConfig()
     tailscale = tailscale_manager or TailscaleManager()
-    from quota.disk_share import (DiskShareManager, parse_shares as _parse_disk_shares,
+    from quota.disk_share import (DiskShareManager, clean_devices as _clean_share_devices,
+                                  parse_shares as _parse_disk_shares,
                                   valid_remote as _valid_remote)
     disk_shares = disk_share_manager or DiskShareManager()
     waf_cfg: WafConfig = waf_config or WafConfig()
@@ -2153,6 +2154,7 @@ def create_app(
             user = (body.user or "").strip()
             entry = {"name": body.name, "source": "network", "remote": remote,
                      "user": user, "writable": body.writable}
+            entry.update(access=body.access, devices=_clean_share_devices(body.devices))
             if user:
                 await asyncio.to_thread(disk_shares.save_credentials, body.name,
                                         user, body.password or "")
@@ -2166,11 +2168,25 @@ def create_app(
             if not any(d["uuid"] == body.uuid for d in disks):
                 raise HTTPException(404, "disk not found (unplugged, or it holds the system)")
             entry = {"name": body.name, "source": "disk", "uuid": body.uuid,
-                     "writable": body.writable}
+                     "writable": body.writable, "access": body.access,
+                     "devices": _clean_share_devices(body.devices)}
             label = "a disk"
         shares.append(entry)
         out = await _disk_share_apply(shares)
         await database.add_event(f"Shared {label} on the network as {body.name}", "info")
+        return out
+
+    @app.put("/api/disks/share/{name}", dependencies=[Depends(_require_auth)])
+    async def set_disk_share_access(name: str, body: DiskShareAccess) -> dict[str, Any]:
+        """Change who may open a share and at what level."""
+        shares = await _disk_share_list()
+        share = next((s for s in shares if s["name"].lower() == name.lower()), None)
+        if share is None:
+            raise HTTPException(404, "no such share")
+        share.update(writable=body.writable, access=body.access,
+                     devices=_clean_share_devices(body.devices))
+        out = await _disk_share_apply(shares)
+        await database.add_event(f"Access to disk share {share['name']} changed", "info")
         return out
 
     @app.delete("/api/disks/share/{name}", dependencies=[Depends(_require_auth)])
@@ -4270,7 +4286,22 @@ def create_app(
             except Exception:  # noqa: BLE001 — never block startup
                 log.exception("disk shares: restore failed")
 
+        async def _disk_heal_loop():
+            # A disk unplugged and plugged back in, or a network folder that
+            # comes back, is picked up within a minute.
+            while True:
+                try:
+                    await asyncio.sleep(60)
+                    shares = await _disk_share_list()
+                    if shares:
+                        await asyncio.to_thread(disk_shares.heal, shares)
+                except asyncio.CancelledError:
+                    break
+                except Exception:  # noqa: BLE001
+                    log.exception("disk shares: heal failed")
+
         disk_restore_task = asyncio.get_running_loop().create_task(_restore_disk_shares())
+        disk_heal_task = asyncio.get_running_loop().create_task(_disk_heal_loop())
         try:
             yield
         finally:
@@ -4278,6 +4309,7 @@ def create_app(
             restore_task.cancel()
             share_cleanup_task.cancel()
             disk_restore_task.cancel()
+            disk_heal_task.cancel()
             try:
                 await push_task
             except (asyncio.CancelledError, Exception):
