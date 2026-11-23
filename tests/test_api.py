@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from pathlib import Path
 import time
 from zoneinfo import ZoneInfo
 
@@ -2480,15 +2481,17 @@ def test_updates_unwired_404_and_snapshot_none(client):
     assert c.get("/api/dashboard").json()["update"] is None
 
 
-def test_updates_round_trip(tmp_path):
+def test_updates_round_trip(tmp_path, signed_release):
     """The Admin-tab update flow: settings toggle, force-check finds a newer
     release, the changelog rides the state, and the install path runs."""
     from quota.updater import Updater
 
     RELEASE = {
         "tag_name": "v0.3.1",
-        "assets": [{"name": "quota-manager_0.3.1_all.deb",
-                    "browser_download_url": "https://example/deb"}],
+        "assets": [
+            {"name": name, "browser_download_url": f"https://github.com/example/release/{name}"}
+            for name in signed_release
+        ],
     }
     CHANGELOG = (
         "# Changelog\n\n## [0.3.1]\n### Fixed\n- the bug.\n\n"
@@ -2501,11 +2504,15 @@ def test_updates_round_trip(tmp_path):
     _get_loop().run_until_complete(database.connect())
 
     installed = []
+
+    def download(url, dest, timeout=120):
+        Path(dest).write_bytes(signed_release[url.rsplit("/", 1)[-1]])
+
     up = Updater(
         database, current_version="0.2.0",
         fetch_json=lambda url, timeout=20: RELEASE,
         fetch_text=lambda url, timeout=20: CHANGELOG,
-        download=lambda url, dest, timeout=120: None,
+        download=download,
         run_command=lambda argv, timeout=15: installed.append(argv) or (0, ""),
         install_kind="deb")
     app = create_app(database, service, holder, updater=up)
@@ -2538,15 +2545,18 @@ def test_updates_round_trip(tmp_path):
             assert [x["version"] for x in st["changelog"]] == ["0.3.1"]
             # the snapshot carries the same availability
             assert c.get("/api/dashboard").json()["update"]["available"] is True
-            # manual install: the endpoint runs the download + systemd-run path
+            # The authenticated endpoint also refuses an invalid signature.
+            signature = signed_release["SHA256SUMS.sig"]
+            signed_release["SHA256SUMS.sig"] = b"invalid signature"
+            r = c.post("/api/updates/install")
+            assert r.status_code == 200, r.text
+            assert r.json()["ok"] is False
+            assert not installed
+
+            signed_release["SHA256SUMS.sig"] = signature
             r = c.post("/api/updates/install")
             assert r.status_code == 200, r.text
             assert r.json()["ok"] is True
-            import time as _t
-            for _ in range(50):
-                if installed:
-                    break
-                _t.sleep(0.02)
             assert installed and installed[0][0] == "systemd-run"
             st = c.get("/api/updates").json()
             assert st["available"] is False  # latest cleared after install
