@@ -777,6 +777,17 @@ drops internet briefly) re-dials on its own. Both only run while ppp0 is
 actually **up** (a dead dial has nothing to renew into), and the last-renewed
 timestamp is persisted so a gateway restart never re-renews mid-schedule.
 
+### Request body inspection by the WAF
+
+`waf.max_body_bytes` (default 1 MiB) limits the bytes buffered to inspect
+`POST`, `PUT`, `PATCH`, and `DELETE` bodies. The WAF checks the actual byte
+count while reading, even when the client omits `Content-Length`. Strict mode
+returns HTTP 413 for an oversized body before the route runs. Log mode records
+the event and forwards the entire stream, including the bytes read before
+the limit was reached, without auto-banning the client. The local-subnet exemption and WAF off mode
+bypass inspection. Routes that accept large inputs still need their own limits
+when WAF blocking is disabled or exempted.
+
 ### Tailscale remote access
 
 `quota/tailscale.py` (`TailscaleManager`) manages the official `tailscale`

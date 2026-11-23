@@ -37,6 +37,8 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                PlainTextResponse, RedirectResponse,
                                StreamingResponse)
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from contextlib import asynccontextmanager
 
 from api.schemas import (BundleUpdate, ConsumptionSpoofRequest, DeviceCreate,
@@ -4349,18 +4351,35 @@ def create_app(
             if holder else "lan"
         return _waf.resolve_mode(getattr(waf_cfg, "mode", "auto"), topology)
 
-    @app.middleware("http")
-    async def _security_middleware(request: Request,
-                                   call_next) -> Response:
-        """WAF inspection + CSRF custom-header guard + security headers.
+    def _security_middleware(app: ASGIApp) -> ASGIApp:
+        async def dispatch(scope: Scope, receive: Receive, send: Send) -> None:
+            if scope["type"] != "http":
+                await app(scope, receive, send)
+                return
 
-        Order: WAF first (reject the request before any handler runs), then
-        CSRF (a session-bearing cross-site mutation must carry ``X-QM-CSRF``),
-        then the response is stamped with the security headers. A WAF crash
+            body = _waf.InspectionBody(receive)
+            request = Request(scope, receive=body.receive)
+            response = await _security_response(request, body)
+            if response is not None:
+                await response(scope, body.receive, send)
+                return
+
+            async def send_with_security_headers(message: Message) -> None:
+                if message["type"] == "http.response.start":
+                    _stamp_security_headers(request.url.path, MutableHeaders(scope=message))
+                await send(message)
+
+            await app(scope, body.receive, send_with_security_headers)
+        return dispatch
+
+    async def _security_response(request: Request,
+                                 body: _waf.InspectionBody) -> Response | None:
+        """Return an early response for captive guests, WAF, or CSRF checks.
+
+        WAF runs before CSRF and can reject the request before the handler. A WAF crash
         fails CLOSED in strict mode (503) — the dashboard becomes unreachable
         rather than silently unprotected — and OPEN (pass + log) in log mode.
         """
-        response: Response | None = None
         try:
             # Captive portal redirection for pending guests
             host = request.client.host if request.client else ""
@@ -4385,7 +4404,7 @@ def create_app(
 
             waf_mode = _waf_mode()
             if waf_mode != "off":
-                blocked = await _waf_inspect(request, waf_mode)
+                blocked = await _waf_inspect(request, body, waf_mode)
                 if blocked is not None:
                     return blocked
             # CSRF: a state-changing request carrying a valid session cookie
@@ -4412,11 +4431,9 @@ def create_app(
                 return JSONResponse(
                     {"detail": "security layer unavailable"},
                     status_code=503)
-        response = await call_next(request)
-        _stamp_security_headers(request.url.path, response)
-        return response
+        return None
 
-    async def _waf_inspect(request: Request,
+    async def _waf_inspect(request: Request, body: _waf.InspectionBody,
                            waf_mode: str) -> Response | None:
         """Run the WAF checks; return a Response to short-circuit, else None."""
         host = request.client.host if request.client else ""
@@ -4432,10 +4449,15 @@ def create_app(
             return None
 
         # -- cheap whole-request caps (before touching the body) --------------
+        max_body_bytes = getattr(cfg, "max_body_bytes", 1_048_576)
         cl = request.headers.get("content-length", "")
-        if cl.isdigit() and int(cl) > getattr(cfg, "max_body_bytes", 1_048_576):
-            return await _waf_block(request, host, now, waf_mode,
-                                    "oversized-body", "request-size", cl)
+        if cl.isascii() and cl.isdecimal():
+            # Compare decimal strings so even a long header needs no bigint.
+            declared = cl.lstrip("0") or "0"
+            cap = str(max_body_bytes)
+            if (len(declared), declared) > (len(cap), cap):
+                return await _waf_block(request, host, now, waf_mode,
+                                        "oversized-body", "request-size", "", status_code=413)
         if len(request.headers) > getattr(cfg, "max_headers", 40):
             return await _waf_block(request, host, now, waf_mode,
                                     "too-many-headers", "request-size", "")
@@ -4447,11 +4469,10 @@ def create_app(
         # -- signatures over path / query / body ------------------------------
         body_text = ""
         if request.method in ("POST", "PUT", "PATCH", "DELETE"):
-            try:
-                raw = await request.body()
-            except Exception:  # noqa: BLE001
-                raw = b""
-            body_text = raw.decode("utf-8", "replace")
+            body_text = await body.inspect(max_body_bytes)
+            if body_text is None:
+                return await _waf_block(request, host, now, waf_mode,
+                                        "oversized-body", "request-size", "", status_code=413)
         rule = _waf.classify(
             request.method, request.url.path, request.url.query,
             body_text, dict(request.headers))
@@ -4479,7 +4500,7 @@ def create_app(
 
     async def _waf_block(request: Request, host: str, now: float,
                          waf_mode: str, category: str, rule_id: str,
-                         extra: str) -> Response | None:
+                         extra: str, *, status_code: int = 403) -> Response | None:
         """Log a WAF hit, feed the auto-ban, and (in strict mode) reject."""
         where = f"{request.url.path}" + (f"?{extra}" if extra else "")
         message = (f"WAF {category} ({rule_id}) from {host} "
@@ -4493,6 +4514,9 @@ def create_app(
             await database.add_event(message, "warn")
         except Exception:  # noqa: BLE001
             pass
+        if waf_mode != "strict":
+            return None  # Log-only hits never feed the firewall auto-ban.
+
         waf_state.register_block(host, now)
         auto_after = int(getattr(waf_cfg, "auto_ban_after", 8) or 0)
         if auto_after and firewall is not None and \
@@ -4504,19 +4528,17 @@ def create_app(
                     await firewall.ban_ip(host, seconds, "waf")
                 except Exception:  # noqa: BLE001
                     log.exception("waf auto-ban failed")
-        if waf_mode == "strict":
-            return JSONResponse(
-                {"detail": f"blocked by WAF ({category})"},
-                status_code=403)
-        return None  # log-only (LAN): record + pass through
+        return JSONResponse(
+            {"detail": f"blocked by WAF ({category})"},
+            status_code=status_code)
 
-    def _stamp_security_headers(path: str, response: Response) -> None:
-        response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("X-Frame-Options", "DENY")
-        response.headers.setdefault("Referrer-Policy", "no-referrer")
+    def _stamp_security_headers(path: str, headers: MutableHeaders) -> None:
+        headers.setdefault("X-Content-Type-Options", "nosniff")
+        headers.setdefault("X-Frame-Options", "DENY")
+        headers.setdefault("Referrer-Policy", "no-referrer")
         # If the dashboard ever sits on a public address, search engines must
         # never index the admin UI (robots.txt + this header both say so).
-        response.headers.setdefault("X-Robots-Tag", "noindex, nofollow")
+        headers.setdefault("X-Robots-Tag", "noindex, nofollow")
         # Sensitive-data protection (anti-replay / anti-cache): every DATA
         # response (API + the HTML pages) is marked no-store so the browser
         # never writes the payloads — MACs, usage, history, events, log lines —
@@ -4526,30 +4548,32 @@ def create_app(
         # Without a header browsers cache them heuristically for days, so after an
         # update the dashboard kept running the OLD app.js against the NEW API.
         if path.startswith(("/assets/", "/js/", "/css/", "/fonts/")) or path == "/logo.svg":
-            response.headers.setdefault("Cache-Control", "no-cache")
+            headers.setdefault("Cache-Control", "no-cache")
         if path.startswith(("/api", "/report", "/milestone", "/share", "/guest-pending", "/guest/pending", "/spoof")) or path == "/":
-            response.headers.setdefault("Cache-Control",
-                                        "no-store, no-cache, must-revalidate, max-age=0")
-            response.headers.setdefault("Pragma", "no-cache")
-            response.headers.setdefault("Expires", "0")
+            headers.setdefault("Cache-Control",
+                               "no-store, no-cache, must-revalidate, max-age=0")
+            headers.setdefault("Pragma", "no-cache")
+            headers.setdefault("Expires", "0")
         # Strict CSP for the dashboard + API. /report, /milestone, /share, the guest
         # portal and the calibration page carry inline scripts, so they get the
         # looser (still-useful) profile (a strict script-src blocked the guest
         # page's status polling and its "Check now" button).
         if path.startswith(("/report", "/milestone", "/share", "/guest/pending", "/spoof")):
-            response.headers.setdefault(
+            headers.setdefault(
                 "Content-Security-Policy",
                 "default-src 'self'; style-src 'self' 'unsafe-inline'; "
                 "img-src 'self' data: blob:; connect-src 'self' ws: wss:; "
                 "script-src 'self' 'unsafe-inline'; base-uri 'self'; "
                 "frame-ancestors 'none'; form-action 'self'")
         else:
-            response.headers.setdefault(
+            headers.setdefault(
                 "Content-Security-Policy",
                 "default-src 'self'; script-src 'self'; "
                 "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
                 "connect-src 'self' ws: wss:; font-src 'self'; "
                 "base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
+
+    app.add_middleware(_security_middleware)
 
     # The dashboard used to live under /ui/ while the classic one sat at "/".
     # Old bookmarks and any cached page still point there: send them to the same

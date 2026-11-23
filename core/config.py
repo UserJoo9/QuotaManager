@@ -556,14 +556,15 @@ class WafConfig:
     enabled: bool = True
     #: "auto" | "strict" | "log" | "off"  ("auto" = strict on WAN, log on LAN).
     mode: str = "auto"
-    #: Body size cap (bytes) — larger requests are 413'd before parsing.
+    #: WAF inspection cap in bytes. Strict mode returns 413 on overflow;
+    #: log mode records the overflow and passes the original stream through.
     max_body_bytes: int = 1_048_576
     #: Max request header count and per-header bytes (431 on overflow).
     max_headers: int = 40
     max_header_bytes: int = 8_192
     #: "closed" (unreachable rather than unprotected) | "open" (pass through).
     fail_mode: str = "closed"
-    #: WAF hits from one source within ``ban_window_seconds`` that trigger an
+    #: Strict-mode WAF hits within ``ban_window_seconds`` that trigger an
     #: automatic firewall IP ban (``0`` disables the auto-ban).
     auto_ban_after: int = 8
     ban_seconds: int = 1800

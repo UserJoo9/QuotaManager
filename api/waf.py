@@ -28,6 +28,46 @@ from __future__ import annotations
 import ipaddress
 import re
 
+from starlette.types import Message, Receive
+
+
+class InspectionBody:
+    """Buffer a bounded HTTP body for inspection, then replay the same bytes."""
+
+    def __init__(self, receive: Receive) -> None:
+        self._receive = receive
+        self._prefix: bytearray | None = None
+        self._more_body = True
+        self._pending: Message | None = None
+
+    async def inspect(self, limit: int) -> str | None:
+        """Return decoded text, or None at the first chunk that exceeds the cap."""
+        prefix = self._prefix = bytearray()
+        while self._more_body:
+            message = await self._receive()
+            if message["type"] == "http.disconnect":
+                self._pending = message
+                return ""
+            chunk = message.get("body", b"")
+            if len(chunk) > limit - len(prefix):
+                # Log mode still needs to pass this event on. Keep the original
+                # message without copying its bytes into the inspection buffer.
+                self._pending = message
+                return None
+            prefix.extend(chunk)
+            self._more_body = message.get("more_body", False)
+        return prefix.decode("utf-8", "replace")
+
+    async def receive(self) -> Message:
+        if self._prefix is not None:
+            prefix, self._prefix = self._prefix, None
+            return {"type": "http.request", "body": bytes(prefix), "more_body": self._more_body}
+        if self._pending is not None:
+            message, self._pending = self._pending, None
+            return message
+        return await self._receive()
+
+
 #: HTTP verbs the dashboard actually uses; everything else is rejected
 #: outright (TRACE/CONNECT and unused verbs are attack surface, not features).
 ALLOWED_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE",

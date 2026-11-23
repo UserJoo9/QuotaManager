@@ -5,6 +5,7 @@ huge legacy file stays stable; the fixtures mirror its pattern."""
 import asyncio
 import time
 
+import httpx
 import pytest
 # import asyncio
 _cached_loop = None
@@ -49,8 +50,8 @@ def app_factory(tmp_path):
 
     _get_loop().run_until_complete(_init())
 
-    def _make(waf_config=None, web_config=None):
-        return create_app(database, service, holder,
+    def _make(waf_config=None, web_config=None, firewall=None):
+        return create_app(database, service, holder, firewall=firewall,
                           waf_config=waf_config, web_config=web_config)
 
     yield _make, database, service, holder
@@ -464,8 +465,88 @@ def test_waf_oversized_body_blocks(app_factory):
     c2.post("/api/login", json={"password": "admin"})
     r = c2.post("/api/bundle",
                 json={"total_gb": 1, "padding": "x" * 100})
-    assert r.status_code == 403
+    assert r.status_code == 413
     assert "oversized-body" in str(r.json())
+
+
+async def _submit_streamed_login(app, chunks, handed_off):
+    async def body():
+        for chunk in chunks:
+            handed_off.append(chunk)
+            yield chunk
+
+    transport = httpx.ASGITransport(app=app, client=("192.0.2.10", 50000))
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        request = client.build_request(
+            "POST", "/api/login", content=body(), headers={"Content-Type": "application/json"},
+        )
+        assert "content-length" not in request.headers
+        return await client.send(request)
+
+
+def test_waf_stops_reading_as_soon_as_body_limit_is_crossed(app_factory):
+    make, database, _, _ = app_factory
+    app = make(WafConfig(mode="strict", max_body_bytes=10, local_subnets=[]))
+    chunks = [b'{"pass', b'word":', b'"admin"}']
+    handed_off = []
+
+    response = _get_loop().run_until_complete(_submit_streamed_login(app, chunks, handed_off))
+
+    assert response.status_code == 413
+    assert "oversized-body" in response.json()["detail"]
+    assert handed_off == chunks[:2]
+    assert not _get_loop().run_until_complete(database.get_setting("session_token"))
+
+
+@pytest.mark.parametrize("mode,exempt", [("log", False), ("off", False), ("strict", True)])
+def test_waf_preserves_body_and_forwarding_in_nonblocking_modes(app_factory, mode, exempt):
+    make, database, _, _ = app_factory
+    app = make(WafConfig(
+        mode=mode, max_body_bytes=10,
+        local_subnets=["192.0.2.0/24"] if exempt else [],
+    ))
+    chunks = [b'{"pass', b'word":', b'"admin"}']
+    handed_off = []
+
+    response = _get_loop().run_until_complete(_submit_streamed_login(app, chunks, handed_off))
+
+    assert response.status_code == 200
+    assert handed_off == chunks
+    events = _get_loop().run_until_complete(database.list_events())
+    assert any("WAF oversized-body" in e["message"] for e in events) == (mode == "log")
+
+
+@pytest.mark.parametrize("mode,status,expected_bans", [("strict", 413, 1), ("log", 200, 0)])
+def test_waf_body_limit_only_auto_bans_in_strict_mode(app_factory, mode, status, expected_bans):
+    make, _, _, _ = app_factory
+    banned = []
+
+    class FirewallRecorder:
+        async def ban_ip(self, host, seconds, reason):
+            banned.append(host)
+
+    app = make(
+        WafConfig(mode=mode, max_body_bytes=10, local_subnets=[], auto_ban_after=1),
+        firewall=FirewallRecorder(),
+    )
+    response = _get_loop().run_until_complete(
+        _submit_streamed_login(app, [b'{"pass', b'word":', b'"admin"}'], []),
+    )
+
+    assert response.status_code == status
+    assert len(banned) == expected_bans
+
+
+def test_waf_accepts_stream_at_exact_limit_and_replays_it(app_factory):
+    make, _, _, _ = app_factory
+    app = make(WafConfig(mode="strict", max_body_bytes=20, local_subnets=[]))
+    chunks = [b'{"pass', b'word":', b'"admin"}']
+
+    response = _get_loop().run_until_complete(_submit_streamed_login(app, chunks, []))
+
+    assert response.status_code == 200
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert "no-store" in response.headers["Cache-Control"]
 
 
 def test_waf_endpoint_rate_limit_strict(app_factory):
