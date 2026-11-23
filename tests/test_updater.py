@@ -4,9 +4,15 @@ check, and the .deb install flow) — no real network, no real dpkg."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 
 import pytest
 
+from quota import updater
 from quota.updater import Updater, parse_changelog, parse_version
 
 
@@ -203,25 +209,31 @@ def test_maybe_check_gated_by_interval_and_enabled():
     assert called == [1]
 
 
-def test_auto_install_fires_after_check():
-    db = FakeDb()
+def test_auto_install_fires_after_check(signed_release):
+    class InstallDb(FakeDb):
+        def __init__(self):
+            super().__init__()
+            self.done = asyncio.Event()
+
+        async def add_event(self, message, level="info", when=None):
+            await super().add_event(message, level, when)
+            if message == "Update v0.3.1 installed — gateway restarting":
+                self.done.set()
+
+    db = InstallDb()
     db.settings["updates_auto_install"] = "1"
-    installed = []
-    up = Updater(
-        db, current_version="0.2.0",
-        fetch_json=lambda url, timeout=20: RELEASE,
-        fetch_text=lambda url, timeout=20: CHANGELOG,
-        download=lambda url, dest, timeout=120: None,
-        run_command=lambda argv, timeout=15: installed.append(argv) or (0, ""))
-    st = run(up.check_now())
-    assert st["available"] is True
-    # let the background install task finish
-    run(asyncio.sleep(0.05))
-    assert installed, "auto-install should have downloaded + installed"
-    st = run(up.state())
-    assert st["available"] is False        # latest cleared after install
-    assert st["last_install"] != ""
-    assert any("Update v0.3.1 installed" in e for e in db.events)
+    up, installed = _test_release_updater(signed_release, db=db)
+
+    async def check_and_wait():
+        assert (await up.check_now())["available"] is True
+        await asyncio.wait_for(db.done.wait(), timeout=5)
+        return await up.state()
+
+    st = run(check_and_wait())
+
+    assert len(installed) == 1
+    assert st["available"] is False
+    assert st["last_install"]
 
 
 def test_install_requires_available_update():
@@ -472,3 +484,144 @@ def test_asset_is_found_by_suffix_not_by_name(names):
     up = Updater(FakeDb(), current_version="0.5.0", install_kind="deb")
     release = {"assets": [{"name": n, "browser_download_url": f"https://x/{n}"} for n in names]}
     assert up._find_asset_url(release, "0.6.0", "deb") == f"https://x/{names[0]}"
+
+
+@pytest.fixture(scope="module")
+def release_signer():
+    """Use real OpenPGP verification with an isolated, disposable key."""
+    if not all(shutil.which(tool) for tool in ("gpg", "gpgv")):
+        pytest.skip("GnuPG tools unavailable")
+    # Keep the path short enough for GnuPG's Unix domain sockets on macOS.
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="qm-test-gpg-") as directory:
+        home = Path(directory)
+        gpg = ["gpg", "--homedir", str(home), "--batch", "--pinentry-mode", "loopback"]
+        key = subprocess.run(
+            [*gpg, "--passphrase", "", "--quick-generate-key", "Test release signer",
+             "ed25519", "sign", "0"],
+            capture_output=True, text=True, timeout=20,
+        )
+        assert key.returncode == 0, key.stderr
+        keyring = home / "test.gpg"
+        keyring.write_bytes(subprocess.check_output([*gpg, "--export"], timeout=20))
+        yield gpg, keyring
+        subprocess.run(["gpgconf", "--homedir", str(home), "--kill", "gpg-agent"],
+                       check=False, capture_output=True, timeout=20)
+
+
+@pytest.fixture
+def signed_release(tmp_path, monkeypatch, release_signer):
+    gpg, keyring = release_signer
+    monkeypatch.setattr(updater, "RELEASE_KEYRING", keyring, raising=False)
+    filename = "netrex_0.3.1_all.deb"
+    payload = b"test package bytes"
+    manifest = tmp_path / "SHA256SUMS"
+    manifest.write_text(f"{hashlib.sha256(payload).hexdigest()}  {filename}\n", encoding="ascii")
+    subprocess.run([*gpg, "--detach-sign", str(manifest)], check=True,
+                   capture_output=True, timeout=20)
+    assets = {
+        filename: payload,
+        manifest.name: manifest.read_bytes(),
+        "SHA256SUMS.sig": manifest.with_suffix(".sig").read_bytes(),
+    }
+    return assets
+
+
+def _test_release_updater(assets, db=None, kind="deb"):
+    release = {"tag_name": "v0.3.1", "assets": [
+        {"name": name, "browser_download_url": "https://github.com/example/release/" + name}
+        for name in assets
+    ]}
+    installations = []
+
+    def download(url, dest, timeout=120):
+        Path(dest).write_bytes(assets[url.rsplit("/", 1)[-1]])
+
+    def install(argv, timeout=15):
+        assert argv[0] == "systemd-run"
+        assert Path(argv[-1]).is_file()
+        installations.append(Path(argv[-1]))
+        return 0, ""
+
+    up = Updater(db or FakeDb(), current_version="0.2.0", install_kind=kind,
+                 fetch_json=lambda _url: release, fetch_text=lambda _url: "",
+                 download=download, run_command=install)
+    return up, installations
+
+
+@pytest.mark.parametrize("damage", ["unsigned", "bad signature", "untrusted signer", "changed manifest", "changed package"])
+def test_unverified_update_never_reaches_installer(signed_release, damage, monkeypatch):
+    if damage == "unsigned":
+        del signed_release["SHA256SUMS.sig"]
+    elif damage == "bad signature":
+        signed_release["SHA256SUMS.sig"] = b"invalid signature"
+    elif damage == "untrusted signer":
+        production_keyring = Path(__file__).resolve().parents[1] / "quota-manager.gpg"
+        monkeypatch.setattr(updater, "RELEASE_KEYRING", production_keyring)
+    elif damage == "changed manifest":
+        signed_release["SHA256SUMS"] += b"\n"
+    else:
+        signed_release["netrex_0.3.1_all.deb"] += b"changed"
+    up, installations = _test_release_updater(signed_release)
+    run(up.check_now())
+
+    result = run(up.install_latest())
+
+    assert result["ok"] is False
+    assert installations == []
+    assert not run(up.state())["last_install"]
+
+
+def test_valid_signed_package_reaches_installer_and_temp_files_are_removed(signed_release):
+    up, installations = _test_release_updater(signed_release)
+    run(up.check_now())
+
+    result = run(up.install_latest())
+
+    assert result == {"ok": True, "version": "0.3.1"}
+    assert [path.name for path in installations] == ["netrex_0.3.1_all.deb"]
+    assert not installations[0].parent.exists()
+    assert run(up.state())["last_install"]
+
+
+def test_release_script_signs_all_four_packages(tmp_path, release_signer):
+    gpg, keyring = release_signer
+    filenames = [
+        "netrex_0.3.1_all.deb",
+        "netrex-0.3.1.tar.gz",
+        "netrex-0.3.1-1.noarch.rpm",
+        "netrex-0.3.1-1-any.pkg.tar.zst",
+    ]
+    for name in filenames:
+        (tmp_path / name).write_text(name, encoding="ascii")
+    secret = subprocess.check_output([*gpg, "--passphrase", "", "--export-secret-keys"], timeout=20)
+    repo = Path(__file__).resolve().parents[1]
+    cmd = ["bash", str(repo / "packaging/sign_release.sh"), "0.3.1", str(tmp_path)]
+    # A secret from a different publisher can't produce publishable metadata.
+    bad = subprocess.run([*cmd, str(repo / "quota-manager.gpg")], input=secret,
+                         capture_output=True, timeout=20)
+    assert bad.returncode != 0
+    assert not (tmp_path / "SHA256SUMS").exists()
+    assert not (tmp_path / "SHA256SUMS.sig").exists()
+
+    signed = subprocess.run([*cmd, str(keyring)], input=secret,
+                            capture_output=True, timeout=20)
+    assert signed.returncode == 0, signed.stderr.decode()
+    manifest = tmp_path / "SHA256SUMS"
+    signature = tmp_path / "SHA256SUMS.sig"
+    verified = subprocess.run(["gpgv", "--homedir", str(tmp_path), "--keyring", str(keyring),
+                               str(signature), str(manifest)], capture_output=True, timeout=20)
+    assert verified.returncode == 0, verified.stderr.decode()
+    assert manifest.read_text(encoding="ascii").splitlines() == [
+        f"{hashlib.sha256(name.encode()).hexdigest()}  {name}" for name in filenames
+    ]
+
+
+def test_installer_refuses_when_release_tag_changes_after_check(signed_release):
+    db = FakeDb()
+    db.settings["updates_state"] = '{"latest_version":"0.3.0"}'
+    up, installations = _test_release_updater(signed_release, db=db)
+
+    result = run(up.install_latest())
+
+    assert result == {"ok": False, "reason": "Release changed since the update check; check again"}
+    assert not installations

@@ -25,6 +25,7 @@ Requires:       ppp
 Requires:       ca-certificates
 Suggests:       miniupnpd
 Suggests:       miniupnpc
+Requires:       /usr/bin/gpgv
 
 %description
 Split a metered internet bundle fairly across users and devices. The package

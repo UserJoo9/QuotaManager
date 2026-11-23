@@ -51,7 +51,7 @@ jobs:
       - name: Install system dependencies (nftables, iproute2, dnsmasq)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq nftables iproute2 dnsmasq arp-scan
+          sudo apt-get install -y -qq nftables iproute2 dnsmasq arp-scan gnupg gpgv
 
       - name: Install Python dependencies
         run: |

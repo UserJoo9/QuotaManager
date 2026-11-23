@@ -14,7 +14,7 @@ pkgdesc='Fair-split metered-internet quota gateway'
 arch=('any')
 url='https://github.com/UserJoo9/Netrex'
 license=('MIT')
-depends=('python>=3.10' 'python-pip' 'dnsmasq' 'nftables' 'iproute2' 'kmod' 'ppp' 'ca-certificates')
+depends=('python>=3.10' 'python-pip' 'dnsmasq' 'nftables' 'iproute2' 'kmod' 'ppp' 'ca-certificates' 'gnupg')
 install=netrex.install
 source=("netrex-${pkgver}.tar.gz")
 sha256sums=('SKIP')
@@ -22,7 +22,7 @@ sha256sums=('SKIP')
 package() {
     cd "$srcdir/netrex-${pkgver}"
     install -d "$pkgdir/opt/quota-manager"
-    for item in run.py requirements-linux.txt LICENSE core quota api web scripts bin; do
+    for item in run.py requirements-linux.txt LICENSE quota-manager.gpg core quota api web scripts bin; do
         [ -e "$item" ] && cp -a "$item" "$pkgdir/opt/quota-manager/"
     done
     chmod 755 "$pkgdir"/opt/quota-manager/scripts/*.sh

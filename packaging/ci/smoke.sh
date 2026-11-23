@@ -37,6 +37,8 @@ ok "venv created"
 ok "runtime deps import"
 (cd /opt/quota-manager && .venv/bin/python -c "import api.app, quota.service, quota.updater") || fail "app does not import"
 ok "app modules import"
+[ -s /opt/quota-manager/quota-manager.gpg ] || fail "release keyring missing"
+command -v gpgv >/dev/null || fail "release signature verifier missing"
 for f in /opt/quota-manager/scripts/*.sh; do bash -n "$f" || fail "syntax: $f"; done
 ok "all scripts parse"
 
