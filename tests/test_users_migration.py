@@ -155,6 +155,227 @@ def test_connect_migrates_legacy_db(tmp_path):
         run(d.close())
 
 
+def test_domain_rules_modern_schema_survives_restart_without_rebuilding(tmp_path, caplog):
+    """The generated scope_key is hidden from table_info; recognizing it via
+    table_xinfo prevents every restart from rebuilding the table and changing
+    retained row IDs.
+    """
+    path = tmp_path / "modern-domain-rules.db"
+    d = _db.Database(path)
+    run(d.connect())
+    try:
+        run(d.conn.execute(
+            "INSERT INTO domain_rules (id, scope, action, domain, created_at) "
+            "VALUES (47, 'global', 'block', 'example.com', 1.0)"))
+        run(d.conn.commit())
+        original_id = 47
+    finally:
+        run(d.close())
+
+    d = _db.Database(path)
+    try:
+        caplog.set_level("WARNING", logger="quota.db")
+        run(d.connect())
+        row = run(d._fetch_one("SELECT id FROM domain_rules WHERE domain=?",
+                               ("example.com",)))
+        assert row["id"] == original_id
+        assert not any("predates the scope_key fix" in record.message
+                       for record in caplog.records)
+        assert run(d._fetch_one(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='domain_rules_old'")) is None
+    finally:
+        run(d.close())
+
+
+def test_domain_rules_legacy_migration_keeps_retained_ids_and_latest_duplicate(tmp_path):
+    """Legacy duplicates collapse to the newest row while retained rows keep
+    their original IDs and all migration work is transactionally applied.
+    """
+    path = tmp_path / "legacy-domain-rules.db"
+
+    async def build_legacy_domain_rules():
+        conn = await aiosqlite.connect(path)
+        await conn.execute("""CREATE TABLE domain_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope TEXT NOT NULL DEFAULT 'global', scope_id INTEGER,
+            action TEXT NOT NULL DEFAULT 'block', domain TEXT NOT NULL,
+            target_ip TEXT, enabled INTEGER NOT NULL DEFAULT 1,
+            source TEXT NOT NULL DEFAULT 'manual', created_at REAL NOT NULL,
+            UNIQUE(scope, scope_id, domain, action))""")
+        await conn.executemany(
+            "INSERT INTO domain_rules "
+            "(id, scope, scope_id, action, domain, target_ip, enabled, source, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(5, "global", None, "block", "duplicate.example", None, 1, "old", 1.0),
+             (9, "global", None, "block", "duplicate.example", None, 0, "new", 2.0),
+             (17, "device", 12, "allow", "kept.example", None, 1, "manual", 3.0)])
+        # Simulate a deleted high-ID row: sqlite_sequence intentionally keeps
+        # the old AUTOINCREMENT high-water mark at 1000.
+        await conn.execute(
+            "UPDATE sqlite_sequence SET seq=1000 WHERE name='domain_rules'")
+        await conn.commit()
+        await conn.close()
+
+    run(build_legacy_domain_rules())
+    d = _db.Database(path)
+    try:
+        run(d.connect())
+        rows = run(d.conn.execute_fetchall(
+            "SELECT id, scope, scope_id, domain, enabled, source "
+            "FROM domain_rules ORDER BY id"))
+        assert [(r["id"], r["domain"], r["enabled"], r["source"]) for r in rows] == [
+            (9, "duplicate.example", 0, "new"),
+            (17, "kept.example", 1, "manual")]
+        assert run(d._fetch_one(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='domain_rules_old'")) is None
+        run(d.conn.execute(
+            "INSERT INTO domain_rules (scope, action, domain, created_at) "
+            "VALUES ('global', 'block', 'after-migration.example', 4.0)"))
+        run(d.conn.commit())
+        new_row = run(d._fetch_one(
+            "SELECT id FROM domain_rules WHERE domain=?",
+            ("after-migration.example",)))
+        assert new_row["id"] == 1001
+    finally:
+        run(d.close())
+
+
+def test_domain_rules_migration_failure_rolls_back_table_rename(tmp_path):
+    """A copy failure leaves the original table and rows in place, with no
+    half-migrated table name for the next boot to mistake as complete.
+    """
+    path = tmp_path / "broken-domain-rules.db"
+
+    async def build_invalid_legacy_domain_rules():
+        conn = await aiosqlite.connect(path)
+        await conn.execute("""CREATE TABLE domain_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope TEXT NOT NULL DEFAULT 'global', scope_id INTEGER,
+            action TEXT NOT NULL DEFAULT 'block', domain TEXT,
+            target_ip TEXT, enabled INTEGER NOT NULL DEFAULT 1,
+            source TEXT NOT NULL DEFAULT 'manual', created_at REAL NOT NULL,
+            UNIQUE(scope, scope_id, domain, action))""")
+        await conn.execute(
+            "INSERT INTO domain_rules (id, scope, scope_id, action, domain, created_at) "
+            "VALUES (23, 'global', NULL, 'block', NULL, 1.0)")
+        await conn.commit()
+        await conn.close()
+
+    run(build_invalid_legacy_domain_rules())
+    d = _db.Database(path)
+    try:
+        try:
+            run(d.connect())
+        except Exception as exc:
+            assert "NOT NULL constraint failed" in str(exc)
+        else:
+            raise AssertionError("invalid legacy row should fail the copy")
+    finally:
+        run(d.close())
+
+    async def inspect_after_failure():
+        conn = await aiosqlite.connect(path)
+        conn.row_factory = aiosqlite.Row
+        names = await conn.execute_fetchall(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('domain_rules', 'domain_rules_old') ORDER BY name")
+        rows = await conn.execute_fetchall("SELECT id, domain FROM domain_rules")
+        await conn.close()
+        return {row["name"] for row in names}, [(row["id"], row["domain"]) for row in rows]
+
+    names, rows = run(inspect_after_failure())
+    assert names == {"domain_rules"}
+    assert rows == [(23, None)]
+
+
+def test_domain_rules_migration_residue_fails_loud_without_dropping_rows(tmp_path):
+    """An interrupted migration's old-table residue is preserved and blocks
+    startup instead of being mistaken for a completed migration.
+    """
+    path = tmp_path / "residue-domain-rules.db"
+
+    async def build_residue():
+        conn = await aiosqlite.connect(path)
+        await conn.execute("CREATE TABLE domain_rules_old (id INTEGER, domain TEXT)")
+        await conn.execute(
+            "INSERT INTO domain_rules_old VALUES (31, 'recover.example')")
+        await conn.commit()
+        await conn.close()
+
+    run(build_residue())
+    d = _db.Database(path)
+    try:
+        try:
+            run(d.connect())
+        except RuntimeError as exc:
+            assert "legacy domain_rules_old migration residue" in str(exc)
+        else:
+            raise AssertionError("migration residue must block startup")
+    finally:
+        run(d.close())
+
+    async def read_residue():
+        conn = await aiosqlite.connect(path)
+        row = await (await conn.execute(
+            "SELECT id, domain FROM domain_rules_old")).fetchone()
+        await conn.close()
+        return row
+
+    assert run(read_residue()) == (31, "recover.example")
+
+
+def test_domain_rules_partial_migration_residue_preserves_both_tables(tmp_path):
+    """If a pre-existing partial copy and the renamed source coexist, startup
+    fails loudly without deleting rows from either table.
+    """
+    path = tmp_path / "partial-residue-domain-rules.db"
+
+    async def build_partial_residue():
+        conn = await aiosqlite.connect(path)
+        await conn.execute("""CREATE TABLE domain_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope TEXT NOT NULL DEFAULT 'global', scope_id INTEGER,
+            scope_key INTEGER GENERATED ALWAYS AS (COALESCE(scope_id, 0)) STORED,
+            action TEXT NOT NULL DEFAULT 'block', domain TEXT NOT NULL,
+            target_ip TEXT, enabled INTEGER NOT NULL DEFAULT 1,
+            source TEXT NOT NULL DEFAULT 'manual', created_at REAL NOT NULL,
+            UNIQUE(scope, scope_key, domain, action))""")
+        await conn.execute(
+            "INSERT INTO domain_rules (id, scope, action, domain, created_at) "
+            "VALUES (41, 'global', 'block', 'partial.example', 1.0)")
+        await conn.execute("CREATE TABLE domain_rules_old (id INTEGER, domain TEXT)")
+        await conn.execute(
+            "INSERT INTO domain_rules_old VALUES (42, 'source.example')")
+        await conn.commit()
+        await conn.close()
+
+    run(build_partial_residue())
+    d = _db.Database(path)
+    try:
+        try:
+            run(d.connect())
+        except RuntimeError as exc:
+            assert "legacy domain_rules_old migration residue" in str(exc)
+        else:
+            raise AssertionError("partial migration residue must block startup")
+    finally:
+        run(d.close())
+
+    async def read_tables():
+        conn = await aiosqlite.connect(path)
+        conn.row_factory = aiosqlite.Row
+        current = await conn.execute_fetchall("SELECT id, domain FROM domain_rules")
+        old = await conn.execute_fetchall(
+            "SELECT id, domain FROM domain_rules_old")
+        await conn.close()
+        return ([(row["id"], row["domain"]) for row in current],
+                [(row["id"], row["domain"]) for row in old])
+
+    assert run(read_tables()) == ([(41, "partial.example")], [(42, "source.example")])
+
+
 def test_bundle_allowances_drop_stale_mac_keys(tmp_path):
     """get_bundle must silently ignore non-int allowance keys left over from a
     pre-v2 DB even after a partial migration."""
