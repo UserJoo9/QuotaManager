@@ -56,6 +56,7 @@ from api.schemas import (BundleUpdate, ConsumptionSpoofRequest, DeviceCreate,
                          VpnConnectRequest, VpnNodeCreate, VpnNodeUpdate,
                          VpnRoutingUpdateRequest, VpnSettingsUpdate,
                          DiskShareAccess, DiskShareCreate, FactoryReset, GatewayOff, SystemRestart,
+                         ScheduleBody, SchedulePause, ScheduleSites,
                          WanRenewConfig, WanTest, WanUpdate,
                          TailscaleDisconnect)
 from api import waf as _waf
@@ -316,6 +317,8 @@ def create_app(
     ipv6_direct_getter: Optional[Callable[[], list[str]]] = None,
     tailscale_manager: Optional[object] = None,
     disk_share_manager: Optional[object] = None,
+    schedule_apply: Optional[Callable[[], object]] = None,
+    schedule_sites_apply: Optional[Callable[[], object]] = None,
 ) -> FastAPI:
     web_cfg: WebConfig = web_config or WebConfig()
     tailscale = tailscale_manager or TailscaleManager()
@@ -740,12 +743,20 @@ def create_app(
                 "block_state": state,
                 "quota_blocked": quota_blocked,
                 "daily": _daily_user_view(u, dst, daily_on),
+                # set below when any of the user's devices is off by schedule
+                "schedule": None,
                 "devices": [],
             }
 
         devices_view: list[dict[str, Any]] = []
         allow_set = set(await database.get_mac_list("allow"))
         deny_set = set(await database.get_mac_list("deny"))
+        # Internet schedules: which devices are off by schedule right now.
+        try:
+            sched_cuts = await service.schedule_cuts()
+        except Exception:  # noqa: BLE001 - a bad schedule must not break the page
+            log.exception("schedules: could not resolve cuts")
+            sched_cuts = {}
         for d in devices:
             # Blacklisted MACs are hidden from Management: they live ONLY in
             # the Network-tab blacklist (a delete wrote them there, or the
@@ -777,6 +788,17 @@ def create_app(
                                              .get(d.id, 0.0))
             dev_view["daily_blocked"] = bool(
                 d.id in daily_cut and state == _db.BLOCK_QUOTA)
+            cut = sched_cuts.get(dev_mac)
+            dev_view["schedule"] = ({
+                "until_ts": cut.until.timestamp(),
+                "names": [x["name"] for x in cut.schedules],
+            } if cut is not None else None)
+            if cut is not None and uv is not None:
+                us = uv.get("schedule") or {"until_ts": 0, "names": [], "devices": 0}
+                us["until_ts"] = max(us["until_ts"], cut.until.timestamp())
+                us["names"] = sorted(set(us["names"]) | {x["name"] for x in cut.schedules})
+                us["devices"] += 1
+                uv["schedule"] = us
             devices_view.append(dev_view)
             if uv is not None:
                 uv["devices"].append(dev_view)
@@ -2956,6 +2978,89 @@ def create_app(
             return {"applied": False, "reason": "dns manager not wired"}
         await dns_apply()
         return {"applied": True}
+
+    # -- internet schedules (quota/schedules.py) ------------------------------
+
+    async def _apply_schedules() -> None:
+        """Program the kernel right away instead of waiting for the next
+        tick, so "save" / "bonus time" takes effect within a second."""
+        if schedule_apply is None:
+            return
+        try:
+            await schedule_apply()
+        except Exception:  # noqa: BLE001 - the tick retries within 15 s
+            log.exception("schedules: immediate apply failed")
+
+    async def _schedules_payload() -> dict[str, Any]:
+        now = service._now()
+        return {
+            "schedules": await service.schedule_overview(now),
+            "sites": await service.schedule_sites(),
+            "now": now.isoformat(),
+            "now_ts": now.timestamp(),
+            "utc_offset_min": int((now.utcoffset() or _dt.timedelta()).total_seconds() // 60),
+        }
+
+    @app.get("/api/schedules", dependencies=[Depends(_require_auth)])
+    async def list_schedules() -> dict[str, Any]:
+        return await _schedules_payload()
+
+    @app.post("/api/schedules", status_code=201, dependencies=[Depends(_require_auth)])
+    async def create_schedule(body: ScheduleBody) -> dict[str, Any]:
+        try:
+            sch = await service.save_schedule(body.model_dump())
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        await database.add_event(f"Internet schedule added: {sch.name}", "info")
+        await _apply_schedules()
+        return await _schedules_payload()
+
+    @app.put("/api/schedules/{sid}", dependencies=[Depends(_require_auth)])
+    async def update_schedule(sid: int, body: ScheduleBody) -> dict[str, Any]:
+        try:
+            sch = await service.save_schedule(body.model_dump(), sid)
+        except KeyError:
+            raise HTTPException(404, "schedule not found") from None
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        await database.add_event(f"Internet schedule changed: {sch.name}", "info")
+        await _apply_schedules()
+        return await _schedules_payload()
+
+    @app.delete("/api/schedules/{sid}", dependencies=[Depends(_require_auth)])
+    async def delete_schedule(sid: int) -> dict[str, Any]:
+        if not await service.delete_schedule(sid):
+            raise HTTPException(404, "schedule not found")
+        await database.add_event("Internet schedule removed", "info")
+        await _apply_schedules()
+        return await _schedules_payload()
+
+    @app.post("/api/schedules/{sid}/pause", dependencies=[Depends(_require_auth)])
+    async def pause_schedule(sid: int, body: SchedulePause) -> dict[str, Any]:
+        try:
+            sch = await service.pause_schedule(sid, body.minutes)
+        except KeyError:
+            raise HTTPException(404, "schedule not found") from None
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        await database.add_event(
+            (f"Bonus time: {sch.name} paused for {body.minutes} min"
+             if body.minutes else f"Bonus time ended: {sch.name}"), "info")
+        await _apply_schedules()
+        return await _schedules_payload()
+
+    @app.put("/api/schedule-sites", dependencies=[Depends(_require_auth)])
+    async def set_schedule_sites(body: ScheduleSites) -> dict[str, Any]:
+        try:
+            await service.set_schedule_sites(body.sites)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        if schedule_sites_apply is not None:
+            try:
+                await schedule_sites_apply()
+            except Exception:  # noqa: BLE001
+                log.exception("schedules: applying allowed sites failed")
+        return await _schedules_payload()
 
     @app.get("/api/logs", dependencies=[Depends(_require_auth)])
     async def logs(limit: int = 300) -> dict[str, Any]:

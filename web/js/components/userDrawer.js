@@ -3,7 +3,7 @@ import { t, num, iso } from "../core/i18n.js";
 import { actions } from "../core/actions.js";
 import { openDrawer, closeDrawer } from "./drawer.js";
 import { toast } from "./toast.js";
-import { bar, sw, chip, userStatus, devIcon, netSplit } from "./ui.js";
+import { bar, sw, chip, userStatus, devIcon, netSplit, clock } from "./ui.js";
 import { dailySection, deviceShare } from "./dailyPlan.js";
 
 const armed = new Set(); // destructive buttons armed by a first tap (confirm-by-second-tap)
@@ -125,6 +125,7 @@ export function openDeviceDrawer(userId, deviceId, getDashboard, refresh) {
         sw(!d.blocked, t("pp.access"), run(() => actions.blockDevice(d.id, !d.blocked))))));
       const reason = deviceCutReason(d, u);
       if (reason) body.push(h("p", { class: "banner " + (isDis || d.daily_blocked ? "warn" : "danger"), role: "alert" }, h("b", {}, `${t("dr.cut.title")}: `), reason));
+      if (d.schedule) body.push(h("p", { class: "banner warn", role: "status" }, h("b", {}, `${t("sc.chip")} ${clock(d.schedule.until_ts)}`), ` · ${(d.schedule.names || []).join("، ")}`));
     }
     body.push(h("div", { class: "dr-sec" }, h("div", { class: "kv" },
       h("div", {}, h("span", { class: "k" }, t("dr.mac")), h("span", { class: "v mono" }, iso(d.mac))),

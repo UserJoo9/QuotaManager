@@ -3105,3 +3105,45 @@ def test_unlimited_opens_an_unassigned_user(client):
     # turning Unlimited off puts the onboarding lock back
     assert c.patch(f"/api/users/{uid}", json={"exempt_quota": False}).status_code == 200
     assert _user_view(c, uid)["blocked"] is True
+
+
+def test_internet_schedule_api(client):
+    """Internet schedules: CRUD, bonus time, allowed sites, dashboard flag.
+    The client's clock is Saturday 2026-08-15 12:00 (weekday 5)."""
+    c, database, _ = client
+    assert c.get("/api/schedules").status_code == 401
+    _login(c)
+    dev = _get_loop().run_until_complete(
+        database.upsert_device("aa:bb:cc:dd:ee:51", name="Kid tablet"))
+    body = {"name": "Homework", "users": [dev.user_id],
+            "windows": [{"days": [5], "start": "11:00", "end": "13:30"}]}
+    r = c.post("/api/schedules", json=body)
+    assert r.status_code == 201, r.text
+    s = r.json()["schedules"][0]
+    assert s["state"]["active"] and s["device_count"] == 1
+    assert s["windows"][0] == {"days": [5], "start": "11:00", "end": "13:30"}
+
+    dash = c.get("/api/dashboard").json()
+    dv = next(d for d in dash["devices"] if d["mac"] == "aa:bb:cc:dd:ee:51")
+    assert dv["schedule"]["names"] == ["Homework"]
+    uv = next(u for u in dash["users"] if u["id"] == dev.user_id)
+    assert uv["schedule"]["devices"] == 1
+
+    r = c.post(f"/api/schedules/{s['id']}/pause", json={"minutes": 30})
+    st = r.json()["schedules"][0]["state"]
+    assert r.status_code == 200 and st["paused"] and not st["active"]
+    assert c.post(f"/api/schedules/{s['id']}/pause", json={"minutes": 5000}).status_code == 422
+    assert c.post("/api/schedules/99/pause", json={"minutes": 5}).status_code == 404
+
+    bad = {**body, "windows": [{"days": [5], "start": "25:00", "end": "13:00"}]}
+    assert c.put(f"/api/schedules/{s['id']}", json=bad).status_code == 422
+    r = c.put(f"/api/schedules/{s['id']}", json={**body, "enabled": False})
+    assert r.status_code == 200 and not r.json()["schedules"][0]["enabled"]
+
+    r = c.put("/api/schedule-sites", json={"sites": ["classroom.google.com"]})
+    assert r.status_code == 200 and r.json()["sites"] == ["classroom.google.com"]
+    assert c.put("/api/schedule-sites", json={"sites": ["no way"]}).status_code == 422
+
+    assert c.delete(f"/api/schedules/{s['id']}").status_code == 200
+    assert c.delete(f"/api/schedules/{s['id']}").status_code == 404
+    assert c.get("/api/schedules").json()["schedules"] == []

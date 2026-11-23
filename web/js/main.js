@@ -22,11 +22,13 @@ import vpnPage from "./pages/vpn.js";
 import securityPage from "./pages/security.js";
 import insightsPage from "./pages/insights.js";
 import sharePage from "./pages/share.js";
+import schedulePage from "./pages/schedule.js";
 
 const ROUTES = [
   { id: "overview", icon: "overview", group: "nav.main", page: overview },
   { id: "people", icon: "people", group: "nav.main", page: people, count: true },
   { id: "quota", icon: "quota", group: "nav.main", page: quotaPage },
+  { id: "schedule", icon: "clock", group: "nav.main", page: schedulePage },
   { id: "network", icon: "network", group: "nav.net", page: networkPage },
   { id: "internet", icon: "internet", group: "nav.net", page: internetPage },
   { id: "security", icon: "security", group: "nav.net", page: securityPage },

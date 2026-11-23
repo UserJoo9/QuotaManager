@@ -115,6 +115,7 @@ nftables.conf, IPv6 host config).
 | `quota/firewall.py` | `quota_firewall` table: posture, rules, bans, port-forward, geo (**IPv4 only**) | |
 | `quota/arp_lock.py`, `arp_scan.py`, `latency_probe.py`, `wifi_probe.py` | rogue detection, ARP gateway-lock, WiFi/LAN + LED probe | |
 | `quota/dns_rules.py` | domain rules/presets/per-client DNS → generated dnsmasq conf (`render_tags`, `[ip6]` in dhcp-host) | |
+| `quota/schedules.py`, `quota/schedule_nft.py` | internet schedules: time math (pure) + the never-flushed `inet quota_schedule` table (kernel timeouts, allowed-site sets fed by dnsmasq `nftset=`) | |
 | `quota/flows.py` | conntrack per-destination byte deltas, IP→name resolution (dnsmasq → reverse DNS → RDAP owner → IP; feeds Live traffic `top_destinations`) | guess app names |
 | `quota/dnslog.py`, `history_analytics.py` | query-log parser; analytics, **Live traffic** (share %, idle, speed) | |
 | `quota/vpn_manager.py` | sing-box supervisor, Clash API, node state | config syntax (→ `vpn_parser`) |

@@ -6,6 +6,11 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
+## [Unreleased]
+
+Added:
+- **Internet schedule** (new page). Turn the internet off at set times of the week for chosen people (all their devices) or single devices: bedtime on school nights, study time, meal times. One click starts from a ready plan ("School nights", "Every night", "Study time", "Meal times"); a schedule can have several times, a time can run past midnight, and dates can be marked as days off (holidays, Eid). **Bonus time** gives a few extra minutes without changing the schedule. **Always allowed** sites (a school platform, a study site) keep working during every schedule. While a schedule is on, the device's card shows when the internet comes back, the home network (printer, shared drives, the dashboard) keeps working, and the cut is done by the gateway itself, so it works on any phone, tablet, TV or console with no app. Each device gets its end time in the system kernel, so it comes back online on time even if the gateway service restarts or stops. Closes #32.
+
 ## [0.5.10] — 2026-11-22
 
 Added:

@@ -667,11 +667,38 @@ def resolve_domain_status(domain: str, rules: Iterable[Any],
 # and the tc tree — see Structure_README.md "Key design decisions").
 # ---------------------------------------------------------------------------
 
+#: nftables sets the "always allowed during a schedule" sites are collected in
+#: (see quota/schedule_nft.py).
+SCHEDULE_NFTSET = "4#inet#quota_schedule#allow4,6#inet#quota_schedule#allow6"
+#: domains per ``nftset=`` line (keeps every line far below dnsmasq's limit)
+_NFTSET_CHUNK = 20
+
+
+def render_schedule_sites(sites: Iterable[str]) -> str:
+    """dnsmasq lines that put every address of ``sites`` (and their
+    subdomains) into the schedule's allow sets as dnsmasq resolves them."""
+    clean: list[str] = []
+    for s in sites:
+        try:
+            d = normalize_pattern(str(s))
+        except ValueError:
+            continue  # never write a token dnsmasq could reject
+        if d not in clean:
+            clean.append(d)
+    lines = ["# Managed by QuotaManager: sites allowed while an internet "
+             "schedule is on. Do not edit."]
+    for i in range(0, len(clean), _NFTSET_CHUNK):
+        chunk = clean[i:i + _NFTSET_CHUNK]
+        lines.append(f"nftset=/{'/'.join(chunk)}/{SCHEDULE_NFTSET}")
+    return "\n".join(lines) + "\n"
+
+
 @dataclass
 class DnsRuleManager:
     conf_dir: str = "/etc/dnsmasq.d"
     tags_file: str = "quota-tags.conf"
     rules_file: str = "quota-domains.conf"
+    schedule_file: str = "quota-schedule.conf"
     reload_dnsmasq: bool = True
 
     def _write_if_changed(self, path: Path, content: str) -> bool:
@@ -692,18 +719,24 @@ class DnsRuleManager:
     def apply(self, devices: Iterable[Any], rules: Iterable[Any],
               dns_servers: Iterable[tuple[str, Optional[int], str]],
               device_ids_by_user: dict[int, list[int]],
-              static_leases: Optional[dict[str, str]] = None) -> bool:
-        """Render + write both files. Reloads dnsmasq only if a file's
-        content actually changed. Returns True if a reload was triggered."""
+              static_leases: Optional[dict[str, str]] = None,
+              schedule_sites: Optional[Iterable[str]] = None) -> bool:
+        """Render + write the files. Reloads dnsmasq only if a file's
+        content actually changed. Returns True if a reload was triggered.
+        ``schedule_sites`` None leaves the schedule file untouched."""
         tags_text = render_tags(devices, static_leases=static_leases)
         rules_text = render_rules(rules, dns_servers, device_ids_by_user)
 
         tags_path = Path(self.conf_dir) / self.tags_file
         rules_path = Path(self.conf_dir) / self.rules_file
-        previous = {path: self._read(path) for path in (tags_path, rules_path)}
-        tags_changed = self._write_if_changed(tags_path, tags_text)
-        rules_changed = self._write_if_changed(rules_path, rules_text)
-        changed = tags_changed or rules_changed
+        files = [(tags_path, tags_text), (rules_path, rules_text)]
+        if schedule_sites is not None:
+            files.append((Path(self.conf_dir) / self.schedule_file,
+                          render_schedule_sites(schedule_sites)))
+        previous = {path: self._read(path) for path, _ in files}
+        changed = False
+        for path, text in files:
+            changed = self._write_if_changed(path, text) or changed
         if changed and self.reload_dnsmasq:
             if not self._reload():
                 # Never leave a file dnsmasq rejects in /etc/dnsmasq.d: the
