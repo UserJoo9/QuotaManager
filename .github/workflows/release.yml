@@ -18,10 +18,23 @@ on:
       - 'v*'
 
 permissions:
-  contents: write   # needed to create the Release + attach the .deb asset
+  contents: read
 
 jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  packaging-smoke:
+    uses: ./.github/workflows/packaging-smoke.yml
+    permissions:
+      contents: read
+
   build:
+    needs: [ci, packaging-smoke]
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -95,12 +108,37 @@ jobs:
           } > "${RUNNER_TEMP}/release_body.md"
           echo "body_path=${RUNNER_TEMP}/release_body.md" >> "$GITHUB_OUTPUT"
 
+      - name: Stage packages and release notes
+        run: |
+          mkdir -p "${RUNNER_TEMP}/release-assets/dist"
+          cp dist/* "${RUNNER_TEMP}/release-assets/dist/"
+          cp "${{ steps.release_body.outputs.body_path }}" "${RUNNER_TEMP}/release-assets/release_body.md"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/release-assets/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [ci, packaging-smoke, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download packages built and gated in this tag run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets
+          path: release-assets
+
       - name: Upload to GitHub Releases
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: |
-            dist/quota-manager_*.deb
-            dist/quota-manager-*.tar.gz
-            dist/quota-manager-*.rpm
-            dist/quota-manager-*.pkg.tar.zst
-          body_path: ${{ steps.release_body.outputs.body_path }}
+            release-assets/dist/quota-manager_*.deb
+            release-assets/dist/quota-manager-*.tar.gz
+            release-assets/dist/quota-manager-*.rpm
+            release-assets/dist/quota-manager-*.pkg.tar.zst
+          body_path: release-assets/release_body.md

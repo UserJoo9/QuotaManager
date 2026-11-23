@@ -4,12 +4,13 @@
 name: Packaging smoke test
 
 on:
+  workflow_call:
   workflow_dispatch:
   pull_request:
-    paths: ['packaging/**', 'scripts/**', 'quota/updater.py', '.github/workflows/**']
+    paths: ['packaging/**', 'scripts/**', 'core/**', 'quota/**', 'api/**', 'web/**', 'run.py', 'bin/**', 'requirements-linux.txt', 'LICENSE', '.github/workflows/**']
   push:
     branches: [main]
-    paths: ['packaging/**', 'scripts/**', 'quota/updater.py', '.github/workflows/**']
+    paths: ['packaging/**', 'scripts/**', 'core/**', 'quota/**', 'api/**', 'web/**', 'run.py', 'bin/**', 'requirements-linux.txt', 'LICENSE', '.github/workflows/**']
 
 permissions:
   contents: read
