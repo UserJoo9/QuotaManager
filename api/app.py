@@ -79,7 +79,10 @@ from quota.engine import GATEWAY_MAC, EngineSnapshot, SnapshotHolder
 from quota.history_analytics import get_history_analytics, get_live_traffic_analytics
 from quota.local_share import (
     MAX_LIVE_DIRECT_BYTES,
+    FolderUploadBusy,
+    FolderUploadNotFound,
     LocalShareManager,
+    ShareLimitExceeded,
     detect_device_name,
     sanitize_filename,
 )
@@ -1183,14 +1186,25 @@ def create_app(
         data["server_host"] = request.headers.get("host") or request.url.netloc or "router.local"
         return data
 
+    @app.exception_handler(ShareLimitExceeded)
+    async def _local_share_limit(_request: Request, exc: ShareLimitExceeded) -> JSONResponse:
+        return JSONResponse({"detail": str(exc)}, status_code=413)
+
+    @app.exception_handler(FolderUploadNotFound)
+    async def _local_share_missing_folder(_request: Request, exc: FolderUploadNotFound) -> JSONResponse:
+        return JSONResponse({"detail": str(exc)}, status_code=404)
+
+    @app.exception_handler(FolderUploadBusy)
+    async def _local_share_busy_folder(_request: Request, exc: FolderUploadBusy) -> JSONResponse:
+        return JSONResponse({"detail": str(exc)}, status_code=409)
+
     @app.post("/api/share/upload", dependencies=[Depends(_require_local_share_access)])
     async def upload_share_file(
         request: Request,
         ttl: int = 7200,
     ) -> dict[str, Any]:
         """Stream an uploaded file to the local share cache with automatic TTL.
-        Uses pure request streaming — zero dependencies on python-multipart and
-        minimal memory overhead for multi-gigabyte transfers.
+        Upload limits apply to received bytes even without Content-Length.
         """
         raw_name = request.headers.get("x-filename") or request.query_params.get("filename") or "shared_file"
         try:
