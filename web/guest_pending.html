@@ -248,6 +248,7 @@
       margin: 16px 0 20px;
       text-align: start;
     }
+    [hidden] { display: none !important; }
     .voucher-form label { color: var(--text); font-size: .9rem; font-weight: 600; }
     .voucher-form input {
       width: 100%; min-height: 44px; padding: 10px 12px; border-radius: 10px;
@@ -271,6 +272,10 @@
     @keyframes blink {
       0%, 100% { opacity: 1; transform: scale(1); }
       50% { opacity: 0.3; transform: scale(0.85); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .live-indicator, .pulse-ring { animation: none; }
+      .pulse-ring { display: none; }
     }
 
     .btn {
@@ -451,7 +456,7 @@
         const response = await fetch('/api/guest/voucher/redeem', {
           method: 'POST',
           credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-QM-CSRF': '1' },
           body: JSON.stringify({ code: voucherCode.value.trim() })
         });
         const errorBody = !response.ok
@@ -545,6 +550,7 @@
       const msgEn = document.getElementById('msg-en');
       const liveBox = document.getElementById('live-status-box');
       const actionBox = document.getElementById('action-container');
+      const voucherHadFocus = voucherForm.contains(document.activeElement);
       voucherForm.hidden = data.status !== 'pending';
 
       if (data.approved || (!data.blocked && data.is_guest) || (data.status === 'ok' && !data.is_guest)) {
@@ -576,6 +582,7 @@
             🌐 تصفح الإنترنت الآن (Start Browsing)
           </a>
         `;
+        if (voucherHadFocus) document.getElementById('browse-btn').focus();
 
         // Start countdown to redirect
         let sec = 3;

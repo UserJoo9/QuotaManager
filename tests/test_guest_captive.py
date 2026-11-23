@@ -59,6 +59,25 @@ def test_guest_pending_page_serves_html(captive_env):
         assert "Quota Manager" in r.text
 
 
+def test_guest_portal_hidden_states_and_reduced_motion(captive_env):
+    _, _, _, app = captive_env
+    with TestClient(app) as client:
+        html = client.get("/guest/pending").text
+
+    assert "[hidden]" in html and "display: none !important" in html
+    assert "@media (prefers-reduced-motion: reduce)" in html
+    assert "voucherForm.contains(document.activeElement)" in html
+    assert "document.getElementById('browse-btn').focus()" in html
+
+
+def test_guest_voucher_redemption_sends_csrf_header(captive_env):
+    _, _, _, app = captive_env
+    with TestClient(app) as client:
+        html = client.get("/guest/pending").text
+
+    assert "'X-QM-CSRF': '1'" in html
+
+
 def test_captive_probes_redirect_pending_guests(captive_env):
     database, service, holder, app = captive_env
 
