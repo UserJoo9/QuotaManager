@@ -987,6 +987,59 @@ def test_flush_counts_usage(tmp_path):
         _get_loop().run_until_complete(gw.shutdown())
 
 
+@pytest.mark.parametrize("commit_then_raise", [False, True])
+def test_failed_usage_batch_retries_same_delta_once(tmp_path, monkeypatch,
+                                                   commit_then_raise):
+    """A failed or ambiguously acknowledged batch is retried before later deltas."""
+    cfg = _cfg(tmp_path)
+    gw = Gateway(cfg)
+    _get_loop().run_until_complete(gw.startup())
+    _cancel_maintenance(gw)
+    try:
+        mac = "aa:bb:cc:dd:ee:fa"
+        ip = "192.168.1.199"
+        _get_loop().run_until_complete(gw._persist_lease(mac, ip))
+        dev = _get_loop().run_until_complete(gw.database.get_device(mac=mac))
+
+        class _FakeEngine:
+            deltas = [1000, 300]
+            def flush(self):
+                amount = self.deltas.pop(0) if self.deltas else 0
+                return EngineSnapshot(by_ip={ip: EngineCounters(up=amount)},
+                                      ip_to_mac={ip: mac}, blocked={})
+            def update_state(self, ip_to_mac, blocked): pass
+            def set_gateway_blocked(self, blocked): pass
+            def stop(self): pass
+        gw.engine = _FakeEngine()  # type: ignore[assignment]
+
+        original = gw.database.add_usage_batch_once
+        calls = []
+        async def fail_once(batch_id, records, *, free_mode):
+            calls.append((batch_id, records, free_mode))
+            if len(calls) == 1 and not commit_then_raise:
+                raise OSError("pre-commit failure")
+            await original(batch_id, records, free_mode=free_mode)
+            if len(calls) == 1:
+                raise OSError("commit acknowledgement lost")
+        monkeypatch.setattr(gw.database, "add_usage_batch_once", fail_once)
+
+        with pytest.raises(OSError):
+            _get_loop().run_until_complete(gw._maintenance_tick())
+        assert gw._pending_usage_batch is not None
+        first_id = gw._pending_usage_batch[0]
+        # The next tick first retries the saved 1000 bytes, then flushes the
+        # new 300-byte delta, preserving the original batch date and identity.
+        _get_loop().run_until_complete(gw._maintenance_tick())
+        usage = _get_loop().run_until_complete(gw.database.get_usage(dev.id))
+        assert usage["up_bytes"] == 1300
+        assert calls[0][0] == first_id and calls[1][0] == first_id
+        assert calls[0][1] == calls[1][1]
+        assert calls[0][1][0][1] == time.strftime("%Y-%m-%d")
+        assert gw._pending_usage_batch is None
+    finally:
+        _get_loop().run_until_complete(gw.shutdown())
+
+
 def test_make_engine_selects_nftables_backend(tmp_path):
     """The Linux gateway always uses NftablesEngine, whatever the config says."""
     from run import _make_engine

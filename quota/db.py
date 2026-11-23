@@ -357,6 +357,15 @@ CREATE TABLE IF NOT EXISTS free_usage (
     PRIMARY KEY (device_id, date)
 );
 
+-- Idempotency receipts for usage deltas. Retained briefly so an in-process
+-- retry after an uncertain SQLite commit cannot apply the same bytes twice.
+CREATE TABLE IF NOT EXISTS usage_batch_receipts (
+    batch_id TEXT PRIMARY KEY,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_usage_batch_receipts_created_at
+    ON usage_batch_receipts(created_at);
+
 -- Daily quota: the cap of each person's day, computed once when the day starts
 -- (or when the plan/allowance changes) and then frozen. See quota/daily_plan.py.
 CREATE TABLE IF NOT EXISTS daily_caps (
@@ -530,6 +539,7 @@ class Database:
         #: set by QuotaService while free mode is on: new usage is also recorded
         #: in free_usage so it can be excluded from the quota maths.
         self.free_mode = False
+        self._last_usage_receipt_prune = 0.0
 
     async def connect(self) -> None:
         if self._conn is not None:
@@ -1492,6 +1502,71 @@ class Database:
         if self.free_mode:
             await self.conn.executemany(self._FREE_UPSERT, records)
         await self.conn.commit()
+
+    async def add_usage_batch_once(
+        self, batch_id: str, records: list[tuple[int, str, int, int]], *,
+        free_mode: bool,
+    ) -> None:
+        """Atomically apply a usage batch once, even if commit acknowledgement is lost.
+
+        A private connection isolates this transaction from the application's
+        shared aiosqlite connection. Receipt retention is bounded to 30 days;
+        pending batches live only in process memory, so this is an in-process
+        retry guarantee, not crash recovery for drained kernel counters.
+        """
+        if not records:
+            return
+        # A literal in-memory DB cannot be reopened. Use its existing connection
+        # in that case; file-backed production DBs use an isolated connection.
+        shared_memory = self.path == ":memory:"
+        conn = self._conn if shared_memory else await aiosqlite.connect(
+            self.path, timeout=30)
+        if conn is None:
+            raise RuntimeError("database is not connected")
+        try:
+            await conn.execute("PRAGMA foreign_keys=ON")
+            await conn.execute("BEGIN IMMEDIATE")
+            cur = await conn.execute(
+                "INSERT OR IGNORE INTO usage_batch_receipts(batch_id, created_at) VALUES (?, ?)",
+                (batch_id, time.time()),
+            )
+            if cur.rowcount:
+                # Deleted devices retain usage only while their owner remains
+                # attributable. Check each row with fixed bind count so very
+                # wide snapshots do not hit SQLite's variable limit.
+                eligible = []
+                for record in records:
+                    cur = await conn.execute(
+                        """SELECT EXISTS(SELECT 1 FROM devices WHERE id=?)
+                           OR EXISTS(SELECT 1 FROM removed_devices r
+                                     JOIN users u ON u.id=r.user_id
+                                     WHERE r.device_id=? AND r.user_id IS NOT NULL)""",
+                        (record[0], record[0]),
+                    )
+                    if (await cur.fetchone())[0]:
+                        eligible.append(record)
+                records = eligible
+                await conn.executemany(
+                    """INSERT INTO usage_daily(device_id,date,up_bytes,down_bytes)
+                       VALUES(?,?,?,?) ON CONFLICT(device_id,date) DO UPDATE SET
+                       up_bytes=up_bytes+excluded.up_bytes,
+                       down_bytes=down_bytes+excluded.down_bytes""", records)
+                if free_mode:
+                    await conn.executemany(self._FREE_UPSERT, records)
+            now = time.time()
+            if now - self._last_usage_receipt_prune >= 86400:
+                await conn.execute(
+                    "DELETE FROM usage_batch_receipts WHERE created_at < ?",
+                    (now - 30 * 86400,),
+                )
+                self._last_usage_receipt_prune = now
+            await conn.commit()
+        except BaseException:
+            await conn.rollback()
+            raise
+        finally:
+            if not shared_memory:
+                await conn.close()
 
     async def add_lan_usage_batch(self, records: list[tuple[int, str, int, int]]) -> None:
         """Add LOCAL (LAN) byte deltas per (device, day). Monitoring only."""

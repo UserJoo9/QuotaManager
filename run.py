@@ -39,6 +39,7 @@ import signal
 import socket
 import subprocess
 import time
+import uuid
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -459,6 +460,9 @@ class Gateway:
         self._empty_sweeps = 0
         #: monotonic time of the previous counter flush (live-speed window).
         self._last_flush_mono: float | None = None
+        #: Kernel counters are drained before SQLite commits. Keep one failed
+        #: batch (including its capture day and free-mode state) for retry.
+        self._pending_usage_batch: tuple[str, list[tuple[int, str, int, int]], bool] | None = None
         #: set when _persist_lease creates a new device — _sync_dnsmasq_leases
         #: resets _last_latency_sweep so the ARP probe runs in the same tick,
         #: turning the new device's LED blue immediately instead of waiting up
@@ -1577,6 +1581,11 @@ class Gateway:
         live_lan_by_ip: dict[str, object] = {}
         flush_interval = 15.0
         if self.engine is not None:
+            if self._pending_usage_batch is not None:
+                batch_id, batch_records, batch_free_mode = self._pending_usage_batch
+                await self.database.add_usage_batch_once(
+                    batch_id, batch_records, free_mode=batch_free_mode)
+                self._pending_usage_batch = None
             snap = await asyncio.to_thread(self.engine.flush)
             _mono = time.monotonic()
             if self._last_flush_mono is not None:
@@ -1616,7 +1625,12 @@ class Gateway:
                             usage_records.append((box.id, today, snap.gateway.up, snap.gateway.down))
 
                 if usage_records:
-                    await self.database.add_usage_batch(usage_records)
+                    pending = (uuid.uuid4().hex, usage_records,
+                               bool(self.database.free_mode))
+                    self._pending_usage_batch = pending
+                    await self.database.add_usage_batch_once(
+                        pending[0], pending[1], free_mode=pending[2])
+                    self._pending_usage_batch = None
 
             # LOCAL (LAN) traffic: stored apart from the metered usage, never
             # part of quota math - purely for the dashboard's LAN monitor.
