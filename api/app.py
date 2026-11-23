@@ -4258,6 +4258,11 @@ def create_app(
                 except Exception:  # noqa: BLE001
                     active_ws.discard(ws)
 
+    async def _expire_waf_state() -> None:
+        while True:
+            await asyncio.sleep(_waf.RATE_STATE_SWEEP_SECONDS)
+            waf_state.expire(time.monotonic())
+
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
         # startup
@@ -4306,6 +4311,7 @@ def create_app(
 
         disk_restore_task = asyncio.get_running_loop().create_task(_restore_disk_shares())
         disk_heal_task = asyncio.get_running_loop().create_task(_disk_heal_loop())
+        waf_expiry_task = asyncio.create_task(_expire_waf_state())
         try:
             yield
         finally:
@@ -4314,6 +4320,8 @@ def create_app(
             share_cleanup_task.cancel()
             disk_restore_task.cancel()
             disk_heal_task.cancel()
+            waf_expiry_task.cancel()
+            await asyncio.gather(waf_expiry_task, return_exceptions=True)
             try:
                 await push_task
             except (asyncio.CancelledError, Exception):
@@ -4342,7 +4350,10 @@ def create_app(
     # (blocking) on WAN, log-only on LAN; fail-closed on WAN if the layer
     # itself errors.
 
-    waf_state = _waf.WafRateState()
+    waf_state = _waf.WafRateState(
+        ban_threshold=int(getattr(waf_cfg, "auto_ban_after", 8) or 0),
+        ban_window_seconds=float(getattr(waf_cfg, "ban_window_seconds", 300) or 300),
+    )
 
     def _waf_mode() -> str:
         if not getattr(waf_cfg, "enabled", True):
@@ -4437,7 +4448,6 @@ def create_app(
                            waf_mode: str) -> Response | None:
         """Run the WAF checks; return a Response to short-circuit, else None."""
         host = request.client.host if request.client else ""
-        now = time.monotonic()
         cfg = waf_cfg
 
         # -- local-management exemption ------------------------------------
@@ -4456,14 +4466,14 @@ def create_app(
             declared = cl.lstrip("0") or "0"
             cap = str(max_body_bytes)
             if (len(declared), declared) > (len(cap), cap):
-                return await _waf_block(request, host, now, waf_mode,
+                return await _waf_block(request, host, waf_mode,
                                         "oversized-body", "request-size", "", status_code=413)
         if len(request.headers) > getattr(cfg, "max_headers", 40):
-            return await _waf_block(request, host, now, waf_mode,
+            return await _waf_block(request, host, waf_mode,
                                     "too-many-headers", "request-size", "")
         for key, value in request.headers.items():
             if len(value) > getattr(cfg, "max_header_bytes", 8192):
-                return await _waf_block(request, host, now, waf_mode,
+                return await _waf_block(request, host, waf_mode,
                                         "oversized-header", "request-size", key)
 
         # -- signatures over path / query / body ------------------------------
@@ -4471,7 +4481,7 @@ def create_app(
         if request.method in ("POST", "PUT", "PATCH", "DELETE"):
             body_text = await body.inspect(max_body_bytes)
             if body_text is None:
-                return await _waf_block(request, host, now, waf_mode,
+                return await _waf_block(request, host, waf_mode,
                                         "oversized-body", "request-size", "", status_code=413)
         rule = _waf.classify(
             request.method, request.url.path, request.url.query,
@@ -4479,28 +4489,27 @@ def create_app(
         if rule is not None and not _waf.is_exempt(
                 getattr(cfg, "exceptions", []), rule[0],
                 request.url.path, host):
-            return await _waf_block(request, host, now, waf_mode,
+            return await _waf_block(request, host, waf_mode,
                                     rule[1], rule[0], "")
 
         # -- scanner User-Agent -----------------------------------------------
         if _waf.classify_ua(request.headers.get("user-agent", "")):
-            return await _waf_block(request, host, now, waf_mode,
+            return await _waf_block(request, host, waf_mode,
                                     "scanner-ua", "scanner", "")
 
-        # -- per-endpoint request-rate cap (strict only; logged otherwise) ----
+        # -- per-endpoint request-rate cap (strict only) -----------------------
         limits = getattr(cfg, "endpoint_limits", {}) or {}
-        if limits and waf_state.rate_limited(host, request.url.path,
-                                             limits, now):
-            if waf_mode == "strict":
-                return JSONResponse(
-                    {"detail": "request rate limit exceeded"},
-                    status_code=429,
-                    headers={"Retry-After": "30"})
+        if waf_mode == "strict" and limits and waf_state.rate_limited(
+                host, request.url.path, limits, time.monotonic()):
+            return JSONResponse(
+                {"detail": "request rate limit exceeded"},
+                status_code=429,
+                headers={"Retry-After": "30"})
         return None
 
-    async def _waf_block(request: Request, host: str, now: float,
-                         waf_mode: str, category: str, rule_id: str,
-                         extra: str, *, status_code: int = 403) -> Response | None:
+    async def _waf_block(request: Request, host: str, waf_mode: str,
+                         category: str, rule_id: str, extra: str,
+                         *, status_code: int = 403) -> Response | None:
         """Log a WAF hit, feed the auto-ban, and (in strict mode) reject."""
         where = f"{request.url.path}" + (f"?{extra}" if extra else "")
         message = (f"WAF {category} ({rule_id}) from {host} "
@@ -4517,17 +4526,13 @@ def create_app(
         if waf_mode != "strict":
             return None  # Log-only hits never feed the firewall auto-ban.
 
-        waf_state.register_block(host, now)
-        auto_after = int(getattr(waf_cfg, "auto_ban_after", 8) or 0)
-        if auto_after and firewall is not None and \
-                hasattr(firewall, "ban_ip"):
-            window = float(getattr(waf_cfg, "ban_window_seconds", 300) or 300)
-            if waf_state.blocks_in_window(host, window, now) >= auto_after:
-                seconds = int(getattr(waf_cfg, "ban_seconds", 1800) or 1800)
-                try:
-                    await firewall.ban_ip(host, seconds, "waf")
-                except Exception:  # noqa: BLE001
-                    log.exception("waf auto-ban failed")
+        if (firewall is not None and hasattr(firewall, "ban_ip")
+                and waf_state.register_block(host, time.monotonic())):
+            seconds = int(getattr(waf_cfg, "ban_seconds", 1800) or 1800)
+            try:
+                await firewall.ban_ip(host, seconds, "waf")
+            except Exception:  # noqa: BLE001
+                log.exception("waf auto-ban failed")
         return JSONResponse(
             {"detail": f"blocked by WAF ({category})"},
             status_code=status_code)

@@ -788,6 +788,17 @@ the limit was reached, without auto-banning the client. The local-subnet exempti
 bypass inspection. Routes that accept large inputs still need their own limits
 when WAF blocking is disabled or exempted.
 
+In strict mode, the WAF keeps at most 4,096 active source/endpoint rate buckets
+and 4,096 source histories for auto-ban. Rate buckets expire after each
+endpoint's configured window. Auto-ban holds only the most recent
+`waf.auto_ban_after` timestamps per source and drops hits outside
+`waf.ban_window_seconds`. A five-second sweep removes expired state even
+without incoming requests. When the rate table is full, an untracked source
+on a rate-limited route receives 429 until a slot frees up. A full auto-ban
+table keeps its active histories. New sources are still blocked for WAF
+violations, but their hits do not accumulate toward a firewall ban until
+space becomes available.
+
 ### Tailscale remote access
 
 `quota/tailscale.py` (`TailscaleManager`) manages the official `tailscale`

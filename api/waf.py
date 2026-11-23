@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from collections import deque
 
 from starlette.types import Message, Receive
 
@@ -210,35 +211,76 @@ def is_exempt(exceptions: list[dict], rule_id: str, path: str,
     return False
 
 
-class WafRateState:
-    """Per-source-IP request buckets + auto-ban hit counters (in-memory)."""
+RATE_STATE_SWEEP_SECONDS = 5
 
-    def __init__(self) -> None:
-        self._hits: dict[str, list[float]] = {}      # ip -> WAF-block timestamps
+
+class WafRateState:
+    """Bounded endpoint buckets and rolling auto-ban history."""
+
+    def __init__(self, *, max_entries: int = 4096, ban_threshold: int = 8,
+                 ban_window_seconds: float = 300) -> None:
+        self._max_entries = max_entries
+        self._ban_threshold = ban_threshold
+        self._ban_window = ban_window_seconds
         self._buckets: dict[tuple[str, str], tuple[int, float]] = {}
-        # (ip, path-prefix) -> (count, window_start)
+        self._hits: dict[str, deque[float]] = {}
+        self._next_sweep = 0.0
+
+    def expire(self, now: float) -> None:
+        """Remove expired entries even when their source never returns."""
+        self._next_sweep = now + RATE_STATE_SWEEP_SECONDS
+        for key, (_, deadline) in list(self._buckets.items()):
+            if now > deadline:
+                del self._buckets[key]
+        for ip, stamps in list(self._hits.items()):
+            self._expire_hits(stamps, now)
+            if not stamps:
+                del self._hits[ip]
+
+    def _expire_if_due(self, now: float) -> None:
+        if now >= self._next_sweep:
+            self.expire(now)
 
     def rate_limited(self, ip: str, path: str, limits: dict[str, list[int]],
                      now: float) -> bool:
-        """True when ``ip`` exceeded the per-path cap for ``path``."""
+        """Check the per-path cap without displacing an active bucket."""
         prefix = next((p for p in limits if path.startswith(p)), None)
-        if not prefix:
+        if prefix is None:
             return False
+        self._expire_if_due(now)
         max_reqs, window = limits[prefix]
+        if max_reqs <= 0:
+            return True
         key = (ip, prefix)
-        count, start = self._buckets.get(key, (0, now))
-        if now - start > window:
-            count, start = 0, now
-        count += 1
-        self._buckets[key] = (count, start)
-        return count > max_reqs
+        bucket = self._buckets.get(key)
+        if bucket is not None and now <= bucket[1]:
+            count, deadline = bucket
+            if count >= max_reqs:
+                return True
+            self._buckets[key] = (count + 1, deadline)
+        else:
+            if bucket is None and len(self._buckets) >= self._max_entries:
+                return True
+            self._buckets[key] = (1, now + window)
+        return False
 
-    def register_block(self, ip: str, now: float) -> None:
-        """Record a WAF block for ``ip`` (feeds the auto-ban counter)."""
-        stamps = self._hits.setdefault(ip, [])
+    def _expire_hits(self, stamps: deque[float], now: float) -> None:
+        cutoff = now - self._ban_window
+        while stamps and stamps[0] < cutoff:
+            stamps.popleft()
+
+    def register_block(self, ip: str, now: float) -> bool:
+        """Record a block and report whether this IP has met the ban threshold."""
+        if self._ban_threshold <= 0:
+            return False
+        self._expire_if_due(now)
+        stamps = self._hits.get(ip)
+        if stamps is None:
+            if len(self._hits) >= self._max_entries:
+                # The request is still blocked by the WAF. Keep the existing
+                # histories so a new source can't erase another source's hits.
+                return False
+            stamps = self._hits[ip] = deque(maxlen=self._ban_threshold)
+        self._expire_hits(stamps, now)
         stamps.append(now)
-
-    def blocks_in_window(self, ip: str, window: float, now: float) -> int:
-        stamps = [t for t in self._hits.get(ip, []) if now - t <= window]
-        self._hits[ip] = stamps
-        return len(stamps)
+        return len(stamps) >= self._ban_threshold

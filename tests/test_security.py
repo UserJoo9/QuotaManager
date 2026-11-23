@@ -411,6 +411,76 @@ def test_waf_rate_state_window():
     assert state.rate_limited("5.6.7.8", "/api/login", limits, t) is False
 
 
+def test_waf_discards_expired_state_for_clients_that_do_not_return():
+    state = _waf.WafRateState()
+    limits = {"/api/login": [1, 60]}
+    state.rate_limited("192.0.2.1", "/api/login", limits, 100)
+    state.register_block("192.0.2.1", 100)
+
+    assert not state.rate_limited("192.0.2.2", "/api/login", limits, 406)
+
+    assert set(state._buckets) == {("192.0.2.2", "/api/login")}
+    assert not state._hits
+
+
+def test_waf_holds_only_the_hits_needed_to_reach_ban_threshold():
+    state = _waf.WafRateState()
+
+    for timestamp in range(100, 120):
+        state.register_block("192.0.2.1", timestamp)
+
+    assert len(state._hits["192.0.2.1"]) == 8
+
+
+def test_waf_full_rate_table_preserves_active_limits_and_recovers():
+    state = _waf.WafRateState(max_entries=2)
+    limits = {"/api/login": [1, 60], "/api/report": [2, 30]}
+    assert not state.rate_limited("192.0.2.1", "/api/login", limits, 100)
+    assert not state.rate_limited("192.0.2.1", "/api/report", limits, 100)
+
+    assert state.rate_limited("192.0.2.2", "/api/login", limits, 101)
+    assert state.rate_limited("192.0.2.1", "/api/login", limits, 101)
+    assert not state.rate_limited("192.0.2.2", "/unlimited", limits, 101)
+    assert len(state._buckets) == 2
+
+    # The shorter window frees a slot while the original login is still capped.
+    assert not state.rate_limited("192.0.2.2", "/api/login", limits, 132)
+    assert state.rate_limited("192.0.2.1", "/api/login", limits, 132)
+
+
+def test_waf_hit_table_stays_bounded_and_known_clients_can_reach_threshold():
+    state = _waf.WafRateState(max_entries=1, ban_threshold=2, ban_window_seconds=10)
+    assert not state.register_block("192.0.2.1", 100)
+
+    assert not state.register_block("192.0.2.2", 101)
+    assert state.register_block("192.0.2.1", 102)
+    assert set(state._hits) == {"192.0.2.1"}
+
+    assert not state.register_block("192.0.2.2", 113)
+    assert state.register_block("192.0.2.2", 114)
+    assert set(state._hits) == {"192.0.2.2"}
+
+
+def test_waf_ban_counter_ignores_hits_outside_its_window():
+    state = _waf.WafRateState(ban_threshold=2, ban_window_seconds=10)
+    assert not state.register_block("192.0.2.1", 100)
+
+    assert not state.register_block("192.0.2.1", 111)
+    assert state.register_block("192.0.2.1", 112)
+
+
+def test_waf_expiry_frees_state_even_when_there_are_no_new_requests():
+    state = _waf.WafRateState(ban_threshold=2, ban_window_seconds=5)
+    limits = {"/api/login": [1, 5]}
+    state.rate_limited("192.0.2.1", "/api/login", limits, 100)
+    state.register_block("192.0.2.1", 100)
+
+    state.expire(106)
+
+    assert not state._buckets
+    assert not state._hits
+
+
 # -- WAF middleware behaviour ---------------------------------------------------
 
 
