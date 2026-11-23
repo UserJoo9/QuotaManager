@@ -828,6 +828,8 @@ def create_app(
                 "blocked_programmed": getattr(live, "gateway_blocked", None),
                 "engine_available": bool(
                     getattr(live, "engine_available", True)),
+                "engine_sync_error": str(
+                    getattr(live, "engine_sync_error", "") or ""),
             },
             "wan": live.wan_status,
             # The VPN-share switch + live kernel state ride the WS snapshot so

@@ -1672,6 +1672,7 @@ class Gateway:
             except Exception:  # noqa: BLE001 — never let a share problem stop the tick
                 log.exception("disk shares: access sync failed")
         engine_available = False
+        engine_sync_error = ""
         gateway_blocked = None
         if self.engine is not None:
             # nft update_state + set_gateway_blocked shell out to `nft`
@@ -1696,6 +1697,7 @@ class Gateway:
             # getattr: some test fakes implement only the minimal engine
             # surface; the real engine always carries both attributes.
             engine_available = bool(getattr(self.engine, "available", True))
+            engine_sync_error = str(getattr(self.engine, "sync_error", "") or "")
             # What the kernel actually holds for the box's cut (True/False), or
             # None if it was never programmed — copied into the snapshot so the
             # dashboard can show "Blocked in the UI but not cut at the kernel".
@@ -1725,6 +1727,7 @@ class Gateway:
             wan_status=wan_status,
             gateway_blocked=gateway_blocked,
             engine_available=engine_available,
+            engine_sync_error=engine_sync_error,
             pending_guests=pending_guests,
             interval_s=flush_interval,
             flows_by_mac=flows_by_mac,
