@@ -215,7 +215,7 @@ sudo apt remove quota-manager                                              # rem
 sudo apt purge quota-manager                                               # remove everything
 ```
 
-Your data lives in `/var/lib/quota-gateway/quota.db` — copy it now and then as a backup.
+Your data lives in `/var/lib/quota-gateway/quota.db`. Back it up with SQLite's online backup procedure, which works while the gateway is running and includes committed WAL data. For backup and restore commands, see the [SQLite backup and restore guide](Structure_README.md#sqlite-backup-and-restore).
 
 ## Troubleshooting
 

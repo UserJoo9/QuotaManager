@@ -220,7 +220,7 @@ sudo apt purge quota-manager                                               # إ�
 
 <div dir="rtl">
 
-بياناتك في `/var/lib/quota-gateway/quota.db` — انسخها من وقت للتاني كنسخة احتياطية.
+بياناتك موجودة في `/var/lib/quota-gateway/quota.db`. اعمل نسخة احتياطية بأداة SQLite للنسخ المباشر، وهي آمنة والبوابة شغالة وبتشمل البيانات المحفوظة في WAL. أوامر النسخ والاستعادة موجودة في [دليل نسخ واستعادة SQLite](Structure_README.md#sqlite-backup-and-restore).
 
 ## حل المشاكل
 
