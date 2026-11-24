@@ -6,10 +6,19 @@ language: what changed and how it affects you.
 _(For developers: versions live in `quota/version.py`; a release tag must
 match it. Release notes are composed from a version's section below.)_
 
-## [Unreleased]
+## [0.5.11] — 2026-11-24
 
 Changed:
 - **Quota Manager is now called Netrex.** Same project, same features and the same settings: only the name and logo changed. Your people, devices, usage and dashboard login stay as they are, and the update installs the usual way from the dashboard or apt. The GitHub page moved to `github.com/UserJoo9/Netrex` (old links forward there), and gateways on 0.5.8 or newer switch their apt source to the new address on their own. If your gateway is older than 0.5.8 and you update with apt, update once from the dashboard first, or point the apt source at `https://UserJoo9.github.io/Netrex` (see the README).
+
+## [0.5.10] — 2026-11-22
+
+Added:
+- **Network drives** (Share page). Share a hard disk or flash drive plugged into the gateway, or a folder another PC or the router already shares, with the devices at home at one address (`\\192.168.2.1\<name>` or `smb://192.168.2.1/<name>`), no password. For each share you choose who gets in: every device with internet, or only the devices you pick, and each device can be given read-write, read-only or no access. Devices that are cut off (quota used up, paused, a guest still waiting for approval) never get in. Shares are only reachable from the home network, never from the internet side, and come back on their own after a reboot or when a disk is plugged back in. The page installs Samba the first time. The system disk is never offered. Contributed by @amr-elgharip2006.
+- **Restart and factory reset** (System → Power). Restart the gateway or reboot the whole machine from the dashboard. Factory reset puts every setting back to how a fresh install starts, without uninstalling: optionally keep people, devices, fixed IPs, the bundle, this month's usage and the dashboard password. The line mode (LAN/WAN) and the PPPoE login always stay so the internet keeps working, and the database is backed up to `/var/lib/quota-gateway/backups/` first. Contributed by @amr-elgharip2006.
+
+Fixed:
+- Deleting a device (or a person) gave the data it had used back to the bundle and to that person's allowance, so removing a device that had used 30 GB made 30 GB "free" again. The internet provider already counted those GB, so they now keep counting: for the person who used them, and for the bundle even after the person is deleted. Data used by devices deleted before this update counts toward the bundle again after updating, without being assigned to anyone. Correcting a person's usage by hand (usage calibration) also works on their total, deleted devices included.
 
 ## [0.5.9] — 2026-11-22
 

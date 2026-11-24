@@ -218,8 +218,8 @@ Many internet lines block or drop connections coming from outside, so opening a 
 | **Security** | Firewall, ad & content blocking, HTTPS |
 | **VPN** | Add servers, choose who goes through the VPN |
 | **Insights** | Daily usage, top devices, most visited domains |
-| **Share** | Send files and folders between devices, even straight to a nearby device |
-| **System** | Language, light/dark, colour themes, password and 2FA, updates, logs |
+| **Share** | Send files and folders between devices, even straight to a nearby device; share a hard disk with every device |
+| **System** | Language, light/dark, colour themes, password and 2FA, updates, logs; restart, factory reset, turn off |
 
 Handy to know:
 
@@ -231,6 +231,8 @@ Handy to know:
 - **WAN | LAN switch** above the Overview chart: the same live speed, daily usage and top devices, for the internet or for traffic inside your home (NAS, router, the gateway itself).
 - **Guest vouchers:** in **Network** → *Guest vouchers*, create a one-time code with a GB allowance (and an optional expiry or note). A guest waiting on the portal page types the code and gets that allowance right away, without you approving them by hand. Each code works once; unused codes can be revoked from the same list. Waiting guests show as *Pending approval* in People & devices.
 - **Sharing**: drop files or folders on the Share page, or send them straight to another device on the WiFi (up to 50 MB; several files or folders arrive as one ZIP).
+- **Network drives** (Share page): plug a hard disk into the gateway and press *Share*, or add a folder another PC or the router already shares (`//192.168.1.5/Movies`). Devices open it at `\\192.168.2.1\<name>` (Windows) or `smb://192.168.2.1/<name>`, no password. **Access** on each share picks who gets in (every device with internet, or only the devices you choose) and gives any device read-write, read-only or no access; cut-off devices never get in. Shares are reachable from the home network only. The first time, the page offers to install Samba. Shares come back on their own after a reboot or when the disk is plugged back in.
+- **Restart / factory reset / turn off** (System → Power): restart the gateway or the whole machine; factory reset puts the settings back to how a fresh install starts without reinstalling (tick *keep people and devices* to keep people, devices, the bundle, this month's usage and your password; the line mode and PPPoE login always stay, and the database is backed up to `/var/lib/quota-gateway/backups/` first); turn off stops the gateway and keeps it off after a reboot (turn the router's DHCP back on first; to start it again: `sudo systemctl enable --now dnsmasq quota-gateway`).
 - Risky buttons (kick, blacklist, enable HTTPS, remove an allow/block entry, clear all) ask you to **tap twice** — the second tap confirms.
 
 ---

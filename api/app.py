@@ -55,7 +55,8 @@ from api.schemas import (BundleUpdate, ConsumptionSpoofRequest, DeviceCreate,
                          UpdateSettings, UserCreate, UserUpdate,
                          VpnConnectRequest, VpnNodeCreate, VpnNodeUpdate,
                          VpnRoutingUpdateRequest, VpnSettingsUpdate,
-                         GatewayOff, WanRenewConfig, WanTest, WanUpdate,
+                         DiskShareAccess, DiskShareCreate, FactoryReset, GatewayOff, SystemRestart,
+                         WanRenewConfig, WanTest, WanUpdate,
                          TailscaleDisconnect)
 from api import waf as _waf
 
@@ -314,9 +315,14 @@ def create_app(
     ipv6_map_getter: Optional[Callable[[], dict[str, str]]] = None,
     ipv6_direct_getter: Optional[Callable[[], list[str]]] = None,
     tailscale_manager: Optional[object] = None,
+    disk_share_manager: Optional[object] = None,
 ) -> FastAPI:
     web_cfg: WebConfig = web_config or WebConfig()
     tailscale = tailscale_manager or TailscaleManager()
+    from quota.disk_share import (DiskShareManager, clean_devices as _clean_share_devices,
+                                  parse_shares as _parse_disk_shares,
+                                  valid_remote as _valid_remote)
+    disk_shares = disk_share_manager or DiskShareManager()
     waf_cfg: WafConfig = waf_config or WafConfig()
     local_share = local_share_manager or LocalShareManager(
         Path(__file__).resolve().parent.parent / "data" / "local_share"
@@ -781,8 +787,8 @@ def create_app(
                        None)
         gw_desired = bool(gw_view["blocked"]) if gw_view else False
 
-        total_used = sum((u["up"] + u["down"]) / GB
-                         for u in usage_by_user.values())
+        total_used_bytes = await database.get_period_usage_total()
+        total_used = total_used_bytes / GB
         days_left = timeutil.days_remaining(_now(), bundle.effective_reset_day)
         return {
             "bundle_source": await database.get_setting("bundle_source", "config"),
@@ -1062,8 +1068,8 @@ def create_app(
         live = holder.get()
         pending_guest_user_ids = _pending_guest_user_ids(users, devices)
 
-        total_used = sum((u["up"] + u["down"]) / GB
-                         for u in usage_by_user.values())
+        total_used_bytes = await database.get_period_usage_total()
+        total_used = total_used_bytes / GB
 
         user_rows = []
         for u in users:
@@ -1125,8 +1131,7 @@ def create_app(
             "bundle": {
                 "total_gb": bundle.total_gb,
                 "used_gb": round(total_used, 3),
-                "used_bytes": int(sum(u["up"] + u["down"]
-                                      for u in usage_by_user.values())),
+                "used_bytes": int(total_used_bytes),
                 "remaining_gb": round(max(0.0, bundle.total_gb - total_used), 3),
                 "reset_day": bundle.reset_day,
                 "period_type": bundle.period_type,
@@ -2087,6 +2092,124 @@ def create_app(
             "Gateway turned off from the dashboard"
             + (" (machine powering off)" if body.poweroff else ""), "warn")
         return result
+
+    @app.post("/api/system/restart", dependencies=[Depends(_require_auth)])
+    async def system_restart(body: SystemRestart) -> dict[str, Any]:
+        """Restart the gateway service, or reboot the whole machine, a few
+        seconds after answering."""
+        from quota import power as _power
+        try:
+            result = await asyncio.to_thread(_power.schedule_restart, body.machine)
+        except RuntimeError as exc:
+            raise HTTPException(500, f"could not restart: {exc}")
+        await database.add_event("Machine reboot requested from the dashboard"
+                                 if body.machine else
+                                 "Gateway restart requested from the dashboard", "info")
+        return result
+
+    @app.post("/api/system/factory-reset", dependencies=[Depends(_require_auth)])
+    async def factory_reset(body: FactoryReset) -> dict[str, Any]:
+        """Back the database up, wipe it and restart (see
+        quota/factory_reset.py). The network mode and PPPoE login always
+        survive; ``keep_users`` also keeps people, devices, the bundle, usage
+        and the login."""
+        from quota import power as _power
+        await database.add_event(
+            "Factory reset requested" + (" (keeping people and devices)"
+                                         if body.keep_users else ""), "warn")
+        try:
+            return await asyncio.to_thread(_power.schedule_factory_reset,
+                                           database.path, body.keep_users)
+        except RuntimeError as exc:
+            raise HTTPException(500, f"could not reset: {exc}")
+
+    # -- disks shared on the network (SMB) -----------------------------------
+    async def _disk_share_list() -> list[dict[str, Any]]:
+        return _parse_disk_shares(await database.get_setting("disk_shares", "[]"))
+
+    async def _disk_share_apply(shares: list[dict[str, Any]]) -> dict[str, Any]:
+        await database.set_setting("disk_shares", json.dumps(shares))
+        problems = await asyncio.to_thread(disk_shares.apply, shares)
+        out = await asyncio.to_thread(disk_shares.status, shares)
+        out["problems"] = problems
+        return out
+
+    @app.get("/api/disks", dependencies=[Depends(_require_auth)])
+    async def get_disks() -> dict[str, Any]:
+        """Disks plugged into the gateway and the ones shared on the network."""
+        return await asyncio.to_thread(disk_shares.status, await _disk_share_list())
+
+    @app.post("/api/disks/share", dependencies=[Depends(_require_auth)])
+    async def share_disk(body: DiskShareCreate) -> dict[str, Any]:
+        shares = await _disk_share_list()
+        if any(s["name"].lower() == body.name.lower() for s in shares):
+            raise HTTPException(409, "a share with this name already exists")
+        if body.source == "network":
+            remote = (body.remote or "").strip().replace("\\", "/")
+            if not _valid_remote(remote):
+                raise HTTPException(422, "the network folder must look like //192.168.1.5/Movies")
+            if any(s.get("remote", "").lower() == remote.lower() for s in shares):
+                raise HTTPException(409, "this network folder is already shared")
+            user = (body.user or "").strip()
+            entry = {"name": body.name, "source": "network", "remote": remote,
+                     "user": user, "writable": body.writable}
+            entry.update(access=body.access, devices=_clean_share_devices(body.devices))
+            if user:
+                try:
+                    await asyncio.to_thread(disk_shares.save_credentials, body.name,
+                                            user, body.password or "")
+                except ValueError as exc:
+                    raise HTTPException(422, str(exc)) from exc
+            label = remote
+        else:
+            if not body.uuid:
+                raise HTTPException(422, "uuid is required for a disk")
+            if any(s.get("uuid") == body.uuid for s in shares):
+                raise HTTPException(409, "this disk is already shared")
+            disks = await asyncio.to_thread(disk_shares.list_disks)
+            if not any(d["uuid"] == body.uuid for d in disks):
+                raise HTTPException(404, "disk not found (unplugged, or it holds the system)")
+            entry = {"name": body.name, "source": "disk", "uuid": body.uuid,
+                     "writable": body.writable, "access": body.access,
+                     "devices": _clean_share_devices(body.devices)}
+            label = "a disk"
+        shares.append(entry)
+        out = await _disk_share_apply(shares)
+        await database.add_event(f"Shared {label} on the network as {body.name}", "info")
+        return out
+
+    @app.put("/api/disks/share/{name}", dependencies=[Depends(_require_auth)])
+    async def set_disk_share_access(name: str, body: DiskShareAccess) -> dict[str, Any]:
+        """Change who may open a share and at what level."""
+        shares = await _disk_share_list()
+        share = next((s for s in shares if s["name"].lower() == name.lower()), None)
+        if share is None:
+            raise HTTPException(404, "no such share")
+        share.update(writable=body.writable, access=body.access,
+                     devices=_clean_share_devices(body.devices))
+        out = await _disk_share_apply(shares)
+        await database.add_event(f"Access to disk share {share['name']} changed", "info")
+        return out
+
+    @app.delete("/api/disks/share/{name}", dependencies=[Depends(_require_auth)])
+    async def unshare_disk(name: str) -> dict[str, Any]:
+        shares = await _disk_share_list()
+        kept = [s for s in shares if s["name"].lower() != name.lower()]
+        if len(kept) == len(shares):
+            raise HTTPException(404, "no such share")
+        out = await _disk_share_apply(kept)
+        await asyncio.to_thread(disk_shares.forget_credentials,
+                                next(s["name"] for s in shares if s not in kept))
+        await database.add_event(f"Disk share {name} removed", "info")
+        return out
+
+    @app.post("/api/disks/install-samba", dependencies=[Depends(_require_auth)])
+    async def install_samba() -> dict[str, Any]:
+        """Install Samba (the SMB server) in the background."""
+        started = await asyncio.to_thread(disk_shares.install_samba)
+        if started:
+            await database.add_event("Samba install started", "info")
+        return await asyncio.to_thread(disk_shares.status, await _disk_share_list())
 
     @app.post("/api/wan/test", dependencies=[Depends(_require_auth)])
     async def test_wan(body: WanTest) -> dict[str, Any]:
@@ -4153,12 +4276,42 @@ def create_app(
                     pass
 
         share_cleanup_task = asyncio.get_running_loop().create_task(_share_cleanup_loop())
+
+        async def _restore_disk_shares():
+            # Shares come back on their own after a reboot or update (rule 8).
+            # An empty list is applied too: after a factory reset that
+            # unmounts the old shares and clears the Samba config.
+            try:
+                shares = await _disk_share_list()
+                if shares or disk_shares.has_state():
+                    await asyncio.to_thread(disk_shares.apply, shares)
+            except Exception:  # noqa: BLE001 — never block startup
+                log.exception("disk shares: restore failed")
+
+        async def _disk_heal_loop():
+            # A disk unplugged and plugged back in, or a network folder that
+            # comes back, is picked up within a minute.
+            while True:
+                try:
+                    await asyncio.sleep(60)
+                    shares = await _disk_share_list()
+                    if shares:
+                        await asyncio.to_thread(disk_shares.heal, shares)
+                except asyncio.CancelledError:
+                    break
+                except Exception:  # noqa: BLE001
+                    log.exception("disk shares: heal failed")
+
+        disk_restore_task = asyncio.get_running_loop().create_task(_restore_disk_shares())
+        disk_heal_task = asyncio.get_running_loop().create_task(_disk_heal_loop())
         try:
             yield
         finally:
             push_task.cancel()
             restore_task.cancel()
             share_cleanup_task.cancel()
+            disk_restore_task.cancel()
+            disk_heal_task.cancel()
             try:
                 await push_task
             except (asyncio.CancelledError, Exception):

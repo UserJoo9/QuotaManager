@@ -387,7 +387,7 @@ class QuotaService:
         usage_by_user = await self.db.get_period_usage_by_user()
         usage_by_device = await self.db.get_period_usage_by_device()
 
-        total_used_gb = sum((u["up"] + u["down"]) for u in usage_by_user.values()) / GB
+        total_used_gb = await self.db.get_period_usage_total() / GB
 
         # 1. Base bundle excess for general packs
         excess_general = max(0.0, total_used_gb - bundle.total_gb)
@@ -1717,15 +1717,16 @@ class QuotaService:
                 # Zero out every device of this user for the current period
                 bundle = await self.db.get_bundle()
                 since = bundle.period_start or ""
-                for d in user_devices:
+                # ...including devices that were deleted but still count
+                # for this user (quota/db.py removed_devices).
+                removed = await self.db.conn.execute_fetchall(
+                    "SELECT device_id FROM removed_devices WHERE user_id=?", (user_id,))
+                for dev_id in [d.id for d in user_devices] + [r["device_id"] for r in removed]:
                     await self.db.conn.execute(
                         "DELETE FROM usage_daily WHERE device_id=? AND date>=?",
-                        (d.id, since),
+                        (dev_id, since),
                     )
                 await self.db.conn.commit()
-            elif len(user_devices) == 1:
-                # Only 1 device, set it directly
-                await self.db.set_device_period_usage(user_devices[0].id, target_user_bytes, today)
             else:
                 # Distribute target: put delta into the first device or proportionally
                 # Safest & simplest: adjust the primary (first) device to absorb the delta
@@ -1734,6 +1735,24 @@ class QuotaService:
                 cur_primary_bytes = cur_primary["up"] + cur_primary["down"]
                 target_primary_bytes = max(0, cur_primary_bytes + delta_total)
                 await self.db.set_device_period_usage(primary.id, target_primary_bytes, today)
+                # Lowering by more than the primary device holds: take the
+                # rest from the person's other devices, deleted ones included
+                # (they still count for this person, quota/db.py removed_devices).
+                deficit = -(cur_primary_bytes + delta_total)
+                if deficit > 0:
+                    removed = await self.db.conn.execute_fetchall(
+                        "SELECT device_id FROM removed_devices WHERE user_id=?", (user_id,))
+                    others = [d.id for d in user_devices[1:]] + [r["device_id"] for r in removed]
+                    for dev_id in others:
+                        if deficit <= 0:
+                            break
+                        cur = period_usage_by_dev.get(dev_id, {"up": 0, "down": 0})
+                        cur_bytes = cur["up"] + cur["down"]
+                        if cur_bytes <= 0:
+                            continue
+                        take = min(cur_bytes, deficit)
+                        await self.db.set_device_period_usage(dev_id, cur_bytes - take, today)
+                        deficit -= take
 
         # Re-evaluate blocks immediately
         block_changes = await self.evaluate_blocks()
