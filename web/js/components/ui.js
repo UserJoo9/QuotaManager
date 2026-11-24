@@ -1,5 +1,5 @@
 import { h, icon } from "../core/dom.js";
-import { t, num } from "../core/i18n.js";
+import { t, num, getLang } from "../core/i18n.js";
 
 export const bar = (pct, neutral) => h("div", { class: "bar" + (!neutral && pct >= 100 ? " over" : "") },
   h("i", { style: { width: Math.min(100, Math.max(0, pct)) + "%" } }));
@@ -32,6 +32,12 @@ export function fmtBps(bps) {
   if (n >= 1e3) return `${num(n / 1e3, 0)} ${t("unit.kbps")}`;
   return `${num(n, 0)} ${t("unit.bps")}`;
 }
+// "07:00" for an epoch-seconds timestamp, in the dashboard language
+export function clock(ts) {
+  if (!ts) return "";
+  try { return new Intl.DateTimeFormat(getLang() === "ar" ? "ar-EG" : "en-GB", { hour: "2-digit", minute: "2-digit" }).format(new Date(ts * 1000)); }
+  catch { return new Date(ts * 1000).toTimeString().slice(0, 5); }
+}
 // status of a person: {k, text, cls}
 export function userStatus(u) {
   const online = (u.devices || []).some((d) => d.connected);
@@ -39,6 +45,7 @@ export function userStatus(u) {
   if (u.blocked && u.quota_mode === "disabled") return { k: "unassigned", text: t("pp.st.unassigned"), cls: "chip warn" };
   if (u.blocked && u.daily && u.daily.blocked && u.block_state === "quota" && !(u.percent >= 100)) return { k: "daily", text: t("pp.st.daily"), cls: "chip warn" };
   if (u.blocked) return { k: "blocked", text: t("pp.st.blocked"), cls: "chip danger" };
+  if (u.schedule) return { k: "schedule", text: `${t("sc.chip")} ${clock(u.schedule.until_ts)}`, cls: "chip warn" };
   return online ? { k: "online", text: t("pp.st.online"), cls: "chip ok" } : { k: "offline", text: t("pp.st.offline"), cls: "chip" };
 }
 export const chip = (cls, text) => h("span", { class: "chip " + (cls || "") }, text);
