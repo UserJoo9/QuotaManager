@@ -8,9 +8,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/UserJoo9/Netrex/releases/latest"><img src="https://img.shields.io/github/v/release/UserJoo9/Netrex?style=for-the-badge&label=release&color=2563EB&labelColor=0B1220" alt="آخر إصدار"></a>
-  <a href="https://github.com/UserJoo9/Netrex/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/UserJoo9/Netrex/ci.yml?branch=main&style=for-the-badge&label=tests&labelColor=0B1220" alt="الاختبارات"></a>
-  <a href="https://github.com/UserJoo9/Netrex/stargazers"><img src="https://img.shields.io/github/stars/UserJoo9/Netrex?style=for-the-badge&color=22D3EE&labelColor=0B1220" alt="النجوم"></a>
+  <a href="https://github.com/UserJoo9/Netrex/releases/latest"><img src="https://img.shields.io/badge/release-latest-2563EB?style=for-the-badge&labelColor=0B1220" alt="آخر إصدار"></a>
+  <a href="https://github.com/UserJoo9/Netrex/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/tests-CI-16A34A?style=for-the-badge&labelColor=0B1220" alt="الاختبارات"></a>
+  <a href="https://github.com/UserJoo9/Netrex/stargazers"><img src="https://img.shields.io/badge/GitHub-star%20us-22D3EE?style=for-the-badge&logo=github&logoColor=white&labelColor=0B1220" alt="النجوم"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22D3EE?style=for-the-badge&labelColor=0B1220" alt="رخصة MIT"></a>
 </p>
 
