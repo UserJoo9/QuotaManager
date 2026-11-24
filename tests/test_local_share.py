@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import io
+import shutil
 import time
 import zipfile
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from api.app import create_app
+from core.config import WafConfig
 from quota import db as _db
 from quota.engine import SnapshotHolder
 from quota.local_share import LocalShareManager, sanitize_filename
@@ -126,6 +129,7 @@ def share_client(tmp_path):
         service=service,
         holder=holder,
         local_share_manager=share_mgr,
+        waf_config=WafConfig(local_subnets=["192.168.1.0/24"]),
     )
 
     with TestClient(app, client=("192.168.1.100", 50000)) as c:
@@ -720,3 +724,207 @@ def test_cancelled_upload_leaves_no_partial_file(tmp_path):
         assert [p for p in (tmp_path / "share_data").rglob("big.bin")] == []
 
     asyncio.run(_test())
+
+
+def test_lan_upload_rejects_file_over_limit(share_client):
+    client, share = share_client
+    share.max_file_bytes = 8
+
+    response = client.post("/api/share/upload", content=b"123456789")
+
+    assert response.status_code == 413
+    assert list(share.storage_dir.iterdir()) == []
+    assert client.post("/api/share/upload", content=b"12345678").status_code == 200
+
+
+def test_lan_upload_rejects_when_existing_files_fill_cache(share_client):
+    client, share = share_client
+    share.max_storage_bytes = 10
+    first = client.post("/api/share/upload", content=b"12345678")
+    file_id = first.json()["file"]["id"]
+
+    response = client.post("/api/share/upload", content=b"abc")
+
+    assert response.status_code == 413
+    assert client.get(f"/api/share/download/{file_id}").content == b"12345678"
+    assert {path.name for path in share.storage_dir.iterdir()} == {file_id, "index.json"}
+    assert client.delete(f"/api/share/files/{file_id}").status_code == 200
+    assert client.post("/api/share/upload", content=b"abc").status_code == 200
+
+
+@pytest.mark.parametrize("limit", ["max_file_bytes", "max_storage_bytes"])
+def test_lan_stream_rejects_after_writing_first_chunk(share_client, limit):
+    client, share = share_client
+    setattr(share, limit, 8)
+
+    # The ASGI transport delivers separate body events to the real middleware and route.
+    async def stream():
+        yield b"12345"
+        partial, = share.storage_dir.glob("*/*")
+        assert partial.is_file()
+        yield b"6789"
+
+    async def upload():
+        transport = httpx.ASGITransport(app=client.app, client=("192.168.1.100", 50000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as lan:
+            request = lan.build_request("POST", "/api/share/upload", content=stream())
+            assert "content-length" not in request.headers
+            return await lan.send(request)
+
+    response = asyncio.run(upload())
+
+    assert response.status_code == 413
+    assert list(share.storage_dir.iterdir()) == []
+    assert client.post("/api/share/upload", content=b"12345678").status_code == 200
+
+
+def test_concurrent_uploads_share_the_same_budget(share_client):
+    client, share = share_client
+    share.max_storage_bytes = 8
+
+    async def upload():
+        partial_ready = asyncio.Event()
+        finish_first = asyncio.Event()
+
+        async def first_body():
+            yield b"12345"
+            partial_ready.set()
+            await finish_first.wait()
+            yield b"678"
+
+        transport = httpx.ASGITransport(app=client.app, client=("192.168.1.100", 50000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as lan:
+            first = asyncio.create_task(lan.post("/api/share/upload", content=first_body()))
+            try:
+                await partial_ready.wait()
+                second = await lan.post("/api/share/upload", content=b"abcd")
+            finally:
+                finish_first.set()
+                first_response = await first
+        return first_response, second
+
+    first, second = asyncio.run(upload())
+
+    assert first.status_code == 200
+    assert second.status_code == 413
+    assert client.get("/api/share/list").json()["total_size"] == 8
+
+
+def test_folder_member_over_limit_discards_incomplete_archive(share_client):
+    client, share = share_client
+    share.max_file_bytes = 8
+    folder_id = client.post("/api/share/folder/init", json={}).json()["folder_id"]
+
+    response = client.post(
+        "/api/share/folder/file",
+        params={"folder_id": folder_id, "path": "file.txt"},
+        content=b"123456789",
+    )
+
+    assert response.status_code == 413
+    assert not (share.storage_dir / folder_id).exists()
+    assert client.get("/api/share/list").json()["files"] == []
+
+
+def test_folder_archive_over_budget_on_finalize_is_removed(share_client):
+    client, share = share_client
+    share.max_storage_bytes = 100
+    folder_id = client.post("/api/share/folder/init", json={}).json()["folder_id"]
+    member = client.post(
+        "/api/share/folder/file",
+        params={"folder_id": folder_id, "path": "a.txt"},
+        content=b"abc",
+    )
+    assert member.status_code == 200
+
+    response = client.post("/api/share/folder/finalize", json={"folder_id": folder_id})
+
+    assert response.status_code == 413
+    assert not (share.storage_dir / folder_id).exists()
+    assert client.get("/api/share/list").json()["files"] == []
+
+
+def test_batch_zip_respects_cache_budget(share_client):
+    client, share = share_client
+    share.max_storage_bytes = 20
+    upload = client.post("/api/share/upload", content=b"12345678")
+    file_id = upload.json()["file"]["id"]
+
+    response = client.get("/api/share/download-zip", params={"ids": file_id})
+
+    assert response.status_code == 413
+    assert list((share.storage_dir / "bundles").glob("*.zip")) == []
+    assert client.get(f"/api/share/download/{file_id}").content == b"12345678"
+
+
+def test_existing_cache_payloads_count_after_restart(tmp_path):
+    existing = tmp_path / "restart" / "old-upload"
+    existing.mkdir(parents=True)
+    (existing / "file.bin").write_bytes(b"12345678")
+    reopened = LocalShareManager(existing.parent)
+    reopened.max_storage_bytes = 10
+    stream = io.BytesIO(b"abc")
+
+    with pytest.raises(ValueError, match="storage limit"):
+        asyncio.run(reopened.save_file_stream(stream, "new.bin", "application/octet-stream", "192.168.1.100"))
+
+    assert list(existing.parent.iterdir()) == [existing]
+
+
+def test_upload_rejects_when_it_would_use_reserved_disk_space(share_client, monkeypatch):
+    client, share = share_client
+    disk_usage = shutil.disk_usage(share.storage_dir)
+    available = 256 * 1024 ** 2 + 4
+    monkeypatch.setattr(
+        "quota.local_share.shutil.disk_usage",
+        lambda _path: disk_usage._replace(free=available),
+    )
+
+    response = client.post("/api/share/upload", content=b"12345")
+
+    assert response.status_code == 413
+    assert list(share.storage_dir.iterdir()) == []
+
+
+def test_cancelled_stream_releases_partial_file_budget(tmp_path):
+    async def upload():
+        share = LocalShareManager(tmp_path)
+        share.max_storage_bytes = 8
+        partial_ready = asyncio.Event()
+
+        async def stream():
+            yield b"12345"
+            partial_ready.set()
+            await asyncio.Future()
+
+        task = asyncio.create_task(
+            share.save_file_stream(stream(), "partial.bin", "application/octet-stream", "192.168.1.100")
+        )
+        await partial_ready.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert list(tmp_path.iterdir()) == []
+
+        saved = await share.save_file_stream(
+            io.BytesIO(b"12345678"), "complete.bin", "application/octet-stream", "192.168.1.100"
+        )
+        assert saved.size == 8
+
+    asyncio.run(upload())
+
+
+def test_cleanup_removes_abandoned_folder_archive(share_client, monkeypatch):
+    client, share = share_client
+    folder_id = client.post("/api/share/folder/init", json={}).json()["folder_id"]
+    member = client.post(
+        "/api/share/folder/file",
+        params={"folder_id": folder_id, "path": "a.txt"},
+        content=b"abc",
+    )
+    assert member.status_code == 200
+    monkeypatch.setattr("quota.local_share.FOLDER_IDLE_SECONDS", 0, raising=False)
+
+    assert client.get("/api/share/list").status_code == 200
+    assert not (share.storage_dir / folder_id).exists()
+    assert client.post("/api/share/folder/finalize", json={"folder_id": folder_id}).status_code == 404
