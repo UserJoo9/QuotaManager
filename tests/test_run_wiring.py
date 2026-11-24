@@ -779,6 +779,9 @@ def test_stop_new_falls_back_to_registered_block_when_fragment_unwritable(tmp_pa
     cfg.dhcp.reload_dnsmasq = False
     gw = Gateway(cfg)
     _get_loop().run_until_complete(gw.startup())
+    # The background tick runs between these awaits and raced the fallback
+    # (CI flake: device registered but not yet admin-blocked when read).
+    _cancel_maintenance(gw)
     try:
         _get_loop().run_until_complete(
             gw.service.set_stop_new_connections(True))
