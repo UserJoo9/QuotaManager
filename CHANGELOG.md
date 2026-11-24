@@ -13,6 +13,7 @@ Added:
 
 Fixed:
 - A short hiccup while the gateway updated its list of cut-off devices could switch off counting and blocking for everyone until a restart, or let a cut-off device through for a moment. The list is now changed in one step: if that step fails, the old list stays in force and the gateway simply tries again 15 seconds later. Contributed by @compnew2006.
+- If saving usage failed for a moment (for example the database was busy), those 15 seconds of usage were lost and the check that cuts off people over their limit was skipped for that round. The usage is now kept and saved on the next round, and the check always runs. Reported by @compnew2006 in #52.
 - A guest who typed a valid code could get an error even though the code was accepted, and then be told the code was already used. The approval now always comes back, and a guest who retries gets the same approval again. Contributed by @compnew2006.
 - The security filter on the dashboard (for access from outside the home) now checks a request's size as it arrives and keeps its memory bounded, so a flood of large or never-ending requests can no longer slow the gateway down. Access from inside the home is unchanged. Contributed by @compnew2006.
 - README: a one-line, safe way to back up the gateway's data while it runs, plus a restore guide. Contributed by @compnew2006.

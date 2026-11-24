@@ -464,6 +464,8 @@ class Gateway:
         self._empty_sweeps = 0
         #: monotonic time of the previous counter flush (live-speed window).
         self._last_flush_mono: float | None = None
+        #: usage the database refused last tick: (device_id, day) -> (up, down)
+        self._unsaved_usage: dict[tuple[int, str], tuple[int, int]] = {}
         #: set when _persist_lease creates a new device — _sync_dnsmasq_leases
         #: resets _last_latency_sweep so the ARP probe runs in the same tick,
         #: turning the new device's LED blue immediately instead of waiting up
@@ -1511,6 +1513,27 @@ class Gateway:
             if dt > 1.0:
                 log.warning("maintenance step %s took %.1fs", name, dt)
 
+    async def _write_usage(self, records: list[tuple[int, str, int, int]]) -> None:
+        """Store counted bytes. The kernel counters were already drained, so a
+        failed write (database locked, disk full) must not lose them or stop
+        the tick before blocks are evaluated: keep them, add them to the next
+        tick's batch, and try again."""
+        merged = dict(self._unsaved_usage)
+        for dev_id, day, up, down in records:
+            u, d = merged.get((dev_id, day), (0, 0))
+            merged[(dev_id, day)] = (u + up, d + down)
+        if not merged:
+            return
+        batch = [(dev_id, day, u, d) for (dev_id, day), (u, d) in merged.items()]
+        try:
+            await self.database.add_usage_batch(batch)
+        except Exception:  # noqa: BLE001 - keep the bytes, keep the tick going
+            self._unsaved_usage = merged
+            log.warning("could not save usage (%d record(s)); keeping it for "
+                        "the next tick", len(batch), exc_info=True)
+            return
+        self._unsaved_usage = {}
+
     async def _maintenance_tick(self) -> None:
         # 1. Roll the quota period if stale (covers month boundary).
         await self.service.ensure_period()
@@ -1634,8 +1657,9 @@ class Gateway:
                         if box is not None:
                             usage_records.append((box.id, today, snap.gateway.up, snap.gateway.down))
 
-                if usage_records:
-                    await self.database.add_usage_batch(usage_records)
+                await self._write_usage(usage_records)
+            elif self._unsaved_usage:
+                await self._write_usage([])
 
             # LOCAL (LAN) traffic: stored apart from the metered usage, never
             # part of quota math - purely for the dashboard's LAN monitor.
