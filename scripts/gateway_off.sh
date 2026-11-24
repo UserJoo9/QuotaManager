@@ -24,7 +24,7 @@ for unit in quota-wan-ppp dnsmasq quota-gateway; do
     systemctl disable --now "$unit" >/dev/null 2>&1 && log "stopped + disabled $unit"
 done
 
-for table in quota_gateway quota_firewall quota_nat; do
+for table in quota_gateway quota_firewall quota_nat quota_schedule; do
     nft delete table inet "$table" 2>/dev/null && log "removed nftables table $table"
 done
 

@@ -707,6 +707,17 @@ Time-based internet cuts per person / device (issue #32).
 - **Tick** (step 4): `_sync_schedules(ip_to_mac_all)` resolves the cuts and
   programs the table; devices off by schedule are also denied on network
   drives. API edits call it immediately (`schedule_apply`).
+- **Precedence**: a schedule cut wins over everything in `quota_gateway`
+  (always-allow / bypass, boosters, free mode): its chain runs first and drops
+  before any accept there. Intended: a bedtime is a bedtime.
+- **Allowed sites need the gateway's DNS**: `allow4/allow6` are only filled
+  when dnsmasq forwards the lookup. A device using its own resolver (Android
+  Private DNS, browser DoH) never fills them, so those sites stay blocked for
+  it during a cut. IPv6 rules mirror IPv4 (rule 9); validated in a real-kernel
+  lab for IPv4 + MAC only (the lab had no IPv6).
+- **Turning the gateway off** (`scripts/gateway_off.sh`) deletes
+  `quota_schedule` with the other tables, so no device stays cut until its
+  kernel timeout.
 - **Dashboard**: `/api/dashboard` adds `schedule: {until_ts, names}` per
   device and `{until_ts, names, devices}` per user; page `web/js/pages/schedule.js`.
 - Limits: a cut STARTS only while the service runs (the tick adds the device);
