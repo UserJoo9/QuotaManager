@@ -874,7 +874,8 @@ def test_existing_cache_payloads_count_after_restart(tmp_path):
 def test_upload_rejects_when_it_would_use_reserved_disk_space(share_client, monkeypatch):
     client, share = share_client
     disk_usage = shutil.disk_usage(share.storage_dir)
-    available = 256 * 1024 ** 2 + 4
+    from quota.local_share import MIN_DISK_FREE_BYTES
+    available = MIN_DISK_FREE_BYTES + 4
     monkeypatch.setattr(
         "quota.local_share.shutil.disk_usage",
         lambda _path: disk_usage._replace(free=available),

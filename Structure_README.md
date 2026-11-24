@@ -1184,7 +1184,7 @@ The Local Share subsystem (`quota/local_share.py`, `web/share.html`, and the das
   - The application reads the request in chunks and writes directly to the gateway cache (`data/local_share/<id>/<safe_name>`). It does not buffer the entire file.
   - Raw client requests set the sanitized URI-encoded filename via `X-Filename: <encoded_name>` and standard `Content-Type`.
 - **Storage limits**:
-  - Each uploaded file, uncompressed folder member, and generated ZIP is limited to 1 GiB. Stored files, concurrent uploads, in-progress folder archives, and temporary download bundles share a 4 GiB cache limit. Payload writes also stop when they would leave less than 256 MiB free on the cache filesystem.
+  - Each uploaded file, uncompressed folder member, and generated ZIP is limited to 4 GiB. Stored files, concurrent uploads, in-progress folder archives, and temporary download bundles share a 16 GiB cache limit. Payload writes also stop when they would leave less than 1 GiB free on the cache filesystem (the database, logs and updates live on the same disk).
   - Limits are checked during streaming and ZIP creation, including the ZIP directory written at finalization. The API returns HTTP 413 and discards the rejected partial file or archive. After a folder upload fails, start a new folder session.
   - Cache usage includes payload files already present at startup. Unfinished folder sessions held by the running process are discarded after 30 minutes of inactivity at the next cleanup pass.
 - **Atomic Index Persistence**:

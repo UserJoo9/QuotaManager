@@ -27,9 +27,9 @@ DEFAULT_TTL_SECONDS = 7200  # 2 hours
 MAX_TEXT_ITEMS = 50
 MAX_TEXT_LENGTH = 10000
 MAX_LIVE_DIRECT_BYTES = 50 * 1024 * 1024  # 50 MB
-MAX_FILE_BYTES = 1024 ** 3  # 1 GiB
-MAX_STORAGE_BYTES = 4 * 1024 ** 3  # 4 GiB
-MIN_DISK_FREE_BYTES = 256 * 1024 ** 2  # 256 MiB
+MAX_FILE_BYTES = 4 * 1024 ** 3  # 4 GiB (a movie or a phone backup)
+MAX_STORAGE_BYTES = 16 * 1024 ** 3  # 16 GiB (the disk reserve below still applies)
+MIN_DISK_FREE_BYTES = 1024 ** 3  # 1 GiB kept free for the database, logs and updates
 FOLDER_IDLE_SECONDS = 1800
 
 
