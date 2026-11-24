@@ -897,6 +897,7 @@ def test_decline_random_falls_back_to_registered_block_when_fragment_unwritable(
     cfg.dhcp.reload_dnsmasq = False
     gw = Gateway(cfg)
     _get_loop().run_until_complete(gw.startup())
+    _cancel_maintenance(gw)  # the startup tick raced the fallback in CI
     try:
         _get_loop().run_until_complete(
             gw.service.set_decline_random_macs(True))
