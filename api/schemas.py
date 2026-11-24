@@ -725,3 +725,35 @@ class VpnSettingsUpdate(BaseModel):
 
 
 
+
+
+class ScheduleWindow(BaseModel):
+    """One time window of an internet schedule. Days: 0 = Monday ... 6 = Sunday.
+    ``end`` earlier than ``start`` runs past midnight."""
+
+    days: list[int] = Field(default_factory=list, max_length=7)
+    start: str = Field(..., max_length=5)
+    end: str = Field(..., max_length=5)
+
+
+class ScheduleBody(BaseModel):
+    """Create / replace an internet schedule (quota/schedules.py validates)."""
+
+    name: str = Field(..., max_length=40)
+    enabled: bool = True
+    users: list[int] = Field(default_factory=list, max_length=500)
+    devices: list[int] = Field(default_factory=list, max_length=500)
+    windows: list[ScheduleWindow] = Field(default_factory=list, max_length=20)
+    skip_dates: list[str] = Field(default_factory=list, max_length=60)
+
+
+class SchedulePause(BaseModel):
+    """Bonus time: no cut for ``minutes`` from now (0 = end it now)."""
+
+    minutes: int = Field(..., ge=0, le=1440)
+
+
+class ScheduleSites(BaseModel):
+    """Sites that keep working while a schedule has the internet off."""
+
+    sites: list[str] = Field(default_factory=list, max_length=200)

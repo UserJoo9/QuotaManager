@@ -60,6 +60,7 @@ from quota.firewall import FirewallManager
 from quota.latency_probe import ArpRttProbe
 from quota.netmgr import TopologyManager
 from quota.nftables import NftablesEngine
+from quota.schedule_nft import ScheduleFirewall
 from quota.tailscale import TailscaleManager
 from quota.service import QuotaService
 from quota.topology import (check_internet, check_internet_dns, detect_ppp,
@@ -293,6 +294,10 @@ class Gateway:
         self.shaper: object | None = None  # quota.shaping.TcShaper (tc/ifb)
         #: quota.disk_share.DiskShareManager, wired in main() (Share > Network drives)
         self.disk_shares: object | None = None
+        #: internet schedules: the ``inet quota_schedule`` nft table
+        self.schedule_fw: ScheduleFirewall | None = None
+        #: MAC -> schedules.Cut of the last tick (devices off by schedule)
+        self._schedule_cuts: dict = {}
         self.dns_manager: _dns_rules.DnsRuleManager | None = None  # domain filtering
         #: VPN-share policy routing (quota.vpnshare.VpnShareManager); None
         #: when cfg.vpn_share.enabled is false. Reconciles the client-subnet
@@ -497,6 +502,10 @@ class Gateway:
 
         if self.cfg.engine.enabled and self.engine is None:
             self.engine = _make_engine(self.cfg, self.holder)
+        if self.schedule_fw is None and isinstance(self.engine, NftablesEngine):
+            self.schedule_fw = ScheduleFirewall(
+                getattr(self.engine, "_local_networks", []),
+                getattr(self.engine, "_local_networks6", []))
         if self.shaper is None:
             self.shaper = _make_shaper(self.cfg)
         if self.dns_manager is None:
@@ -1660,10 +1669,19 @@ class Gateway:
             v["ip"] for mac, v in state.items()
             if v.get("ip") and v.get("guest") and v.get("blocked")
         }
+        # Internet schedules: program the quota_schedule table (devices off by
+        # schedule right now, each with a kernel timeout at the end of its cut).
+        try:
+            await self._timed("_sync_schedules",
+                              self._sync_schedules(ip_to_mac_all))
+        except Exception:  # noqa: BLE001 - never let a schedule stop the tick
+            log.exception("schedules: sync failed")
         # Shared disks follow the same cut: a device without internet (over
-        # quota, paused, unassigned, guest waiting) cannot open them either.
+        # quota, paused, unassigned, guest waiting, off by schedule) cannot
+        # open them either.
         if self.disk_shares is not None:
-            denied = {v["ip"] for v in state.values() if v.get("ip") and v.get("blocked")}
+            denied = {v["ip"] for mac, v in state.items()
+                      if v.get("ip") and (v.get("blocked") or mac in self._schedule_cuts)}
             ip_by_mac = {mac: v["ip"] for mac, v in state.items() if v.get("ip")}
             try:
                 await self._timed("_sync_disk_share_access",
@@ -1997,12 +2015,38 @@ class Gateway:
                 static_leases_list = await self.database.list_static_leases()
                 static_map = {r["mac"]: (r.get("ip", ""), r.get("ip6", ""))
                               for r in static_leases_list}
+                schedule_sites = await self.service.schedule_sites()
                 await asyncio.to_thread(
                     manager.apply, devices, rules, dns_servers, device_ids_by_user,
-                    static_map)
+                    static_map, schedule_sites)
         except Exception:  # noqa: BLE001
             log.exception("failed to sync DNS filtering rules")
 
+
+    async def _sync_schedules(self, ip_to_mac_all: dict[str, str] | None = None) -> None:
+        """Resolve which devices are off by schedule now and program the
+        kernel (cache-gated in ScheduleFirewall.sync, so an unchanged state
+        costs no nft call)."""
+        cuts = await self.service.schedule_cuts()
+        self._schedule_cuts = cuts
+        fw = self.schedule_fw
+        if fw is None:
+            return
+        ip_map = ip_to_mac_all if ip_to_mac_all is not None else (self._last_ip_to_mac or {})
+        until = {mac: c.until.timestamp() for mac, c in cuts.items()}
+        await asyncio.to_thread(fw.sync, until, dict(ip_map), time.time())
+
+    async def _apply_schedules_now(self) -> None:
+        """API hook: a schedule was saved / paused / removed."""
+        await self._sync_schedules()
+
+    async def _apply_schedule_sites_now(self) -> None:
+        """API hook: the allowed-sites list changed. Forget the addresses
+        collected for the old list, then rewrite + restart dnsmasq so it
+        refills them for the new one."""
+        if self.schedule_fw is not None:
+            await asyncio.to_thread(self.schedule_fw.reset_allowed)
+        await self._sync_dns_rules()
 
     async def _apply_dns_now(self) -> None:
         """Apply a domain-rule / preset / DNS-server edit immediately instead
@@ -2684,6 +2728,8 @@ def main() -> None:
                          shaping_sync=gateway._reshaping_now,
                          report_config=report_cfg,
                          dns_apply=gateway._apply_dns_now,
+                         schedule_apply=gateway._apply_schedules_now,
+                         schedule_sites_apply=gateway._apply_schedule_sites_now,
                          vpn_apply=gateway._apply_vpn_now,
                          vpn_status_getter=gateway._vpn_status,
                          wan_renew=gateway._renew_wan_ip,

@@ -373,3 +373,36 @@ textarea.input{height:auto;min-height:120px;padding:10px 12px;resize:vertical;fo
 .cl-li{position:relative;padding-inline-start:14px}
 .cl-li::before{content:"\2022";position:absolute;inset-inline-start:2px}
 .cl-body code{font-family:var(--mono,monospace);background:var(--surface-3);padding:0 4px;border-radius:4px}
+
+/* Internet schedule (pages/schedule.js) */
+.sc-list{display:flex;flex-direction:column;gap:12px}
+.sc-card{border:1px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:10px;background:var(--surface)}
+.sc-card.live{border-color:color-mix(in srgb,var(--danger) 45%,var(--line))}
+.sc-head{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;align-items:center}
+.sc-head .c-name{display:flex;flex-direction:column;font-weight:650;min-width:0}
+.sc-head .c-name .sub{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sc-week{display:flex;flex-direction:column;gap:3px;margin-top:4px}
+.sc-row{display:grid;grid-template-columns:44px 1fr;gap:8px;align-items:center}
+.sc-day{font-size:11.5px;color:var(--text-3);font-weight:600}
+.sc-row.today .sc-day{color:var(--accent)}
+.sc-bar{direction:ltr;position:relative;height:12px;border-radius:6px;background:var(--surface-3);overflow:hidden}
+.sc-seg{position:absolute;top:0;bottom:0;background:color-mix(in srgb,var(--accent) 70%,transparent);border-radius:4px}
+.sc-seg.on{background:color-mix(in srgb,var(--danger) 75%,transparent)}
+.sc-now{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--text);border-radius:1px}
+.sc-ticks{display:flex;justify-content:space-between;font-size:10.5px;color:var(--text-3);direction:ltr}
+.sc-axis{margin-top:2px}
+.sc-win{border:1px dashed var(--line);border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:8px;margin-bottom:8px}
+.sc-days{display:flex;flex-wrap:wrap;gap:6px}
+.sc-pill{height:30px;min-width:44px;padding:0 10px;border-radius:999px;border:1px solid var(--line);font-size:12.5px;font-weight:600;color:var(--text-2);background:var(--surface)}
+.sc-pill.on{background:var(--accent-soft);color:var(--accent);border-color:var(--accent)}
+.sc-times{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.sc-times label{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--text-2)}
+.sc-times .input{width:auto}
+.sc-pick{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:6px;max-height:190px;overflow:auto;padding:4px 0}
+.sc-check{display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;min-width:0}
+.sc-check span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sc-dates{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.sc-x{margin-inline-start:4px;font-size:14px;line-height:1;color:inherit}
+.sc-how{margin:0;padding-inline-start:18px;display:flex;flex-direction:column;gap:8px;color:var(--text-2);font-size:13px}
+details.field summary{cursor:pointer;font-weight:600;font-size:13px;margin-bottom:6px}
+@media (max-width:560px){.sc-head{grid-template-columns:1fr auto}.sc-head .sw{grid-row:1;grid-column:2}.sc-head .chip{grid-column:1/-1;justify-self:start}}

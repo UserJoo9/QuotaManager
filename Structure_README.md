@@ -672,6 +672,58 @@ either way.
 
 ---
 
+## Internet schedules (`quota/schedules.py`, `quota/schedule_nft.py`)
+
+Time-based internet cuts per person / device (issue #32).
+
+- **Model** (`quota/schedules.py`, pure): a schedule = name, enabled, `users`
+  (every device of each), `devices`, `windows` (`days` = Python weekdays,
+  `start`/`end` `HH:MM`; `end` < `start` runs past midnight and belongs to the
+  day it STARTS on; `24:00` = midnight), `skip_dates`, `paused_until` (bonus
+  time). Touching windows are merged so the dashboard shows the real end.
+  Stored as JSON in `settings.schedules`; the allowed sites in
+  `settings.schedule_sites`. A broken row is skipped, never fatal.
+- **Service**: `save_schedule` / `delete_schedule` / `pause_schedule` /
+  `set_schedule_sites`, `schedule_cuts()` = MAC -> `Cut(until, schedules)`
+  (the box itself is never cut, the protected Gateway user cannot be picked).
+- **Kernel** (`quota/schedule_nft.py`): its own table `inet quota_schedule`,
+  NOT flushed on service start, so scheduled devices stay off across a
+  restart and the collected allowed-site addresses survive (dnsmasq only adds
+  an address when it forwards a query, not from its cache). Sets `devs4`,
+  `devs6`, `macs` have `flags timeout`: each device is added with a timeout
+  equal to the end of its cut (+5 s), so the KERNEL frees it on time even if
+  the service is stopped. Forward chain at priority -5 (before
+  `quota_gateway`'s counters at 0, so dropped packets are never counted):
+  `ip saddr @devs4 ip daddr != @allow4 <local nets excluded> drop` + the
+  reverse direction + the `ip6` twins + `ether saddr @macs` for lease-less
+  devices. Every membership change is ONE `nft -f -` batch (flush + re-add),
+  cache-gated on (address, end) — no unblock window, no nft call when nothing
+  changed.
+- **Allowed sites**: `dns_rules.render_schedule_sites` writes
+  `/etc/dnsmasq.d/quota-schedule.conf` (`nftset=/a/b/…/4#inet#quota_schedule#allow4,6#…#allow6`,
+  20 domains per line) through the same `DnsRuleManager.apply` validation /
+  rollback path. Saving the list flushes `allow4/allow6` and restarts dnsmasq
+  so they refill. The allow list is shared by all schedules (one kernel set).
+- **Tick** (step 4): `_sync_schedules(ip_to_mac_all)` resolves the cuts and
+  programs the table; devices off by schedule are also denied on network
+  drives. API edits call it immediately (`schedule_apply`).
+- **Precedence**: a schedule cut wins over everything in `quota_gateway`
+  (always-allow / bypass, boosters, free mode): its chain runs first and drops
+  before any accept there. Intended: a bedtime is a bedtime.
+- **Allowed sites need the gateway's DNS**: `allow4/allow6` are only filled
+  when dnsmasq forwards the lookup. A device using its own resolver (Android
+  Private DNS, browser DoH) never fills them, so those sites stay blocked for
+  it during a cut. IPv6 rules mirror IPv4 (rule 9); validated in a real-kernel
+  lab for IPv4 + MAC only (the lab had no IPv6).
+- **Turning the gateway off** (`scripts/gateway_off.sh`) deletes
+  `quota_schedule` with the other tables, so no device stays cut until its
+  kernel timeout.
+- **Dashboard**: `/api/dashboard` adds `schedule: {until_ts, names}` per
+  device and `{until_ts, names, devices}` per user; page `web/js/pages/schedule.js`.
+- Limits: a cut STARTS only while the service runs (the tick adds the device);
+  the end is enforced by the kernel. DNS lookups to the box keep working
+  (input hook), so allowed sites resolve.
+
 ## Rogue devices & the ARP gateway-lock
 
 Because the router keeps WiFi and shares the client segment, a device can assign
@@ -1882,6 +1934,10 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | POST | `/api/system/off` | turn the whole gateway off (System → Power): `{"poweroff": bool}` → `quota/power.py` schedules `scripts/gateway_off.sh` via `systemd-run --on-active=3` (so it outlives this service), which stops + disables `quota-wan-ppp`, `dnsmasq`, `quota-gateway`, deletes the `quota_gateway`/`quota_firewall`/`quota_nat` tables and the tc qdiscs, and optionally powers the machine off. Back on: `sudo systemctl enable --now dnsmasq quota-gateway`. 500 when `systemd-run`/the script is missing |
 | POST | `/api/system/restart` | `{"machine": bool}` → `quota/power.py::schedule_restart`: `systemd-run --on-active=3 systemctl restart quota-gateway` (or `systemctl reboot`) |
 | POST | `/api/system/factory-reset` | `{"keep_users": bool, "confirm": "RESET"}` (422 without the exact word) → `systemd-run` runs `quota/factory_reset.py` (stdlib only, run as a script): stop service → backup to `<db dir>/backups/quota-<time>.db` → delete rows from every table (keep `users`, `devices`, `static_leases`, bundle + usage tables with `keep_users`) and every setting except the network ones (`topology*`, `pppoe_*`, `wan_if`; plus login/TLS keys with `keep_users`) → remove `/etc/quota-gateway/smb-credentials` → start service |
+| GET | `/api/schedules` | `{schedules: [{id, name, enabled, users, devices, windows, skip_dates, paused_until, device_count, state: {active, until_ts, paused, skipped_today, next_start_ts, next_end_ts}}], sites, now_ts, utc_offset_min}` |
+| POST / PUT / DELETE | `/api/schedules`, `/api/schedules/{id}` | `{name, enabled, users, devices, windows: [{days, start, end}], skip_dates}` validated by `quota/schedules.py` (422 bad input, 404 unknown id); returns the list above and programs the kernel at once |
+| POST | `/api/schedules/{id}/pause` | `{minutes: 0..1440}` bonus time (0 ends it) |
+| PUT | `/api/schedule-sites` | `{sites: [domains]}` always-allowed sites (normalized like domain rules, max 200) |
 | GET | `/api/disks` | `quota/disk_share.py`: `{samba, cifs, installing, install_error, disks: [lsblk filesystems, system disk excluded], shares: [{name, source, uuid\|remote, writable, present, active}]}` |
 | POST | `/api/disks/share` | `{"source": "disk", "uuid", "name", "writable"}` or `{"source": "network", "remote": "//host/share", "user", "password", "name", "writable"}` → stored in `settings.disk_shares` (password only in a 0600 file under `/etc/quota-gateway/smb-credentials/`), mounted under `/srv/quota-share/<name>` (disk by UUID, network with `mount -t cifs`), published in `/etc/samba/quota-shares.conf`, included as the FIRST line of `smb.conf` so its `[global]` applies to every share: `interfaces = lo <LAN NIC>` + `bind interfaces only` (never `ppp0`), `hosts allow` = loopback + the engine's local IPv4 networks `EXCEPT` every cut-off device IP (fed by the tick via `DiskShareManager.set_clients`, cache-gated, `smbcontrol smbd reload-config`), guest access as the system user `quotashare` (not root), `follow symlinks = no`, `wide links = no`. Per share: `access="selected"` adds a share-level `hosts allow` of the chosen devices' current IPs; per-device levels go in `/etc/samba/quota-share.d/<share>-<ip>.conf` via `include = …-%I.conf`. A minute heal loop unmounts unplugged disks, remounts them when back, and retries unreachable CIFS folders every 5 min (mount bounded to 20 s, startup never waits). IPv4 only 409 duplicate name/disk/folder, 404 unknown or system disk, 422 bad name/remote |
 | PUT | `/api/disks/share/{name}` | change who may open a share: `{"access": "all"\|"selected", "writable", "devices": {mac: "rw"\|"ro"\|"none"}}` (MACs normalized, bad entries dropped); remounts when the read/write need changes |
@@ -2000,6 +2056,10 @@ QuotaManager/
 │   │                         #   blocklist presets, per-client DNS-server overrides,
 │   │                         #   resolve_domain_status (History-tab filter badges) —
 │   │                         #   generated dnsmasq config, no new service
+│   ├── schedules.py          # internet schedules: windows, skip dates, bonus time,
+│   │                         #   who is off right now (pure, no I/O)
+│   ├── schedule_nft.py       # ScheduleFirewall: inet quota_schedule table, devices
+│   │                         #   with kernel timeouts, allowed-site sets (nftset)
 │   ├── vpn_manager.py        # VpnManager: sing-box process supervisor, Clash API (9090),
 │   │                         #   traffic metrics, policy routing, persistent auto-healing
 │   ├── vpn_parser.py         # parse_vpn_link (VLESS/VMess/Trojan/Shadowsocks/WireGuard),
@@ -2075,6 +2135,7 @@ QuotaManager/
     │                         #   auto-detect, spawn argv, respawn/download gates,
     │                         #   stop-on-off, arch + checksum refusal
     ├── test_dns_rules.py     # hosts/ABP parsing, wildcard scopes, rendering
+    ├── test_schedules.py     # schedule time math, kernel batches, nftset fragment, service
     ├── test_latency_probe.py # ARP-RTT classifier math + sweep wiring (fakes)
     ├── test_wifi_probe.py    # airodump CSV parse + probe snapshot + thread smoke
     ├── test_updater.py       # version math + CHANGELOG parse + GitHub check +

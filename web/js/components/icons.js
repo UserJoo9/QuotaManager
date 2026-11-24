@@ -29,6 +29,7 @@ export const icons = Object.fromEntries(Object.entries({
   menu: "M4 6h16 M4 12h16 M4 18h16",
   panel: "M15 6l-6 6 6 6",
   bolt: "M13 2L3 14h8l-1 8 10-12h-8z",
+  clock: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z M12 7v5l3.5 2",
   ban: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z M5.6 5.6l12.8 12.8",
   lang: "M5 8l6 6 M4 14l6-6 2-3 M2 5h12 M7 2h1 M22 22l-5-10-5 10 M14 18h6",
   close: "M6 6l12 12 M18 6L6 18",
