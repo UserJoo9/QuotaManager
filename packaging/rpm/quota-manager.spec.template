@@ -11,7 +11,7 @@ Version:        __VERSION__
 Release:        1
 Summary:        Fair-split metered-internet quota gateway
 License:        MIT
-URL:            https://github.com/UserJoo9/QuotaManager
+URL:            https://github.com/UserJoo9/Netrex
 BuildArch:      noarch
 AutoReqProv:    no
 Requires:       python3 >= 3.10

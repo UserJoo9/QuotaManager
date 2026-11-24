@@ -1,4 +1,4 @@
-# Quota Manager — gateway configuration (Debian/Kali laptop).
+# Netrex — gateway configuration (Debian/Kali laptop).
 # The kernel owns the network path: dnsmasq (DHCP+DNS) + nftables NAT/accounting.
 # Clients live on a SEPARATE subnet (192.168.2.0/24, gateway = this laptop) so
 # every byte deterministically crosses the box — no proxy_arp.
@@ -313,11 +313,11 @@ network:
 # The Admin-tab "check automatically" / "auto-install" toggles live in the DB;
 # this block is the master switch + where the releases live.
 #   enabled: true           # false = whole subsystem off (endpoints 404)
-#   repo: UserJoo9/QuotaManager  # GitHub owner/repo (releases + CHANGELOG.md)
+#   repo: UserJoo9/Netrex  # GitHub owner/repo (releases + CHANGELOG.md)
 #   interval_hours: 24      # release-check cadence
 updates:
   enabled: true
-  repo: UserJoo9/QuotaManager
+  repo: UserJoo9/Netrex
   interval_hours: 24
 
 # Kernel firewall (nftables table `inet quota_firewall`), layered NEXT TO the

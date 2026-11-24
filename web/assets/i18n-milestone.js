@@ -1,6 +1,6 @@
 /* Arabic texts of /milestone (keys are the English source strings). */
 QMI.add({
-  "My quota — Quota Manager": "حصتي — Quota Manager",
+  "My quota — Netrex": "حصتي — Netrex",
   "Your internet allowance this period": "باقة الإنترنت بتاعتك في الفترة دي",
   "Loading…": "جاري التحميل…",
   "Your devices": "أجهزتك",

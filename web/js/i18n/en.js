@@ -1,5 +1,5 @@
 export default {
-  app: "QuotaManager", tagline: "Fair internet for everyone",
+  app: "Netrex", tagline: "Fair internet for everyone",
   "nav.main": "Main", "nav.manage": "Manage", "nav.more": "More",
   "nav.overview": "Overview", "nav.people": "People & devices", "nav.quota": "Quota", "nav.network": "Network",
   "nav.internet": "Internet", "nav.security": "Security", "nav.vpn": "VPN", "nav.insights": "Insights",
@@ -918,7 +918,7 @@ export default {
   "pk.block.not-https": "Passkeys only work over HTTPS. Turn on HTTPS in Security, or open the dashboard through its Tailscale address.",
   "pk.block.browser": "This browser does not support passkeys.",
   "pk.block.no-platform": "This device has no built-in fingerprint, face or PIN unlock that the browser can use.",
-  "pk.block.server-missing": "Passkey support is not installed on the gateway yet. Update or reinstall Quota Manager.",
+  "pk.block.server-missing": "Passkey support is not installed on the gateway yet. Update or reinstall Netrex.",
   "sys.tab.power": "Power",
   "pw.title": "Turn the gateway off",
   "pw.d": "Stop the whole system and keep it off after a reboot.",

@@ -331,7 +331,7 @@ def create_app(
     # OpenAPI schema) are a structured endpoint map served to ANYONE who can
     # reach the port — a perfect recon target on a WAN-facing box. Off unless
     # explicitly enabled for a dev environment (web.docs_enabled).
-    app = FastAPI(title="Quota Manager", version=__version__,
+    app = FastAPI(title="Netrex", version=__version__,
                   docs_url="/api/docs" if web_cfg.docs_enabled else None,
                   redoc_url=None,
                   openapi_url="/api/openapi.json" if web_cfg.docs_enabled

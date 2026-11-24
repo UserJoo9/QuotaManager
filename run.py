@@ -1,4 +1,4 @@
-"""Quota Manager entrypoint.
+"""Netrex (formerly Quota Manager) entrypoint.
 
 Wires every layer together in one process on the Linux gateway (Kali/Debian).
 The kernel owns the network path: dnsmasq serves DHCP + DNS on a dedicated
@@ -244,7 +244,7 @@ def _make_tun2socks_manager(cfg: cfg_mod.Config):
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Quota Manager gateway")
+    p = argparse.ArgumentParser(description="Netrex gateway")
     p.add_argument("--config", default=None, help="path to config.yaml")
     env_port = os.environ.get("QUOTA_PORT")
     p.add_argument(
@@ -2624,7 +2624,7 @@ def main() -> None:
         cfg.log_level = "DEBUG"
 
     setup_logging(cfg.log_level, cfg.log_file)
-    log.info("Quota Manager starting (bundle %.1f GB, reset day %d)",
+    log.info("Netrex starting (bundle %.1f GB, reset day %d)",
              cfg.bundle.total_gb, cfg.bundle.reset_day)
 
     gateway = Gateway(cfg, config_path=resolved_config_path)

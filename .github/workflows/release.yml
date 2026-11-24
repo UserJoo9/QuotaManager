@@ -1,4 +1,4 @@
-# Quota Manager — build a .deb and publish it to GitHub Releases.
+# Netrex — build a .deb and publish it to GitHub Releases.
 #
 # The .deb is built and released ONLY from this workflow. Triggered by pushing a
 # version tag (v<major>.<minor>.<patch>, e.g. `git tag v0.1.0 && git push --tags`).
@@ -73,7 +73,7 @@ jobs:
         shell: bash
         run: |
           VER="${{ steps.version.outputs.version }}"
-          { printf 'Quota Manager **v%s**.\n\n' "${VER}"
+          { printf 'Netrex **v%s**.\n\n' "${VER}"
             printf 'Install on the gateway laptop:\n\n'
             printf '```bash\nsudo apt install ./quota-manager_%s_all.deb\n```\n\n' "${VER}"
             printf 'Or, with the apt repository configured (see README):\n'

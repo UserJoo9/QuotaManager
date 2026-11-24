@@ -254,7 +254,7 @@ def test_install_uses_release_asset_url():
     assert up._find_deb_url(RELEASE, "0.3.1") == "https://example/deb"
     # no assets -> constructed URL fallback
     assert up._find_deb_url({}, "0.3.1") == (
-        "https://github.com/UserJoo9/QuotaManager/releases/download/"
+        "https://github.com/UserJoo9/Netrex/releases/download/"
         "v0.3.1/quota-manager_0.3.1_all.deb")
 
 

@@ -8,7 +8,7 @@
 set -eu
 
 APP_DIR=/opt/QuotaManager
-REPO=https://github.com/UserJoo9/QuotaManager.git
+REPO=https://github.com/UserJoo9/Netrex.git
 PKGS="python3 python3-pip nftables kmod-nft-core ip-full dnsmasq-full git git-http ca-bundle"
 
 log() { echo "[quota-manager] $*"; }

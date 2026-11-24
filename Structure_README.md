@@ -1,4 +1,18 @@
-# Quota Manager — Developer Guide
+# Netrex — Developer Guide
+
+> **Naming.** The project was called *Quota Manager* until the Netrex rename.
+> Only user-facing names changed. Every internal identifier keeps the old name
+> on purpose: the `quota-manager` package, `/opt/quota-manager`, the
+> `quota-gateway` / `quota-wan-ppp` services, `/etc/quota-gateway`,
+> `/var/lib/quota-gateway`, the `quota_*` nftables tables, release asset names
+> (`quota-manager_<v>_all.deb`, which every updater since 0.2 looks for), the
+> apt key file `quota-manager.gpg` and the signing key itself, the apt
+> `Origin`/`Label: Quota Manager` (apt refuses a repo whose Origin/Label changed
+> without `--allow-releaseinfo-change`), and the passkey `USER_ID` (changing it
+> orphans registered passkeys). The updater tries `UserJoo9/Netrex` first and
+> falls back to `UserJoo9/QuotaManager`; `quota/apt_source.py` moves 0.5.8+
+> boxes from `UserJoo9.github.io/QuotaManager` to `UserJoo9.github.io/Netrex`
+> once the new Pages site serves the repo.
 
 How the app actually works: the topology, the packet path, the maintenance
 loop, the quota model, and every subsystem — plus configuration, the REST API,

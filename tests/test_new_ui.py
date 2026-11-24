@@ -41,7 +41,7 @@ def client(tmp_path):
 
 def test_ui_index_served_with_revalidation(client):
     r = client.get("/")
-    assert r.status_code == 200 and "QuotaManager" in r.text and "js/main.js" in r.text
+    assert r.status_code == 200 and "Netrex" in r.text and "js/main.js" in r.text
     assert "no-store" in r.headers["cache-control"]  # the page itself is never cached
     assert "script-src 'self'" in r.headers["content-security-policy"]
 

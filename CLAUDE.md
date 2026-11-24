@@ -5,6 +5,16 @@ belongs, and which mistakes already cost a real outage. Deep technical detail li
 `Structure_README.md`; the old v0.2.1 audit is archived in
 `docs/legacy-system-audit-v0.2.1.md` (historical, partly stale).
 
+## 0. Name: Netrex (formerly Quota Manager)
+
+The user-facing name is **Netrex** (UI, titles, READMEs, release notes, TOTP issuer,
+passkey display name). Internal identifiers deliberately KEEP the old name so
+existing installs, packages and the apt repo keep working: package `quota-manager`,
+`/opt/quota-manager`, services `quota-gateway`/`quota-wan-ppp`, `/etc/quota-gateway`,
+`/var/lib/quota-gateway`, nft tables `quota_*`, release asset names
+`quota-manager_*`, the apt key `quota-manager.gpg`, apt `Origin`/`Label: Quota Manager`
+(changing them makes apt refuse the repo), and the passkey `USER_ID`. Don't rename those.
+
 ## 1. What this is
 
 A Linux gateway (old laptop, Kali/Debian) that splits ONE metered internet bundle

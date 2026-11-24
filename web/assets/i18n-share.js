@@ -1,6 +1,6 @@
 /* Arabic texts of /share (keys are the English source strings). */
 QMI.add({
-  "Local Share — Quota Manager": "المشاركة المحلية — Quota Manager",
+  "Local Share — Netrex": "المشاركة المحلية — Netrex",
   "Local Share": "المشاركة المحلية",
   "LAN Direct": "شبكة محلية مباشرة",
   "Connected": "متصل",
