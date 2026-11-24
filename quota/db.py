@@ -1616,17 +1616,23 @@ class Database:
         """Insert or update usage records for multiple devices in a single batch transaction."""
         if not records:
             return
-        await self.conn.executemany(
-            """INSERT INTO usage_daily (device_id, date, up_bytes, down_bytes)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(device_id, date) DO UPDATE SET
-                 up_bytes = up_bytes + excluded.up_bytes,
-                 down_bytes = down_bytes + excluded.down_bytes""",
-            records,
-        )
-        if self.free_mode:
-            await self.conn.executemany(self._FREE_UPSERT, records)
-        await self.conn.commit()
+        try:
+            await self.conn.executemany(
+                """INSERT INTO usage_daily (device_id, date, up_bytes, down_bytes)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(device_id, date) DO UPDATE SET
+                     up_bytes = up_bytes + excluded.up_bytes,
+                     down_bytes = down_bytes + excluded.down_bytes""",
+                records,
+            )
+            if self.free_mode:
+                await self.conn.executemany(self._FREE_UPSERT, records)
+            await self.conn.commit()
+        except BaseException:
+            # all or nothing: a half-applied batch must not stay open on the
+            # shared connection (the caller keeps the records and retries)
+            await self.conn.rollback()
+            raise
 
     async def add_lan_usage_batch(self, records: list[tuple[int, str, int, int]]) -> None:
         """Add LOCAL (LAN) byte deltas per (device, day). Monitoring only."""

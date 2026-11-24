@@ -987,6 +987,60 @@ def test_flush_counts_usage(tmp_path):
         _get_loop().run_until_complete(gw.shutdown())
 
 
+def test_failed_usage_write_keeps_bytes_and_tick_continues(tmp_path, monkeypatch):
+    """Regression (idea from #52 by @compnew2006): the kernel counters are
+    drained before the database write, so a failed write used to lose those
+    bytes AND abort the tick before blocks were evaluated. Now the bytes are
+    kept, the tick goes on, and the next tick saves them with the new ones."""
+    cfg = _cfg(tmp_path)
+    gw = Gateway(cfg)
+    _get_loop().run_until_complete(gw.startup())
+    _cancel_maintenance(gw)
+    try:
+        mac, ip = "aa:bb:cc:dd:ee:fb", "192.168.1.198"
+        _get_loop().run_until_complete(gw._persist_lease(mac, ip))
+        dev = _get_loop().run_until_complete(gw.database.get_device(mac=mac))
+
+        class _FakeEngine:
+            deltas = [1000, 300, 0]
+            def flush(self):
+                amount = self.deltas.pop(0) if self.deltas else 0
+                return EngineSnapshot(by_ip={ip: EngineCounters(up=amount)},
+                                      ip_to_mac={ip: mac}, blocked={})
+            def update_state(self, ip_to_mac, blocked, *a, **k): pass
+            def set_gateway_blocked(self, blocked): pass
+            def stop(self): pass
+        gw.engine = _FakeEngine()  # type: ignore[assignment]
+
+        original = gw.database.add_usage_batch
+        calls = []
+        async def fail_once(records):
+            calls.append(list(records))
+            if len(calls) == 1:
+                raise OSError("database is locked")
+            await original(records)
+        monkeypatch.setattr(gw.database, "add_usage_batch", fail_once)
+        evaluated = []
+        real_eval = gw.service.evaluate_blocks
+        async def spy_eval(*a, **k):
+            evaluated.append(1)
+            return await real_eval(*a, **k)
+        monkeypatch.setattr(gw.service, "evaluate_blocks", spy_eval)
+
+        _get_loop().run_until_complete(gw._maintenance_tick())  # write fails
+        assert evaluated, "blocks must still be evaluated after a failed write"
+        assert gw._unsaved_usage
+        _get_loop().run_until_complete(gw._maintenance_tick())  # 1000 + 300
+        usage = _get_loop().run_until_complete(gw.database.get_usage(dev.id))
+        assert usage["up_bytes"] == 1300
+        assert gw._unsaved_usage == {}
+        _get_loop().run_until_complete(gw._maintenance_tick())  # nothing new
+        usage = _get_loop().run_until_complete(gw.database.get_usage(dev.id))
+        assert usage["up_bytes"] == 1300, "saved bytes must not be added twice"
+    finally:
+        _get_loop().run_until_complete(gw.shutdown())
+
+
 def test_make_engine_selects_nftables_backend(tmp_path):
     """The Linux gateway always uses NftablesEngine, whatever the config says."""
     from run import _make_engine
