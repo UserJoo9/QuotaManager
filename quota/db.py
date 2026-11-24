@@ -748,15 +748,35 @@ class Database:
             "AND name='domain_rules'")
         if row is None:
             return  # nothing to migrate yet — SCHEMA creates the fixed table
-        cols = await self.conn.execute_fetchall("PRAGMA table_info(domain_rules)")
+        # table_info deliberately omits generated/hidden columns. scope_key is
+        # a STORED generated column, so use table_xinfo to recognize the fixed
+        # schema on every restart.
+        cols = await self.conn.execute_fetchall("PRAGMA table_xinfo(domain_rules)")
+        residue = await self._fetch_one(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='domain_rules_old'")
+        if residue is not None:
+            raise RuntimeError(
+                "found legacy domain_rules_old migration residue; its rows "
+                "were left untouched. Stop quota-gateway, preserve the "
+                "database, and inspect both tables to recover the legacy rows "
+                "or restore from a verified backup before restarting")
         if any(c["name"] == "scope_key" for c in cols):
             return  # already the fixed shape
         log.warning("domain_rules predates the scope_key fix — rebuilding "
                    "the table and dropping any duplicate global rules the "
                    "old NULL-scope upsert bug let through")
-        await self._conn.executescript("""
-            ALTER TABLE domain_rules RENAME TO domain_rules_old;
-            CREATE TABLE domain_rules (
+        sequence = await self._fetch_one(
+            "SELECT seq FROM sqlite_sequence WHERE name='domain_rules'")
+        old_high_water = int(sequence["seq"]) if sequence is not None else 0
+        # Keep DDL, copy, and cleanup in one transaction. executescript() would
+        # implicitly commit and could strand data in domain_rules_old if a
+        # later statement failed.
+        await self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            await self._conn.execute(
+                "ALTER TABLE domain_rules RENAME TO domain_rules_old")
+            await self._conn.execute("""CREATE TABLE domain_rules (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 scope      TEXT NOT NULL DEFAULT 'global',
                 scope_id   INTEGER,
@@ -768,20 +788,35 @@ class Database:
                 source     TEXT NOT NULL DEFAULT 'manual',
                 created_at REAL NOT NULL,
                 UNIQUE(scope, scope_key, domain, action)
-            );
-        """)
-        await self._conn.execute("""
+            )""")
+            await self._conn.execute("""
             INSERT INTO domain_rules
-                (scope, scope_id, action, domain, target_ip, enabled, source, created_at)
-            SELECT scope, scope_id, action, domain, target_ip, enabled, source, created_at
+                (id, scope, scope_id, action, domain, target_ip, enabled, source, created_at)
+            SELECT id, scope, scope_id, action, domain, target_ip, enabled, source, created_at
             FROM domain_rules_old
             WHERE id IN (
                 SELECT MAX(id) FROM domain_rules_old
                 GROUP BY scope, COALESCE(scope_id, 0), domain, action
             )
-        """)
-        await self._conn.execute("DROP TABLE domain_rules_old")
-        await self._conn.commit()
+            """)
+            await self._conn.execute("DROP TABLE domain_rules_old")
+            new_sequence = await self._fetch_one(
+                "SELECT seq FROM sqlite_sequence WHERE name='domain_rules'")
+            high_water = max(
+                old_high_water,
+                int(new_sequence["seq"]) if new_sequence is not None else 0)
+            # Preserve AUTOINCREMENT's historical high-water mark too. The
+            # greatest ID may have been deleted before this rebuild; reusing
+            # it would make an old ID refer to a different DNS rule.
+            await self._conn.execute(
+                "DELETE FROM sqlite_sequence WHERE name='domain_rules'")
+            await self._conn.execute(
+                "INSERT INTO sqlite_sequence(name, seq) VALUES ('domain_rules', ?)",
+                (high_water,))
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
 
     async def _backfill_users(self) -> None:
         """Give every device without a user its own user (v2 migration).
