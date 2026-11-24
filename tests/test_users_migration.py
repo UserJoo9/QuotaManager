@@ -290,9 +290,10 @@ def test_domain_rules_migration_failure_rolls_back_table_rename(tmp_path):
     assert rows == [(23, None)]
 
 
-def test_domain_rules_migration_residue_fails_loud_without_dropping_rows(tmp_path):
-    """An interrupted migration's old-table residue is preserved and blocks
-    startup instead of being mistaken for a completed migration.
+def test_domain_rules_migration_residue_unknown_shape_kept_and_startup_continues(tmp_path):
+    """An interrupted migration's old-table residue of an unknown shape is
+    preserved untouched, and the gateway still starts (a gateway that does
+    not start counts and blocks nobody); the admin gets an event.
     """
     path = tmp_path / "residue-domain-rules.db"
 
@@ -307,12 +308,9 @@ def test_domain_rules_migration_residue_fails_loud_without_dropping_rows(tmp_pat
     run(build_residue())
     d = _db.Database(path)
     try:
-        try:
-            run(d.connect())
-        except RuntimeError as exc:
-            assert "legacy domain_rules_old migration residue" in str(exc)
-        else:
-            raise AssertionError("migration residue must block startup")
+        run(d.connect())
+        events = run(d.conn.execute_fetchall("SELECT message FROM events"))
+        assert any("domain_rules_old" in e["message"] for e in events)
     finally:
         run(d.close())
 
@@ -327,8 +325,8 @@ def test_domain_rules_migration_residue_fails_loud_without_dropping_rows(tmp_pat
 
 
 def test_domain_rules_partial_migration_residue_preserves_both_tables(tmp_path):
-    """If a pre-existing partial copy and the renamed source coexist, startup
-    fails loudly without deleting rows from either table.
+    """If a partial copy and an unknown-shape renamed source coexist, startup
+    continues without deleting rows from either table.
     """
     path = tmp_path / "partial-residue-domain-rules.db"
 
@@ -354,12 +352,7 @@ def test_domain_rules_partial_migration_residue_preserves_both_tables(tmp_path):
     run(build_partial_residue())
     d = _db.Database(path)
     try:
-        try:
-            run(d.connect())
-        except RuntimeError as exc:
-            assert "legacy domain_rules_old migration residue" in str(exc)
-        else:
-            raise AssertionError("partial migration residue must block startup")
+        run(d.connect())
     finally:
         run(d.close())
 
@@ -374,6 +367,67 @@ def test_domain_rules_partial_migration_residue_preserves_both_tables(tmp_path):
                 [(row["id"], row["domain"]) for row in old])
 
     assert run(read_tables()) == ([(41, "partial.example")], [(42, "source.example")])
+
+
+def test_domain_rules_interrupted_rebuild_is_recovered_on_start(tmp_path):
+    """Regression: an older build's every-restart rebuild could be cut by a
+    power loss right after RENAME + CREATE, leaving the rules in
+    domain_rules_old and an empty fixed table. Startup must put them back
+    (ids kept, newest duplicate wins, rows already present win) instead of
+    crashing or losing them.
+    """
+    path = tmp_path / "interrupted-domain-rules.db"
+
+    async def build():
+        conn = await aiosqlite.connect(path)
+        await conn.execute("""CREATE TABLE domain_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope TEXT NOT NULL DEFAULT 'global', scope_id INTEGER,
+            scope_key INTEGER GENERATED ALWAYS AS (COALESCE(scope_id, 0)) STORED,
+            action TEXT NOT NULL DEFAULT 'block', domain TEXT NOT NULL,
+            target_ip TEXT, enabled INTEGER NOT NULL DEFAULT 1,
+            source TEXT NOT NULL DEFAULT 'manual', created_at REAL NOT NULL,
+            UNIQUE(scope, scope_key, domain, action))""")
+        await conn.execute(
+            "INSERT INTO domain_rules (id, scope, action, domain, created_at) "
+            "VALUES (7, 'global', 'block', 'kept.example', 1.0)")
+        await conn.execute("""CREATE TABLE domain_rules_old (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT, scope_id INTEGER,
+            action TEXT, domain TEXT, target_ip TEXT, enabled INTEGER,
+            source TEXT, created_at REAL)""")
+        rows = [(3, "global", None, "block", "ads.example", None, 1, "manual", 1.0),
+                (5, "global", None, "block", "ads.example", None, 1, "manual", 2.0),
+                (7, "global", None, "block", "clash.example", None, 1, "manual", 3.0),
+                (9, "global", None, "allow", "school.example", None, 1, "manual", 4.0)]
+        await conn.executemany(
+            "INSERT INTO domain_rules_old VALUES (?,?,?,?,?,?,?,?,?)", rows)
+        await conn.commit()
+        await conn.close()
+
+    run(build())
+    d = _db.Database(path)
+    try:
+        run(d.connect())
+        got = run(d.conn.execute_fetchall(
+            "SELECT id, domain FROM domain_rules ORDER BY id"))
+        assert [(r["id"], r["domain"]) for r in got] == [
+            (5, "ads.example"), (7, "kept.example"), (9, "school.example")]
+        left = run(d.conn.execute_fetchall(
+            "SELECT name FROM sqlite_master WHERE name='domain_rules_old'"))
+        assert left == []
+        seq = run(d.conn.execute_fetchall(
+            "SELECT seq FROM sqlite_sequence WHERE name='domain_rules'"))
+        assert seq[0]["seq"] >= 9
+    finally:
+        run(d.close())
+    # a second start is a no-op
+    d = _db.Database(path)
+    try:
+        run(d.connect())
+        n = run(d.conn.execute_fetchall("SELECT COUNT(*) AS n FROM domain_rules"))
+        assert n[0]["n"] == 3
+    finally:
+        run(d.close())
 
 
 def test_bundle_allowances_drop_stale_mac_keys(tmp_path):

@@ -11,6 +11,9 @@ match it. Release notes are composed from a version's section below.)_
 Added:
 - **Internet schedule** (new page). Turn the internet off at set times of the week for chosen people (all their devices) or single devices: bedtime on school nights, study time, meal times. One click starts from a ready plan ("School nights", "Every night", "Study time", "Meal times"); a schedule can have several times, a time can run past midnight, and dates can be marked as days off (holidays, Eid). **Bonus time** gives a few extra minutes without changing the schedule. **Always allowed** sites (a school platform, a study site) keep working during every schedule. While a schedule is on, the device's card shows when the internet comes back, the home network (printer, shared drives, the dashboard) keeps working, and the cut is done by the gateway itself, so it works on any phone, tablet, TV or console with no app. Each device gets its end time in the system kernel, so it comes back online on time even if the gateway service restarts or stops. Sites on the "always allowed" list only open on devices that look names up through the gateway; a phone with Private DNS (or a browser with secure DNS) turned on keeps them blocked during a schedule. Contributed by @amr-elgharip2006. Closes #32.
 
+Fixed:
+- Website block/allow rules were rebuilt every time the gateway started, so their numbers changed on each restart. They are now kept as they are. If an older version was interrupted in the middle of that rebuild (for example by a power cut), the rules it left behind are put back on the next start instead of being lost. Contributed by @compnew2006.
+
 ## [0.5.11] — 2026-11-24
 
 Changed:
