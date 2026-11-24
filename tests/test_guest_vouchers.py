@@ -6,6 +6,8 @@ import asyncio
 import re
 import sqlite3
 
+import pytest
+
 from quota import db as _db
 from quota.service import QuotaService
 
@@ -58,6 +60,8 @@ def test_existing_guest_voucher_table_gets_revocation_column(tmp_path):
             cursor = await database.conn.execute("PRAGMA table_info(guest_vouchers)")
             columns = {row["name"] for row in await cursor.fetchall()}
             assert "revoked_at" in columns
+            assert {"used_user_id", "used_device_id",
+                    "allowance_sync_pending"} <= columns
             voucher = await database.get_guest_voucher(" keep-me ")
             assert voucher is not None
             assert voucher.quota_gb == 1.5
@@ -118,6 +122,185 @@ def test_concurrent_redemption_grants_one_voucher_only(tmp_path):
     asyncio.run(scenario())
 
 
+def test_same_guest_retry_is_idempotent_and_does_not_regrant(tmp_path):
+    async def scenario():
+        database = _db.Database(tmp_path / "voucher-idempotent.db")
+        await database.connect()
+        try:
+            device = await _pending_guest(database, "aa:bb:cc:dd:ee:41")
+            await database.create_guest_voucher("retry-5678", 3.0)
+
+            first = await database.redeem_guest_voucher_for_device(
+                "retry-5678", device.mac)
+            await database.set_setting("guest_mode", "0")
+            retry = await database.redeem_guest_voucher_for_device(
+                "retry-5678", device.mac)
+
+            assert first == (True, "redeemed", 3.0)
+            assert retry == (True, "already_redeemed", 3.0)
+            user = await database.get_user(device.user_id)
+            current = await database.get_device(device_id=device.id)
+            voucher = await database.get_guest_voucher("retry-5678")
+            assert user is not None and user.fixed_gb == 3.0
+            assert current is not None and current.fixed_gb == 3.0
+            assert voucher is not None and voucher.allowance_sync_pending
+        finally:
+            await database.close()
+
+    asyncio.run(scenario())
+
+
+def test_same_voucher_retry_rejects_changed_deleted_and_shared_accounts(tmp_path):
+    async def scenario():
+        database = _db.Database(tmp_path / "voucher-stale-retry.db")
+        await database.connect()
+        try:
+            changed = await _pending_guest(database, "aa:bb:cc:dd:ee:42")
+            await database.create_guest_voucher("changed-5678", 3.0)
+            assert (await database.redeem_guest_voucher_for_device(
+                "changed-5678", changed.mac))[0]
+            await database.update_user(changed.user_id, fixed_gb=4.0)
+            assert await database.redeem_guest_voucher_for_device(
+                "changed-5678", changed.mac) == (False, "guest_not_pending", None)
+
+            shared = await _pending_guest(database, "aa:bb:cc:dd:ee:43")
+            await database.create_guest_voucher("shared-5678", 2.0)
+            assert (await database.redeem_guest_voucher_for_device(
+                "shared-5678", shared.mac))[0]
+            await database.upsert_device("aa:bb:cc:dd:ee:44", "Sibling",
+                                         user_id=shared.user_id)
+            assert await database.redeem_guest_voucher_for_device(
+                "shared-5678", shared.mac) == (False, "guest_account_shared", None)
+
+            deleted = await _pending_guest(database, "aa:bb:cc:dd:ee:45")
+            await database.create_guest_voucher("deleted-5678", 1.0)
+            assert (await database.redeem_guest_voucher_for_device(
+                "deleted-5678", deleted.mac))[0]
+            await database.delete_user(deleted.user_id)
+            assert await database.redeem_guest_voucher_for_device(
+                "deleted-5678", deleted.mac) == (False, "voucher_invalid", None)
+
+            denied = await _pending_guest(database, "aa:bb:cc:dd:ee:48")
+            await database.create_guest_voucher("denied-5678", 1.0)
+            assert (await database.redeem_guest_voucher_for_device(
+                "denied-5678", denied.mac))[0]
+            await database.add_mac_list("deny", [denied.mac])
+            assert await database.redeem_guest_voucher_for_device(
+                "denied-5678", denied.mac) == (False, "device_blocked", None)
+        finally:
+            await database.close()
+
+    asyncio.run(scenario())
+
+
+def test_allowance_recovery_after_restart_uses_current_policy_once(tmp_path):
+    path = tmp_path / "voucher-restart.db"
+
+    async def claim_and_restart():
+        database = _db.Database(path)
+        await database.connect()
+        device = await _pending_guest(database, "aa:bb:cc:dd:ee:46")
+        await database.create_guest_voucher("restart-5678", 2.5)
+        assert await database.redeem_guest_voucher_for_device(
+            "restart-5678", device.mac) == (True, "redeemed", 2.5)
+        await database.update_user(device.user_id, fixed_gb=4.0)
+        await database.close()
+        return device.user_id
+
+    user_id = asyncio.run(claim_and_restart())
+
+    async def recover():
+        database = _db.Database(path)
+        await database.connect()
+        try:
+            service = QuotaService(database)
+            assert await service.recover_guest_voucher_allowances() is True
+            bundle = await database.get_bundle()
+            assert bundle.allowances[user_id] == 4.0
+            voucher = await database.get_guest_voucher("restart-5678")
+            assert voucher is not None and not voucher.allowance_sync_pending
+            assert await service.recover_guest_voucher_allowances() is False
+            assert (await database.get_bundle()).allowances[user_id] == 4.0
+        finally:
+            await database.close()
+
+    asyncio.run(recover())
+
+
+def test_concurrent_allowance_refreshes_serialize_and_preserve_bundle_policy(tmp_path):
+    async def scenario():
+        database = _db.Database(tmp_path / "voucher-refresh-order.db")
+        await database.connect()
+        try:
+            service = QuotaService(database)
+            original_compute = service.compute_allowances
+            first_entered = asyncio.Event()
+            release_first = asyncio.Event()
+            active = 0
+            max_active = 0
+
+            async def delayed_compute():
+                nonlocal active, max_active
+                active += 1
+                max_active = max(max_active, active)
+                try:
+                    if not first_entered.is_set():
+                        first_entered.set()
+                        await release_first.wait()
+                    return await original_compute()
+                finally:
+                    active -= 1
+
+            service.compute_allowances = delayed_compute
+            first = asyncio.create_task(service.recompute_allowances())
+            await first_entered.wait()
+            second = asyncio.create_task(service.recompute_allowances())
+            await asyncio.sleep(0)
+            bundle = await database.get_bundle()
+            bundle.total_gb = 222.0
+            bundle.period_start = "2026-11-01"
+            await database.set_bundle(bundle)
+            release_first.set()
+            await asyncio.gather(first, second)
+
+            saved = await database.get_bundle()
+            assert max_active == 1
+            assert saved.total_gb == 222.0
+            assert saved.period_start == "2026-11-01"
+        finally:
+            await database.close()
+
+    asyncio.run(scenario())
+
+
+def test_database_failure_before_commit_leaves_voucher_unspent(tmp_path):
+    async def scenario():
+        database = _db.Database(tmp_path / "voucher-precommit-error.db")
+        await database.connect()
+        try:
+            device = await _pending_guest(database, "aa:bb:cc:dd:ee:47")
+            await database.create_guest_voucher("abort-5678", 1.0)
+            await database.conn.execute("""
+                CREATE TRIGGER reject_guest_approval BEFORE UPDATE ON users
+                WHEN OLD.id = NEW.id AND OLD.guest = 1
+                BEGIN SELECT RAISE(ABORT, 'injected approval failure'); END
+            """)
+            await database.conn.commit()
+
+            with pytest.raises(Exception, match="injected approval failure"):
+                await database.redeem_guest_voucher_for_device(
+                    "abort-5678", device.mac)
+
+            voucher = await database.get_guest_voucher("abort-5678")
+            current = await database.get_device(device_id=device.id)
+            assert voucher is not None and voucher.used_at is None
+            assert current is not None and current.block_state == _db.BLOCK_GUEST_PENDING
+        finally:
+            await database.close()
+
+    asyncio.run(scenario())
+
+
 def test_memory_database_rejects_redemption_with_clear_reason():
     async def scenario():
         database = _db.Database(":memory:")
@@ -133,6 +316,33 @@ def test_memory_database_rejects_redemption_with_clear_reason():
             assert result == (False, "voucher_storage_unsupported", None)
             voucher = await database.get_guest_voucher("memory-1234")
             assert voucher is not None and voucher.used_at is None
+        finally:
+            await database.close()
+
+    asyncio.run(scenario())
+
+
+def test_fresh_claim_still_respects_disabled_and_paused_guest_gates(tmp_path):
+    async def scenario():
+        database = _db.Database(tmp_path / "voucher-gates.db")
+        await database.connect()
+        try:
+            disabled = await _pending_guest(database, "aa:bb:cc:dd:ee:49")
+            await database.create_guest_voucher("disabled-5678", 1.0)
+            await database.set_setting("guest_mode", "0")
+            assert await database.redeem_guest_voucher_for_device(
+                "disabled-5678", disabled.mac) == (
+                    False, "guest_mode_disabled", None)
+
+            paused = await _pending_guest(database, "aa:bb:cc:dd:ee:50")
+            await database.create_guest_voucher("paused-5678", 1.0)
+            await database.set_setting("stop_new_connections", "1")
+            assert await database.redeem_guest_voucher_for_device(
+                "paused-5678", paused.mac) == (
+                    False, "new_guests_paused", None)
+            for code in ("disabled-5678", "paused-5678"):
+                voucher = await database.get_guest_voucher(code)
+                assert voucher is not None and voucher.used_at is None
         finally:
             await database.close()
 

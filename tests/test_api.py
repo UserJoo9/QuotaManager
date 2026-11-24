@@ -901,6 +901,66 @@ def test_guest_admin_approve_and_reject(client):
     assert user_view["blocked"] is True
 
 
+@pytest.mark.parametrize("failure_point", ["recompute", "audit"])
+def test_voucher_retry_recovers_after_post_commit_failure(tmp_path, failure_point):
+    """A committed voucher stays accepted if derived work or audit logging fails."""
+    database = _db.Database(tmp_path / "voucher-recovery.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+
+    async def _init():
+        await database.connect()
+        await service.open_period()
+        await database.set_setting("guest_mode", "1")
+        guest = await database.create_user(
+            name="", quota_mode=_db.QUOTA_FIXED, fixed_gb=0.0, guest=True)
+        device = await database.upsert_device(
+            "aa:bb:cc:dd:ee:96", name="Visitor", user_id=guest.id,
+            guest=True, quota_mode=_db.QUOTA_FIXED, fixed_gb=0.0)
+        await database.set_device_state(device.id, _db.BLOCK_GUEST_PENDING)
+        await database.update_user(guest.id, block_state=_db.BLOCK_GUEST_PENDING)
+        await database.create_guest_voucher("recover-1234", 2.5)
+        holder.swap(EngineSnapshot(ip_to_mac={"127.0.0.1": device.mac}))
+        return guest.id
+
+    guest_id = _get_loop().run_until_complete(_init())
+    original_recompute = service.recompute_allowances
+    original_add_event = database.add_event
+    failures = [True]
+
+    async def fail_once():
+        if failures.pop() if failures else False:
+            raise RuntimeError("injected post-commit recompute failure")
+        await original_recompute()
+
+    async def fail_event_once(*args, **kwargs):
+        if failures.pop() if failures else False:
+            raise RuntimeError("injected post-commit event failure")
+        await original_add_event(*args, **kwargs)
+
+    if failure_point == "recompute":
+        service.recompute_allowances = fail_once
+    else:
+        database.add_event = fail_event_once
+    app = create_app(database, service, holder)
+    try:
+        with TestClient(app, client=("127.0.0.1", 50000)) as c:
+            first = c.post("/api/guest/voucher/redeem", json={"code": "recover-1234"})
+            assert first.status_code == 200, first.text
+            assert first.json() == {"ok": True, "status": "approved", "quota_gb": 2.5}
+
+            retry = c.post("/api/guest/voucher/redeem", json={"code": "recover-1234"})
+            assert retry.status_code == 200, retry.text
+            assert retry.json() == first.json()
+
+        guest = _get_loop().run_until_complete(database.get_user(guest_id))
+        voucher = _get_loop().run_until_complete(database.get_guest_voucher("recover-1234"))
+        assert guest is not None and guest.fixed_gb == 2.5
+        assert voucher is not None and voucher.used_at is not None
+    finally:
+        _get_loop().run_until_complete(database.close())
+
+
 def test_connected_follows_arp_responders(tmp_path):
     """With the ARP probe running, a leased device is "connected" only if it
     ALSO answered the latest sweep — a lease alone lags reality by up to

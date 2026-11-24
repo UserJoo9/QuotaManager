@@ -498,6 +498,10 @@ class Gateway:
             script_path=cfg_mod.PROJECT_ROOT / "scripts" / "topology.sh")
         await self._seed_bundle_from_cfg()
         await self.service.ensure_period()
+        try:
+            await self.service.recover_guest_voucher_allowances()
+        except Exception:  # noqa: BLE001 - maintenance retries the durable marker
+            log.exception("guest voucher allowance recovery deferred at startup")
         log.info("database ready: %s", self.cfg.db_path)
 
         if self.cfg.engine.enabled and self.engine is None:
@@ -1510,6 +1514,12 @@ class Gateway:
     async def _maintenance_tick(self) -> None:
         # 1. Roll the quota period if stale (covers month boundary).
         await self.service.ensure_period()
+        # A previous derived allowance write can fail after a voucher claim
+        # committed. Retry it before evaluating device blocks this tick.
+        try:
+            await self.service.recover_guest_voucher_allowances()
+        except Exception:  # noqa: BLE001 - continue normal maintenance work
+            log.exception("guest voucher allowance recovery deferred")
 
         # 1b. Learn device bindings from dnsmasq's lease file.
         await self._timed("_sync_dnsmasq_leases", self._sync_dnsmasq_leases())

@@ -5,6 +5,7 @@ huge legacy file stays stable; the fixtures mirror its pattern."""
 import asyncio
 import time
 
+import httpx
 import pytest
 # import asyncio
 _cached_loop = None
@@ -49,8 +50,8 @@ def app_factory(tmp_path):
 
     _get_loop().run_until_complete(_init())
 
-    def _make(waf_config=None, web_config=None):
-        return create_app(database, service, holder,
+    def _make(waf_config=None, web_config=None, firewall=None):
+        return create_app(database, service, holder, firewall=firewall,
                           waf_config=waf_config, web_config=web_config)
 
     yield _make, database, service, holder
@@ -410,6 +411,76 @@ def test_waf_rate_state_window():
     assert state.rate_limited("5.6.7.8", "/api/login", limits, t) is False
 
 
+def test_waf_discards_expired_state_for_clients_that_do_not_return():
+    state = _waf.WafRateState()
+    limits = {"/api/login": [1, 60]}
+    state.rate_limited("192.0.2.1", "/api/login", limits, 100)
+    state.register_block("192.0.2.1", 100)
+
+    assert not state.rate_limited("192.0.2.2", "/api/login", limits, 406)
+
+    assert set(state._buckets) == {("192.0.2.2", "/api/login")}
+    assert not state._hits
+
+
+def test_waf_holds_only_the_hits_needed_to_reach_ban_threshold():
+    state = _waf.WafRateState()
+
+    for timestamp in range(100, 120):
+        state.register_block("192.0.2.1", timestamp)
+
+    assert len(state._hits["192.0.2.1"]) == 8
+
+
+def test_waf_full_rate_table_preserves_active_limits_and_recovers():
+    state = _waf.WafRateState(max_entries=2)
+    limits = {"/api/login": [1, 60], "/api/report": [2, 30]}
+    assert not state.rate_limited("192.0.2.1", "/api/login", limits, 100)
+    assert not state.rate_limited("192.0.2.1", "/api/report", limits, 100)
+
+    assert state.rate_limited("192.0.2.2", "/api/login", limits, 101)
+    assert state.rate_limited("192.0.2.1", "/api/login", limits, 101)
+    assert not state.rate_limited("192.0.2.2", "/unlimited", limits, 101)
+    assert len(state._buckets) == 2
+
+    # The shorter window frees a slot while the original login is still capped.
+    assert not state.rate_limited("192.0.2.2", "/api/login", limits, 132)
+    assert state.rate_limited("192.0.2.1", "/api/login", limits, 132)
+
+
+def test_waf_hit_table_stays_bounded_and_known_clients_can_reach_threshold():
+    state = _waf.WafRateState(max_entries=1, ban_threshold=2, ban_window_seconds=10)
+    assert not state.register_block("192.0.2.1", 100)
+
+    assert not state.register_block("192.0.2.2", 101)
+    assert state.register_block("192.0.2.1", 102)
+    assert set(state._hits) == {"192.0.2.1"}
+
+    assert not state.register_block("192.0.2.2", 113)
+    assert state.register_block("192.0.2.2", 114)
+    assert set(state._hits) == {"192.0.2.2"}
+
+
+def test_waf_ban_counter_ignores_hits_outside_its_window():
+    state = _waf.WafRateState(ban_threshold=2, ban_window_seconds=10)
+    assert not state.register_block("192.0.2.1", 100)
+
+    assert not state.register_block("192.0.2.1", 111)
+    assert state.register_block("192.0.2.1", 112)
+
+
+def test_waf_expiry_frees_state_even_when_there_are_no_new_requests():
+    state = _waf.WafRateState(ban_threshold=2, ban_window_seconds=5)
+    limits = {"/api/login": [1, 5]}
+    state.rate_limited("192.0.2.1", "/api/login", limits, 100)
+    state.register_block("192.0.2.1", 100)
+
+    state.expire(106)
+
+    assert not state._buckets
+    assert not state._hits
+
+
 # -- WAF middleware behaviour ---------------------------------------------------
 
 
@@ -464,8 +535,88 @@ def test_waf_oversized_body_blocks(app_factory):
     c2.post("/api/login", json={"password": "admin"})
     r = c2.post("/api/bundle",
                 json={"total_gb": 1, "padding": "x" * 100})
-    assert r.status_code == 403
+    assert r.status_code == 413
     assert "oversized-body" in str(r.json())
+
+
+async def _submit_streamed_login(app, chunks, handed_off):
+    async def body():
+        for chunk in chunks:
+            handed_off.append(chunk)
+            yield chunk
+
+    transport = httpx.ASGITransport(app=app, client=("192.0.2.10", 50000))
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        request = client.build_request(
+            "POST", "/api/login", content=body(), headers={"Content-Type": "application/json"},
+        )
+        assert "content-length" not in request.headers
+        return await client.send(request)
+
+
+def test_waf_stops_reading_as_soon_as_body_limit_is_crossed(app_factory):
+    make, database, _, _ = app_factory
+    app = make(WafConfig(mode="strict", max_body_bytes=10, local_subnets=[]))
+    chunks = [b'{"pass', b'word":', b'"admin"}']
+    handed_off = []
+
+    response = _get_loop().run_until_complete(_submit_streamed_login(app, chunks, handed_off))
+
+    assert response.status_code == 413
+    assert "oversized-body" in response.json()["detail"]
+    assert handed_off == chunks[:2]
+    assert not _get_loop().run_until_complete(database.get_setting("session_token"))
+
+
+@pytest.mark.parametrize("mode,exempt", [("log", False), ("off", False), ("strict", True)])
+def test_waf_preserves_body_and_forwarding_in_nonblocking_modes(app_factory, mode, exempt):
+    make, database, _, _ = app_factory
+    app = make(WafConfig(
+        mode=mode, max_body_bytes=10,
+        local_subnets=["192.0.2.0/24"] if exempt else [],
+    ))
+    chunks = [b'{"pass', b'word":', b'"admin"}']
+    handed_off = []
+
+    response = _get_loop().run_until_complete(_submit_streamed_login(app, chunks, handed_off))
+
+    assert response.status_code == 200
+    assert handed_off == chunks
+    events = _get_loop().run_until_complete(database.list_events())
+    assert any("WAF oversized-body" in e["message"] for e in events) == (mode == "log")
+
+
+@pytest.mark.parametrize("mode,status,expected_bans", [("strict", 413, 1), ("log", 200, 0)])
+def test_waf_body_limit_only_auto_bans_in_strict_mode(app_factory, mode, status, expected_bans):
+    make, _, _, _ = app_factory
+    banned = []
+
+    class FirewallRecorder:
+        async def ban_ip(self, host, seconds, reason):
+            banned.append(host)
+
+    app = make(
+        WafConfig(mode=mode, max_body_bytes=10, local_subnets=[], auto_ban_after=1),
+        firewall=FirewallRecorder(),
+    )
+    response = _get_loop().run_until_complete(
+        _submit_streamed_login(app, [b'{"pass', b'word":', b'"admin"}'], []),
+    )
+
+    assert response.status_code == status
+    assert len(banned) == expected_bans
+
+
+def test_waf_accepts_stream_at_exact_limit_and_replays_it(app_factory):
+    make, _, _, _ = app_factory
+    app = make(WafConfig(mode="strict", max_body_bytes=20, local_subnets=[]))
+    chunks = [b'{"pass', b'word":', b'"admin"}']
+
+    response = _get_loop().run_until_complete(_submit_streamed_login(app, chunks, []))
+
+    assert response.status_code == 200
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert "no-store" in response.headers["Cache-Control"]
 
 
 def test_waf_endpoint_rate_limit_strict(app_factory):

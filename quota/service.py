@@ -62,6 +62,7 @@ class QuotaService:
         #: injectable clock (callable returning datetime) for tests
         self._clock = clock
         self._temporary_kicks: dict[str, float] = {}
+        self._allowance_lock = asyncio.Lock()
         #: "everyone is out of quota and nobody has an add-on pack" — the box
         #: opens the internet for all (see refresh_free_mode). Off by default
         #: until the first refresh.
@@ -252,6 +253,10 @@ class QuotaService:
         return timeutil.period_bounds(now, bundle.effective_reset_day)[1].date().isoformat()
 
     async def open_period(self) -> None:
+        async with self._allowance_lock:
+            await self._open_period_locked()
+
+    async def _open_period_locked(self) -> None:
         """Open a fresh period: recompute allowances and set ``period_start`` to now.
 
         Called at startup, at each month roll-over, and by the manual
@@ -259,6 +264,7 @@ class QuotaService:
         touches historical usage rows. With ``reset_day <= 0`` the period is
         opened once and stays open (no automatic roll).
         """
+        pending_voucher_sync = await self.db.pending_guest_voucher_allowance_sync()
         bundle = await self.db.get_bundle()
         now = self._now()
         effective = bundle.effective_reset_day
@@ -276,24 +282,45 @@ class QuotaService:
         # effective<=0 -> period_bounds returns "today"; period_end stays "".
         bundle.period_start = start.date().isoformat()
         bundle.period_end = end.date().isoformat() if effective > 0 else ""
-        await self.db.set_bundle(bundle)
+        await self.db.set_bundle_period(bundle)
+        await self.db.complete_guest_voucher_allowance_sync(pending_voucher_sync)
         log.info("quota period opened: %s -> %s (%d allowances)",
                  bundle.period_start, bundle.period_end or "manual",
                  len(bundle.allowances))
 
     async def recompute_allowances(self) -> None:
+        async with self._allowance_lock:
+            await self._recompute_allowances_locked()
+
+    async def _recompute_allowances_locked(self) -> None:
         """Refresh allowances + period_end without moving ``period_start``.
 
         Used after device edits, bundle changes, and mid-month top-ups of the
         bundle itself. Unlike :meth:`open_period`, it never rolls the period,
         so usage already recorded in the current period is preserved.
         """
+        pending_voucher_sync = await self.db.pending_guest_voucher_allowance_sync()
         bundle = await self.db.get_bundle()
         now = self._now()
         bundle.allowances = await self.compute_allowances()
         bundle.period_end = self._next_period_end(bundle, now)
-        await self.db.set_bundle(bundle)
+        await self.db.set_bundle_allowances(bundle)
+        await self.db.complete_guest_voucher_allowance_sync(pending_voucher_sync)
         log.info("allowances recomputed (%d users)", len(bundle.allowances))
+
+    async def recover_guest_voucher_allowances(self) -> bool:
+        """Retry the derived allowance snapshot after a committed voucher claim.
+
+        The voucher transaction stores this pending marker before commit. A
+        successful recompute clears only markers observed before that recompute;
+        later claims remain queued for the next pass. Recompute derives from
+        current policy, so recovery never reapplies an old quota over edits.
+        """
+        pending = await self.db.pending_guest_voucher_allowance_sync()
+        if not pending:
+            return False
+        await self.recompute_allowances()
+        return True
 
     async def ensure_period(self) -> None:
         """Roll the period if stale, open if missing."""

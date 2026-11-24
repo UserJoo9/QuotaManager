@@ -257,7 +257,17 @@ sudo apt purge quota-manager                                               # إ�
 
 <div dir="rtl">
 
-بياناتك في `/var/lib/quota-gateway/quota.db` — انسخها من وقت للتاني كنسخة احتياطية.
+بياناتك موجودة في `/var/lib/quota-gateway/quota.db`. عشان تاخد نسخة احتياطية منها (آمن والبوابة شغالة):
+
+</div>
+
+```bash
+sudo python3 -c "import sqlite3; sqlite3.connect('/var/lib/quota-gateway/quota.db').backup(sqlite3.connect('/root/netrex-backup.db'))"
+```
+
+<div dir="rtl">
+
+ما تنسخش `quota.db` بـ `cp` والبوابة شغالة: آخر التغييرات ممكن تكون لسه في ملف جانبي والنسخة تطلع بايظة. استرجاع النسخة موجود في [دليل النسخ والاسترجاع](Structure_README.md#sqlite-backup-and-restore).
 
 ## حل المشاكل
 
