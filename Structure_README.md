@@ -29,6 +29,7 @@ the project layout, tests, and the release process.
 - [Topology: a one-armed gateway](#topology-a-one-armed-gateway)
 - [The packet path (no Python)](#the-packet-path-no-python)
 - [The maintenance loop](#the-maintenance-loop)
+- [SQLite backup and restore](#sqlite-backup-and-restore)
 - [Quota model](#quota-model)
 - [Speed shaping](#speed-shaping)
 - [DNS filtering (domain rules, presets, per-client DNS servers)](#dns-filtering-domain-rules-presets-per-client-dns-servers)
@@ -263,6 +264,146 @@ because the package's `prerm` stops the `quota-gateway` service — a plain chil
 `apt-get` would die with the cgroup. The whole call is behind a try/except so a
 network failure never stalls a tick. See [Software updates](#software-updates)
 below.
+
+---
+
+## SQLite backup and restore
+
+The runtime database is `/var/lib/quota-gateway/quota.db`; `Database.connect()`
+opens it in WAL mode (`PRAGMA journal_mode=WAL`). While the service is running,
+recent committed changes can still live in `quota.db-wal` and are not necessarily
+checkpointed into `quota.db`. A plain `cp quota.db backup.db` is therefore not a
+consistent live backup. Do not copy the main file and its `-wal`/`-shm` sidecars
+separately while SQLite is open; writes and checkpoints can race that copy.
+
+Use Python's standard-library `sqlite3.Connection.backup()` API. It takes a
+consistent SQLite snapshot while writers continue and includes committed WAL
+content visible to that snapshot (later writes are not included). After the
+copy, switch the destination to rollback-journal `DELETE` mode and close it;
+this checkpoints any destination WAL and makes the backup a standalone file
+without sidecars. The script checks it with `PRAGMA integrity_check` before
+reporting success and restricts its mode:
+
+```bash
+( set -eu
+  sudo install -d -m 700 /var/lib/quota-gateway/backups
+  BACKUP="/var/lib/quota-gateway/backups/quota-$(date +%F-%H%M%S).db"
+  sudo test ! -e "$BACKUP"
+  sudo python3 - "$BACKUP" <<'PY'
+from contextlib import closing
+import os
+import sqlite3
+import sys
+
+destination = sys.argv[1]
+with closing(sqlite3.connect(
+        "file:/var/lib/quota-gateway/quota.db?mode=ro", uri=True)) as source:
+    with closing(sqlite3.connect(destination)) as backup:
+        source.backup(backup)
+        mode = backup.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+        if mode.lower() != "delete":
+            raise SystemExit(f"Could not make backup standalone: {mode}")
+        check = backup.execute("PRAGMA integrity_check").fetchone()[0]
+        if check != "ok":
+            raise SystemExit(f"Backup validation failed: {check}")
+os.chmod(destination, 0o600)
+print(f"Backup saved and verified: {destination}")
+PY
+)
+```
+
+Restore only with the service stopped. Validate the standalone backup first;
+then move the old database and any sidecars aside as one set before installing
+the backup. Never put an old `quota.db-wal` beside a restored database. For
+example:
+
+```bash
+( set -eu
+  DB_DIR=/var/lib/quota-gateway
+  BACKUP="/var/lib/quota-gateway/backups/quota-YYYY-MM-DD-HHMMSS.db"
+  STAMP="$(date +%F-%H%M%S)"
+  STAGED="$DB_DIR/.quota.db.restore-$STAMP-$$"
+  ARCHIVE="$DB_DIR/quota.db.pre-restore-$STAMP"
+  sudo test -f "$BACKUP"
+  sudo test ! -e "$STAGED"
+  sudo test ! -e "$ARCHIVE"
+  sudo python3 - "$BACKUP" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(
+        f"file:{sys.argv[1]}?mode=ro&immutable=1", uri=True) as backup:
+    check = backup.execute("PRAGMA integrity_check").fetchone()[0]
+if check != "ok":
+    raise SystemExit(f"Backup validation failed: {check}")
+print("Backup is valid")
+PY
+  sudo install -o root -g root -m 600 "$BACKUP" "$STAGED"
+  sudo python3 - "$STAGED" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(
+        f"file:{sys.argv[1]}?mode=ro&immutable=1", uri=True) as staged:
+    check = staged.execute("PRAGMA integrity_check").fetchone()[0]
+if check != "ok":
+    raise SystemExit(f"Staged database validation failed: {check}")
+PY
+  sudo mkdir -m 700 "$ARCHIVE"
+  sudo systemctl stop quota-gateway
+  if sudo test -e "$DB_DIR/quota.db"; then
+    sudo mv "$DB_DIR/quota.db" "$ARCHIVE/quota.db"
+  fi
+  for suffix in -wal -shm; do
+    if sudo test -e "$DB_DIR/quota.db$suffix"; then
+      sudo mv "$DB_DIR/quota.db$suffix" "$ARCHIVE/quota.db$suffix"
+    fi
+  done
+  sudo mv "$STAGED" "$DB_DIR/quota.db"
+  printf 'Old database and sidecars are preserved in %s\n' "$ARCHIVE"
+  sudo systemctl start quota-gateway
+)
+```
+
+The restore block uses `set -eu`: any failed validation, stop, move, or start
+ends the block immediately. It validates a staged replacement before stopping
+the service and uses unique paths that refuse to overwrite existing files. If
+the service does not start after replacement, leave it stopped and restore the
+preserved files. Substitute the exact archive path printed by the restore
+block:
+
+```bash
+( set -eu
+  DB_DIR=/var/lib/quota-gateway
+  ARCHIVE="$DB_DIR/quota.db.pre-restore-YYYY-MM-DD-HHMMSS"
+  sudo systemctl stop quota-gateway
+  sudo test -f "$ARCHIVE/quota.db"
+  sudo test ! -e "$ARCHIVE/quota.db.failed-restore"
+  if sudo test -e "$DB_DIR/quota.db"; then
+    sudo mv "$DB_DIR/quota.db" "$ARCHIVE/quota.db.failed-restore"
+  fi
+  for suffix in -wal -shm; do
+    if sudo test -e "$DB_DIR/quota.db$suffix"; then
+      sudo test ! -e "$ARCHIVE/quota.db.failed-restore$suffix"
+      sudo mv "$DB_DIR/quota.db$suffix" \
+        "$ARCHIVE/quota.db.failed-restore$suffix"
+    fi
+  done
+  sudo mv "$ARCHIVE/quota.db" "$DB_DIR/quota.db"
+  for suffix in -wal -shm; do
+    if sudo test -e "$ARCHIVE/quota.db$suffix"; then
+      sudo mv "$ARCHIVE/quota.db$suffix" "$DB_DIR/quota.db$suffix"
+    fi
+  done
+  sudo systemctl start quota-gateway
+)
+```
+
+Keep the backup file outside the live DB path. This procedure targets the
+packaged systemd service and its default DB path; custom `db_path` or service
+setups must use their configured path and unit name. An online DB backup does
+not include unrelated files in the DB directory, such as `firewall_config.json`;
+back up that file separately when needed.
 
 ---
 
