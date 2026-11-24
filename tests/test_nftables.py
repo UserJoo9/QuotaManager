@@ -41,6 +41,8 @@ class FakeNft:
         #: When True, ``nft add element`` fails — the gw_allowed whitelist
         #: must stay uncommitted (cache-gate -> retry next tick).
         self.reject_add_element: bool = False
+        #: Fail the next nft batch before mutating any set (transaction rollback).
+        self.reject_batch: bool = False
         #: table -> setname -> member IPs
         self._sets: dict[str, dict[str, set[str]]] = {
             "inet quota_gateway": {"blocked": set(), "known_ips": set(),
@@ -79,6 +81,30 @@ class FakeNft:
         self.calls.append(argv)
         if argv[0] != "nft":
             return 1, f"unknown binary {argv[0]}"
+        if argv[1:2] == ["-f"]:
+            with open(argv[2], encoding="utf-8") as batch_file:
+                commands = [line.strip() for line in batch_file if line.strip()]
+            if self.reject_batch:
+                self.reject_batch = False
+                return 1, "fake: batch rejected"
+            # Apply to a copy so a malformed command never leaves partial state.
+            updated = {table: {name: set(members)
+                               for name, members in sets.items()}
+                       for table, sets in self._sets.items()}
+            for line in commands:
+                words = line.split()
+                table, name = " ".join(words[2:4]), words[4]
+                members = updated.setdefault(table, {}).setdefault(name, set())
+                if words[:2] == ["flush", "set"]:
+                    members.clear()
+                elif words[:2] == ["add", "element"]:
+                    for value in " ".join(words[5:]).strip("{} ").split(","):
+                        if value.strip():
+                            members.add(value.strip())
+                else:
+                    return 1, f"fake: unsupported batch command {line}"
+            self._sets = updated
+            return 0, ""
         args = argv[1:]
         cmd = args[0]
 
@@ -101,18 +127,15 @@ class FakeNft:
             self.tables.add(args[2])
             return 0, ""
         if cmd == "flush" and args[1] == "table":
-            # Real nft: a table flush removes rules/sets/chains but NOT named
-            # counter objects, which keep their byte totals. That is exactly the
-            # restart-resurrection bug the engine guards against, so the fake
-            # must preserve counters here too. Only the named table is flushed.
+            # Named counters keep their byte totals. The fake also preserves
+            # set contents across rebuilds to exercise the unknown-cache path
+            # when retained enforcement memberships are present.
             table = args[2]
             self._rules = [(t, e) for t, e in self._rules if t != table]
             self.chain_rules = {
                 (t, h): v for (t, h), v in self.chain_rules.items()
                 if t != table
             }
-            for s in self._sets.setdefault(table, {}):
-                self._sets[table][s].clear()
             return 0, ""
         if cmd == "add" and args[1] in ("chain", "set", "rule"):
             self._rules.append((self._table(args), args[-1]))
@@ -222,8 +245,8 @@ def test_update_state_is_add_only():
     eng.update_state({"192.168.2.111": "aa:bb:cc:dd:ee:01"}, {})
     n_calls = len(fake.calls)
     eng.update_state({}, {})  # device gone
-    # only the three blocked-set flushes (IPv4 + IPv6 + MAC, all empty) — no deletes
-    assert len(fake.calls) == n_calls + 3
+    # The table starts with empty enforcement sets; unchanged sets need no nft call.
+    assert len(fake.calls) == n_calls
     # counters still exist but are not surfaced (flush filters by ip_to_mac)
     assert "q_up_192_168_2_111" in fake.counters
 
@@ -297,6 +320,136 @@ def test_unblock_removes_ip_from_set():
     eng.update_state({"192.168.2.111": "aa:bb:cc:dd:ee:01"},
                      {"aa:bb:cc:dd:ee:01": False})
     assert "192.168.2.111" not in fake.blocked
+
+
+def test_transient_blocked_set_sync_failure_preserves_enforcement_and_retries():
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    ip_to_mac = {"192.168.2.111": "aa:bb:cc:dd:ee:01",
+                 "2001:db8::111": "aa:bb:cc:dd:ee:01"}
+    eng.update_state(ip_to_mac, {"aa:bb:cc:dd:ee:01": True},
+                     pending_guests=["192.168.2.112"])
+    assert len([call for call in fake.calls if call[1:2] == ["-f"]]) == 1
+    assert fake.blocked == {"192.168.2.111"}
+    assert fake._sets["inet quota_gateway"]["blocked6"] == {"2001:db8::111"}
+    assert fake.blocked_macs == {"aa:bb:cc:dd:ee:01"}
+    assert fake._sets["inet quota_gateway"]["pending_guests"] == {"192.168.2.112"}
+
+    fake.counters["q_up_192_168_2_111"] = 100
+    assert eng.flush().by_ip["192.168.2.111"].up == 100
+    fake.reject_batch = True
+    eng.update_state(ip_to_mac, {}, pending_guests=[])
+
+    assert eng.available
+    assert fake.blocked == {"192.168.2.111"}
+    assert fake._sets["inet quota_gateway"]["blocked6"] == {"2001:db8::111"}
+    assert fake.blocked_macs == {"aa:bb:cc:dd:ee:01"}
+    assert fake._sets["inet quota_gateway"]["pending_guests"] == {"192.168.2.112"}
+    assert "batch rejected" in eng.sync_error
+
+    eng.update_state(ip_to_mac, {}, pending_guests=[])
+    assert eng.available
+    assert fake.blocked == set()
+    assert fake._sets["inet quota_gateway"]["blocked6"] == set()
+    assert fake.blocked_macs == set()
+    assert fake._sets["inet quota_gateway"]["pending_guests"] == set()
+    assert eng.sync_error == ""
+    assert len([call for call in fake.calls if call[1:2] == ["-f"]]) == 3
+    assert eng.flush().by_ip == {}
+    fake.counters["q_up_192_168_2_111"] = 150
+    assert eng.flush().by_ip["192.168.2.111"].up == 50
+
+
+def test_start_flushes_retained_sets_when_desired_membership_is_empty():
+    fake = FakeNft()
+    fake._sets["inet quota_gateway"].update({
+        "blocked": {"192.168.2.99"},
+        "blocked6": {"2001:db8::99"},
+        "blocked_macs": {"aa:bb:cc:dd:ee:99"},
+        "pending_guests": {"192.168.2.98"},
+    })
+    eng = _engine(fake)
+    eng.start()
+    eng.update_state({}, {}, pending_guests=[])
+
+    assert fake.blocked == set()
+    assert fake._sets["inet quota_gateway"]["blocked6"] == set()
+    assert fake.blocked_macs == set()
+    assert fake._sets["inet quota_gateway"]["pending_guests"] == set()
+
+
+def test_restart_forces_empty_reconciliation_for_retained_sets():
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    eng.update_state({"192.168.2.111": "aa:bb:cc:dd:ee:01",
+                      "2001:db8::111": "aa:bb:cc:dd:ee:01"},
+                     {"aa:bb:cc:dd:ee:01": True},
+                     pending_guests=["192.168.2.111"])
+    eng.start()
+    # The restart resets the set caches to unknown. The fake retains all four
+    # memberships across table reconstruction; the next empty desired state wins.
+    eng.update_state({}, {}, pending_guests=[])
+
+    assert fake.blocked == set()
+    assert fake._sets["inet quota_gateway"]["blocked6"] == set()
+    assert fake.blocked_macs == set()
+    assert fake._sets["inet quota_gateway"]["pending_guests"] == set()
+
+
+def test_missing_nft_during_enforcement_sync_marks_engine_unavailable():
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    original = fake.__call__
+
+    def nft_missing(argv):
+        if argv[1:2] == ["-f"]:
+            return 127, "nft: not found"
+        return original(argv)
+
+    eng._run_command = nft_missing
+    eng.update_state({"192.168.2.111": "aa:bb:cc:dd:ee:01"},
+                     {"aa:bb:cc:dd:ee:01": True})
+    assert not eng.available
+    assert "nft: not found" in eng.last_error
+
+
+def test_set_apply_error_is_reported_but_does_not_disable_nft_engine():
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    original = fake.__call__
+
+    def missing_set(argv):
+        if argv[1:2] == ["-f"]:
+            return 1, "Error: No such file or directory"
+        return original(argv)
+
+    eng._run_command = missing_set
+    eng.update_state({"192.168.2.111": "aa:bb:cc:dd:ee:01"},
+                     {"aa:bb:cc:dd:ee:01": True})
+    assert eng.available
+    assert "No such file or directory" in eng.sync_error
+
+
+def test_scoped_or_invalid_ips_never_reach_nft_device_rules():
+    fake = FakeNft()
+    eng = _engine(fake)
+    eng.start()
+    eng.update_state({"fe80::1%eth0": "aa:bb:cc:dd:ee:01",
+                      "bad-address": "aa:bb:cc:dd:ee:02"},
+                     {"aa:bb:cc:dd:ee:01": True,
+                      "aa:bb:cc:dd:ee:02": True},
+                     pending_guests=["192.168.2.111%eth0"])
+    assert eng.available
+    assert not eng._installed
+    assert fake.blocked == set()
+    assert fake._sets["inet quota_gateway"]["blocked6"] == set()
+    assert fake._sets["inet quota_gateway"]["pending_guests"] == set()
+    assert not any("fe80::1%eth0" in str(call) or "bad-address" in str(call)
+                   for call in fake.calls)
 
 
 def test_flush_returns_delta_since_last_flush():

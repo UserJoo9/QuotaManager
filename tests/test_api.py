@@ -1748,7 +1748,8 @@ def test_gateway_payload_engine_programmed_but_ui_free(tmp_path):
 #     import asyncio
     database = _db.Database(tmp_path / "gw.db")
     holder = SnapshotHolder()
-    holder.swap(EngineSnapshot(gateway_blocked=True, engine_available=True))
+    holder.swap(EngineSnapshot(gateway_blocked=True, engine_available=True,
+                               engine_sync_error="nft enforcement sync failed"))
     service = QuotaService(database, timezone="Africa/Cairo")
     _get_loop().run_until_complete(database.connect())
     app = create_app(database, service, holder)
@@ -1759,6 +1760,8 @@ def test_gateway_payload_engine_programmed_but_ui_free(tmp_path):
             assert dash["gateway"]["blocked_desired"] is False
             assert dash["gateway"]["blocked_programmed"] is True
             assert dash["gateway"]["engine_available"] is True
+            assert dash["gateway"]["engine_sync_error"] == \
+                "nft enforcement sync failed"
     finally:
         _get_loop().run_until_complete(database.close())
 
