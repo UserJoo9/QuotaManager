@@ -1,6 +1,8 @@
 name: CI
 
 on:
+  workflow_call:
+
   push:
     branches:
       - '**'
@@ -21,6 +23,9 @@ on:
       - 'LICENSE'
       - '.gitignore'
       - '.agents/**'
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
