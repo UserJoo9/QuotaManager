@@ -843,6 +843,28 @@ drops internet briefly) re-dials on its own. Both only run while ppp0 is
 actually **up** (a dead dial has nothing to renew into), and the last-renewed
 timestamp is persisted so a gateway restart never re-renews mid-schedule.
 
+### Request body inspection by the WAF
+
+`waf.max_body_bytes` (default 1 MiB) limits the bytes buffered to inspect
+`POST`, `PUT`, `PATCH`, and `DELETE` bodies. The WAF checks the actual byte
+count while reading, even when the client omits `Content-Length`. Strict mode
+returns HTTP 413 for an oversized body before the route runs. Log mode records
+the event and forwards the entire stream, including the bytes read before
+the limit was reached, without auto-banning the client. The local-subnet exemption and WAF off mode
+bypass inspection. Routes that accept large inputs still need their own limits
+when WAF blocking is disabled or exempted.
+
+In strict mode, the WAF keeps at most 4,096 active source/endpoint rate buckets
+and 4,096 source histories for auto-ban. Rate buckets expire after each
+endpoint's configured window. Auto-ban holds only the most recent
+`waf.auto_ban_after` timestamps per source and drops hits outside
+`waf.ban_window_seconds`. A five-second sweep removes expired state even
+without incoming requests. When the rate table is full, an untracked source
+on a rate-limited route receives 429 until a slot frees up. A full auto-ban
+table keeps its active histories. New sources are still blocked for WAF
+violations, but their hits do not accumulate toward a firewall ban until
+space becomes available.
+
 ### Tailscale remote access
 
 `quota/tailscale.py` (`TailscaleManager`) manages the official `tailscale`
