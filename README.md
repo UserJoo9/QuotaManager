@@ -248,7 +248,13 @@ sudo apt remove quota-manager                                              # rem
 sudo apt purge quota-manager                                               # remove everything
 ```
 
-Your data lives in `/var/lib/quota-gateway/quota.db`. Back it up with SQLite's online backup procedure, which works while the gateway is running and includes committed WAL data. For backup and restore commands, see the [SQLite backup and restore guide](Structure_README.md#sqlite-backup-and-restore).
+Your data lives in `/var/lib/quota-gateway/quota.db`. To back it up (safe while the gateway is running):
+
+```bash
+sudo python3 -c "import sqlite3; sqlite3.connect('/var/lib/quota-gateway/quota.db').backup(sqlite3.connect('/root/netrex-backup.db'))"
+```
+
+Don't just copy `quota.db` with `cp` while the gateway runs: recent changes may still sit in a side file and the copy can come out broken. Restoring a backup is in the [backup and restore guide](Structure_README.md#sqlite-backup-and-restore).
 
 ## Troubleshooting
 
