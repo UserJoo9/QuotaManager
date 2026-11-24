@@ -2649,6 +2649,26 @@ def test_per_device_admin_block_reaches_the_kernel(tmp_path):
             self.calls.append(argv)
             if argv[0] != "nft":
                 return 1, f"unknown binary {argv[0]}"
+            if argv[1:2] == ["-f"]:
+                with open(argv[2], encoding="utf-8") as batch_file:
+                    commands = [line.strip() for line in batch_file if line.strip()]
+                updated = {table: {name: set(members)
+                                   for name, members in sets.items()}
+                           for table, sets in self._sets.items()}
+                for line in commands:
+                    words = line.split()
+                    table, name = " ".join(words[2:4]), words[4]
+                    members = updated.setdefault(table, {}).setdefault(name, set())
+                    if words[:2] == ["flush", "set"]:
+                        members.clear()
+                    elif words[:2] == ["add", "element"]:
+                        for ip in " ".join(words[5:]).strip("{} ").split(","):
+                            if ip.strip():
+                                members.add(ip.strip())
+                    else:
+                        return 1, f"unsupported batch command: {line}"
+                self._sets = updated
+                return 0, ""
             args = argv[1:]
             if args[0] == "-j":  # nft -j list counters
                 return self._list_counters()

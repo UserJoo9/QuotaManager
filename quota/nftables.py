@@ -57,6 +57,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import tempfile
 import time
 from ipaddress import ip_address, ip_network
 from typing import Any, Callable
@@ -213,6 +214,35 @@ def _which_network(networks: list[str], host: str) -> str | None:
 _MAC_RE = re.compile(r"^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$")
 
 
+def _valid_addresses(values: list[str], version: int) -> list[str]:
+    """Return sorted canonical IP literals of the requested address family."""
+    valid: set[str] = set()
+    for value in values:
+        try:
+            address = ip_address(value)
+        except ValueError:
+            continue
+        if address.version == version and not getattr(address, "scope_id", None):
+            valid.add(str(address))
+    return sorted(valid)
+
+
+def _valid_ip_to_mac(ip_to_mac: dict[str, str]) -> dict[str, str]:
+    """Reject invalid and zone-scoped IPs before they enter nft rule syntax."""
+    valid: dict[str, str] = {}
+    for ip, mac in ip_to_mac.items():
+        try:
+            address = ip_address(ip)
+        except ValueError:
+            log.warning("ignoring invalid address in nft device map")
+            continue
+        if getattr(address, "scope_id", None):
+            log.warning("ignoring zone-scoped address in nft device map")
+            continue
+        valid[ip] = mac
+    return valid
+
+
 class NftablesEngine:
     """Linux (nftables) accounting + hard-block engine.
 
@@ -267,14 +297,18 @@ class NftablesEngine:
 
         self.available = True
         self._warned = False
+        #: Last enforcement-set reconciliation error. A failed transaction is
+        #: observable without declaring the packet engine itself unavailable.
+        self.sync_error = ""
+        self.last_error = ""
         self._ip_to_mac: dict[str, str] = {}
         self._blocked: dict[str, bool] = {}
         #: IPs most recently programmed into the kernel `blocked` set.
-        self._last_blocked_ips: list[str] = []
+        self._last_blocked_ips: list[str] | None = None
         ipv6_pfx = (getattr(dhcp_cfg, "ipv6_prefix", "fd00:da7a:2::/64") or "fd00:da7a:2::/64").strip()
         self._ipv6_prefix = ipv6_pfx
         self._local_networks6 = sorted({"fe80::/10", "fd00::/8", "ff00::/8", ipv6_pfx})
-        self._last_blocked6_ips: list[str] = []
+        self._last_blocked6_ips: list[str] | None = None
         #: Is the ISP's IPv6 reachable (probe verdict)? None = never programmed.
         #: While False the ``v6gate`` chain answers every client IPv6 packet
         #: bound for the internet with ICMPv6 "no route", so apps fall back to
@@ -283,7 +317,7 @@ class NftablesEngine:
         #: MACs most recently programmed into the kernel `blocked_macs` set
         #: (lease-less / static-IP devices are cut by ethernet address — see
         #: :meth:`_sync_blocked_macs`).
-        self._last_blocked_macs: list[str] = []
+        self._last_blocked_macs: list[str] | None = None
         #: IPs whose counter rules exist in the kernel.
         self._installed: set[str] = set()
         #: IPs whose LAN-monitoring counters exist; ``_last_lan`` is their
@@ -312,7 +346,7 @@ class NftablesEngine:
         #: run.py sets the plain-HTTP side door here when the dashboard is HTTPS.
         self.portal_port: int | None = None
         #: IPs of pending guests programmed into the `pending_guests` captive portal set
-        self._last_pending_guests: list[str] = []
+        self._last_pending_guests: list[str] | None = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -329,9 +363,12 @@ class NftablesEngine:
         self._lan_installed = set()
         self._lan_carried = set()
         self._last_lan = {}
-        self._last_blocked_ips = []
-        self._last_blocked6_ips = []
-        self._last_blocked_macs = []
+        # A table rebuild invalidates every set cache. Even a desired empty
+        # set must be flushed once so retained set objects cannot stay stale.
+        self._last_blocked_ips = None
+        self._last_blocked6_ips = None
+        self._last_blocked_macs = None
+        self._last_pending_guests = None
         self._ipv6_wan_active = None
         self._run(["add", "table", f"{FAMILY} {self.table}"])
         self._run(["flush", "table", f"{FAMILY} {self.table}"])
@@ -443,6 +480,7 @@ class NftablesEngine:
                      blocked: dict[str, bool],
                      pending_guests: list[str] | None = None) -> None:
         """Reconcile per-device counters + the blocked set with the service."""
+        ip_to_mac = _valid_ip_to_mac(ip_to_mac)
         self._ip_to_mac = dict(ip_to_mac)
         self._blocked = dict(blocked)
         if not self.available:
@@ -461,21 +499,15 @@ class NftablesEngine:
         # lease is allowed even on ticks where the blocked set is unchanged.
         self._sync_known_ips(ip_to_mac)
 
-        # Rebuild the blocked set from the current blocked MACs -> their IPs,
-        # but only when the desired membership actually changed AND is not
-        # empty. Re-flushing an identical set every ~15 s re-opens a small
-        # unblock window for every blocked device on every tick (the chain's
-        # policy is accept between the flush and the last re-add), and a
-        # mid-rebuild nft failure leaves the later devices missing from the set
-        # — both silent enforcement gaps. The empty case is cheap (one
-        # subprocess, no devices affected) so it always runs to keep the kernel
-        # authoritative.
+        # Reconcile all enforcement sets in one transaction. Unknown caches
+        # (startup/restart) force an authoritative first sync, including empty
+        # sets; thereafter identical memberships cost no nft invocation.
         blocked_ips = sorted(
             ip for ip, mac in ip_to_mac.items() if blocked.get(mac))
-        blocked_v4 = [ip for ip in blocked_ips if ":" not in ip]
-        blocked_v6 = [ip for ip in blocked_ips if ":" in ip]
-        self._sync_blocked_ips(blocked_v4)
-        self._sync_blocked6_ips(blocked_v6)
+        blocked_v4 = _valid_addresses(
+            [ip for ip in blocked_ips if ":" not in ip], 4)
+        blocked_v6 = _valid_addresses(
+            [ip for ip in blocked_ips if ":" in ip], 6)
         # MAC-based drops are the SECOND enforcement channel, keyed by the
         # device's ethernet address instead of its lease: they cut devices
         # whose IP never entered ``ip_to_mac`` — a lease-less quota-blocked
@@ -483,42 +515,17 @@ class NftablesEngine:
         # that routes through the box with no lease row. The IP set above
         # cannot see those; the ether set can (its traffic still crosses the
         # forward chain with its real saddr/daddr).
-        self._sync_blocked_macs(blocked)
+        blocked_macs = sorted(m for m, b in blocked.items()
+                              if b and m != GATEWAY_MAC and _MAC_RE.fullmatch(m))
+        desired = {
+            "blocked": (blocked_v4, self._last_blocked_ips),
+            "blocked6": (blocked_v6, self._last_blocked6_ips),
+            "blocked_macs": (blocked_macs, self._last_blocked_macs),
+        }
         if pending_guests is not None:
-            self._sync_pending_guests(pending_guests)
-
-    def _sync_pending_guests(self, pending_guests: list[str]) -> None:
-        """Program the kernel ``pending_guests`` set for captive portal redirect."""
-        pg_sorted = sorted(pending_guests)
-        if pg_sorted == self._last_pending_guests:
-            return
-        self._last_pending_guests = None
-        if self._run(["flush", "set", f"{FAMILY} {self.table} pending_guests"]):
-            ok = True
-            for ip in pg_sorted:
-                if not self._run(["add", "element",
-                                  f"{FAMILY} {self.table} pending_guests",
-                                  f"{{ {ip} }}"]):
-                    ok = False
-                    break
-            if ok:
-                self._last_pending_guests = pg_sorted
-
-    def _sync_blocked_ips(self, blocked_ips: list[str]) -> None:
-        """Program the kernel ``blocked`` set for leased, quota-blocked IPs."""
-        if blocked_ips and blocked_ips == self._last_blocked_ips:
-            return
-        self._last_blocked_ips = None  # not yet committed; retry next tick if a step fails
-        if self._run(["flush", "set", f"{FAMILY} {self.table} blocked"]):
-            ok = True
-            for ip in blocked_ips:
-                if not self._run(["add", "element",
-                                  f"{FAMILY} {self.table} blocked",
-                                  f"{{ {ip} }}"]):
-                    ok = False
-                    break
-            if ok:
-                self._last_blocked_ips = blocked_ips
+            desired["pending_guests"] = (
+                _valid_addresses(pending_guests, 4), self._last_pending_guests)
+        self._sync_enforcement_sets(desired)
 
     def set_ipv6_wan(self, active: bool) -> None:
         """Open (ISP IPv6 works) or close (it does not) the IPv6 WAN gate.
@@ -548,48 +555,58 @@ class NftablesEngine:
         """Last IPv6-WAN verdict pushed to the kernel (None = never)."""
         return self._ipv6_wan_active
 
-    def _sync_blocked6_ips(self, blocked6_ips: list[str]) -> None:
-        """Program the kernel ``blocked6`` set for leased, quota-blocked IPv6s."""
-        if blocked6_ips and blocked6_ips == self._last_blocked6_ips:
-            return
-        self._last_blocked6_ips = None
-        if self._run(["flush", "set", f"{FAMILY} {self.table} blocked6"]):
-            ok = True
-            for ip in blocked6_ips:
-                if not self._run(["add", "element",
-                                  f"{FAMILY} {self.table} blocked6",
-                                  f"{{ {ip} }}"]):
-                    ok = False
-                    break
-            if ok:
-                self._last_blocked6_ips = blocked6_ips
+    def _sync_enforcement_sets(
+        self, desired: dict[str, tuple[list[str], list[str] | None]],
+    ) -> None:
+        """Atomically replace only changed enforcement sets.
 
-    def _sync_blocked_macs(self, blocked: dict[str, bool]) -> None:
-        """Program the kernel ``blocked_macs`` set for every blocked device.
-
-        The set is ``ether_addr``-typed; the forward chain's drop rules match
-        ``ether saddr/daddr @blocked_macs`` (both directions, LAN-excluded).
-        The box's own sentinel MAC is never programmed (its packets never
-        cross the forward chain). Cache-gated exactly like the IP set: a
-        same-set re-flush every tick would open a short unblock window.
+        nft applies a ``-f`` file as one transaction. If validation/programming
+        fails, every prior set remains live and each cache still describes the
+        last successful kernel state, so the next maintenance tick retries.
         """
-        # Only real MACs: one malformed entry makes `nft add element` fail with
-        # "Invalid LL address", which used to switch the whole engine off.
-        blocked_macs = sorted(m for m, b in blocked.items()
-                              if b and m != GATEWAY_MAC and _MAC_RE.match(m))
-        if blocked_macs and blocked_macs == self._last_blocked_macs:
+        changed = {name: (members, previous)
+                   for name, (members, previous) in desired.items()
+                   if members != previous}
+        if not changed:
             return
-        self._last_blocked_macs = None  # not yet committed; retry next tick
-        if self._run(["flush", "set", f"{FAMILY} {self.table} blocked_macs"]):
-            ok = True
-            for mac in blocked_macs:
-                if not self._run(["add", "element",
-                                  f"{FAMILY} {self.table} blocked_macs",
-                                  f"{{ {mac} }}"]):
-                    ok = False
-                    break
-            if ok:
-                self._last_blocked_macs = blocked_macs
+        commands = []
+        for name, (members, _previous) in changed.items():
+            commands.append(f"flush set {FAMILY} {self.table} {name}")
+            if members:
+                commands.append(
+                    f"add element {FAMILY} {self.table} {name} "
+                    "{ " + ", ".join(members) + " }")
+        code, out = self._run_batch(commands)
+        if code == 0:
+            for name, (members, _previous) in changed.items():
+                setattr(self, {
+                    "blocked": "_last_blocked_ips",
+                    "blocked6": "_last_blocked6_ips",
+                    "blocked_macs": "_last_blocked_macs",
+                    "pending_guests": "_last_pending_guests",
+                }[name], members)
+            self.sync_error = ""
+            return
+
+        message = f"nft enforcement sync failed: {out.strip()}"
+        if code == 127 or any(term in out.lower() for term in (
+                "permission denied", "operation not permitted")):
+            self._fail(message, command=["-f", "<enforcement batch>"])
+            return
+        self.sync_error = message
+        log.error("%s; retaining last successful enforcement and retrying", message)
+
+    def _run_batch(self, commands: list[str]) -> tuple[int, str]:
+        """Run an atomic nft batch from a temporary file using the injected runner."""
+        try:
+            with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", prefix="quota-nft-",
+                    suffix=".nft", delete=True) as batch:
+                batch.write("\n".join(commands) + "\n")
+                batch.flush()
+                return self._run_command(["nft", "-f", batch.name])
+        except OSError as exc:
+            return 1, str(exc)
 
     def _sync_known_ips(self, ip_to_mac: dict[str, str]) -> None:
         """Keep the kernel ``known_ips`` set == the currently leased client IPs.
@@ -1100,6 +1117,8 @@ class NftablesEngine:
 
     def _fail(self, reason: str, command: list[str] | None = None) -> None:
         self.available = False
+        self.sync_error = ""
+        self.last_error = reason
         if not self._warned:
             argv = f"nft {' '.join(command)}" if command else "nft <unknown>"
             log.error("nftables engine unavailable: %s — no per-packet "
