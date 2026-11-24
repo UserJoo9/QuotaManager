@@ -1181,9 +1181,12 @@ The Local Share subsystem (`quota/local_share.py`, `web/share.html`, and the das
 
 - **Elimination of `python-multipart` Overhead**:
   Unlike standard form-data endpoints which require third-party C/Rust parsers or external libraries, file uploads leverage pure raw HTTP streaming via Starlette's `request.stream()`:
-  - Network bytes flow in 64 KB chunks directly from the incoming socket to disk (`data/local_share/<id>/<safe_name>`).
-  - Total process RAM usage remains $< 1\,\text{MB}$ regardless of whether transferring a small document or a 20 GB multi-file ISO/video.
+  - The application reads the request in chunks and writes directly to the gateway cache (`data/local_share/<id>/<safe_name>`). It does not buffer the entire file.
   - Raw client requests set the sanitized URI-encoded filename via `X-Filename: <encoded_name>` and standard `Content-Type`.
+- **Storage limits**:
+  - Each uploaded file, uncompressed folder member, and generated ZIP is limited to 4 GiB. Stored files, concurrent uploads, in-progress folder archives, and temporary download bundles share a 16 GiB cache limit. Payload writes also stop when they would leave less than 1 GiB free on the cache filesystem (the database, logs and updates live on the same disk).
+  - Limits are checked during streaming and ZIP creation, including the ZIP directory written at finalization. The API returns HTTP 413 and discards the rejected partial file or archive. After a folder upload fails, start a new folder session.
+  - Cache usage includes payload files already present at startup. Unfinished folder sessions held by the running process are discarded after 30 minutes of inactivity at the next cleanup pass.
 - **Atomic Index Persistence**:
   - Metadata is persisted in `data/local_share/index.json`.
   - Mutating operations (`save_file_stream`, `delete_file`, `save_text`, `cleanup_expired`) are synchronized behind an `asyncio.Lock()`.
@@ -1200,7 +1203,7 @@ The Local Share subsystem (`quota/local_share.py`, `web/share.html`, and the das
   - Household devices connected to the router's Wi-Fi or Ethernet LAN can freely upload, download, and share notes without requiring administrative credentials or session tokens.
   - Requesters arriving from external WAN addresses (in Strong WAN mode) are automatically denied with `403 Forbidden` unless possessing a cryptographically signed HMAC admin session cookie (`COOKIE_NAME`).
 - **CSRF & WAF Immunity on LAN**:
-  - LAN requests bypass strict WAN WAF body-size caps, enabling full-bandwidth gigabit file transfers without triggering false-positive rate-limit bans.
+  - LAN requests bypass WAN WAF body-size checks. Local Share enforces its storage limits independently.
 
 ### 3. Client Experience & Standalone Web Portal
 
@@ -1255,7 +1258,7 @@ The Local Share subsystem (`quota/local_share.py`, `web/share.html`, and the das
 - **`Content-Length` only for single files**:
   A multi-file/folder send is a ZIP the *sender* builds on the fly; it is larger than the sum of the announced file sizes. `GET /api/share/live/download/{id}` therefore omits `Content-Length` for names ending in `.zip` (chunked body); with a too-small length the server aborted the body and browsers reported a cancelled download. [`tests/test_local_share.py`]
 - **50 MB Live Direct Transfer Safety Clamp**:
-  To protect low-memory mobile browser engines from memory pressure or prolonged connection hangs during live Wi-Fi streaming, a strict $50\,\text{MB}$ payload limit is enforced. Both frontend interfaces (`initiateDashSendDirect`, `initiateSendDirect`, and multi-folder staging confirm) calculate total payload size upfront and immediately warn users via friendly toast notices if exceeded. The backend WebSocket relay endpoint (`/api/share/live/ws`) additionally enforces this ceiling on `transfer-request` messages, rejecting payloads $> 50\,\text{MB}$ with a descriptive `transfer-error` response. Larger files and folders are routed to standard Local Share upload.
+  To protect low-memory mobile browser engines from memory pressure or prolonged connection hangs during live Wi-Fi streaming, a strict $50\,\text{MB}$ payload limit is enforced. Both frontend interfaces (`initiateDashSendDirect`, `initiateSendDirect`, and multi-folder staging confirm) calculate total payload size upfront and immediately warn users via friendly toast notices if exceeded. The backend WebSocket relay endpoint (`/api/share/live/ws`) additionally enforces this ceiling on `transfer-request` messages, rejecting payloads $> 50\,\text{MB}$ with a descriptive `transfer-error` response. Larger files and folders are routed to standard Local Share upload, subject to its storage limits.
 
 ---
 

@@ -8,11 +8,13 @@ Stores files in a local cache with automatic TTL expiration and low memory footp
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import re
 import secrets
 import shutil
+import threading
 import time
 import zipfile
 from dataclasses import dataclass
@@ -25,6 +27,88 @@ DEFAULT_TTL_SECONDS = 7200  # 2 hours
 MAX_TEXT_ITEMS = 50
 MAX_TEXT_LENGTH = 10000
 MAX_LIVE_DIRECT_BYTES = 50 * 1024 * 1024  # 50 MB
+MAX_FILE_BYTES = 4 * 1024 ** 3  # 4 GiB (a movie or a phone backup)
+MAX_STORAGE_BYTES = 16 * 1024 ** 3  # 16 GiB (the disk reserve below still applies)
+MIN_DISK_FREE_BYTES = 1024 ** 3  # 1 GiB kept free for the database, logs and updates
+FOLDER_IDLE_SECONDS = 1800
+
+
+class ShareLimitExceeded(ValueError):
+    """The incoming data exceeds a Local Share storage limit."""
+
+
+class FolderUploadNotFound(ValueError):
+    """The folder session no longer exists."""
+
+
+class FolderUploadBusy(ValueError):
+    """An entry is already being written to this folder."""
+
+
+async def _disk_call(func, *args):
+    """Finish disk I/O before a cancelled caller closes or removes the file."""
+    task = asyncio.create_task(asyncio.to_thread(func, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+
+
+async def _copy_upload(stream: Any, dest, max_bytes: int) -> int:
+    """Check the received bytes before writing each chunk."""
+    async def chunks():
+        if hasattr(stream, "__aiter__"):
+            async for chunk in stream:
+                yield chunk
+        else:
+            while True:
+                if callable(stream):
+                    chunk = await stream(65536)
+                else:
+                    chunk = await _disk_call(stream.read, 65536)
+                if not chunk:
+                    break
+                yield chunk
+
+    total = 0
+    async for chunk in chunks():
+        if chunk:
+            total += len(chunk)
+            if total > max_bytes:
+                raise ShareLimitExceeded("File exceeds the Local Share per-file limit")
+            await _disk_call(dest.write, chunk)
+    return total
+
+
+class _CacheFile(io.FileIO):
+    """Unbuffered file that charges actual growth, including ZIP metadata."""
+
+    def __init__(self, owner: LocalShareManager, path: Path) -> None:
+        super().__init__(path, "x")
+        self._owner = owner
+        self._path = path
+
+    def write(self, data: bytes) -> int:
+        owner = self._owner
+        with owner._storage_lock:
+            size = owner._storage_sizes.get(self._path, 0)
+            end = self.tell() + len(data)
+            growth = end - size
+            if growth > 0:
+                if end > owner.max_file_bytes:
+                    raise ShareLimitExceeded("File exceeds the Local Share per-file limit")
+                if owner._storage_bytes + growth > owner.max_storage_bytes:
+                    raise ShareLimitExceeded("Local Share storage limit reached")
+                if shutil.disk_usage(owner.storage_dir).free - growth < MIN_DISK_FREE_BYTES:
+                    raise ShareLimitExceeded("Not enough free disk space for Local Share")
+            written = super().write(data)
+            new_size = max(size, self.tell())
+            owner._storage_sizes[self._path] = new_size
+            owner._storage_bytes += new_size - size
+            if written != len(data):
+                raise OSError("Incomplete Local Share disk write")
+            return written
 
 
 def sanitize_filename(filename: str) -> str:
@@ -103,7 +187,34 @@ class LocalShareManager:
         self.texts: list[SharedText] = []
         self._folder_sessions: dict[str, dict[str, Any]] = {}
         self.live_hub = LiveShareHub()
+        self.max_file_bytes = MAX_FILE_BYTES
+        self.max_storage_bytes = MAX_STORAGE_BYTES
         self._load_index()
+        self._storage_lock = threading.Lock()
+        # Include scratch payloads left behind by a previous process.
+        self._storage_sizes = {
+            path: path.stat().st_size
+            for path in self.storage_dir.glob("*/*")
+            if not path.parent.is_symlink() and not path.is_symlink() and path.is_file()
+        }
+        self._storage_bytes = sum(self._storage_sizes.values())
+
+    def _remove_payload(self, path: Path, *, directory: bool = False) -> None:
+        """Release budget for files that are no longer on disk."""
+        with self._storage_lock:
+            try:
+                if directory:
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+            except OSError:
+                if path.exists():
+                    log.exception("Could not remove Local Share payload %s", path)
+            candidates = ([p for p in self._storage_sizes if p.parent == path]
+                          if directory else [path])
+            for candidate in candidates:
+                if not candidate.exists():
+                    self._storage_bytes -= self._storage_sizes.pop(candidate, 0)
 
     def _load_index(self) -> None:
         """Load persisted metadata from disk."""
@@ -171,51 +282,29 @@ class LocalShareManager:
         file_id = secrets.token_hex(6)
         safe_name = sanitize_filename(filename)
         dest_dir = self.storage_dir / file_id
-        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_dir.mkdir()
         dest_file = dest_dir / safe_name
 
-        total_bytes = 0
         try:
-            with open(dest_file, "wb") as f:
-                if hasattr(stream, "__aiter__"):
-                    async for chunk in stream:
-                        if chunk:
-                            f.write(chunk)
-                            total_bytes += len(chunk)
-                elif callable(stream):
-                    while True:
-                        chunk = await stream(65536)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        total_bytes += len(chunk)
-                elif hasattr(stream, "read"):
-                    while True:
-                        chunk = stream.read(65536)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        total_bytes += len(chunk)
+            with _CacheFile(self, dest_file) as f:
+                total_bytes = await _copy_upload(stream, f, self.max_file_bytes)
+
+            now = time.time()
+            sf = SharedFile(
+                id=file_id,
+                name=safe_name,
+                size=total_bytes,
+                content_type=content_type or "application/octet-stream",
+                uploaded_at=now,
+                expires_at=now + max(60, ttl_seconds),
+                sender_ip=sender_ip,
+            )
+            async with self._lock:
+                self.files[file_id] = sf
+                self._save_index()
         except BaseException:
-            # client cancelled / connection dropped: leave no half-written file behind
-            shutil.rmtree(dest_dir, ignore_errors=True)
+            self._remove_payload(dest_dir, directory=True)
             raise
-
-        now = time.time()
-        sf = SharedFile(
-            id=file_id,
-            name=safe_name,
-            size=total_bytes,
-            content_type=content_type or "application/octet-stream",
-            uploaded_at=now,
-            expires_at=now + max(60, ttl_seconds),
-            sender_ip=sender_ip,
-            download_count=0,
-        )
-
-        async with self._lock:
-            self.files[file_id] = sf
-            self._save_index()
 
         log.info("Local share: saved '%s' (%d bytes) from %s", safe_name, total_bytes, sender_ip)
         return sf
@@ -235,22 +324,29 @@ class LocalShareManager:
             clean_name = clean_base
 
         dest_dir = self.storage_dir / folder_id
-        dest_dir.mkdir(parents=True, exist_ok=True)
         zip_path = dest_dir / clean_name
 
-        # Create writable zip file
-        zf = zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED)
-        now = time.time()
-
         async with self._lock:
+            dest_dir.mkdir()
+            try:
+                payload = _CacheFile(self, zip_path)
+                try:
+                    zf = zipfile.ZipFile(payload, "w", compression=zipfile.ZIP_DEFLATED)
+                except BaseException:
+                    payload.close()
+                    raise
+            except BaseException:
+                self._remove_payload(dest_dir, directory=True)
+                raise
             self._folder_sessions[folder_id] = {
                 "folder_name": clean_name,
                 "zip_path": zip_path,
                 "zip_file": zf,
+                "payload": payload,
                 "sender_ip": sender_ip,
                 "ttl_seconds": max(60, ttl_seconds),
-                "created_at": now,
-                "file_count": 0,
+                "last_activity": time.monotonic(),
+                "busy": False,
             }
         log.info("Local share: initiated folder archive '%s' (%s) from %s", clean_name, folder_id, sender_ip)
         return folder_id
@@ -262,53 +358,50 @@ class LocalShareManager:
         stream: Any,
     ) -> int:
         """Stream a single file into the active in-progress folder ZIP archive."""
-        session = self._folder_sessions.get(folder_id)
-        if not session:
-            raise ValueError(f"Folder upload session '{folder_id}' not found or already finalized")
-
-        zf: zipfile.ZipFile = session["zip_file"]
-        clean_rel = sanitize_relpath(relpath)
-
-        total_bytes = 0
-        with zf.open(clean_rel, "w") as out_f:
-            if hasattr(stream, "__aiter__"):
-                async for chunk in stream:
-                    if chunk:
-                        out_f.write(chunk)
-                        total_bytes += len(chunk)
-            elif callable(stream):
-                while True:
-                    chunk = await stream(65536)
-                    if not chunk:
-                        break
-                    out_f.write(chunk)
-                    total_bytes += len(chunk)
-            elif hasattr(stream, "read"):
-                while True:
-                    chunk = stream.read(65536)
-                    if not chunk:
-                        break
-                    out_f.write(chunk)
-                    total_bytes += len(chunk)
-
-        session["file_count"] += 1
+        session = self._get_idle_folder(folder_id)
+        session["busy"] = True
+        try:
+            with session["zip_file"].open(sanitize_relpath(relpath), "w") as member:
+                total_bytes = await _copy_upload(stream, member, self.max_file_bytes)
+        except BaseException:
+            del self._folder_sessions[folder_id]
+            self._discard_folder(session)
+            raise
+        session["last_activity"] = time.monotonic()
+        session["busy"] = False
         return total_bytes
+
+    def _get_idle_folder(self, folder_id: str) -> dict[str, Any]:
+        session = self._folder_sessions.get(folder_id)
+        if session is None:
+            raise FolderUploadNotFound("Folder upload session no longer exists")
+        if session["busy"]:
+            raise FolderUploadBusy("A file is already uploading to this folder")
+        return session
+
+    def _discard_folder(self, session: dict[str, Any]) -> None:
+        try:
+            session["zip_file"].close()
+        except (OSError, ShareLimitExceeded):
+            log.debug("Could not close discarded Local Share ZIP", exc_info=True)
+        finally:
+            session["payload"].close()
+            self._remove_payload(session["zip_path"].parent, directory=True)
 
     async def finalize_folder_upload(self, folder_id: str) -> SharedFile:
         """Close the ZIP archive, record it as a shared file item, and save index."""
         async with self._lock:
-            session = self._folder_sessions.pop(folder_id, None)
-            if not session:
-                raise ValueError(f"Folder session '{folder_id}' not found")
-
-            zf: zipfile.ZipFile = session["zip_file"]
-            try:
-                zf.close()
-            except Exception as exc:
-                log.warning("Error closing folder zip '%s': %s", folder_id, exc)
-
+            session = self._get_idle_folder(folder_id)
+            del self._folder_sessions[folder_id]
             zip_path: Path = session["zip_path"]
-            total_size = zip_path.stat().st_size if zip_path.exists() else 0
+            try:
+                with session["payload"]:
+                    await _disk_call(session["zip_file"].close)
+                total_size = zip_path.stat().st_size
+            except BaseException:
+                self._remove_payload(zip_path.parent, directory=True)
+                raise
+
             now = time.time()
             ttl = session["ttl_seconds"]
 
@@ -326,9 +419,8 @@ class LocalShareManager:
             self._save_index()
 
         log.info(
-            "Local share: finalized folder '%s' (%d files, %d bytes) from %s",
+            "Local share: finalized folder '%s' (%d bytes) from %s",
             sf.name,
-            session["file_count"],
             total_size,
             sf.sender_ip,
         )
@@ -350,23 +442,28 @@ class LocalShareManager:
 
             bundles_dir = self.storage_dir / "bundles"
             bundles_dir.mkdir(parents=True, exist_ok=True)
-            bundle_name = f"LocalShare_Batch_{secrets.token_hex(4)}.zip"
+            bundle_name = f"LocalShare_Batch_{secrets.token_hex(8)}.zip"
             bundle_path = bundles_dir / bundle_name
 
-            seen_names: dict[str, int] = {}
-            with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                for fpath, fname in valid_files:
-                    arcname = fname
-                    if arcname in seen_names:
-                        seen_names[arcname] += 1
-                        stem = Path(fname).stem
-                        ext = Path(fname).suffix
-                        arcname = f"{stem}_{seen_names[fname]}{ext}"
-                    else:
-                        seen_names[arcname] = 0
-                    zf.write(fpath, arcname=arcname)
-
+            try:
+                await _disk_call(self._write_bundle, bundle_path, valid_files)
+            except FileExistsError:
+                raise  # This request does not own the existing bundle.
+            except BaseException:
+                self._remove_payload(bundle_path)
+                raise
             return bundle_path, "LocalShare_Bundle.zip"
+
+    def _write_bundle(self, bundle_path: Path, files: list[tuple[Path, str]]) -> None:
+        seen_names: dict[str, int] = {}
+        with _CacheFile(self, bundle_path) as payload, zipfile.ZipFile(
+            payload, "w", compression=zipfile.ZIP_DEFLATED,
+        ) as zf:
+            for path, name in files:
+                count = seen_names.get(name, 0)
+                seen_names[name] = count + 1
+                arcname = f"{Path(name).stem}_{count}{Path(name).suffix}" if count else name
+                zf.write(path, arcname=arcname)
 
     async def delete_batch(self, file_ids: list[str]) -> int:
         """Delete multiple files in one batch operation."""
@@ -389,6 +486,7 @@ class LocalShareManager:
             file_path = self.storage_dir / sf.id / sf.name
             if not file_path.exists():
                 del self.files[file_id]
+                self._remove_payload(file_path)
                 self._save_index()
                 return None
             sf.download_count += 1
@@ -399,8 +497,7 @@ class LocalShareManager:
         if file_id in self.files:
             sf = self.files.pop(file_id)
             target_dir = self.storage_dir / sf.id
-            if target_dir.exists():
-                shutil.rmtree(target_dir, ignore_errors=True)
+            self._remove_payload(target_dir, directory=True)
             self._save_index()
             return True
         return False
@@ -452,9 +549,14 @@ class LocalShareManager:
                 for b in bundles_dir.glob("*.zip"):
                     try:
                         if b.stat().st_mtime < now - 1800:
-                            b.unlink()
+                            self._remove_payload(b)
                     except Exception:
                         pass
+            idle_cutoff = time.monotonic() - FOLDER_IDLE_SECONDS
+            for folder_id, session in list(self._folder_sessions.items()):
+                if not session["busy"] and session["last_activity"] <= idle_cutoff:
+                    del self._folder_sessions[folder_id]
+                    self._discard_folder(session)
             return count
 
     async def clear_all(self) -> None:
@@ -462,8 +564,7 @@ class LocalShareManager:
         async with self._lock:
             for sf in list(self.files.values()):
                 target_dir = self.storage_dir / sf.id
-                if target_dir.exists():
-                    shutil.rmtree(target_dir, ignore_errors=True)
+                self._remove_payload(target_dir, directory=True)
             self.files.clear()
             self.texts.clear()
             self._save_index()
