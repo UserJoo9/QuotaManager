@@ -3325,17 +3325,18 @@ def create_app(
     @app.post("/api/guest/voucher/redeem")
     async def redeem_guest_voucher(body: GuestVoucherRedeem,
                                    request: Request) -> dict[str, Any]:
-        if not await service.is_guest_mode():
-            raise HTTPException(403, {"code": "guest_mode_disabled"})
-        if await service.stop_new_connections():
-            raise HTTPException(403, {"code": "new_guests_paused"})
-
+        guest_mode_enabled = await service.is_guest_mode()
+        new_guests_paused = await service.stop_new_connections()
         host = request.client.host if request.client else ""
         snapshot = holder.get() if holder else None
         mac = (str(snapshot.ip_to_mac.get(host, "") or "").strip().lower()
                if snapshot else "")
         dev = await database.get_device(mac=mac) if mac else None
         if dev is None or not dev.user_id:
+            if not guest_mode_enabled:
+                raise HTTPException(403, {"code": "guest_mode_disabled"})
+            if new_guests_paused:
+                raise HTTPException(403, {"code": "new_guests_paused"})
             raise HTTPException(403, {"code": "device_unrecognized"})
 
         deny_macs = {str(value).strip().lower()
@@ -3345,11 +3346,6 @@ def create_app(
         kicked_macs = {str(value).strip().lower() for value in kicked_macs}
         if dev.mac.lower() in deny_macs or dev.mac.lower() in kicked_macs:
             raise HTTPException(403, {"code": "device_blocked"})
-
-        user = await database.get_user(dev.user_id)
-        if user is None or not is_pending_guest(
-                user.guest, user.block_state, dev.block_state):
-            raise HTTPException(403, {"code": "guest_not_pending"})
 
         async with voucher_attempts.serialize(dev.mac):
             kicked_getter = getattr(service, "active_kicked_macs", None)
@@ -3383,11 +3379,26 @@ def create_app(
                     raise HTTPException(503, {"code": "voucher_storage_unsupported"})
                 raise HTTPException(500, {"code": "voucher_service_error"})
 
-        await service.recompute_allowances()
-        _schedule_shaping_sync()
-        await database.add_event(
-            f"Guest voucher redeemed for {dev.mac} ({quota_gb:g} GB)",
-            "info", dev.id)
+        # Redemption already committed atomically. A stale allowance snapshot
+        # must not turn that accepted claim into an HTTP error; the durable
+        # marker is retried by the next request, startup, and maintenance tick.
+        allowances_recovered = False
+        try:
+            allowances_recovered = await service.recover_guest_voucher_allowances()
+        except Exception:  # noqa: BLE001 - committed voucher remains accepted
+            log.exception("guest voucher allowance recovery deferred")
+        if reason != "already_redeemed" or allowances_recovered:
+            try:
+                _schedule_shaping_sync()
+            except Exception:  # noqa: BLE001 - shaping will be reconciled later
+                log.exception("guest voucher shaping sync deferred")
+        if reason != "already_redeemed":
+            try:
+                await database.add_event(
+                    f"Guest voucher redeemed for {dev.mac} ({quota_gb:g} GB)",
+                    "info", dev.id)
+            except Exception:  # noqa: BLE001 - event logging is post-commit
+                log.exception("guest voucher audit event failed after redemption commit")
         return {"ok": True, "status": "approved", "quota_gb": quota_gb}
 
     # -- Guest Mode (Admin Accept / Reject) -----------------------------------
