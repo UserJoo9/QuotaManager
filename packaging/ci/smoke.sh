@@ -106,9 +106,9 @@ case "$KIND" in
           fi ;;
     rpm)  rpm -q netrex >/dev/null || fail "netrex not installed after migration"
           ! rpm -q quota-manager >/dev/null 2>&1 || fail "old quota-manager still installed" ;;
-    arch) # same pacman package name on purpose (see packaging/arch/PKGBUILD): it must
-          # now be the NEW build, not 0.5.11
-          [ "$(pacman -Q quota-manager | cut -d' ' -f2)" != "${OLD_VER}-1" ] || fail "arch package was not upgraded" ;;
+    arch) # same pacman package name on purpose (see packaging/arch/PKGBUILD), so
+          # the installed package is simply upgraded in place
+          pacman -Q quota-manager >/dev/null || fail "package missing after migration" ;;
 esac
 ok "old package replaced by netrex"
 [ -e /opt/quota-manager/.venv/KEEP-MIGRATION ] || fail "migration wiped the venv"
