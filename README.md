@@ -99,22 +99,22 @@ curl -fsSL https://UserJoo9.github.io/Netrex/quota-manager.gpg | \
 echo "deb [signed-by=/etc/apt/keyrings/quota-manager.gpg] https://UserJoo9.github.io/Netrex stable main" | \
   sudo tee /etc/apt/sources.list.d/quota-manager.list
 sudo apt-get update
-sudo apt-get install quota-manager
+sudo apt-get install netrex
 ```
 
-Prefer a single file? Download `quota-manager_<version>_all.deb` from [Releases](https://github.com/UserJoo9/Netrex/releases) and run `sudo apt install ./quota-manager_*_all.deb`.
+Prefer a single file? Download `netrex_<version>_all.deb` from [Releases](https://github.com/UserJoo9/Netrex/releases) and run `sudo apt install ./netrex_*_all.deb`.
 
 **Other distros** - download the matching file from [Releases](https://github.com/UserJoo9/Netrex/releases):
 
 ```bash
 # Fedora / RHEL family
-sudo dnf install ./quota-manager-<version>-1.noarch.rpm
+sudo dnf install ./netrex-<version>-1.noarch.rpm
 
 # Arch / Manjaro
-sudo pacman -U quota-manager-<version>-1-any.pkg.tar.zst
+sudo pacman -U netrex-<version>-1-any.pkg.tar.zst
 
 # Any other systemd distro
-tar xzf quota-manager-<version>.tar.gz && cd quota-manager-<version> && sudo ./install.sh
+tar xzf netrex-<version>.tar.gz && cd netrex-<version> && sudo ./install.sh
 ```
 
 The in-app updater picks the right file for how you installed. Fedora and Arch support is new: if your box runs SELinux or firewalld and forwarded traffic is blocked, set `QUOTA_DISABLE_FIREWALLD=1` before installing, or open an issue with the output.
@@ -243,10 +243,13 @@ Handy to know:
 The dashboard checks for updates itself (**System → Updates**) and can install them in one click. Your settings and data are kept.
 
 ```bash
-sudo apt-get update && sudo apt-get install --only-upgrade quota-manager   # update
-sudo apt remove quota-manager                                              # remove, keep data
-sudo apt purge quota-manager                                               # remove everything
+sudo apt-get update && sudo apt-get install --only-upgrade netrex   # update
+sudo apt remove netrex                                                    # remove, keep data
+sudo apt purge netrex                                                     # remove everything
 ```
+
+> Installed it earlier as `quota-manager`? Run `sudo apt-get update && sudo apt-get install netrex` once (or update from the dashboard). The old package is removed automatically; your settings and data stay. Use `apt-get install`, not `apt-get upgrade`: `upgrade` skips packages it has to newly install.
+
 
 Your data lives in `/var/lib/quota-gateway/quota.db`. To back it up (safe while the gateway is running):
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Quota Manager - generic installer for any systemd-based Linux distro.
+# Netrex - generic installer for any systemd-based Linux distro.
 # Run as root from inside the unpacked release tarball:
 #     sudo ./install.sh                # install / upgrade (installs distro deps)
 #     sudo ./install.sh --no-deps      # skip the package-manager step
@@ -40,7 +40,7 @@ if [ "$UNINSTALL" -eq 1 ]; then
     exit 0
 fi
 
-[ -f "$HERE/run.py" ] && [ -d "$HERE/quota" ] || die "run this from the unpacked quota-manager tarball"
+[ -f "$HERE/run.py" ] && [ -d "$HERE/quota" ] || die "run this from the unpacked netrex tarball"
 # shellcheck source=/dev/null
 . "$HERE/scripts/distro.sh"
 

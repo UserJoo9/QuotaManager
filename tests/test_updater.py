@@ -255,7 +255,7 @@ def test_install_uses_release_asset_url():
     # no assets -> constructed URL fallback
     assert up._find_deb_url({}, "0.3.1") == (
         "https://github.com/UserJoo9/Netrex/releases/download/"
-        "v0.3.1/quota-manager_0.3.1_all.deb")
+        "v0.3.1/netrex_0.3.1_all.deb")
 
 
 def test_check_now_refuses_when_disabled():
@@ -315,10 +315,10 @@ def test_detect_install_kind_marker_then_package_manager(tmp_path):
 
 
 @pytest.mark.parametrize("kind,name", [
-    ("deb", "quota-manager_0.3.1_all.deb"),
-    ("rpm", "quota-manager-0.3.1-1.noarch.rpm"),
-    ("arch", "quota-manager-0.3.1-1-any.pkg.tar.zst"),
-    ("tarball", "quota-manager-0.3.1.tar.gz")])
+    ("deb", "netrex_0.3.1_all.deb"),
+    ("rpm", "netrex-0.3.1-1.noarch.rpm"),
+    ("arch", "netrex-0.3.1-1-any.pkg.tar.zst"),
+    ("tarball", "netrex-0.3.1.tar.gz")])
 def test_asset_url_per_kind(kind, name):
     up = Updater(FakeDb(), current_version="0.2.0", install_kind=kind)
     release = {"assets": [
@@ -460,3 +460,15 @@ def test_custom_repo_is_the_only_one_asked():
                  fetch_text=lambda url, timeout=20: CHANGELOG)
     run(up.check_now())
     assert fetch.asked == ["me/fork"] and up.repo == "me/fork"
+
+
+@pytest.mark.parametrize("names", [
+    # what a release published before the rename carries ...
+    ["quota-manager_0.5.11_all.deb"],
+    # ... and after it: the real asset is found by its suffix, whatever it is called
+    ["netrex_0.6.0_all.deb"],
+])
+def test_asset_is_found_by_suffix_not_by_name(names):
+    up = Updater(FakeDb(), current_version="0.5.0", install_kind="deb")
+    release = {"assets": [{"name": n, "browser_download_url": f"https://x/{n}"} for n in names]}
+    assert up._find_asset_url(release, "0.6.0", "deb") == f"https://x/{names[0]}"

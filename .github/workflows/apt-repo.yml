@@ -2,7 +2,7 @@
 #
 # Consumes the .deb produced by the `release` workflow and publishes it to a
 # signed apt repo hosted on GitHub Pages (https://UserJoo9.github.io/Netrex/)
-# so Linux users can `apt-get install quota-manager` and upgrade via
+# so Linux users can `apt-get install netrex` and upgrade via
 # `apt-get update && apt-get upgrade`.
 #
 # Triggered:
@@ -10,6 +10,11 @@
 #     auto-publishes (old versions stay installable).
 #   * workflow_dispatch with a `version` input — used once to backfill the
 #     already-released v0.1.2 .deb.
+#
+# Two packages are published per release: the real `netrex` package and a tiny
+# transitional `quota-manager` (no files, Depends: netrex) so boxes that installed
+# the old name move over on a plain `apt upgrade`. Older quota-manager versions
+# stay in the pool untouched.
 #
 # The signing key is the armored PRIVATE key in the APT_REPO_GPG_KEY secret
 # (user-generated, empty passphrase). The matching PUBLIC key is committed at
@@ -85,14 +90,35 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Download the .deb from GitHub Releases
+        id: debs
         run: |
           set -euo pipefail
           VER="${{ steps.version.outputs.version }}"
           TAG="${{ steps.version.outputs.tag }}"
           mkdir -p "$RUNNER_TEMP/deb"
-          gh release download "$TAG" --pattern "quota-manager_${VER}_all.deb" \
-            --dir "$RUNNER_TEMP/deb" --clobber
-          test -f "$RUNNER_TEMP/deb/quota-manager_${VER}_all.deb"   # fail loudly if absent
+          if gh release download "$TAG" --pattern "netrex_${VER}_all.deb" \
+              --dir "$RUNNER_TEMP/deb" --clobber 2>/dev/null; then
+            test -f "$RUNNER_TEMP/deb/netrex_${VER}_all.deb"
+            echo "name=netrex" >> "$GITHUB_OUTPUT"
+          else
+            # A backfill of a release from before the rename (<= 0.5.x) ships the
+            # old name; publish it as it was, with no transitional package.
+            gh release download "$TAG" --pattern "quota-manager_${VER}_all.deb" \
+              --dir "$RUNNER_TEMP/deb" --clobber
+            test -f "$RUNNER_TEMP/deb/quota-manager_${VER}_all.deb"   # fail loudly if absent
+            echo "name=quota-manager" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the transitional quota-manager package
+        if: steps.debs.outputs.name == 'netrex'
+        run: |
+          set -euo pipefail
+          VER="${{ steps.version.outputs.version }}"
+          T="$RUNNER_TEMP/transitional"
+          rm -rf "$T"; mkdir -p "$T/DEBIAN"
+          sed -e "s/__VERSION__/${VER}/g" -e '/^#/d' packaging/DEBIAN/transitional.control.template > "$T/DEBIAN/control"
+          dpkg-deb --build --root-owner-group "$T" "$RUNNER_TEMP/deb/quota-manager_${VER}_all.deb"
+          dpkg-deb --info "$RUNNER_TEMP/deb/quota-manager_${VER}_all.deb"
 
       - name: Install repo tooling (apt-ftparchive + gpg)
         run: |
@@ -135,13 +161,14 @@ jobs:
           cp "$RUNNER_TEMP/quota-manager.gpg" ./quota-manager.gpg
           test -s quota-manager.gpg
           touch .nojekyll                          # REQUIRED: else Jekyll strips pool/ and dists/
-          mkdir -p "pool/main/q/quota-manager" "dists/stable/main/binary-all"
+          mkdir -p "pool/main/q/quota-manager" "pool/main/n/netrex" "dists/stable/main/binary-all"
+          [ -f "$RUNNER_TEMP/deb/netrex_${VER}_all.deb" ] && cp "$RUNNER_TEMP/deb/netrex_${VER}_all.deb" "pool/main/n/netrex/"
           cp "$RUNNER_TEMP/deb/quota-manager_${VER}_all.deb" "pool/main/q/quota-manager/"
 
       - name: Generate Packages + Release
         run: |
           set -euo pipefail
-          # From the repo root so Filename: is pool/main/q/quota-manager/...
+          # From the repo root so Filename: is pool/main/<x>/<package>/...
           apt-ftparchive packages pool > "dists/stable/main/binary-all/Packages"
           gzip -9n -c "dists/stable/main/binary-all/Packages" > "dists/stable/main/binary-all/Packages.gz"
           apt-ftparchive release \
@@ -174,7 +201,7 @@ jobs:
           else
             git -c user.name="github-actions[bot]" \
                 -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-                commit -m "apt repo: publish quota-manager ${VER}"
+                commit -m "apt repo: publish netrex ${VER}"
             git push origin gh-pages
           fi
 

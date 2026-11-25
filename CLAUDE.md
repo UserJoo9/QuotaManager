@@ -9,11 +9,15 @@ belongs, and which mistakes already cost a real outage. Deep technical detail li
 
 The user-facing name is **Netrex** (UI, titles, READMEs, release notes, TOTP issuer,
 passkey display name). Internal identifiers deliberately KEEP the old name so
-existing installs, packages and the apt repo keep working: package `quota-manager`,
-`/opt/quota-manager`, services `quota-gateway`/`quota-wan-ppp`, `/etc/quota-gateway`,
-`/var/lib/quota-gateway`, nft tables `quota_*`, release asset names
-`quota-manager_*`, the apt key `quota-manager.gpg`, apt `Origin`/`Label: Quota Manager`
+existing installs and the apt repo keep working: `/opt/quota-manager`, services
+`quota-gateway`/`quota-wan-ppp`, `/etc/quota-gateway`, `/var/lib/quota-gateway`, nft
+tables `quota_*`, the apt key `quota-manager.gpg`, apt `Origin`/`Label: Quota Manager`
 (changing them makes apt refuse the repo), and the passkey `USER_ID`. Don't rename those.
+**Packages and release assets ARE named `netrex`** since 0.6.0 (`netrex_<v>_all.deb`, ...);
+the deb/rpm metadata declares `quota-manager` as replaced (Breaks/Replaces, Obsoletes; the
+Arch pacman package keeps the name `quota-manager`, only its file is `netrex-*`) and the apt repo also carries a tiny transitional `quota-manager`
+(`Depends: netrex`, built by `apt-repo.yml`, never a release asset). Updaters find assets by
+SUFFIX (every version since 0.2), so the file names can change; keep it that way.
 
 ## 1. What this is
 

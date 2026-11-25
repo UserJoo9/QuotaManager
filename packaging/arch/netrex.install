@@ -1,4 +1,4 @@
-# Arch pacman install hooks for Quota Manager.
+# Arch pacman install hooks for Netrex.
 post_install() {
     bash /opt/quota-manager/scripts/post_install.sh arch || true
 }

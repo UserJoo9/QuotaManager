@@ -1,4 +1,4 @@
-# RPM spec for Quota Manager (Fedora / RHEL family). __VERSION__ and __PAYLOAD__
+# RPM spec for Netrex (Fedora / RHEL family). __VERSION__ and __PAYLOAD__
 # are substituted by the release workflow; the payload is the same staged tree
 # the .deb ships (/opt/quota-manager).
 # The payload ships the bundled sing-box binary; the .deb is "all" the same way.
@@ -6,13 +6,14 @@
 %global debug_package %{nil}
 %global __strip /bin/true
 
-Name:           quota-manager
+Name:           netrex
 Version:        __VERSION__
 Release:        1
 Summary:        Fair-split metered-internet quota gateway
 License:        MIT
 URL:            https://github.com/UserJoo9/Netrex
 BuildArch:      noarch
+Obsoletes:      quota-manager < 0.6.0
 AutoReqProv:    no
 Requires:       python3 >= 3.10
 Requires:       python3-pip
@@ -52,6 +53,16 @@ if [ "$1" -eq 0 ]; then
     systemctl stop quota-gateway 2>/dev/null || true
     systemctl disable quota-gateway 2>/dev/null || true
 fi
+exit 0
+
+# The OLD quota-manager package is erased by this transaction and its %preun
+# (written before the rename) stops + disables the service AFTER our %post has
+# started it. %posttrans runs once the whole transaction is done, so bring the
+# gateway back up here. Harmless on a normal install/upgrade (already running).
+%posttrans
+systemctl daemon-reload 2>/dev/null || true
+systemctl enable quota-gateway 2>/dev/null || true
+systemctl start quota-gateway 2>/dev/null || true
 exit 0
 
 %postun

@@ -2,10 +2,9 @@
 
 > **Naming.** The project was called *Quota Manager* until the Netrex rename.
 > Only user-facing names changed. Every internal identifier keeps the old name
-> on purpose: the `quota-manager` package, `/opt/quota-manager`, the
+> on purpose: `/opt/quota-manager`, the
 > `quota-gateway` / `quota-wan-ppp` services, `/etc/quota-gateway`,
-> `/var/lib/quota-gateway`, the `quota_*` nftables tables, release asset names
-> (`quota-manager_<v>_all.deb`, which every updater since 0.2 looks for), the
+> `/var/lib/quota-gateway`, the `quota_*` nftables tables, the
 > apt key file `quota-manager.gpg` and the signing key itself, the apt
 > `Origin`/`Label: Quota Manager` (apt refuses a repo whose Origin/Label changed
 > without `--allow-releaseinfo-change`), and the passkey `USER_ID` (changing it
@@ -13,6 +12,23 @@
 > falls back to `UserJoo9/QuotaManager`; `quota/apt_source.py` moves 0.5.8+
 > boxes from `UserJoo9.github.io/QuotaManager` to `UserJoo9.github.io/Netrex`
 > once the new Pages site serves the repo.
+>
+> **Packages (0.6.0).** The packages and release assets are named `netrex`
+> (`netrex_<v>_all.deb`, `netrex-<v>-1.noarch.rpm`,
+> `netrex-<v>-1-any.pkg.tar.zst`, `netrex-<v>.tar.gz`) and still install into
+> `/opt/quota-manager`. Updaters pick an asset by its SUFFIX (`.deb`, `.rpm`,
+> `.pkg.tar.zst`, `.tar.gz`) and have done so since 0.2, so the rename needs no
+> old-name copy in the release. Upgrade from `quota-manager`: deb `Breaks`+`Replaces:
+> quota-manager (<< 0.6.0)` (never `Conflicts`, which would make the transitional
+> package unsatisfiable); rpm `Obsoletes` + a `%posttrans` that restarts the service
+> (the old `%preun` stops/disables it after the new `%post`); Arch keeps the pacman name
+> `quota-manager` (only the file is `netrex-*`): `pacman -U --noconfirm` answers NO to a
+> conflict prompt, so a renamed conflicting package could not replace it (proven in CI). The apt repo also publishes a files-free transitional `quota-manager`
+> (`packaging/DEBIAN/transitional.control.template`, built in `apt-repo.yml`, never a
+> release asset: old updaters take the first `.deb`). `packaging/ci/smoke.sh` installs the
+> real 0.5.11 package and upgrades it in Debian, Ubuntu, Fedora and Arch containers.
+> `apt-get upgrade` keeps the new dependency back; the documented command is
+> `apt-get install netrex`.
 
 How the app actually works: the topology, the packet path, the maintenance
 loop, the quota model, and every subsystem — plus configuration, the REST API,
@@ -2156,11 +2172,12 @@ QuotaManager/
 │   └── release.yml           # builds the .deb on a version tag -> GitHub Releases
 ├── packaging/DEBIAN/
 │   ├── control.template      # Debian control file (Version rendered from quota/version.py)
+│   ├── transitional.control.template  # files-free quota-manager -> netrex (built by apt-repo.yml)
 │   ├── postinst              # thin wrapper -> scripts/post_install.sh deb
 │   └── prerm                 # stop + disable the gateway service on remove/upgrade
 ├── packaging/generic/install.sh   # tarball installer for any systemd distro (--no-deps, --uninstall)
-├── packaging/rpm/quota-manager.spec.template   # Fedora/RHEL (noarch; %preun acts only on erase)
-├── packaging/arch/{PKGBUILD,quota-manager.install}   # Arch (CI builds the .pkg.tar.zst with tar --zstd)
+├── packaging/rpm/netrex.spec.template          # Fedora/RHEL (noarch; %preun acts only on erase)
+├── packaging/arch/{PKGBUILD,netrex.install}   # Arch (CI builds the .pkg.tar.zst with tar --zstd)
 ├── packaging/build_packages.sh   # builds deb+tarball+rpm+arch into dist/ (release.yml AND packaging-smoke.yml use it)
 ├── packaging/ci/smoke.sh     # installs/upgrades/removes a package inside a distro container
 ├── scripts/install_openwrt.sh # OpenWrt installer (apk on 25.12+, opkg before; experimental)
@@ -2413,7 +2430,7 @@ git push origin v0.2.1
 ```
 
 The `release` workflow (`.github/workflows/release.yml`) builds
-`quota-manager_0.2.1_all.deb` and uploads it to a GitHub Release named
+`netrex_0.2.1_all.deb` (plus the rpm, Arch and tarball) and uploads it to a GitHub Release named
 `v0.2.1`. GitHub Releases are immutable, so each version needs a **new** tag.
 The release description is auto-composed from the `CHANGELOG.md` section for
 the released version (plus the install note), so keep the CHANGELOG current —
@@ -2422,7 +2439,7 @@ it IS the release notes.
 Tagging also **auto-publishes the `.deb` to a signed apt repository**
 (`.github/workflows/apt-repo.yml`, a `workflow_run` on the `release` workflow)
 hosted on GitHub Pages. Once a box has the repo configured, `apt-get update &&
-apt-get install quota-manager` installs/upgrades to the newest published
+apt-get install netrex` installs/upgrades to the newest published
 version; old versions stay installable.
 
 > Version tags are what trigger the release — pushing a commit to `main` alone

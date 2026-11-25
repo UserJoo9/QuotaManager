@@ -69,12 +69,12 @@ jobs:
 
       - name: Inspect the artifact (sanity)
         run: |
-          dpkg-deb --info "dist/quota-manager_${{ steps.version.outputs.version }}_all.deb"
-          dpkg-deb --contents "dist/quota-manager_${{ steps.version.outputs.version }}_all.deb" | head -40
+          dpkg-deb --info "dist/netrex_${{ steps.version.outputs.version }}_all.deb"
+          dpkg-deb --contents "dist/netrex_${{ steps.version.outputs.version }}_all.deb" | head -40
           V="${{ steps.version.outputs.version }}"
-          tar -tzf "dist/quota-manager-${V}.tar.gz" | head -8
-          rpm -qpl "dist/quota-manager-${V}-1.noarch.rpm" | head -8
-          tar --zstd -tf "dist/quota-manager-${V}-1-any.pkg.tar.zst" | head -8
+          tar -tzf "dist/netrex-${V}.tar.gz" | head -8
+          rpm -qpl "dist/netrex-${V}-1.noarch.rpm" | head -8
+          tar --zstd -tf "dist/netrex-${V}-1-any.pkg.tar.zst" | head -8
           ls -l dist
 
       # The release description = a short install note + this version's
@@ -88,13 +88,13 @@ jobs:
           VER="${{ steps.version.outputs.version }}"
           { printf 'Netrex **v%s**.\n\n' "${VER}"
             printf 'Install on the gateway laptop:\n\n'
-            printf '```bash\nsudo apt install ./quota-manager_%s_all.deb\n```\n\n' "${VER}"
+            printf '```bash\nsudo apt install ./netrex_%s_all.deb\n```\n\n' "${VER}"
             printf 'Or, with the apt repository configured (see README):\n'
-            printf '```bash\nsudo apt-get update && sudo apt-get install quota-manager\n```\n\n'
+            printf '```bash\nsudo apt-get update && sudo apt-get install netrex\n```\n\n'
             printf 'Other distros:\n\n'
-            printf '```bash\n# Fedora / RHEL family\nsudo dnf install ./quota-manager-%s-1.noarch.rpm\n\n' "${VER}"
-            printf '# Arch / Manjaro\nsudo pacman -U quota-manager-%s-1-any.pkg.tar.zst\n\n' "${VER}"
-            printf '# Any other systemd distro\ntar xzf quota-manager-%s.tar.gz && cd quota-manager-%s && sudo ./install.sh\n```\n\n' "${VER}" "${VER}"
+            printf '```bash\n# Fedora / RHEL family\nsudo dnf install ./netrex-%s-1.noarch.rpm\n\n' "${VER}"
+            printf '# Arch / Manjaro\nsudo pacman -U netrex-%s-1-any.pkg.tar.zst\n\n' "${VER}"
+            printf '# Any other systemd distro\ntar xzf netrex-%s.tar.gz && cd netrex-%s && sudo ./install.sh\n```\n\n' "${VER}" "${VER}"
             printf 'The package configures the network stack, installs the Python\n'
             printf 'dependencies into `/opt/quota-manager/.venv`, wires the\n'
             printf '`quota-gateway` systemd service and starts it. See the README for\n'
@@ -137,8 +137,8 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: |
-            release-assets/dist/quota-manager_*.deb
-            release-assets/dist/quota-manager-*.tar.gz
-            release-assets/dist/quota-manager-*.rpm
-            release-assets/dist/quota-manager-*.pkg.tar.zst
+            release-assets/dist/netrex_*.deb
+            release-assets/dist/netrex-*.tar.gz
+            release-assets/dist/netrex-*.rpm
+            release-assets/dist/netrex-*.pkg.tar.zst
           body_path: release-assets/release_body.md
