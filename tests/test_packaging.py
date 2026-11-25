@@ -615,3 +615,13 @@ def test_every_asset_is_named_netrex_but_installs_to_the_old_path():
         assert needle in build, needle
     assert "dist/quota-manager" not in build
     assert 'mkdir -p dist "$STAGE/DEBIAN" "$STAGE/opt/quota-manager"' in build
+
+
+def test_gateway_unit_is_reachable_as_netrex_service():
+    """`systemctl status netrex` works through an alias; the unit file itself
+    keeps the name quota-gateway (older package scripts stop/start it by name)."""
+    text = _read(REPO / "scripts" / "setup_gateway_kali.sh")
+    unit = text.split("cat > /etc/systemd/system/quota-gateway.service <<EOF", 1)[1].split("\nEOF\n", 1)[0]
+    assert "Alias=netrex.service" in unit.split("[Install]", 1)[1]
+    assert "systemctl enable quota-gateway" in text, "the alias link is created by enabling the unit"
+    assert "Description=Netrex gateway" in unit

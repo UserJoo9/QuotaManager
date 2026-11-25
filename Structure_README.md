@@ -27,6 +27,9 @@
 > (`packaging/DEBIAN/transitional.control.template`, built in `apt-repo.yml`, never a
 > release asset: old updaters take the first `.deb`). `packaging/ci/smoke.sh` installs the
 > real 0.5.11 package and upgrades it in Debian, Ubuntu, Fedora and Arch containers.
+> The systemd unit keeps its file name `quota-gateway.service` and has `Alias=netrex.service`
+> (the setup script runs `systemctl enable quota-gateway` on every install/update, which
+> creates the alias link; old package scripts stop/start the old name).
 > `apt-get upgrade` keeps the new dependency back; the documented command is
 > `apt-get install netrex`.
 

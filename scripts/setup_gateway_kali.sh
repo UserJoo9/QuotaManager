@@ -1105,7 +1105,7 @@ if wan_mode; then
 fi
 cat > /etc/systemd/system/quota-gateway.service <<EOF
 [Unit]
-Description=Quota Manager gateway (accounting + quota enforcement)
+Description=Netrex gateway (accounting + quota enforcement)
 After=$AFTER_DEP
 
 [Service]
@@ -1122,6 +1122,10 @@ ${ADMIN_ENV_LINE}
 
 [Install]
 WantedBy=multi-user.target
+# `systemctl status netrex` / `journalctl -u netrex` work too. The unit file keeps
+# its old name (old package scripts stop/start quota-gateway by name); enabling
+# the unit below creates the netrex.service alias link.
+Alias=netrex.service
 EOF
 if [ -n "$ADMIN_PASSWORD" ]; then
     chmod 600 /etc/systemd/system/quota-gateway.service
