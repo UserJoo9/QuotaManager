@@ -1,0 +1,17 @@
+# Transitional package for boxes that installed the old `quota-manager` name.
+# Built by .github/workflows/apt-repo.yml (never attached to a GitHub release,
+# whose .deb is the real `netrex` package). It has no files: it only pulls in
+# `netrex`, so `apt upgrade` moves existing installs over. Keep it published for
+# several months. Comment lines (#) are stripped when rendered.
+Package: quota-manager
+Version: __VERSION__
+Section: oldlibs
+Priority: optional
+Architecture: all
+Depends: netrex (>= __VERSION__)
+Maintainer: Youssef Alkhodary <youssef.alkhodary@users.noreply.github.com>
+Homepage: https://github.com/UserJoo9/Netrex
+Description: transitional package - Quota Manager is now Netrex
+ This empty package only exists so that existing installs of quota-manager
+ upgrade to the renamed netrex package. It can be removed once netrex is
+ installed.

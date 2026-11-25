@@ -107,7 +107,7 @@ def test_release_workflow_exists_and_parses_as_yaml():
 def test_release_workflow_publishes_to_github_releases():
     text = _read(WORKFLOW)
     assert "softprops/action-gh-release" in text, "the .deb must go to GitHub Releases"
-    assert "dist/quota-manager_*.deb" in text
+    assert "dist/netrex_*.deb" in text
     assert "permissions:" in text and "contents: write" in text
 
 
@@ -180,8 +180,8 @@ def test_apt_repo_workflow_downloads_the_deb_from_releases():
     text = _read(APT_WORKFLOW)
     assert "gh release download" in text, \
         "the .deb must come from the GitHub Release asset (not a local build)"
-    assert "quota-manager_" in text and "_all.deb" in text, \
-        "the download must target quota-manager_<ver>_all.deb"
+    assert "netrex_" in text and "_all.deb" in text, \
+        "the download must target netrex_<ver>_all.deb"
     assert "GH_TOKEN" in text or "GITHUB_TOKEN" in text, \
         "gh must be authenticated with the Actions token"
 
@@ -243,7 +243,7 @@ def test_public_key_file_exists_and_is_not_ignored():
 def test_control_template_fields():
     text = _read(PACKAGING / "DEBIAN" / "control.template")
     fields = {
-        "Package": "quota-manager",
+        "Package": "netrex",
         "Version": "__VERSION__",  # rendered by the workflow
         "Architecture": "all",
         "Section": "net",
@@ -385,7 +385,7 @@ def test_generic_installer_is_safe_and_calls_shared_post_install():
 
 
 def test_rpm_spec_only_stops_service_on_real_erase():
-    text = _read(PACKAGING / "rpm" / "quota-manager.spec.template")
+    text = _read(PACKAGING / "rpm" / "netrex.spec.template")
     assert "BuildArch:      noarch" in text
     assert "post_install.sh rpm" in text
     pre = text.split("%preun", 1)[1].split("%postun", 1)[0]
@@ -395,26 +395,26 @@ def test_rpm_spec_only_stops_service_on_real_erase():
 
 
 def test_arch_install_hooks_and_pkgbuild():
-    hooks = _read(PACKAGING / "arch" / "quota-manager.install")
+    hooks = _read(PACKAGING / "arch" / "netrex.install")
     for fn in ("post_install", "post_upgrade", "pre_upgrade", "pre_remove"):
         assert fn + "()" in hooks
     assert "post_install.sh arch" in hooks
     pkgbuild = _read(PACKAGING / "arch" / "PKGBUILD")
     assert "arch=('any')" in pkgbuild
-    assert "install=quota-manager.install" in pkgbuild
+    assert "install=netrex.install" in pkgbuild
     assert "iproute2" in pkgbuild and "python-pip" in pkgbuild
 
 
 def test_release_workflow_builds_and_uploads_every_package_kind():
     wf = _read(REPO / ".github" / "workflows" / "release.yml")
     build = _read(PACKAGING / "build_packages.sh")
-    for needle in ("quota-manager-${VERSION}.tar.gz", "rpmbuild -bb",
+    for needle in ("netrex-${VERSION}.tar.gz", "rpmbuild -bb",
                    ".pkg.tar.zst", "dpkg-deb --build", "find \"$T\" -type l",
                    "chmod 755 \"$STAGE/DEBIAN/postinst\""):
         assert needle in build, needle
-    for needle in ("packaging/build_packages.sh", "dist/quota-manager_*.deb",
-                   "dist/quota-manager-*.tar.gz", "dist/quota-manager-*.rpm",
-                   "dist/quota-manager-*.pkg.tar.zst"):
+    for needle in ("packaging/build_packages.sh", "dist/netrex_*.deb",
+                   "dist/netrex-*.tar.gz", "dist/netrex-*.rpm",
+                   "dist/netrex-*.pkg.tar.zst"):
         assert needle in wf, needle
 
 
@@ -557,3 +557,59 @@ def test_download_step_nothing_works_reports_not_finished(tmp_path):
     r, calls = _run_download_step(tmp_path, probe_ok=False, pip_ok=False, systemd_ok=False)
     assert r.returncode == 1 and "CONTINUED" not in r.stdout
     assert "SETUP IS NOT FINISHED" in r.stderr
+
+
+# --------------------------------------------------------------------------- #
+# Package rename: quota-manager -> netrex (0.6.0). Existing installs must move
+# over without losing anything, so every format declares the replacement.
+# --------------------------------------------------------------------------- #
+
+def test_deb_replaces_the_old_package_name():
+    text = _read(PACKAGING / "DEBIAN" / "control.template")
+    # versioned, so the transitional quota-manager 0.6.0+ (which Depends: netrex)
+    # is not itself broken by netrex
+    assert re.search(r"^Breaks:\s*quota-manager \(<< 0\.6\.0\)", text, re.M)
+    assert re.search(r"^Replaces:\s*quota-manager \(<< 0\.6\.0\)", text, re.M)
+    assert "Conflicts:" not in text, "Conflicts would make the transitional package unsatisfiable"
+
+
+def test_transitional_quota_manager_package_pulls_in_netrex():
+    text = _read(PACKAGING / "DEBIAN" / "transitional.control.template")
+    assert re.search(r"^Package:\s*quota-manager$", text, re.M)
+    assert re.search(r"^Depends:\s*netrex \(>= __VERSION__\)", text, re.M)
+    assert re.search(r"^Version:\s*__VERSION__$", text, re.M)
+    apt = _read(APT_WORKFLOW)
+    assert "transitional.control.template" in apt
+    assert "pool/main/n/netrex" in apt, "the real package goes into its own pool dir"
+    assert "quota-manager_${VER}_all.deb" in apt, "the transitional deb keeps the old pool entry"
+    release = _read(REPO / ".github" / "workflows" / "release.yml")
+    assert "transitional" not in release, \
+        "the transitional deb must never be a release asset (old updaters pick the first .deb)"
+
+
+def test_rpm_obsoletes_the_old_package_and_restarts_after_its_erase():
+    text = _read(PACKAGING / "rpm" / "netrex.spec.template")
+    assert re.search(r"^Name:\s+netrex$", text, re.M)
+    assert re.search(r"^Obsoletes:\s+quota-manager < 0\.6\.0$", text, re.M)
+    # the old package's %preun stops + disables the service after our %post ran
+    post = text.split("%posttrans", 1)[1].split("%postun", 1)[0]
+    assert "systemctl enable quota-gateway" in post and "systemctl start quota-gateway" in post
+
+
+def test_arch_package_replaces_the_old_name():
+    pkgbuild = _read(PACKAGING / "arch" / "PKGBUILD")
+    assert "pkgname=netrex" in pkgbuild
+    for field in ("replaces", "conflicts", "provides"):
+        assert f"{field}=('quota-manager')" in pkgbuild
+    build = _read(PACKAGING / "build_packages.sh")
+    for field in ("replaces", "conflict", "provides"):
+        assert f"{field} = quota-manager" in build
+
+
+def test_every_asset_is_named_netrex_but_installs_to_the_old_path():
+    build = _read(PACKAGING / "build_packages.sh")
+    for needle in ("dist/netrex_${VERSION}_all.deb", "dist/netrex-${VERSION}.tar.gz",
+                   "netrex-${VERSION}-1.noarch.rpm", "dist/netrex-${VERSION}-1-any.pkg.tar.zst"):
+        assert needle in build, needle
+    assert "dist/quota-manager" not in build
+    assert 'mkdir -p dist "$STAGE/DEBIAN" "$STAGE/opt/quota-manager"' in build

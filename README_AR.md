@@ -107,12 +107,12 @@ curl -fsSL https://UserJoo9.github.io/Netrex/quota-manager.gpg | \
 echo "deb [signed-by=/etc/apt/keyrings/quota-manager.gpg] https://UserJoo9.github.io/Netrex stable main" | \
   sudo tee /etc/apt/sources.list.d/quota-manager.list
 sudo apt-get update
-sudo apt-get install quota-manager
+sudo apt-get install netrex
 ```
 
 <div dir="rtl">
 
-تفضّل ملف واحد؟ نزّل `quota-manager_<version>_all.deb` من [الإصدارات](https://github.com/UserJoo9/Netrex/releases) ونفّذ `sudo apt install ./quota-manager_*_all.deb`.
+تفضّل ملف واحد؟ نزّل `netrex_<version>_all.deb` من [الإصدارات](https://github.com/UserJoo9/Netrex/releases) ونفّذ `sudo apt install ./netrex_*_all.deb`.
 
 بعدها كمّل على [الإعداد الأول](#الإعداد-الأول).
 
@@ -250,10 +250,17 @@ http://192.168.2.1:8080
 </div>
 
 ```bash
-sudo apt-get update && sudo apt-get install --only-upgrade quota-manager   # تحديث
-sudo apt remove quota-manager                                              # إزالة مع الاحتفاظ بالبيانات
-sudo apt purge quota-manager                                               # إزالة كاملة
+sudo apt-get update && sudo apt-get install --only-upgrade netrex   # تحديث
+sudo apt remove netrex                                                    # إزالة مع الاحتفاظ بالبيانات
+sudo apt purge netrex                                                     # إزالة كاملة
 ```
+
+<div dir="rtl">
+
+> لو كنت مثبّت النسخة القديمة باسم `quota-manager`، نفّذ `sudo apt-get update && sudo apt-get install netrex` مرة واحدة (أو حدّث من اللوحة). الحزمة القديمة بتتشال لوحدها وإعداداتك وبياناتك بتفضل زي ما هي. استخدم `apt-get install` مش `apt-get upgrade` لأن `upgrade` بيتجاهل الحزم الجديدة.
+
+</div>
+
 
 <div dir="rtl">
 

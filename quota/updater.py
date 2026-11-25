@@ -59,12 +59,14 @@ def repo_candidates(configured: str) -> list[str]:
 
 #: package type -> (asset suffix, deterministic asset name). The release
 #: pipeline names every asset this way, so a release with an empty asset list
-#: still resolves to a download URL.
+#: still resolves to a download URL. Assets are found by SUFFIX, never by name
+#: (every updater since 0.2 does the same), which is why the files could be
+#: renamed from ``quota-manager_*`` to ``netrex_*`` without breaking old boxes.
 ASSET_KINDS: dict[str, tuple[str, str]] = {
-    "deb": (".deb", "quota-manager_{v}_all.deb"),
-    "rpm": (".rpm", "quota-manager-{v}-1.noarch.rpm"),
-    "arch": (".pkg.tar.zst", "quota-manager-{v}-1-any.pkg.tar.zst"),
-    "tarball": (".tar.gz", "quota-manager-{v}.tar.gz"),
+    "deb": (".deb", "netrex_{v}_all.deb"),
+    "rpm": (".rpm", "netrex-{v}-1.noarch.rpm"),
+    "arch": (".pkg.tar.zst", "netrex-{v}-1-any.pkg.tar.zst"),
+    "tarball": (".tar.gz", "netrex-{v}.tar.gz"),
 }
 
 #: written by every installer (deb postinst, rpm %post, PKGBUILD, install.sh) so

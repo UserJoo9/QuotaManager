@@ -60,10 +60,83 @@ ok "upgrade keeps the venv"
 
 echo "== remove"
 case "$KIND" in
-    deb)  DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq quota-manager ;;
-    rpm)  dnf remove -y -q quota-manager ;;
-    arch) pacman -R --noconfirm quota-manager ;;
+    deb)  DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq netrex ;;
+    rpm)  dnf remove -y -q netrex ;;
+    arch) pacman -R --noconfirm netrex ;;
 esac || fail "remove failed"
 [ ! -e /opt/quota-manager/run.py ] || fail "files left after remove"
 ok "removed cleanly"
+
+# ---------------------------------------------------------------------------
+# Rename migration: a box that installed the OLD package name (the real, published
+# quota-manager 0.5.11) must move to netrex without losing its files/venv, and the
+# old package must be gone afterwards. This is the path every existing install takes.
+# ---------------------------------------------------------------------------
+OLD_VER=0.5.11
+BASE="https://github.com/UserJoo9/Netrex/releases/download/v${OLD_VER}"
+case "$KIND" in
+    deb)  OLD_FILE="quota-manager_${OLD_VER}_all.deb" ;;
+    rpm)  OLD_FILE="quota-manager-${OLD_VER}-1.noarch.rpm" ;;
+    arch) OLD_FILE="quota-manager-${OLD_VER}-1-any.pkg.tar.zst" ;;
+esac
+echo "== migration: old quota-manager ${OLD_VER} -> netrex"
+if ! command -v curl >/dev/null 2>&1; then
+    case "$KIND" in
+        deb) apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates ;;
+        rpm) dnf install -y -q curl ;;
+    esac
+fi
+mkdir -p /tmp/old
+curl -fsSL -o "/tmp/old/$OLD_FILE" "$BASE/$OLD_FILE" || fail "could not download the old $OLD_FILE"
+install_pkg "/tmp/old/$OLD_FILE" || fail "old package install failed"
+[ -x /opt/quota-manager/.venv/bin/python ] || fail "old package left no venv"
+touch /opt/quota-manager/.venv/KEEP-MIGRATION
+mkdir -p /etc/quota-gateway && echo "# keep me" > /etc/quota-gateway/KEEP-CONFIG
+
+case "$KIND" in
+    deb)  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$PKG" ;;
+    rpm)  dnf install -y -q "$PKG" ;;
+    arch) pacman -U --noconfirm "$PKG" ;;
+esac || fail "installing netrex over quota-manager failed"
+
+case "$KIND" in
+    deb)  dpkg -s netrex >/dev/null 2>&1 || fail "netrex not installed after migration"
+          if dpkg -s quota-manager 2>/dev/null | grep -q '^Status: install ok installed'; then
+              fail "old quota-manager still installed next to netrex"
+          fi ;;
+    rpm)  rpm -q netrex >/dev/null || fail "netrex not installed after migration"
+          ! rpm -q quota-manager >/dev/null 2>&1 || fail "old quota-manager still installed" ;;
+    arch) pacman -Q netrex >/dev/null || fail "netrex not installed after migration"
+          ! pacman -Q quota-manager >/dev/null 2>&1 || fail "old quota-manager still installed" ;;
+esac
+ok "old package replaced by netrex"
+[ -e /opt/quota-manager/.venv/KEEP-MIGRATION ] || fail "migration wiped the venv"
+[ -e /etc/quota-gateway/KEEP-CONFIG ] || fail "migration touched /etc/quota-gateway"
+[ -f /opt/quota-manager/run.py ] || fail "app files missing after migration"
+(cd /opt/quota-manager && .venv/bin/python -c "import api.app, quota.service") || fail "app does not import after migration"
+ok "venv, config and app survive the migration"
+
+if [ "$KIND" = deb ]; then
+    echo "== migration through an apt repository (the documented upgrade command)"
+    DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq netrex >/dev/null
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "/tmp/old/$OLD_FILE" >/dev/null || fail "old deb reinstall failed"
+    touch /opt/quota-manager/.venv/KEEP-APT
+    NEWVER="$(dpkg-deb -f "$PKG" Version)"
+    # The real transitional package carries the release version (>= 0.6.0, the
+    # version netrex Breaks below). Pin 0.6.0 so this also runs before the bump.
+    DUMMYVER=0.6.0
+    DUMMY=/tmp/dummy; rm -rf "$DUMMY"; mkdir -p "$DUMMY/DEBIAN"
+    printf 'Package: quota-manager\nVersion: %s\nSection: oldlibs\nPriority: optional\nArchitecture: all\nDepends: netrex (>= %s)\nMaintainer: ci <ci@example.org>\nDescription: transitional\n x\n' \
+        "$DUMMYVER" "$NEWVER" > "$DUMMY/DEBIAN/control"
+    mkdir -p /tmp/repo && cp "$PKG" /tmp/repo/ && dpkg-deb --build --root-owner-group "$DUMMY" /tmp/repo/quota-manager_"$DUMMYVER"_all.deb >/dev/null
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq apt-utils >/dev/null
+    (cd /tmp/repo && apt-ftparchive packages . > Packages)
+    echo "deb [trusted=yes] file:/tmp/repo ./" > /etc/apt/sources.list.d/netrex-test.list
+    apt-get update -qq >/dev/null 2>&1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --only-upgrade quota-manager || fail "apt upgrade of quota-manager failed"
+    dpkg -s netrex 2>/dev/null | grep -q '^Status: install ok installed' || fail "apt did not pull in netrex"
+    [ -e /opt/quota-manager/.venv/KEEP-APT ] || fail "apt migration wiped the venv"
+    [ -f /opt/quota-manager/run.py ] || fail "app files missing after apt migration"
+    ok "apt upgrade quota-manager -> netrex"
+fi
 echo "SMOKE PASSED ($KIND)"
