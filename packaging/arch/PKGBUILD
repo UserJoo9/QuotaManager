@@ -2,16 +2,18 @@
 # Local build from the release tarball:
 #   makepkg -si    (with netrex-VER.tar.gz next to this file)
 # The release workflow also publishes a ready-made .pkg.tar.zst.
-pkgname=netrex
+# The pacman package keeps the name quota-manager for now: updaters older than 0.6.0
+# run `pacman -U --noconfirm`, which answers NO to a package-conflict prompt, so a
+# renamed (conflicting) package could not replace the installed one. Only the
+# release FILE is named netrex-*. Rename the package itself once every box updates
+# with 0.6.0+ (the updater can then pass --ask=4).
+pkgname=quota-manager
 pkgver=0.0.0
 pkgrel=1
 pkgdesc='Fair-split metered-internet quota gateway'
 arch=('any')
 url='https://github.com/UserJoo9/Netrex'
 license=('MIT')
-replaces=('quota-manager')
-conflicts=('quota-manager')
-provides=('quota-manager')
 depends=('python>=3.10' 'python-pip' 'dnsmasq' 'nftables' 'iproute2' 'kmod' 'ppp' 'ca-certificates')
 install=netrex.install
 source=("netrex-${pkgver}.tar.gz")

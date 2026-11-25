@@ -596,14 +596,16 @@ def test_rpm_obsoletes_the_old_package_and_restarts_after_its_erase():
     assert "systemctl enable quota-gateway" in post and "systemctl start quota-gateway" in post
 
 
-def test_arch_package_replaces_the_old_name():
+def test_arch_package_keeps_its_pacman_name_so_old_updaters_can_upgrade_it():
+    """`pacman -U --noconfirm` (every updater before 0.6.0) answers NO to a
+    package-conflict prompt, so a renamed Arch package could not replace the old
+    one. Only the release file is renamed."""
     pkgbuild = _read(PACKAGING / "arch" / "PKGBUILD")
-    assert "pkgname=netrex" in pkgbuild
-    for field in ("replaces", "conflicts", "provides"):
-        assert f"{field}=('quota-manager')" in pkgbuild
+    assert "pkgname=quota-manager" in pkgbuild
+    assert "conflicts=" not in pkgbuild
     build = _read(PACKAGING / "build_packages.sh")
-    for field in ("replaces", "conflict", "provides"):
-        assert f"{field} = quota-manager" in build
+    assert "pkgname = quota-manager" in build and "conflict" not in build
+    assert "dist/netrex-${VERSION}-1-any.pkg.tar.zst" in build
 
 
 def test_every_asset_is_named_netrex_but_installs_to_the_old_path():

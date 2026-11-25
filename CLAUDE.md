@@ -14,8 +14,8 @@ existing installs and the apt repo keep working: `/opt/quota-manager`, services
 tables `quota_*`, the apt key `quota-manager.gpg`, apt `Origin`/`Label: Quota Manager`
 (changing them makes apt refuse the repo), and the passkey `USER_ID`. Don't rename those.
 **Packages and release assets ARE named `netrex`** since 0.6.0 (`netrex_<v>_all.deb`, ...);
-the deb/rpm/Arch metadata declares `quota-manager` as replaced (Breaks/Replaces, Obsoletes,
-conflicts/replaces) and the apt repo also carries a tiny transitional `quota-manager`
+the deb/rpm metadata declares `quota-manager` as replaced (Breaks/Replaces, Obsoletes; the
+Arch pacman package keeps the name `quota-manager`, only its file is `netrex-*`) and the apt repo also carries a tiny transitional `quota-manager`
 (`Depends: netrex`, built by `apt-repo.yml`, never a release asset). Updaters find assets by
 SUFFIX (every version since 0.2), so the file names can change; keep it that way.
 

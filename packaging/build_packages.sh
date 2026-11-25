@@ -4,7 +4,8 @@
 #   netrex-VER-1.noarch.rpm, netrex-VER-1-any.pkg.tar.zst
 # The packages are named `netrex`; they install into /opt/quota-manager (the
 # on-disk path is deliberately unchanged) and replace the old `quota-manager`
-# package on upgrade.
+# package on upgrade (Arch keeps the pacman package name quota-manager for now,
+# only its file is named netrex-*; see packaging/arch/PKGBUILD).
 # Used by BOTH the release workflow and the packaging smoke-test workflow, so
 # what gets tested is byte-for-byte what gets released.
 # Needs: dpkg-deb, tar, zstd, rpmbuild. Usage: packaging/build_packages.sh [workdir]
@@ -61,7 +62,7 @@ A="$W/archpkg"
 mkdir -p "$A/opt"
 cp -a "$STAGE/opt/quota-manager" "$A/opt/"
 SIZE="$(du -sb "$A/opt" | cut -f1)"
-printf 'pkgname = netrex\npkgbase = netrex\npkgver = %s-1\npkgdesc = Fair-split metered-internet quota gateway\nurl = https://github.com/UserJoo9/Netrex\nbuilddate = %s\npackager = Netrex CI\nsize = %s\narch = any\nlicense = MIT\ndepend = python>=3.10\ndepend = python-pip\ndepend = dnsmasq\ndepend = nftables\ndepend = iproute2\ndepend = kmod\ndepend = ppp\ndepend = ca-certificates\nreplaces = quota-manager\nconflict = quota-manager\nprovides = quota-manager\n' \
+printf 'pkgname = quota-manager\npkgbase = quota-manager\npkgver = %s-1\npkgdesc = Fair-split metered-internet quota gateway\nurl = https://github.com/UserJoo9/Netrex\nbuilddate = %s\npackager = Netrex CI\nsize = %s\narch = any\nlicense = MIT\ndepend = python>=3.10\ndepend = python-pip\ndepend = dnsmasq\ndepend = nftables\ndepend = iproute2\ndepend = kmod\ndepend = ppp\ndepend = ca-certificates\n' \
     "${VERSION}" "$(date +%s)" "${SIZE}" > "$A/.PKGINFO"
 cp packaging/arch/netrex.install "$A/.INSTALL"
 tar -C "$A" --owner=0 --group=0 --numeric-owner --zstd \

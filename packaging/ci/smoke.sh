@@ -62,7 +62,7 @@ echo "== remove"
 case "$KIND" in
     deb)  DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq netrex ;;
     rpm)  dnf remove -y -q netrex ;;
-    arch) pacman -R --noconfirm netrex ;;
+    arch) pacman -R --noconfirm quota-manager ;;
 esac || fail "remove failed"
 [ ! -e /opt/quota-manager/run.py ] || fail "files left after remove"
 ok "removed cleanly"
@@ -106,8 +106,9 @@ case "$KIND" in
           fi ;;
     rpm)  rpm -q netrex >/dev/null || fail "netrex not installed after migration"
           ! rpm -q quota-manager >/dev/null 2>&1 || fail "old quota-manager still installed" ;;
-    arch) pacman -Q netrex >/dev/null || fail "netrex not installed after migration"
-          ! pacman -Q quota-manager >/dev/null 2>&1 || fail "old quota-manager still installed" ;;
+    arch) # same pacman package name on purpose (see packaging/arch/PKGBUILD): it must
+          # now be the NEW build, not 0.5.11
+          [ "$(pacman -Q quota-manager | cut -d' ' -f2)" != "${OLD_VER}-1" ] || fail "arch package was not upgraded" ;;
 esac
 ok "old package replaced by netrex"
 [ -e /opt/quota-manager/.venv/KEEP-MIGRATION ] || fail "migration wiped the venv"

@@ -21,8 +21,9 @@
 > old-name copy in the release. Upgrade from `quota-manager`: deb `Breaks`+`Replaces:
 > quota-manager (<< 0.6.0)` (never `Conflicts`, which would make the transitional
 > package unsatisfiable); rpm `Obsoletes` + a `%posttrans` that restarts the service
-> (the old `%preun` stops/disables it after the new `%post`); Arch `replaces`/`conflict`/
-> `provides`. The apt repo also publishes a files-free transitional `quota-manager`
+> (the old `%preun` stops/disables it after the new `%post`); Arch keeps the pacman name
+> `quota-manager` (only the file is `netrex-*`): `pacman -U --noconfirm` answers NO to a
+> conflict prompt, so a renamed conflicting package could not replace it (proven in CI). The apt repo also publishes a files-free transitional `quota-manager`
 > (`packaging/DEBIAN/transitional.control.template`, built in `apt-repo.yml`, never a
 > release asset: old updaters take the first `.deb`). `packaging/ci/smoke.sh` installs the
 > real 0.5.11 package and upgrades it in Debian, Ubuntu, Fedora and Arch containers.
