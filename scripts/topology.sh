@@ -37,11 +37,14 @@ die()  { echo -e "\e[1;31m[topology] $*\e[0m" >&2; exit 1; }
 # --- every value comes from the app (quota/netmgr.py) ------------------------
 TOPO="${TOPO:-}"
 LAN_IF="${LAN_IF:-}"              # NIC carrying the client subnet
+LAN_IFINDEX="${LAN_IFINDEX:-}"
 LAN_IP="${LAN_IP:-}"              # uplink IP; kept as a router-admin alias in WAN mode
 LAN_CIDR="${LAN_CIDR:-24}"        # uplink prefix
 SUBNET_MASK="${SUBNET_MASK:-255.255.255.0}"
 CLIENT_IP="${CLIENT_IP:-}"        # client-subnet alias (clients' gateway)
 CLIENT_NET="${CLIENT_NET:-}"      # client subnet CIDR
+CLIENT_CIDR="${CLIENT_CIDR:-24}"
+IPV6_ENABLE="${IPV6_ENABLE:-0}"
 WAN_GATEWAY="${WAN_GATEWAY:-}"    # upstream router IP
 UPSTREAM_DNS="${UPSTREAM_DNS:-8.8.8.8}"
 POOL_START="${POOL_START:-}"
@@ -56,8 +59,27 @@ PPPOE_PASSWORD="${PPPOE_PASSWORD:-}"  # never argv — they must not show in `ps
 [ "$(id -u)" -eq 0 ] || die "must run as root"
 case "$TOPO" in wan|lan) ;; *) die "TOPO='$TOPO' must be 'wan' or 'lan'" ;; esac
 [ -n "$LAN_IF" ] || die "LAN_IF not set (the app passes it)"
+[ -n "$LAN_IFINDEX" ] || die "LAN_IFINDEX not set (the app passes it)"
 [ -n "$CLIENT_IP" ] || die "CLIENT_IP not set"
 PPP_IF="${WAN_IF:-$LAN_IF}"
+
+_validate_lan() {
+    local gateway_cidr="${1:-}"
+    local project_root
+    project_root="$(cd "$(dirname "$0")/.." && pwd)"
+    if [ -n "$gateway_cidr" ]; then
+        PYTHONPATH="$project_root${PYTHONPATH:+:$PYTHONPATH}" python3 -m quota.lan_interface validate \
+            --interface "$LAN_IF" --ifindex "$LAN_IFINDEX" \
+            --gateway-cidr "$gateway_cidr" \
+            || die "LAN_IF=$LAN_IF is down, changed, or does not carry the client gateway; re-detect LAN and apply again"
+    else
+        PYTHONPATH="$project_root${PYTHONPATH:+:$PYTHONPATH}" python3 -m quota.lan_interface validate \
+            --interface "$LAN_IF" --ifindex "$LAN_IFINDEX" \
+            || die "LAN_IF=$LAN_IF is down or its identity changed; re-detect LAN and apply again"
+    fi
+}
+
+_validate_lan
 
 # ---------------------------------------------------------------------------
 # NIC helpers — NetworkManager when it owns the interface, else ifupdown, and
@@ -121,17 +143,19 @@ _nic_apply() {
 }
 
 # Remove an IPv4 address if present (best-effort).
-_ip_del() { ip addr show "$LAN_IF" 2>/dev/null | grep -q "inet $1/" \
-            && ip addr del "$1/$LAN_CIDR" dev "$LAN_IF" >/dev/null 2>&1 || true; }
+_ip_del() { local cidr="${2:-$LAN_CIDR}"
+            ip addr show "$LAN_IF" 2>/dev/null | grep -q "inet $1/" \
+            && ip addr del "$1/$cidr" dev "$LAN_IF" >/dev/null 2>&1 || true; }
 # Add an IPv4 address if absent (best-effort).
-_ip_add() { ip addr show "$LAN_IF" 2>/dev/null | grep -q "inet $1/" \
-            || ip addr add "$1/$LAN_CIDR" dev "$LAN_IF" >/dev/null 2>&1 || true; }
+_ip_add() { local cidr="${2:-$LAN_CIDR}"
+            ip addr show "$LAN_IF" 2>/dev/null | grep -q "inet $1/" \
+            || ip addr add "$1/$cidr" dev "$LAN_IF" >/dev/null 2>&1 || true; }
 
 _nic_wan() {
-    log "NIC $LAN_IF -> client subnet $CLIENT_IP/$LAN_CIDR + router-admin alias $LAN_IP/$LAN_CIDR"
-    _nic_apply "$CLIENT_IP/$LAN_CIDR" "" "" "$LAN_IP/$LAN_CIDR"
+    log "NIC $LAN_IF -> client subnet $CLIENT_IP/$CLIENT_CIDR + router-admin alias $LAN_IP/$LAN_CIDR"
+    _nic_apply "$CLIENT_IP/$CLIENT_CIDR" "" "" "$LAN_IP/$LAN_CIDR"
     ip route del default 2>/dev/null || true   # pppd installs its own via ppp0
-    _ip_add "$CLIENT_IP"
+    _ip_add "$CLIENT_IP" "$CLIENT_CIDR"
     # Keep the uplink IP as a SECONDARY address: the router is bridged in WAN
     # mode, so clients reach its admin page (${WAN_GATEWAY:-192.168.1.1}) through
     # the box's connected route to the uplink subnet — automatic router access,
@@ -139,21 +163,23 @@ _nic_wan() {
     # $CLIENT_NET, so an uplink-subnet static source is never NATed out ppp0 and
     # cannot reach the internet through the box.
     [ -n "$LAN_IP" ] && _ip_add "$LAN_IP"
+    _validate_lan "$CLIENT_IP/$CLIENT_CIDR"
     ip addr show "$LAN_IF" 2>/dev/null | grep -q "inet $CLIENT_IP/" \
         || die "interface $LAN_IF does not carry $CLIENT_IP — WAN mode is dead without it"
 }
 
 _nic_lan() {
-    log "NIC $LAN_IF -> uplink $LAN_IP/$LAN_CIDR + client alias $CLIENT_IP/$LAN_CIDR"
-    _nic_apply "$LAN_IP/$LAN_CIDR" "$WAN_GATEWAY" "$UPSTREAM_DNS" "$CLIENT_IP/$LAN_CIDR"
+    log "NIC $LAN_IF -> uplink $LAN_IP/$LAN_CIDR + client alias $CLIENT_IP/$CLIENT_CIDR"
+    _nic_apply "$LAN_IP/$LAN_CIDR" "$WAN_GATEWAY" "$UPSTREAM_DNS" "$CLIENT_IP/$CLIENT_CIDR"
     _ip_add "$LAN_IP"
-    _ip_add "$CLIENT_IP"
+    _ip_add "$CLIENT_IP" "$CLIENT_CIDR"
     [ -n "$WAN_GATEWAY" ] || die "WAN_GATEWAY not set (the app passes it)"
     ip route replace default via "$WAN_GATEWAY" dev "$LAN_IF"
     for expect in "$LAN_IP" "$CLIENT_IP"; do
         ip addr show "$LAN_IF" 2>/dev/null | grep -q "inet $expect/" \
             || die "interface $LAN_IF does not carry $expect — LAN mode is dead without it"
     done
+    _validate_lan "$CLIENT_IP/$CLIENT_CIDR"
 }
 
 # ---------------------------------------------------------------------------
@@ -214,12 +240,66 @@ dhcp-leasefile=/var/lib/misc/dnsmasq.leases
 EOF
 }
 
-_dnsmasq_reload() {
-    if dnsmasq --test -C /etc/dnsmasq.d/quota-gateway.conf >/dev/null 2>&1; then
-        systemctl restart dnsmasq || warn "dnsmasq restart failed — run manually"
-    else
-        warn "dnsmasq config did not validate — fix it before starting the app"
+_dnsmasq_snapshot() {
+    local backup_dir=/var/backups/netrex
+    mkdir -p "$backup_dir"
+    chmod 700 "$backup_dir"
+    DNSMASQ_PENDING=1
+    DNSMASQ_HAD_CONF=0
+    if [ -f /etc/dnsmasq.d/quota-gateway.conf ]; then
+        DNSMASQ_BACKUP="$(mktemp "$backup_dir/quota-gateway.conf.XXXXXX")"
+        cp -p /etc/dnsmasq.d/quota-gateway.conf "$DNSMASQ_BACKUP"
+        DNSMASQ_HAD_CONF=1
     fi
+}
+
+_dnsmasq_restore() {
+    [ "${DNSMASQ_PENDING:-0}" = 1 ] || return 0
+    if [ "${DNSMASQ_HAD_CONF:-0}" = 1 ] && [ -n "${DNSMASQ_BACKUP:-}" ]; then
+        cp -p "$DNSMASQ_BACKUP" /etc/dnsmasq.d/quota-gateway.conf \
+            || warn "could not restore the previous dnsmasq fragment"
+    else
+        rm -f /etc/dnsmasq.d/quota-gateway.conf
+    fi
+    if dnsmasq --test >/dev/null 2>&1; then
+        systemctl restart dnsmasq >/dev/null 2>&1 \
+            || warn "could not restart dnsmasq with its previous fragment"
+    else
+        warn "previous dnsmasq configuration also fails validation; service left running"
+    fi
+    DNSMASQ_PENDING=0
+}
+
+_dnsmasq_exit_rollback() {
+    local status=$?
+    if [ "$status" -ne 0 ]; then _dnsmasq_restore; fi
+    return "$status"
+}
+
+_dnsmasq_reload() {
+    local backup_dir=/var/backups/netrex old
+    mkdir -p "$backup_dir"
+    chmod 700 "$backup_dir"
+    for old in /etc/dnsmasq.d/quota-gateway.conf.bak* \
+               /etc/dnsmasq.d/quota-gateway.conf~; do
+        [ -f "$old" ] || continue
+        mv "$old" "$backup_dir/$(basename "$old").legacy-$(date +%s%N)"
+    done
+    dnsmasq --test >/dev/null \
+        || die "effective dnsmasq config failed validation; previous fragment will be restored"
+    systemctl restart dnsmasq || die "dnsmasq restart failed; previous fragment will be restored"
+    systemctl is-active --quiet dnsmasq \
+        || die "dnsmasq is not active after restart; previous fragment will be restored"
+    local sockets
+    sockets="$(ss -H -lunp)" \
+        || die "could not inspect dnsmasq DHCP sockets; previous fragment will be restored"
+    printf '%s\n' "$sockets" | grep -Eq "0\.0\.0\.0%${LAN_IF}:67([[:space:]]|$)" \
+        || die "dnsmasq DHCPv4 is not bound to $LAN_IF; previous fragment will be restored"
+    if [ "$IPV6_ENABLE" = 1 ]; then
+        printf '%s\n' "$sockets" | grep -Fq "[::]%${LAN_IF}:547 " \
+            || die "dnsmasq DHCPv6 is not bound to $LAN_IF; previous fragment will be restored"
+    fi
+    DNSMASQ_PENDING=0
 }
 
 # ---------------------------------------------------------------------------
@@ -336,6 +416,8 @@ _pppoe_lan() {
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
+_dnsmasq_snapshot
+trap _dnsmasq_exit_rollback EXIT
 if [ "$TOPO" = "wan" ]; then
     _nic_wan
     _pppoe_wan

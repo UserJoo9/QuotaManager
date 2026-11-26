@@ -87,32 +87,15 @@ PPPOE_PASSWORD="${PPPOE_PASSWORD:-}" # WAN mode: PPPoE password
 # interface. Override with LAN_IF=ethX when auto-detection still misses.
 LAN_IF="${LAN_IF:-}"
 if [ -z "$LAN_IF" ]; then
-    # Two passes (issue #36):
-    #  1. the default-route NIC. It is trusted even when it is a bridge, bond or
-    #     VLAN (a box can legitimately live on br0), but never a shaping / PPP /
-    #     tunnel / container device.
-    #  2. otherwise scan sysfs for a PHYSICAL NIC only. Software interfaces
-    #     (ifb0, bridges, veth, ...) report type=1 + carrier=1 like a real NIC,
-    #     and in WAN mode (default route on ppp0) ifb0 used to win this scan:
-    #     dnsmasq, the firewall and shaping were then bound to it.
-    _lan_ok() {   # $1 = interface, $2 = "phys" to accept physical NICs only
-        case "$1" in lo|ifb*|ppp*|tun*|tap*|veth*|docker*|virbr*) return 1 ;; esac
-        [ -d "/sys/class/net/$1/wireless" ] && return 1                   # skip WiFi
-        if [ "$2" = phys ] && [ -e "/sys/devices/virtual/net/$1" ]; then return 1; fi
-        [ "$(cat "/sys/class/net/$1/type" 2>/dev/null || echo 0)" = "1" ] \
-            || return 1                                                    # Ethernet only
-        [ "$(cat "/sys/class/net/$1/carrier" 2>/dev/null || echo 0)" = "1" ] \
-            || return 1                                                    # cable present
-        return 0
+    _PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    _resolved="$(PYTHONPATH="$_PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 -m quota.lan_interface resolve --gateway-ip "$CLIENT_IP" \
+        --uplink-ip "$LAN_IP" --wan-interface "$WAN_IF" \
+        --sysfs-net "${LAN_SYSFS_NET:-/sys/class/net}" 2>/dev/null)" || {
+        echo "Could not uniquely detect an active wired LAN interface. Set LAN_IF explicitly after checking carrier and operstate." >&2
+        exit 1
     }
-    for cand in $(ip route | awk '/default/ {print $5}'); do
-        if _lan_ok "$cand" any; then LAN_IF="$cand"; break; fi
-    done
-    if [ -z "$LAN_IF" ]; then
-        for cand in $(ls /sys/class/net | grep -v '^lo$'); do
-            if _lan_ok "$cand" phys; then LAN_IF="$cand"; break; fi
-        done
-    fi
+    LAN_IF="${_resolved%%$'\t'*}"
 fi
 
 CONF_DIR="/etc/quota-gateway"
@@ -189,6 +172,10 @@ iftype="$(cat "/sys/class/net/$LAN_IF/type" 2>/dev/null || echo 0)"
 [ "$iftype" = "1" ] || die \
     "LAN_IF=$LAN_IF is not an Ethernet NIC (type=$iftype) — the gateway must be \
 wired. Set LAN_IF=ethX (the auto-detect may have picked a WiFi/VPN default route)"
+[ "$(cat "/sys/class/net/$LAN_IF/carrier" 2>/dev/null || echo 0)" = "1" ] \
+    || die "LAN_IF=$LAN_IF has no carrier; connect the LAN cable and retry"
+[ "$(cat "/sys/class/net/$LAN_IF/operstate" 2>/dev/null || echo down)" = "up" ] \
+    || die "LAN_IF=$LAN_IF is not up; bring the wired interface up and retry"
 if wan_mode && [ -n "$WAN_IF" ]; then
     ip link show "$WAN_IF" >/dev/null 2>&1 \
         || die "WAN_IF=$WAN_IF not found (two-NIC WAN layout: the NIC that reaches \
@@ -225,8 +212,6 @@ net.ipv6.conf.all.disable_ipv6 = 0
 net.ipv6.conf.default.disable_ipv6 = 0
 net.ipv6.conf.all.forwarding = 1
 net.ipv6.conf.default.forwarding = 1
-net.ipv6.conf.$LAN_IF.disable_ipv6 = 0
-net.ipv6.conf.$LAN_IF.accept_ra = 2
 EOF
 sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-quota-gateway.conf >/dev/null
 
@@ -934,6 +919,7 @@ log_file: /var/log/quota-gateway/quota.log
 timezone: $TIMEZONE
 dhcp:
   enable: true
+  interface: $LAN_IF
   gateway_ip: $CLIENT_IP
   router_ip: $CFG_ROUTER_IP
   dns_servers: $CFG_DNS_SERVERS

@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import os
 from pathlib import Path
 
 import pytest
@@ -51,22 +52,42 @@ def _fake_sysfs(root: Path, nics: dict[str, dict]) -> None:
         d.mkdir(parents=True)
         (d / "type").write_text(f"{spec.get('type', 1)}\n")
         (d / "carrier").write_text(f"{spec.get('carrier', 1)}\n")
+        (d / "ifindex").write_text(f"{len(list((root / 'class' / 'net').iterdir()))}\n")
+        (d / "operstate").write_text(
+            "up\n" if spec.get("carrier", 1) == 1 else "down\n")
         if spec.get("wireless"):
             (d / "wireless").mkdir()
         if spec.get("virtual"):
             (root / "devices" / "virtual" / "net" / name).mkdir(parents=True)
+        else:
+            (d / "device").mkdir()
 
 
 def _run_detect(tmp_path: Path, nics: dict[str, dict], default_if: str) -> str:
     sysfs = tmp_path / "sys"
     _fake_sysfs(sysfs, nics)
-    block = (_detect_block()
-             .replace("/sys/", f"{sysfs}/")
-             .replace("$(ip route | awk '/default/ {print $5}')", default_if)
-             .replace("$(ls /sys/class/net", f"$(ls {sysfs}/class/net"))
-    script = f'LAN_IF=""\n{block}echo "$LAN_IF"\n'
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    ip = bin_dir / "ip"
+    ip.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1 $2 $3 $4\" = '-j -4 addr show' ]; then echo '[]'; exit 0; fi\n"
+        "if [ \"$1 $2 $3 $4\" = '-j route show default' ]; then\n"
+        "  if [ -n \"$FAKE_DEFAULT_IF\" ]; then printf '[{\\\"dev\\\":\\\"%s\\\"}]' \"$FAKE_DEFAULT_IF\"; else echo '[]'; fi; exit 0; fi\n"
+        "exit 1\n")
+    ip.chmod(0o755)
+    nmcli = bin_dir / "nmcli"
+    nmcli.write_text("#!/bin/sh\nexit 1\n")
+    nmcli.chmod(0o755)
+    block = _detect_block().replace(
+        '$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)', str(REPO))
+    script = (f'CLIENT_IP=192.168.2.1 LAN_IP=192.168.1.110 WAN_IF="" '
+              f'LAN_SYSFS_NET="{sysfs / "class" / "net"}" LAN_IF=""\n'
+              f'{block}echo "$LAN_IF"\n')
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}",
+               FAKE_DEFAULT_IF=default_if)
     out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                         check=True)
+                         check=True, env=env)
     return out.stdout.strip()
 
 
@@ -90,8 +111,8 @@ def test_wan_mode_does_not_pick_ifb0(tmp_path):
 @needs_bash
 def test_virtual_ethernet_like_devices_are_skipped(tmp_path):
     nics = {
-        "br-lan": {"type": 1, "carrier": 1, "virtual": True},
         "docker0": {"type": 1, "carrier": 1, "virtual": True},
+        "virbr0": {"type": 1, "carrier": 1, "virtual": True},
         "eth0": {"type": 1, "carrier": 1},
         "veth1a2b": {"type": 1, "carrier": 1, "virtual": True},
     }

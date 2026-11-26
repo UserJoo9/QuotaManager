@@ -31,6 +31,7 @@ RunCommand = Callable[[list[str]], tuple[int, str]]
 
 DNSMASQ_FRAGMENT = Path("/etc/dnsmasq.d/quota-ipv6.conf")
 SYSCTL_FRAGMENT = Path("/etc/sysctl.d/99-zz-quota-ipv6.conf")
+LEGACY_SYSCTL_FRAGMENT = Path("/etc/sysctl.d/99-quota-gateway.conf")
 _PROC_IPV6 = Path("/proc/sys/net/ipv6/conf")
 
 
@@ -84,6 +85,33 @@ def _write_if_changed(path: Path, content: str) -> bool:
         return False
 
 
+def _remove_stale_interface_sysctls(path: Path) -> bool:
+    """Remove NIC-specific overrides from the setup file during migration."""
+    try:
+        if not path.exists():
+            return False
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        log.warning("ipv6 setup: cannot inspect legacy sysctl file %s: %s", path, exc)
+        return False
+    kept: list[str] = []
+    removed = False
+    prefix = "net.ipv6.conf."
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(prefix) and "=" in stripped:
+            setting = stripped[len(prefix):].split("=", 1)[0].strip()
+            interface, separator, key = setting.rpartition(".")
+            if separator and interface not in {"all", "default"} \
+                    and key in {"disable_ipv6", "accept_ra"}:
+                removed = True
+                continue
+        kept.append(line)
+    if not removed:
+        return False
+    return _write_if_changed(path, "\n".join(kept).rstrip() + "\n")
+
+
 def _live_ipv6_off(proc_root: Path, iface: str) -> bool:
     """True when the kernel still has IPv6 disabled somewhere we need it."""
     for name in ("all", iface):
@@ -98,6 +126,34 @@ def _live_ipv6_off(proc_root: Path, iface: str) -> bool:
     return False
 
 
+def _reconcile_sysctl(*, iface: str, run: RunCommand, sysctl_path: Path | None,
+                      legacy_sysctl_path: Path | None,
+                      proc_root: Path | None) -> tuple[bool, bool]:
+    sysctl_file = sysctl_path or SYSCTL_FRAGMENT
+    legacy_changed = _remove_stale_interface_sysctls(
+        legacy_sysctl_path or LEGACY_SYSCTL_FRAGMENT)
+    file_changed = _write_if_changed(sysctl_file, sysctl_fragment(iface))
+    if legacy_changed or file_changed or _live_ipv6_off(proc_root or _PROC_IPV6, iface):
+        code, msg = run(["sysctl", "-p", str(sysctl_file)])
+        if code == 0:
+            log.info("ipv6 setup: IPv6 sysctl applied (%s)", sysctl_file)
+            return True, True
+        log.warning("ipv6 setup: sysctl -p failed: %s", (msg or "").strip())
+        return False, False
+    return True, False
+
+
+def ensure_ipv6_sysctl(*, iface: str, run: RunCommand | None = None,
+                       sysctl_path: Path | None = None,
+                       legacy_sysctl_path: Path | None = None,
+                       proc_root: Path | None = None) -> bool:
+    """Apply the active interface's IPv6 sysctl and remove old NIC overrides."""
+    okay, _ = _reconcile_sysctl(
+        iface=iface, run=run or _default_run, sysctl_path=sysctl_path,
+        legacy_sysctl_path=legacy_sysctl_path, proc_root=proc_root)
+    return okay
+
+
 def ensure_ipv6_host_config(
     *,
     prefix: str,
@@ -106,6 +162,7 @@ def ensure_ipv6_host_config(
     run: RunCommand | None = None,
     dnsmasq_path: Path | None = None,
     sysctl_path: Path | None = None,
+    legacy_sysctl_path: Path | None = None,
     proc_root: Path | None = None,
 ) -> dict[str, bool]:
     """Bring dnsmasq + sysctl to the dual-stack state. Best-effort, never raises.
@@ -125,15 +182,9 @@ def ensure_ipv6_host_config(
     if out["dnsmasq_changed"]:
         log.info("ipv6 setup: wrote the dnsmasq RA fragment (restart needed)")
 
-    sysctl_file = sysctl_path or SYSCTL_FRAGMENT
-    file_changed = _write_if_changed(sysctl_file, sysctl_fragment(iface))
-    if file_changed or _live_ipv6_off(proc_root or _PROC_IPV6, iface):
-        code, msg = run(["sysctl", "-p", str(sysctl_file)])
-        if code == 0:
-            out["sysctl_applied"] = True
-            log.info("ipv6 setup: IPv6 sysctl applied (%s)", sysctl_file)
-        else:
-            log.warning("ipv6 setup: sysctl -p failed: %s", (msg or "").strip())
+    _, out["sysctl_applied"] = _reconcile_sysctl(
+        iface=iface, run=run, sysctl_path=sysctl_path,
+        legacy_sysctl_path=legacy_sysctl_path, proc_root=proc_root)
     return out
 
 

@@ -38,6 +38,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import tempfile
 import time
 from ipaddress import ip_address
 from pathlib import Path
@@ -294,6 +295,13 @@ class Gateway:
         self.holder = SnapshotHolder()
         self.engine: NftablesEngine | None = None
         self.shaper: object | None = None  # quota.shaping.TcShaper (tc/ifb)
+        self._lan_selection = None
+        self._wan_interface = ""
+        self._lan_binding_status: dict[str, object] = {
+            "state": "unknown", "configured": "", "active": "",
+            "dhcp_v4": "", "dhcp_v6": "", "shaper": "", "reason": "",
+        }
+        self._last_lan_reconcile = 0.0
         #: quota.disk_share.DiskShareManager, wired in main() (Share > Network drives)
         self.disk_shares: object | None = None
         #: internet schedules: the ``inet quota_schedule`` nft table
@@ -379,6 +387,7 @@ class Gateway:
         #: briefly undo the user's fresh caps. Whoever runs second re-reads the
         #: DB, so the lock makes both orderings end on the fresh state.
         self._shaping_lock = asyncio.Lock()
+        self._lan_lock = asyncio.Lock()
         #: serializes DNS-rule regeneration the same way ``_shaping_lock``
         #: does for the tc tree (a maintenance tick and an API-triggered
         #: immediate apply must not race each other's DB read + file write).
@@ -502,7 +511,8 @@ class Gateway:
         self.topology_manager = TopologyManager(
             self.cfg, self.database,
             config_path=self.config_path,
-            script_path=cfg_mod.PROJECT_ROOT / "scripts" / "topology.sh")
+            script_path=cfg_mod.PROJECT_ROOT / "scripts" / "topology.sh",
+            apply_lock=self._lan_lock)
         await self._seed_bundle_from_cfg()
         await self.service.ensure_period()
         try:
@@ -537,7 +547,9 @@ class Gateway:
         """Background initialization of kernel rules, shaping, firewall, tailers."""
         # -- startup self-heal (infrastructure resilience) -----------------
         try:
-            await asyncio.to_thread(self._startup_self_heal)
+            self._wan_interface = await self.database.get_setting("wan_if", "")
+            await asyncio.to_thread(self._startup_self_heal,
+                                    self._wan_interface)
         except Exception as e:
             log.warning("startup self-heal notice: %s", e)
 
@@ -763,7 +775,7 @@ class Gateway:
         except Exception:  # noqa: BLE001 — cosmetic follow-up, never stalls a tick
             log.debug("apt source check failed", exc_info=True)
 
-    def _startup_self_heal(self) -> None:
+    def _startup_self_heal(self, wan_interface: str = "") -> None:
         """Verify / recreate infrastructure the app depends on but doesn't own.
 
         The setup script creates ``quota_nat`` (masquerade NAT) and the NIC
@@ -773,6 +785,9 @@ class Gateway:
         """
         from quota.startup_health import (  # lazy: subprocess + /proc
             ensure_nat_table, ensure_network_infrastructure)
+        from quota.dnsmasq_binding import FragmentUpdate, probe_dhcp_binding
+        from quota.lan_interface import LanRequest, resolve_lan, LanResolutionError
+        from quota.startup_health import _SYS_NET
 
         # -- PPPoE peer options (holdoff + LCP echo, issue #41) ---------------
         try:
@@ -812,13 +827,101 @@ class Gateway:
         uplink_ip = getattr(self.cfg.dhcp, "uplink_ip", "") or ""
         lan_cidr = getattr(self.cfg.dhcp, "lan_cidr", 24) or 24
         gateway_ip = getattr(self.cfg.dhcp, "gateway_ip", "") or "192.168.2.1"
-        ensure_network_infrastructure(
+        request = LanRequest(
             gateway_ip=gateway_ip,
             uplink_ip=uplink_ip,
-            lan_cidr=int(lan_cidr),
-            ipv6_gateway=(getattr(self.cfg.dhcp, "ipv6_gateway", "")
-                          if getattr(self.cfg.dhcp, "ipv6_enable", False) else ""),
+            last_applied=getattr(self.cfg.shaping, "interface", "") or "",
+            wan_interface=(wan_interface or self._wan_interface
+                           or getattr(self.cfg, "wan_interface", "") or ""),
         )
+        selection = None
+        for attempt in range(5):
+            try:
+                selection = resolve_lan(request, run=_default_run_command,
+                                        sysfs_net=_SYS_NET)
+                break
+            except LanResolutionError as exc:
+                if "no active wired" not in str(exc) or attempt == 4:
+                    log.error("LAN interface discovery failed: %s", exc)
+                    break
+                time.sleep(1)
+        if selection is not None:
+            previous = getattr(self.cfg.shaping, "interface", "") or ""
+            if previous and previous != selection.name:
+                log.warning("LAN interface changed: configured=%s active=%s — "
+                            "rebinding dnsmasq and shaper", previous, selection.name)
+            self._lan_selection = selection
+            self.cfg.shaping.interface = selection.name
+            self.cfg.dhcp.interface = selection.name
+            ipv6_enabled = bool(getattr(self.cfg.dhcp, "ipv6_enable", False))
+            ipv6_fragment = None
+            if ipv6_enabled:
+                from quota.ipv6_setup import DNSMASQ_FRAGMENT, dnsmasq_fragment
+                ipv6_fragment = FragmentUpdate(
+                    DNSMASQ_FRAGMENT,
+                    dnsmasq_fragment(
+                        getattr(self.cfg.dhcp, "ipv6_prefix", "")
+                        or "fd00:da7a:2::/64",
+                        getattr(self.cfg.dhcp, "ipv6_gateway", "")
+                        or "fd00:da7a:2::1"))
+            uplink_gateway = ""
+            if getattr(self.cfg.engine, "topology", "lan") != "wan":
+                uplink_gateway = getattr(self.cfg.dhcp, "router_ip", "") or ""
+            healthy = ensure_network_infrastructure(
+                gateway_ip=gateway_ip,
+                uplink_ip=uplink_ip,
+                lan_cidr=int(lan_cidr),
+                client_cidr=ipaddress.IPv4Network(
+                    f"0.0.0.0/{self.cfg.dhcp.subnet}").prefixlen,
+                ipv6_gateway=(getattr(self.cfg.dhcp, "ipv6_gateway", "")
+                              if ipv6_enabled else ""),
+                lan_selection=selection,
+                ipv6_fragment=ipv6_fragment,
+                uplink_gateway=uplink_gateway,
+                wan_interface=request.wan_interface,
+                expect_ipv6=ipv6_enabled,
+            )
+            if self.config_path is not None:
+                try:
+                    self._persist_lan_interface(selection.name)
+                except Exception:
+                    log.exception("could not persist active LAN interface")
+                    healthy = False
+            if self.shaper is not None and previous != selection.name:
+                try:
+                    healthy = self.shaper.rebind(selection) and healthy
+                except Exception:
+                    log.exception("tc shaper failed to rebind to %s", selection.name)
+                    healthy = False
+            if getattr(self.cfg.engine, "topology", "lan") == "wan":
+                try:
+                    from quota.ppp_binding import reconcile_ppp_interface
+                    healthy = reconcile_ppp_interface(
+                        wan_interface=request.wan_interface or selection.name,
+                        run=_default_run_command) and healthy
+                except Exception:
+                    log.exception("could not reconcile the PPPoE interface")
+                    healthy = False
+            binding = probe_dhcp_binding(
+                run=_default_run_command, expect_ipv6=ipv6_enabled,
+                expected_interface=selection.name)
+            shaper_iface = getattr(self.shaper, "iface", "") or ""
+            healthy = (healthy and binding.healthy
+                       and (not shaper_iface or shaper_iface == selection.name))
+            self._lan_binding_status.update({
+                "state": "healthy" if healthy else "degraded",
+                "configured": previous, "active": selection.name,
+                "dhcp_v4": binding.ipv4_interface,
+                "dhcp_v6": binding.ipv6_interface,
+                "shaper": shaper_iface,
+                "reason": "" if healthy else binding.evidence or
+                "one or more LAN bindings failed verification",
+            })
+        else:
+            self._lan_binding_status.update({
+                "state": "degraded", "configured": request.last_applied,
+                "reason": "active LAN interface could not be determined",
+            })
 
         # -- IPv6 host config (dnsmasq RA + sysctl) -------------------------
         # Applied by the app itself so an update never needs a manual
@@ -828,10 +931,9 @@ class Gateway:
             try:
                 from quota.ipv6_setup import (disable_ipv6_host_config,
                                               ensure_box_ignores_ula_dns)
-                from quota.startup_health import _find_lan_interface, _SYS_NET, _default_run
                 ensure_box_ignores_ula_dns(
                     prefix=getattr(self.cfg.dhcp, "ipv6_prefix", "") or "fd00:da7a:2::/64",
-                    iface=_find_lan_interface(_default_run, _SYS_NET) or "",
+                    iface=(self._lan_selection.name if self._lan_selection else ""),
                     fallback_dns=list(getattr(self.cfg.dhcp, "dns_servers", []) or []))
                 if disable_ipv6_host_config()["dnsmasq_changed"]:
                     _reload_dnsmasq()
@@ -840,15 +942,14 @@ class Gateway:
         else:
             try:
                 from quota.ipv6_setup import ensure_ipv6_host_config
-                from quota.startup_health import _find_lan_interface, _SYS_NET, _default_run
                 res = ensure_ipv6_host_config(
                     prefix=getattr(self.cfg.dhcp, "ipv6_prefix", "") or "fd00:da7a:2::/64",
                     gateway=getattr(self.cfg.dhcp, "ipv6_gateway", "") or "fd00:da7a:2::1",
-                    iface=_find_lan_interface(_default_run, _SYS_NET) or "")
+                    iface=(self._lan_selection.name if self._lan_selection else ""))
                 from quota.ipv6_setup import ensure_box_ignores_ula_dns
                 ensure_box_ignores_ula_dns(
                     prefix=getattr(self.cfg.dhcp, "ipv6_prefix", "") or "fd00:da7a:2::/64",
-                    iface=_find_lan_interface(_default_run, _SYS_NET) or "",
+                    iface=(self._lan_selection.name if self._lan_selection else ""),
                     fallback_dns=list(getattr(self.cfg.dhcp, "dns_servers", []) or []))
                 if res["dnsmasq_changed"]:
                     _reload_dnsmasq()
@@ -856,6 +957,164 @@ class Gateway:
                 rollback_if_dnsmasq_down()
             except Exception:  # noqa: BLE001 — never block startup on IPv6 setup
                 log.exception("startup self-heal: IPv6 host config failed")
+
+    def _persist_lan_interface(self, interface: str) -> None:
+        """Persist the resolved NIC while preserving unknown config sections."""
+        import yaml
+
+        assert self.config_path is not None
+        data = yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}
+        data.setdefault("shaping", {})["interface"] = interface
+        data.setdefault("dhcp", {})["interface"] = interface
+        text = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+        mode = self.config_path.stat().st_mode & 0o777
+        fd, name = tempfile.mkstemp(prefix=f".{self.config_path.name}.",
+                                    dir=self.config_path.parent)
+        try:
+            os.fchmod(fd, mode)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(name, self.config_path)
+        finally:
+            try:
+                os.unlink(name)
+            except FileNotFoundError:
+                pass
+
+    async def _reconcile_lan_bindings(self, reason: str = "tick") -> dict[str, object]:
+        """Converge addresses, dnsmasq, config and tc on the same active link."""
+        from quota.lan_interface import LanRequest, LanResolutionError, resolve_lan
+        from quota.dnsmasq_binding import FragmentUpdate, probe_dhcp_binding
+        from quota.startup_health import ensure_network_infrastructure
+
+        now = time.monotonic()
+        if reason == "tick" and now - self._last_lan_reconcile < 60:
+            return dict(self._lan_binding_status)
+        self._last_lan_reconcile = now
+        try:
+            wan_interface = await self.database.get_setting("wan_if", "")
+            self._wan_interface = wan_interface
+            selection = await asyncio.to_thread(
+                resolve_lan,
+                LanRequest(
+                    gateway_ip=self.cfg.dhcp.gateway_ip,
+                    uplink_ip=getattr(self.cfg.dhcp, "uplink_ip", "") or "",
+                    last_applied=getattr(self.cfg.shaping, "interface", "") or "",
+                    wan_interface=wan_interface,
+                ),
+                run=_default_run_command,
+            )
+        except LanResolutionError as exc:
+            self._lan_binding_status.update({
+                "state": "degraded", "active": "", "dhcp_v4": "",
+                "dhcp_v6": "", "reason": str(exc),
+            })
+            if reason == "manual":
+                return dict(self._lan_binding_status)
+            log.warning("LAN interface reconciliation deferred: %s", exc)
+            return dict(self._lan_binding_status)
+
+        async with self._lan_lock:
+            configured = getattr(self.cfg.shaping, "interface", "") or ""
+            dhcp_configured = getattr(self.cfg.dhcp, "interface", "") or ""
+            changed = configured != selection.name
+            if changed:
+                log.warning("LAN interface changed: configured=%s active=%s — "
+                            "rebinding dnsmasq and shaper",
+                            configured or "(unset)", selection.name)
+            self.cfg.shaping.interface = selection.name
+            self.cfg.dhcp.interface = selection.name
+            ipv6_enabled = bool(self.cfg.dhcp.ipv6_enable)
+            ipv6_fragment = None
+            if ipv6_enabled:
+                from quota.ipv6_setup import DNSMASQ_FRAGMENT, dnsmasq_fragment
+                ipv6_fragment = FragmentUpdate(
+                    DNSMASQ_FRAGMENT,
+                    dnsmasq_fragment(
+                        getattr(self.cfg.dhcp, "ipv6_prefix", "")
+                        or "fd00:da7a:2::/64",
+                        getattr(self.cfg.dhcp, "ipv6_gateway", "")
+                        or "fd00:da7a:2::1"))
+            uplink_gateway = ""
+            if getattr(self.cfg.engine, "topology", "lan") != "wan":
+                uplink_gateway = getattr(self.cfg.dhcp, "router_ip", "") or ""
+            healthy = await asyncio.to_thread(
+                ensure_network_infrastructure,
+                gateway_ip=self.cfg.dhcp.gateway_ip,
+                uplink_ip=getattr(self.cfg.dhcp, "uplink_ip", "") or "",
+                lan_cidr=int(getattr(self.cfg.dhcp, "lan_cidr", 24) or 24),
+                client_cidr=ipaddress.IPv4Network(
+                    f"0.0.0.0/{self.cfg.dhcp.subnet}").prefixlen,
+                ipv6_gateway=(getattr(self.cfg.dhcp, "ipv6_gateway", "")
+                              if ipv6_enabled else ""),
+                lan_selection=selection,
+                ipv6_fragment=ipv6_fragment,
+                uplink_gateway=uplink_gateway,
+                wan_interface=wan_interface,
+                expect_ipv6=ipv6_enabled,
+            )
+            if (changed or dhcp_configured != selection.name) \
+                    and self.config_path is not None:
+                try:
+                    await asyncio.to_thread(self._persist_lan_interface,
+                                            selection.name)
+                except Exception:
+                    log.exception("could not persist active LAN interface")
+                    healthy = False
+            if getattr(self.cfg.engine, "topology", "lan") == "wan":
+                try:
+                    from quota.ppp_binding import reconcile_ppp_interface
+                    ppp_ok = await asyncio.to_thread(
+                        reconcile_ppp_interface,
+                        wan_interface=wan_interface or selection.name,
+                        run=_default_run_command)
+                    healthy = ppp_ok and healthy
+                except Exception:
+                    log.exception("could not reconcile the PPPoE interface")
+                    healthy = False
+            if ipv6_enabled:
+                try:
+                    from quota.ipv6_setup import ensure_ipv6_sysctl
+                    sysctl_ok = await asyncio.to_thread(
+                        ensure_ipv6_sysctl, iface=selection.name)
+                    healthy = sysctl_ok and healthy
+                except Exception:
+                    log.exception("could not reconcile IPv6 sysctls for %s",
+                                  selection.name)
+                    healthy = False
+            if self.shaper is not None and getattr(self.shaper, "iface", "") != selection.name:
+                async with self._shaping_lock:
+                    try:
+                        rebound = await asyncio.to_thread(self.shaper.rebind, selection)
+                        healthy = rebound and healthy
+                    except Exception:
+                        log.exception("tc shaper failed to rebind to %s", selection.name)
+                        healthy = False
+            binding = await asyncio.to_thread(
+                probe_dhcp_binding, run=_default_run_command,
+                expect_ipv6=bool(self.cfg.dhcp.ipv6_enable),
+                expected_interface=selection.name,
+            )
+            shaper_iface = getattr(self.shaper, "iface", "") or ""
+            if shaper_iface and shaper_iface != selection.name:
+                log.warning("LAN bindings differ: DHCP=%s shaper=%s",
+                            selection.name, shaper_iface)
+            healthy = healthy and binding.healthy and (
+                not shaper_iface or shaper_iface == selection.name)
+            status = {
+                "state": "healthy" if healthy else "degraded",
+                "configured": configured, "active": selection.name,
+                "dhcp_v4": binding.ipv4_interface,
+                "dhcp_v6": binding.ipv6_interface,
+                "shaper": shaper_iface,
+                "reason": "" if healthy else binding.evidence or
+                "one or more LAN bindings failed verification",
+            }
+            self._lan_selection = selection
+            self._lan_binding_status = status
+            return dict(status)
 
     async def _apply_topology_override(self) -> None:
         """Apply a dashboard WAN-mode toggle (takes effect on the NEXT restart).
@@ -1838,6 +2097,10 @@ class Gateway:
         # 9. Network self-heal: forwarding / NAT / engine table that something
         #    outside the app removed (a package install, an nftables restart).
         try:
+            await self._reconcile_lan_bindings("tick")
+        except Exception:  # noqa: BLE001
+            log.exception("LAN binding reconciliation failed")
+        try:
             fixed = await asyncio.to_thread(self._network_heal, "tick")
             if fixed:
                 await self.database.add_event(
@@ -2670,6 +2933,7 @@ class Gateway:
             "pending": configured if source == "dashboard" else None,
             "ppp0": "n/a", "ppp_ip": "", "ppp_peer": "",
             "public_ip6": "", "ipv6_active": False,
+            "lan_binding": dict(self._lan_binding_status),
         }
         if getattr(self, "ipv6_probe", None) is not None:
             st6 = self.ipv6_probe.get_status()
@@ -2860,6 +3124,7 @@ def main() -> None:
                          vpn_apply=gateway._apply_vpn_now,
                          vpn_status_getter=gateway._vpn_status,
                          wan_renew=gateway._renew_wan_ip,
+                         lan_binding_repair=lambda: gateway._reconcile_lan_bindings("manual"),
                          shaping_state_getter=gateway._shaping_state,
                          stop_new_sync=gateway._apply_stop_new_now,
                          decline_random_sync=gateway._apply_decline_random_now,

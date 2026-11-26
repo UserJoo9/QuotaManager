@@ -19,7 +19,9 @@ async function req(method, path, body) {
   try { data = await res.json(); } catch { /* empty body */ }
   if (!res.ok) {
     const msg = (data && data.detail) || `HTTP ${res.status}`;
-    throw new Error(typeof msg === "string" ? nice(msg) : JSON.stringify(msg));
+    const error = new Error(typeof msg === "string" ? nice(msg) : JSON.stringify(msg));
+    if (data && data.detail !== undefined) error.detail = data.detail;
+    throw error;
   }
   return data;
 }

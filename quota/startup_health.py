@@ -25,6 +25,9 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
+from quota.dnsmasq_binding import DnsmasqPaths, FragmentUpdate, reconcile_dnsmasq
+from quota.lan_interface import LanRequest, LanResolutionError, LanSelection, resolve_lan
+
 log = logging.getLogger("quota.startup_health")
 
 #: argv → (returncode, output).  Mirrors ``quota.nftables.RunCommand``.
@@ -200,41 +203,18 @@ def ensure_nftables_conf() -> bool:
 # ------------------------------------------------------------------
 
 def _find_lan_interface(run: RunCommand,
-                        sysfs_net: Path = _SYS_NET) -> str:
-    """Detect the wired Ethernet NIC carrying the gateway IP.
-
-    Mirrors ``quota.netmgr.TopologyManager.lan_interface()`` but without
-    needing the full config object.  ``run`` and ``sysfs_net`` are
-    injectable so tests never touch the real kernel.
-    """
-    code, out = run(["ip", "-o", "-4", "addr", "show"])
-    if code != 0:
+                        sysfs_net: Path = _SYS_NET,
+                        gateway_ip: str = "192.168.2.1",
+                        uplink_ip: str = "",
+                        wan_interface: str = "") -> str:
+    """Use the shared carrier-aware LAN resolver for legacy call sites."""
+    try:
+        return resolve_lan(LanRequest(gateway_ip, uplink_ip,
+                                      wan_interface=wan_interface),
+                           run=run, sysfs_net=sysfs_net).name
+    except LanResolutionError as exc:
+        log.warning("LAN interface discovery failed: %s", exc)
         return ""
-    # Prefer the kernel's default-route interface if it's an Ethernet NIC.
-    for line in (out or "").splitlines():
-        # line format: "2: eth0    inet 192.168.2.1/24 ..."
-        parts = line.split(":", 1)
-        if len(parts) < 2:
-            continue
-        iface = parts[1].strip().split(" ", 1)[0].strip()
-        if not iface or iface == "lo":
-            continue
-        # Check it's wired (type 1 = Ethernet).
-        type_path = sysfs_net / iface / "type"
-        try:
-            if type_path.read_text(encoding="utf-8").strip() != "1":
-                continue
-        except OSError:
-            continue
-        # Check it has a live link.
-        carrier_path = sysfs_net / iface / "carrier"
-        try:
-            if carrier_path.read_text(encoding="utf-8").strip() != "1":
-                continue
-        except OSError:
-            continue
-        return iface
-    return ""
 
 
 def _current_addrs(run: RunCommand, iface: str) -> dict[str, str]:
@@ -257,6 +237,97 @@ def _has_ipv6_addr(run: RunCommand, iface: str, addr: str) -> bool:
     return code == 0 and f" {addr}/" in (out or "")
 
 
+def _nm_list(value: str) -> list[str]:
+    """Parse NetworkManager's comma-separated address property output."""
+    return [item.strip() for item in value.replace("\n", ",").split(",")
+            if item.strip() and item.strip() != "--"]
+
+
+def _persist_nm_addresses(run: RunCommand, iface: str,
+                          addresses: list[str],
+                          ipv6_addresses: list[str] | None = None,
+                          uplink_gateway: str = "") -> bool:
+    """Persist app-owned addresses in a reusable NetworkManager profile."""
+    ipv6_addresses = ipv6_addresses or []
+    code, state = run(["nmcli", "-g", "RUNNING", "general"])
+    if code != 0 or state.strip().lower() != "running":
+        return True
+    code, out = run(["nmcli", "-g", "GENERAL.CON-UUID", "device", "show", iface])
+    connection_uuid = out.strip() if code == 0 else ""
+    if connection_uuid == "--":
+        connection_uuid = ""
+    if not connection_uuid:
+        code, out = run(["nmcli", "-t", "--escape", "no", "-f",
+                         "UUID,connection.interface-name", "connection", "show"])
+        if code == 0:
+            connection_uuid = next((row.split(":", 1)[0]
+                                    for row in out.splitlines()
+                                    if row.count(":") >= 1
+                                    and row.split(":", 1)[1] == iface), "")
+        if not connection_uuid:
+            connection_uuid = f"quota-gateway-{iface}"
+            command = ["nmcli", "connection", "add", "type", "ethernet",
+                       "con-name", connection_uuid, "ifname", iface,
+                       "ipv4.method", "manual", "ipv4.addresses",
+                       ",".join(addresses), "ipv6.method", "auto"]
+            if uplink_gateway:
+                command += ["ipv4.gateway", uplink_gateway]
+            if ipv6_addresses:
+                command += ["ipv6.addresses", ",".join(ipv6_addresses)]
+            code, out = run(command)
+            if code != 0:
+                log.error("could not create a NetworkManager profile for %s: %s",
+                          iface, out.strip())
+                return False
+            code, out = run(["nmcli", "-g", "connection.uuid", "connection",
+                             "show", connection_uuid])
+            if code != 0 or not out.strip():
+                log.error("could not read the new NetworkManager profile UUID for %s",
+                          iface)
+                return False
+            connection_uuid = out.strip()
+
+    code, current_v4 = run(["nmcli", "-g", "ipv4.addresses", "connection",
+                            "show", "uuid", connection_uuid])
+    code6, current_v6 = run(["nmcli", "-g", "ipv6.addresses", "connection",
+                             "show", "uuid", connection_uuid])
+    if code != 0 or code6 != 0:
+        log.error("could not read NetworkManager addresses for %s: %s",
+                  iface, (current_v4 or current_v6).strip())
+        return False
+    desired_v4 = list(dict.fromkeys(_nm_list(current_v4) + addresses))
+    desired_v6 = list(dict.fromkeys(_nm_list(current_v6) + ipv6_addresses))
+    command = ["nmcli", "connection", "modify", "uuid", connection_uuid,
+               "ipv4.method", "manual", "ipv4.addresses", ",".join(desired_v4),
+               "ipv6.method", "auto"]
+    if uplink_gateway:
+        command += ["ipv4.gateway", uplink_gateway]
+    if desired_v6:
+        command += ["ipv6.addresses", ",".join(desired_v6)]
+    code, out = run(command)
+    if code != 0:
+        log.error("could not persist LAN addresses on %s: %s", iface, out.strip())
+        return False
+
+    # A device with no active profile needs a connection activation; an active
+    # device can reapply the updated profile without tearing down its link.
+    code, active_uuid = run(["nmcli", "-g", "GENERAL.CON-UUID", "device",
+                             "show", iface])
+    active_uuid = active_uuid.strip() if code == 0 else ""
+    if active_uuid == "--":
+        active_uuid = ""
+    if active_uuid == connection_uuid:
+        code, out = run(["nmcli", "device", "reapply", iface])
+    else:
+        code, out = run(["nmcli", "connection", "up", "uuid", connection_uuid,
+                         "ifname", iface])
+    if code != 0:
+        log.warning("NetworkManager could not activate the LAN profile on %s: %s",
+                    iface, out.strip())
+        return False
+    return True
+
+
 def ensure_network_infrastructure(
     *,
     ipv6_gateway: str = "",
@@ -266,6 +337,14 @@ def ensure_network_infrastructure(
     run: RunCommand | None = None,
     proc_ipforward: Path | None = None,
     sysfs_net: Path | None = None,
+    lan_selection: LanSelection | None = None,
+    client_cidr: int = 24,
+    dnsmasq_run: RunCommand | None = None,
+    dnsmasq_paths: DnsmasqPaths | None = None,
+    ipv6_fragment: FragmentUpdate | None = None,
+    uplink_gateway: str = "",
+    wan_interface: str = "",
+    expect_ipv6: bool = False,
 ) -> bool:
     """Verify critical network settings survive reboots / NM reconnections.
 
@@ -299,18 +378,29 @@ def ensure_network_infrastructure(
         pass  # non-Linux or container — skip silently
 
     # -- NIC addresses ----------------------------------------------
-    iface = _find_lan_interface(run, net_root)
+    iface = (lan_selection.name if lan_selection is not None
+             else _find_lan_interface(run, net_root, gateway_ip, uplink_ip,
+                                      wan_interface))
     if not iface:
         log.debug("ensure_network_infrastructure: no wired LAN interface found — "
                   "skipping address check")
         return ok and ensure_nftables_conf()
+
+    if lan_selection is not None:
+        persistent = [f"{gateway_ip}/{client_cidr}"] if gateway_ip else []
+        if uplink_ip:
+            persistent.append(f"{uplink_ip}/{lan_cidr}")
+        persistent_v6 = [f"{ipv6_gateway}/64"] if ipv6_gateway else []
+        if not _persist_nm_addresses(run, iface, persistent, persistent_v6,
+                                     uplink_gateway):
+            ok = False
 
     addrs = _current_addrs(run, iface)
     needed: dict[str, str] = {}
 
     # Client gateway IP (always required).
     if gateway_ip:
-        gw_cidr = f"{gateway_ip}/24"  # subnet from the CIDR, not from config
+        gw_cidr = f"{gateway_ip}/{client_cidr}"
         if gw_cidr not in addrs:
             # Also try matching by prefix (the /24 might differ).
             matched = any(a.startswith(gateway_ip + "/") for a in addrs)
@@ -337,7 +427,7 @@ def ensure_network_infrastructure(
             ok = False
         else:
             log.info("ensure_network_infrastructure: added %s to %s", cidr, iface)
-            if ip == gateway_ip:
+            if ip == gateway_ip and lan_selection is None:
                 # dnsmasq runs with bind-interfaces: it only listens on addresses
                 # that existed when it started. If it started before this address
                 # was (re)added, DNS/DHCP on the gateway IP stay dead until a
@@ -359,6 +449,22 @@ def ensure_network_infrastructure(
         if code != 0 and "File exists" not in out and "already exists" not in out:
             log.error("ensure_network_infrastructure: ip -6 addr add %s dev %s failed: %s",
                       ipv6_gateway, iface, out.strip())
+            ok = False
+
+    if lan_selection is not None:
+        try:
+            reconcile_dnsmasq(
+                lan_selection, replacement=None, ipv6_fragment=ipv6_fragment,
+                # dnsmasq's RA/DHCPv6 fragment is staged with the interface
+                # update so the effective configuration is tested together.
+                expect_ipv6=expect_ipv6, force_restart=False,
+                paths=dnsmasq_paths or DnsmasqPaths(
+                    Path("/etc/dnsmasq.d/quota-gateway.conf"),
+                    Path("/etc/dnsmasq.d"), Path("/var/backups/netrex")),
+                run=dnsmasq_run or run,
+            )
+        except Exception as exc:  # noqa: BLE001 — report degraded DHCP, keep app alive
+            log.error("dnsmasq LAN binding reconciliation failed: %s", exc)
             ok = False
 
     # -- nftables.conf symlink --------------------------------------
