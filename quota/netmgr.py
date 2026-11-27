@@ -43,6 +43,7 @@ import yaml
 
 from core import config as cfg_mod
 from quota import db as _db
+from quota.lan_interface import LanRequest, LanSelection, resolve_lan
 
 log = logging.getLogger("quota.netmgr")
 
@@ -69,6 +70,16 @@ def _mask_to_cidr(mask: str) -> int:
         return int(ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen)
     except (ValueError, ipaddress.AddressValueError):
         return DEFAULT_LAN_CIDR
+
+
+def _merge_config(existing: object, updates: object) -> object:
+    """Deep-merge generated values over YAML so extension keys survive apply."""
+    if isinstance(existing, dict) and isinstance(updates, dict):
+        merged = dict(existing)
+        for key, value in updates.items():
+            merged[key] = _merge_config(merged.get(key), value)
+        return merged
+    return updates
 
 
 def _net_of(ip: str, cidr: int) -> str:
@@ -145,6 +156,8 @@ class TopologyManager:
                                        tuple[int, str]]] = None,
         spawn_restart: Optional[Callable[[], None]] = None,
         addr_cmd: Optional[Callable[[], str]] = None,
+        lan_resolver: Callable[[LanRequest], LanSelection] | None = None,
+        apply_lock: asyncio.Lock | None = None,
     ) -> None:
         self.cfg = cfg
         self.database = database
@@ -154,8 +167,12 @@ class TopologyManager:
             for sh_file in self.script_path.parent.glob("*.sh"):
                 _normalize_script_crlf(sh_file)
         self.run_command = run_command or self._default_run_command
+        self._has_injected_runner = run_command is not None
         self.spawn_restart = spawn_restart or self._default_spawn_restart
         self.addr_cmd = addr_cmd or self._default_addr_cmd
+        self._has_injected_addr = addr_cmd is not None
+        self.lan_resolver = lan_resolver
+        self._apply_lock = apply_lock or asyncio.Lock()
 
     # ------------------------------------------------------------------ env
 
@@ -185,22 +202,45 @@ class TopologyManager:
 
     # ------------------------------------------------------------- discovery
 
-    def lan_interface(self) -> str:
-        """The client-facing NIC: the ``shaping.interface`` the setup script
-        wrote, else the NIC carrying the client gateway IP.
+    def lan_interface(self, wan_interface: str = "") -> str:
+        """Return the shared resolver's carrier-verified client interface."""
+        try:
+            return self.resolve_lan(wan_interface).name
+        except Exception:
+            if self._has_injected_addr:
+                return ""
+            raise
 
-        The ``ip -o -4 addr show`` line format is ``2: eth0    inet
-        192.168.2.1/24 brd ... scope global eth0`` — the interface NAME is the
-        token after ``:``, NOT the index before it (the old ``split(":", 1)[0]``
-        returned the index ``2``, which is meaningless to the applier)."""
-        iface = getattr(self.cfg.shaping, "interface", "") or ""
-        if iface:
-            return iface
-        text = self.addr_cmd()
-        for line in text.splitlines():
-            if f"inet {self.cfg.dhcp.gateway_ip}/" in line:
-                return line.split(":", 1)[1].strip().split(" ", 1)[0].strip()
-        return ""
+    def resolve_lan(self, wan_interface: str = "") -> LanSelection:
+        request = LanRequest(
+            gateway_ip=self.cfg.dhcp.gateway_ip,
+            uplink_ip=getattr(self.cfg.dhcp, "uplink_ip", "") or "",
+            last_applied=getattr(self.cfg.shaping, "interface", "") or "",
+            wan_interface=wan_interface or getattr(self.cfg, "wan_interface", "") or "",
+        )
+        if self.lan_resolver is not None:
+            return self.lan_resolver(request)
+        if self._has_injected_runner or self._has_injected_addr:
+            # Existing unit tests inject an applier/addr output and never have
+            # a Linux sysfs tree. Runtime instances use the shared resolver.
+            iface = request.last_applied
+            if not iface:
+                for line in self.addr_cmd().splitlines():
+                    if f"inet {request.gateway_ip}/" in line:
+                        iface = line.split(":", 1)[1].strip().split()[0]
+                        break
+            if iface:
+                return LanSelection(iface, 1, "injected-test-interface")
+            raise RuntimeError("no injected LAN interface contains the gateway")
+        def run(argv: list[str]) -> tuple[int, str]:
+            try:
+                proc = subprocess.run(argv, capture_output=True, text=True,
+                                      timeout=5)
+                return proc.returncode, (proc.stdout or proc.stderr or "")
+            except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+                return 127, str(exc)
+
+        return resolve_lan(request, run=run)
 
     def upstream_dns(self) -> str:
         """The public resolver the box forwards to when it terminates the WAN
@@ -346,6 +386,11 @@ class TopologyManager:
         # default_flow_style=None keeps scalar lists inline (`[a, b]`) — the
         # same shape the setup script's heredoc writes — while nested mappings
         # stay block style.
+        existing: object = {}
+        old_text = self._read_config()
+        if old_text:
+            existing = yaml.safe_load(old_text) or {}
+        data = _merge_config(existing, data)
         return yaml.safe_dump(data, sort_keys=False, default_flow_style=None)
 
     def _write_config(self, text: str) -> None:
@@ -359,19 +404,25 @@ class TopologyManager:
 
     def applier_env(self, topology: str, lan: dict[str, object],
                     pppoe_user: str = "", pppoe_password: str = "",
-                    wan_if: str = "") -> dict[str, str]:
+                    wan_if: str = "",
+                    selection: LanSelection | None = None) -> dict[str, str]:
         """Build the environment the runtime applier expects (see topology.sh)."""
         cfg = self.cfg
         dhcp = cfg.dhcp
         cidr = int(lan["lan_cidr"])
+        selection = selection or self.resolve_lan()
         return {
             "TOPO": topology,
-            "LAN_IF": self.lan_interface(),
+            "LAN_IF": selection.name,
+            "LAN_IFINDEX": str(selection.ifindex),
             "LAN_IP": str(lan["uplink_ip"]),
             "LAN_CIDR": str(cidr),
             "SUBNET_MASK": dhcp.subnet,
             "CLIENT_IP": dhcp.gateway_ip,
             "CLIENT_NET": cfg.engine.client_subnet,
+            "CLIENT_CIDR": str(ipaddress.IPv4Network(
+                f"0.0.0.0/{dhcp.subnet}").prefixlen),
+            "IPV6_ENABLE": "1" if bool(getattr(dhcp, "ipv6_enable", False)) else "0",
             "WAN_GATEWAY": str(lan["router_ip"]),
             "UPSTREAM_DNS": self.upstream_dns(),
             "POOL_START": dhcp.pool_start,
@@ -455,6 +506,13 @@ class TopologyManager:
 
     async def apply(self, topology: str, pppoe_user: str = "",
                     pppoe_password: str = "", wan_if: str = "") -> dict[str, object]:
+        async with self._apply_lock:
+            return await self._apply_locked(topology, pppoe_user,
+                                            pppoe_password, wan_if)
+
+    async def _apply_locked(self, topology: str, pppoe_user: str = "",
+                            pppoe_password: str = "",
+                            wan_if: str = "") -> dict[str, object]:
         """Apply ``topology`` ("lan" | "wan") and schedule a detached restart.
 
         Returns a summary dict for the API. Raises :class:`RuntimeError` when a
@@ -475,9 +533,20 @@ class TopologyManager:
                         "dial with 'noauth', which most ISP lines reject")
 
         # Invariant 2: snapshot the LAN reality BEFORE the active keys flip.
-        lan = self.lan_values()
-        text = self.render_config(topology, lan)
-        env = self.applier_env(topology, lan, pppoe_user, pppoe_password, wan_if)
+        selection = self.resolve_lan(wan_if)
+        old_interface = self.cfg.shaping.interface
+        old_dhcp_interface = self.cfg.dhcp.interface
+        self.cfg.shaping.interface = selection.name
+        self.cfg.dhcp.interface = selection.name
+        try:
+            lan = self.lan_values()
+            text = self.render_config(topology, lan)
+            env = self.applier_env(topology, lan, pppoe_user, pppoe_password,
+                                   wan_if, selection)
+        except Exception:
+            self.cfg.shaping.interface = old_interface
+            self.cfg.dhcp.interface = old_dhcp_interface
+            raise
 
         # Capture the pre-apply persisted state so a failed applier can restore
         # it (the revert bug — booting into a topology the NIC never got).
@@ -488,9 +557,16 @@ class TopologyManager:
 
         # Invariant 1: config.yaml and the DB are written together, in the same
         # apply, so the next boot cannot pick one and ignore the other.
-        self._write_config(text)
-        await self.database.set_setting("topology_source", "dashboard")
-        await self.database.set_setting("topology", topology)
+        try:
+            self._write_config(text)
+            await self.database.set_setting("topology_source", "dashboard")
+            await self.database.set_setting("topology", topology)
+        except Exception:
+            await self._rollback_apply(old_existed, old_config, old_source,
+                                       old_topology)
+            self.cfg.shaping.interface = old_interface
+            self.cfg.dhcp.interface = old_dhcp_interface
+            raise
         # Remember the PPPoE credentials (user/password + the optional second
         # NIC) so the WAN tab can prefill them next time instead of asking the
         # admin to retype them. Plaintext in the root-only DB — the same exposure
@@ -515,6 +591,8 @@ class TopologyManager:
             # config + DB settings, then surface the applier's output.
             await self._rollback_apply(old_existed, old_config, old_source,
                                        old_topology)
+            self.cfg.shaping.interface = old_interface
+            self.cfg.dhcp.interface = old_dhcp_interface
             raise RuntimeError(
                 f"topology applier failed (exit {rc}); previous config restored "
                 f"so no restart was scheduled:\n{out.strip() or 'no output'}")

@@ -8,6 +8,9 @@ match it. Release notes are composed from a version's section below.)_
 
 ## [Unreleased]
 
+Fixed:
+- Moving the cable to a different gateway network card could stop new devices from getting an address, even while DNS and internet still seemed to work. The gateway now detects the active card and reconnects DHCP and speed limits to it automatically, including after a restart, so devices can join and renew without manual network-file edits.
+
 ## [0.6.0] — 2026-11-27
 
 Added:

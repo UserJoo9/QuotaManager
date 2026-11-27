@@ -62,6 +62,24 @@ def test_second_run_is_a_no_op(tmp_path):
     assert run.calls == []
 
 
+def test_migrates_interface_specific_legacy_sysctls(tmp_path):
+    legacy = tmp_path / "99-quota-gateway.conf"
+    legacy.write_text(
+        "net.ipv6.conf.all.disable_ipv6 = 0\n"
+        "net.ipv6.conf.eno1.disable_ipv6 = 0\n"
+        "net.ipv6.conf.eno1.accept_ra = 2\n")
+    sysc = tmp_path / "99-zz.conf"
+    run = FakeRun()
+    result = ensure_ipv6_host_config(
+        prefix=PREFIX, gateway=GW, iface="enp10s0f1", run=run,
+        dnsmasq_path=tmp_path / "d.conf", sysctl_path=sysc,
+        legacy_sysctl_path=legacy, proc_root=_proc(tmp_path))
+    assert result["sysctl_applied"] is True
+    assert "eno1" not in legacy.read_text()
+    assert "all.disable_ipv6 = 0" in legacy.read_text()
+    assert "enp10s0f1.accept_ra = 2" in sysc.read_text()
+
+
 def test_live_disabled_ipv6_is_re_enabled_even_if_files_exist(tmp_path):
     """An old install: files are fine but the kernel still has IPv6 off (the
     old setup script's disable_ipv6=1 won at boot)."""

@@ -145,9 +145,38 @@ def make_net(*ifaces: tuple[str, str, str]) -> Path:
         d = root / name
         d.mkdir()
         (d / "type").write_text(link_type, encoding="utf-8")
+        (d / "ifindex").write_text(str(len(list(root.iterdir()))),
+                                    encoding="utf-8")
+        (d / "operstate").write_text("up" if carrier == "1" else "down",
+                                     encoding="utf-8")
         if carrier:
             (d / "carrier").write_text(carrier, encoding="utf-8")
+        if link_type == "1" and name != "lo":
+            (d / "device").mkdir()
     return root
+
+
+class FakeDnsmasqBinding:
+    def __init__(self, root: Path) -> None:
+        self.conf_dir = root / "dnsmasq.d"
+        self.conf_dir.mkdir()
+        self.target = self.conf_dir / "quota-gateway.conf"
+        self.target.write_text("interface=eno1\n")
+        self.backups = root / "backups"
+        self.calls: list[list[str]] = []
+
+    def run(self, argv: list[str]) -> tuple[int, str]:
+        self.calls.append(argv)
+        if argv == ["dnsmasq", "--test"]:
+            return 0, ""
+        if argv == ["systemctl", "restart", "dnsmasq"]:
+            return 0, ""
+        if argv == ["systemctl", "is-active", "--quiet", "dnsmasq"]:
+            return 0, "active"
+        if argv == ["ss", "-H", "-lunp"]:
+            return (0, 'UNCONN 0 0 0.0.0.0%eth0:67 0.0.0.0:* users:(("dnsmasq"))\n'
+                       'UNCONN 0 0 [::]%eth0:547 [::]:* users:(("dnsmasq"))\n')
+        return 0, ""
 
 
 ADDR_SHOW = ("ip", "-o", "-4", "addr", "show")
@@ -242,6 +271,84 @@ class TestEnsureNetworkInfrastructure:
         )
         assert ok is True
         assert fake.adds() == []
+
+    def test_reconciles_dnsmasq_when_gateway_address_already_exists(self, tmp_path: Path) -> None:
+        from quota.dnsmasq_binding import DnsmasqPaths
+        from quota.lan_interface import LanSelection
+
+        out = ("2: eth0 inet 192.168.1.110/24 scope global eth0\n"
+               "2: eth0 inet 192.168.2.1/24 scope global eth0\n")
+        fake = FakeIp({ADDR_SHOW: (0, out), ADDR_SHOW_DEV: (0, out)})
+        dns = FakeDnsmasqBinding(tmp_path)
+        result = ensure_network_infrastructure(
+            gateway_ip="192.168.2.1", uplink_ip="192.168.1.110", lan_cidr=24,
+            run=fake, dnsmasq_run=dns.run,
+            dnsmasq_paths=DnsmasqPaths(dns.target, dns.conf_dir, dns.backups),
+            lan_selection=LanSelection("eth0", 2, "networkmanager"),
+            expect_ipv6=True, proc_ipforward=_fwd_on(tmp_path),
+            sysfs_net=make_net(("eth0", "1", "1")),
+        )
+        assert result is True
+        assert "interface=eth0" in dns.target.read_text()
+        assert ["systemctl", "restart", "dnsmasq"] in dns.calls
+
+    def test_nm_persists_both_ipv4_and_ula_addresses(self):
+        from quota.startup_health import _persist_nm_addresses
+        calls = []
+
+        def nm(argv):
+            calls.append(argv)
+            if argv == ["nmcli", "-g", "RUNNING", "general"]:
+                return 0, "running\n"
+            if argv == ["nmcli", "-g", "GENERAL.CON-UUID", "device", "show", "enp2s0"]:
+                return 0, "active-uuid\n"
+            if argv == ["nmcli", "-g", "ipv4.addresses", "connection", "show", "uuid", "active-uuid"]:
+                return 0, "192.168.1.110/24\n"
+            if argv == ["nmcli", "-g", "ipv6.addresses", "connection", "show", "uuid", "active-uuid"]:
+                return 0, "\n"
+            return 0, ""
+
+        assert _persist_nm_addresses(
+            nm, "enp2s0", ["192.168.2.1/24", "192.168.1.110/24"],
+            ["fd00:da7a:2::1/64"], "192.168.1.1")
+        change = next(c for c in calls if c[:3] == ["nmcli", "connection", "modify"])
+        assert change[change.index("ipv4.addresses") + 1] == \
+            "192.168.1.110/24,192.168.2.1/24"
+        assert change[change.index("ipv6.addresses") + 1] == "fd00:da7a:2::1/64"
+        assert change[change.index("ipv4.gateway") + 1] == "192.168.1.1"
+        assert ["nmcli", "device", "reapply", "enp2s0"] in calls
+
+    def test_nm_creates_profile_when_new_nic_has_no_active_profile(self):
+        from quota.startup_health import _persist_nm_addresses
+        calls = []
+
+        def nm(argv):
+            calls.append(argv)
+            if argv == ["nmcli", "-g", "RUNNING", "general"]:
+                return 0, "running\n"
+            if argv == ["nmcli", "-g", "GENERAL.CON-UUID", "device", "show", "enx001122334455"]:
+                return 0, "\n"
+            if argv[:5] == ["nmcli", "-t", "--escape", "no", "-f"]:
+                return 0, ""
+            if argv[:3] == ["nmcli", "connection", "add"]:
+                return 0, "added\n"
+            if argv == ["nmcli", "-g", "connection.uuid", "connection", "show",
+                        "quota-gateway-enx001122334455"]:
+                return 0, "new-uuid\n"
+            if argv[:3] == ["nmcli", "-g", "ipv4.addresses", "connection"]:
+                return 0, "\n"
+            if argv[:3] == ["nmcli", "-g", "ipv6.addresses", "connection"]:
+                return 0, "\n"
+            return 0, ""
+
+        assert _persist_nm_addresses(
+            nm, "enx001122334455", ["192.168.2.1/24", "192.168.1.110/24"],
+            ["fd00:da7a:2::1/64"], "192.168.1.1")
+        create = next(c for c in calls if c[:3] == ["nmcli", "connection", "add"])
+        assert "enx001122334455" in create
+        assert "192.168.1.1" in create
+        assert ["nmcli", "connection", "up", "uuid", "new-uuid",
+                "ifname", "enx001122334455"] in calls
 
     def test_addr_add_failure_returns_false(self, tmp_path: Path) -> None:
         """A failed address add (no root) is reported via False, never raised."""

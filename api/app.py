@@ -300,6 +300,7 @@ def create_app(
     now_provider: Optional[Callable[[], _dt.datetime]] = None,
     log_path: str | Path | None = None,
     topology_manager: object | None = None,
+    lan_binding_repair: Optional[Callable[[], object]] = None,
     shaping_sync: Optional[Callable[[], object]] = None,
     report_config: object | None = None,
     dns_apply: Optional[Callable[[], object]] = None,
@@ -1762,6 +1763,8 @@ def create_app(
         a password is only ever served to this explicit GET.
         """
         status = dict((await _dashboard_payload()).get("wan") or {})
+        if status.get("lan_binding") is None:
+            status["lan_binding"] = {"state": "unknown", "reason": "not reported"}
         status["pppoe_user"] = await database.get_setting("pppoe_user", "")
         status["pppoe_has_password"] = bool(
             await database.get_setting("pppoe_password", ""))
@@ -1773,6 +1776,27 @@ def create_app(
         status["pppoe_password"] = "********"
         status["wan_if"] = await database.get_setting("wan_if", "")
         return status
+
+    @app.post("/api/wan/repair-lan", dependencies=[Depends(_require_auth)])
+    async def repair_lan_bindings() -> dict[str, Any]:
+        if lan_binding_repair is None:
+            raise HTTPException(503, "LAN binding repair is unavailable")
+        try:
+            result = lan_binding_repair()
+            if hasattr(result, "__await__"):
+                result = await result
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 — return an actionable repair failure
+            log.exception("manual LAN binding repair failed")
+            raise HTTPException(500, f"LAN binding repair failed: {exc}") from exc
+        if isinstance(result, dict) and result.get("state") != "healthy":
+            code = 409 if not result.get("active") else 503
+            raise HTTPException(code, detail={
+                "message": result.get("reason") or "LAN binding repair is incomplete",
+                "lan_binding": result,
+            })
+        return {"lan_binding": result}
 
     @app.post("/api/wan", dependencies=[Depends(_require_auth)])
     async def set_wan(body: WanUpdate) -> dict[str, Any]:

@@ -6,7 +6,7 @@ import { api } from "../core/api.js";
 import { sw, chip } from "../components/ui.js";
 import { toast } from "../components/toast.js";
 
-const s = { loaded: false, loading: false, failAt: 0, on: null, dirty: false, user: "", pass: "", wanIf: "", hasPass: false, msg: null, testing: false, applying: false, armed: "", autoRan: false, note: "" };
+const s = { loaded: false, loading: false, failAt: 0, on: null, dirty: false, user: "", pass: "", wanIf: "", hasPass: false, msg: null, testing: false, applying: false, armed: "", autoRan: false, note: "", binding: null, bindingTimer: 0, repairing: false, repairError: "" };
 let armTimer = 0;
 
 async function load(ctx) {
@@ -20,6 +20,22 @@ async function load(ctx) {
 }
 const field = (label, control, hint) => h("div", { class: "field" }, h("label", {}, label), control, hint ? h("span", { class: "sub" }, hint) : null);
 function arm(ctx, which) { s.armed = which; clearTimeout(armTimer); armTimer = setTimeout(() => { s.armed = ""; ctx.touch(); }, 8000); ctx.touch(); }
+
+async function repairLan(ctx) {
+  if (s.repairing) return;
+  s.repairing = true; s.repairError = ""; ctx.touch();
+  try {
+    const result = await api.post("/api/wan/repair-lan");
+    s.binding = result.lan_binding || null;
+    clearTimeout(s.bindingTimer);
+    s.bindingTimer = setTimeout(() => { s.binding = null; ctx.touch(); }, 65000);
+    toast(t("wan.lan.repair.ok"));
+    await ctx.refresh();
+  } catch (e) {
+    if (e.detail?.lan_binding) s.binding = e.detail.lan_binding;
+    s.repairError = e.detail?.message || e.message || t("wan.lan.repair.fail");
+  } finally { s.repairing = false; ctx.touch(); }
+}
 
 function verdict(r) {
   if (r && r.ok) return { ok: true, text: `${t("wan.t.ok")}${r.local_ip ? `  ${iso(r.local_ip)} ↔ ${iso(r.peer_ip)}` : ""}  ${t("wan.t.net")}: ${r.internet ? t("wan.yes") : t("wan.no")}${r.internet ? "" : "\n" + (r.detail || "")}` };
@@ -35,6 +51,12 @@ export default function wanCard(ctx) {
   const desired = (w.configured || w.topology) === "wan", live = w.topology === "wan", linkUp = (w.ppp0 || "") === "up", on = s.on;
   const pending = w.pending && w.pending !== w.topology;
   const dirty = s.dirty;
+  const binding = s.binding || w.lan_binding || { state: "unknown" };
+  const bindingMismatch = !!binding.active && (
+    (binding.dhcp_v4 && binding.dhcp_v4 !== binding.active) ||
+    (binding.dhcp_v6 && binding.dhcp_v6 !== binding.active) ||
+    (binding.shaper && binding.shaper !== binding.active));
+  const bindingBad = binding.state === "degraded" || bindingMismatch;
 
   const runTest = async (auto) => {
     if (s.testing) return; s.testing = true; s.msg = { text: t(auto ? "wan.t.auto" : "wan.t.run") }; ctx.touch();
@@ -69,6 +91,22 @@ export default function wanCard(ctx) {
       h("div", {}, h("span", { class: "k" }, t("wan.k.source")), h("span", { class: "v" }, w.source === "dashboard" ? "dashboard" : "config.yaml")),
       h("div", {}, h("span", { class: "k" }, t("wan.k.ip")), h("span", { class: "v mono" }, w.ppp_ip ? iso(w.ppp_ip) : "—")),
       h("div", {}, h("span", { class: "k" }, "IPv6"), h("span", { class: "v mono" }, w.public_ip6 ? iso(w.public_ip6) : t("wan.k.v6none")))),
+    h("hr", { class: "sep" }),
+    h("div", { class: "h-with", style: { "justify-content": "space-between", "align-items": "center" } },
+      h("h4", {}, t("wan.lan.title")),
+      chip(bindingBad ? "danger" : binding.state === "healthy" ? "ok" : "", t(`wan.lan.${binding.state || "unknown"}`))),
+    h("div", { class: "kv", style: { margin: "8px 0" } },
+      h("div", {}, h("span", { class: "k" }, t("wan.lan.active")), h("span", { class: "v mono" }, binding.active || "—")),
+      h("div", {}, h("span", { class: "k" }, t("wan.lan.dhcp4")), h("span", { class: "v mono" }, binding.dhcp_v4 || "—")),
+      h("div", {}, h("span", { class: "k" }, t("wan.lan.dhcp6")), h("span", { class: "v mono" }, binding.dhcp_v6 || "—")),
+      h("div", {}, h("span", { class: "k" }, t("wan.lan.shaper")), h("span", { class: "v mono" }, binding.shaper || "—"))),
+    bindingBad ? h("p", { class: "banner warn", role: "alert" },
+      bindingMismatch ? t("wan.lan.mismatch") : t("wan.lan.degraded.message")) : null,
+    s.repairError ? h("p", { class: "banner warn", role: "alert" }, s.repairError) : null,
+    h("div", { class: "fa" }, h("button", { type: "button", class: "btn ghost sm",
+      disabled: s.repairing, "aria-busy": String(s.repairing),
+      onclick: () => repairLan(ctx) }, s.repairing ? t("wan.lan.repair.running")
+        : t("wan.lan.repair.button"))),
     h("div", { class: "row-sw", style: { padding: "10px 0" } }, h("div", {}, h("b", {}, t("wan.mode")), h("span", {}, t("wan.mode.d"))),
       sw(on, t("wan.mode"), () => { s.on = !s.on; s.dirty = true; s.armed = ""; ctx.touch(); })),
     on ? h("div", { style: { display: "flex", "flex-direction": "column", gap: "12px", "margin-top": "6px" } },

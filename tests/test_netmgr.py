@@ -20,6 +20,7 @@ import yaml
 
 from core import config as cfg_mod
 from quota import db as _db
+from quota.lan_interface import LanSelection
 from quota.netmgr import (
     DEFAULT_LAN_CIDR,
     DEFAULT_LAN_DNS,
@@ -256,11 +257,13 @@ def test_applier_env_creds_go_through_env_not_argv():
         manager = TopologyManager(cfg, _db.Database(cfg.db_path))
         lan = manager.lan_values()
         env = manager.applier_env("wan", lan, pppoe_user="u@isp",
-                                  pppoe_password="s3cret", wan_if="eth1")
+                                  pppoe_password="s3cret", wan_if="eth1",
+                                  selection=LanSelection("eth0", 2, "test"))
         assert env["TOPO"] == "wan"
         assert env["PPPOE_USER"] == "u@isp"
         assert env["PPPOE_PASSWORD"] == "s3cret"
         assert env["WAN_IF"] == "eth1"
+        assert env["IPV6_ENABLE"] == ("1" if cfg.dhcp.ipv6_enable else "0")
         assert env["LAN_IF"] == "eth0"  # from the shaping.interface key
         assert env["CLIENT_NET"] == CLIENT_NET
         assert env["WAN_GATEWAY"] == ROUTER
@@ -532,6 +535,21 @@ def test_render_config_preserves_full_config():
         assert data["log_level"] == "DEBUG"
         assert data["dhcp"]["interface"] == "eth0"
         assert data["engine"]["count_direction"] == "both"
+
+
+def test_render_config_preserves_unknown_yaml_keys(tmp_path):
+    """Topology writes keep extensions added by an installer or operator."""
+    cfg = _cfg(tmp_path)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "vendor_extension:\n  enabled: true\n"
+        "dhcp:\n  custom_option: preserve-me\n"
+        "shaping:\n  custom_rate_unit: decimal\n")
+    manager = TopologyManager(cfg, _db.Database(cfg.db_path), config_path=config_path)
+    data = yaml.safe_load(manager.render_config("wan", manager.lan_values()))
+    assert data["vendor_extension"] == {"enabled": True}
+    assert data["dhcp"]["custom_option"] == "preserve-me"
+    assert data["shaping"]["custom_rate_unit"] == "decimal"
 
 
 def test_lan_interface_parses_name_not_index():

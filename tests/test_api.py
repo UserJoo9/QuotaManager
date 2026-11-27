@@ -1155,8 +1155,74 @@ def test_wan_endpoint_defaults(client):
     r = c.get("/api/wan")
     assert r.status_code == 200
     assert r.json() == {"pppoe_user": "", "pppoe_password": "********",
-                        "pppoe_has_password": False, "wan_if": ""}
+                        "pppoe_has_password": False, "wan_if": "",
+                        "lan_binding": {"state": "unknown", "reason": "not reported"}}
     assert c.get("/api/dashboard").json()["wan"] == {}
+
+
+def test_repair_lan_bindings_requires_auth_and_returns_live_state(tmp_path):
+    database = _db.Database(tmp_path / "lan-repair.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    _get_loop().run_until_complete(database.connect())
+
+    async def repair():
+        return {"state": "healthy", "active": "enp10s0f1",
+                "dhcp_v4": "enp10s0f1", "dhcp_v6": "enp10s0f1",
+                "shaper": "enp10s0f1", "reason": ""}
+
+    app = create_app(database, service, holder, lan_binding_repair=repair)
+    with TestClient(app) as client:
+        assert client.post("/api/wan/repair-lan").status_code == 401
+        _login(client)
+        response = client.post("/api/wan/repair-lan")
+        assert response.status_code == 200
+        assert response.json()["lan_binding"]["active"] == "enp10s0f1"
+    _get_loop().run_until_complete(database.close())
+
+
+def test_repair_lan_bindings_reports_unavailable_workflow(client):
+    c, _, _ = client
+    _login(c)
+    assert c.post("/api/wan/repair-lan").status_code == 503
+
+
+def test_repair_lan_bindings_returns_verified_state_when_incomplete(tmp_path):
+    database = _db.Database(tmp_path / "lan-repair-incomplete.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    _get_loop().run_until_complete(database.connect())
+    observed = {"state": "degraded", "configured": "eno1",
+                "active": "enp10s0f1", "dhcp_v4": "eno1",
+                "dhcp_v6": "", "shaper": "enp10s0f1",
+                "reason": "dnsmasq DHCPv4 socket is still on eno1"}
+    app = create_app(database, service, holder,
+                     lan_binding_repair=lambda: observed)
+    with TestClient(app) as client:
+        _login(client)
+        response = client.post("/api/wan/repair-lan")
+        assert response.status_code == 503
+        assert response.json()["detail"]["lan_binding"] == observed
+        assert response.json()["detail"]["message"] == observed["reason"]
+    _get_loop().run_until_complete(database.close())
+
+
+def test_repair_lan_bindings_reports_ambiguous_selection_as_conflict(tmp_path):
+    database = _db.Database(tmp_path / "lan-repair-ambiguous.db")
+    service = QuotaService(database, timezone="Africa/Cairo")
+    holder = SnapshotHolder()
+    _get_loop().run_until_complete(database.connect())
+    observed = {"state": "degraded", "configured": "eno1", "active": "",
+                "dhcp_v4": "", "dhcp_v6": "", "shaper": "eno1",
+                "reason": "Multiple active wired links remain; select the LAN link."}
+    app = create_app(database, service, holder,
+                     lan_binding_repair=lambda: observed)
+    with TestClient(app) as client:
+        _login(client)
+        response = client.post("/api/wan/repair-lan")
+        assert response.status_code == 409
+        assert response.json()["detail"]["lan_binding"] == observed
+    _get_loop().run_until_complete(database.close())
 
 
 def test_dashboard_surfaces_wan_status(tmp_path):
@@ -1182,6 +1248,7 @@ def test_dashboard_surfaces_wan_status(tmp_path):
             **expected,
             "pppoe_user": "", "pppoe_password": "********",
             "pppoe_has_password": False, "wan_if": "",
+            "lan_binding": {"state": "unknown", "reason": "not reported"},
         }
         assert c.get("/api/dashboard").json()["wan"] == expected
     _get_loop().run_until_complete(database.close())

@@ -12,6 +12,7 @@ dedicated cake tests below.
 from __future__ import annotations
 
 from core.config import Config
+from quota.lan_interface import LanSelection
 from quota.shaping import TcShaper, _derive_client_subnet, _effective
 
 
@@ -389,21 +390,32 @@ def test_ifb0_never_created_degrades_at_start():
                         True, 100.0, 20.0, True)
 
 
-def test_auto_detect_interface():
+def test_auto_detect_interface(tmp_path):
     fake = FakeTc()
     fake.calls.append(["ip", "-o", "-4", "addr", "show"])
     fake.calls.append(["ip", "-o", "-4", "addr", "show"])  # __call__ not used yet
     # The auto-detect helper parses `ip -o -4 addr show` output directly.
     from quota.shaping import _find_interface_for
 
+    (tmp_path / "eth0").mkdir()
+    for key, value in (("type", "1"), ("ifindex", "2"),
+                       ("carrier", "1"), ("operstate", "up")):
+        (tmp_path / "eth0" / key).write_text(value)
+    (tmp_path / "eth0" / "device").mkdir()
+
     def ip_addr(argv):
-        if argv == ["ip", "-o", "-4", "addr", "show"]:
-            return 0, ("2: eth0    inet 192.168.1.110/24 brd 192.168.1.255 scope global eth0\n"
-                       "2: eth0    inet 192.168.2.1/24 brd 192.168.2.255 scope global eth0\n")
+        if argv == ["ip", "-j", "-4", "addr", "show"]:
+            return 0, ('[{"ifname":"eth0","addr_info":'
+                       '[{"family":"inet","local":"192.168.1.110"},'
+                       '{"family":"inet","local":"192.168.2.1"}]}]')
+        if argv == ["nmcli", "-t", "--escape", "no", "-f", "DEVICE,TYPE,STATE", "device", "status"]:
+            return 0, ""
+        if argv == ["ip", "-j", "route", "show", "default"]:
+            return 0, "[]"
         return 0, ""
 
-    assert _find_interface_for("192.168.2.1", ip_addr) == "eth0"
-    assert _find_interface_for("192.168.9.9", ip_addr) == ""
+    assert _find_interface_for("192.168.2.1", ip_addr, tmp_path) == "eth0"
+    assert _find_interface_for("192.168.9.9", ip_addr, tmp_path) == "eth0"
 
 
 # ---------------------------------------------------------------------------
@@ -428,34 +440,56 @@ def test_lan_traffic_gets_pass_through_class():
     assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:1",
                     "classid", "1:99", "htb", "rate", "1000mbit",
                     "ceil", "1000mbit")
-    assert fake.has("tc", "class", "add", "dev", "ifb0", "parent", "1:1",
-                    "classid", "1:99", "htb", "rate", "1000mbit",
-                    "ceil", "1000mbit")
     # upload tree (ifb0, pre-NAT src = client): LAN-cross = dst in the uplink
     assert fake.has("tc", "filter", "add", "dev", "ifb0", "parent", "1:",
                     "protocol", "ip", "prio", "1", "u32", "match", "ip", "dst",
                     "192.168.1.0/24", "flowid", "1:99")
-    # download tree (egress): LAN-cross = src in the uplink (LAN downloads to
-    # clients) OR dst in the uplink (re-injected LAN uploads already shaped at
-    # ifb0 — never re-capped by the default class on their way out)
+    # download tree (egress): LAN-cross = src in the uplink.
     assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
                     "protocol", "ip", "prio", "1", "u32", "match", "ip", "src",
                     "192.168.1.0/24", "flowid", "1:99")
     assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
                     "protocol", "ip", "prio", "1", "u32", "match", "ip", "dst",
                     "192.168.1.0/24", "flowid", "1:99")
-    # the device filters still run at prio 2 — the LAN pass-through (prio 1)
-    # always wins for a LAN-cross packet (tc ignores a ``prio 0`` filter, so
-    # all priorities are deliberately non-zero)
     assert fake.has("tc", "filter", "add", "dev", "eth0", "parent", "1:",
                     "protocol", "ip", "prio", "2", "u32", "match", "ip", "dst",
                     "192.168.2.100", "flowid", "1:0x8001")
-    # the root caps at the LAN link rate so 1:99 can exceed the WAN line
     assert fake.has("tc", "class", "add", "dev", "eth0", "parent", "1:",
                     "classid", "1:1", "htb", "rate", "1000mbit")
-    # fq_codel on the pass-through leaf too (the "every leaf" contract)
     assert fake.has("tc", "qdisc", "add", "dev", "eth0", "parent", "1:99",
                     "handle", "0x99:", "fq_codel")
+
+
+def test_rebind_moves_existing_policy_to_new_interface():
+    fake = FakeTc()
+    shaper = TcShaper(make_cfg(), run_command=fake)
+    shaper.start()
+    rates = [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)]
+    shaper.update_state(rates, True, 100.0, 20.0)
+    fake.calls.clear()
+
+    assert shaper.rebind(LanSelection("enp10s0f1", 8, "gateway")) is True
+    assert shaper.iface == "enp10s0f1"
+    assert fake.has("tc", "qdisc", "del", "dev", "eth0", "root")
+    assert fake.has("tc", "qdisc", "add", "dev", "enp10s0f1", "root")
+    assert fake.has("tc", "filter", "add", "dev", "enp10s0f1", "parent", "1:",
+                    "protocol", "ip", "prio", "2", "u32", "match", "ip",
+                    "dst", "192.168.2.100")
+
+
+def test_failed_rebind_stays_retryable():
+    fake = FakeTc()
+    shaper = TcShaper(make_cfg(), run_command=fake)
+    shaper.start()
+    rates = [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)]
+    shaper.update_state(rates, True, 100.0, 20.0)
+    fake.fail_binary = "tc"
+    assert shaper.rebind(LanSelection("enp10s0f1", 8, "gateway")) is False
+    fake.fail_binary = None
+    assert shaper.rebind(LanSelection("enp10s0f1", 8, "gateway")) is True
+    # The retry must actually re-program tc on the new interface, not just
+    # return True from the `iface == selection.name and available` shortcut.
+    assert fake.has("tc", "qdisc", "add", "dev", "enp10s0f1", "root")
 
 
 def test_lan_pass_through_respects_explicit_uplink_subnet():

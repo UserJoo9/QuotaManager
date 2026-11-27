@@ -75,9 +75,12 @@ from __future__ import annotations
 import ipaddress
 import logging
 import re
+from pathlib import Path
 from typing import Any, Callable
 
 from quota.nftables import resolve_local_networks
+from quota.lan_interface import (LanRequest, LanResolutionError, LanSelection,
+                                 resolve_lan)
 
 log = logging.getLogger("quota.shaping")
 
@@ -142,33 +145,20 @@ def _effective(dev_cap: float, user_cap: float, total: float) -> float | None:
     return max(0.0, min(min(caps), total))
 
 
-def _find_interface_for(gateway_ip: str, run_command: RunCommand) -> str:
-    """Find the interface whose subnet contains ``gateway_ip`` (the client
-    alias) by parsing ``ip -o -4 addr show``. Returns '' when not found."""
+def _find_interface_for(gateway_ip: str, run_command: RunCommand,
+                        sysfs_net: Path = Path("/sys/class/net"),
+                        uplink_ip: str = "", wan_interface: str = "") -> str:
+    """Resolve the LAN link with the same carrier-aware policy as the app."""
     if not gateway_ip:
         return ""
-    code, out = run_command(["ip", "-o", "-4", "addr", "show"])
-    if code != 0:
-        return ""
     try:
-        target = ipaddress.ip_address(gateway_ip)
-    except ValueError:
+        return resolve_lan(
+            LanRequest(gateway_ip, uplink_ip=uplink_ip,
+                       wan_interface=wan_interface),
+            run=run_command, sysfs_net=sysfs_net).name
+    except LanResolutionError as exc:
+        log.warning("tc shaper could not resolve its LAN interface: %s", exc)
         return ""
-    for line in out.splitlines():
-        parts = line.split()
-        # e.g. "2: eth0    inet 192.168.2.1/24 brd 192.168.2.255 …"
-        if len(parts) < 4 or parts[2] != "inet":
-            continue
-        addr, _, prefix = parts[3].partition("/")
-        if not prefix:
-            continue
-        try:
-            net = ipaddress.ip_network(f"{addr}/{prefix}", strict=False)
-        except ValueError:
-            continue
-        if target in net:
-            return parts[1]
-    return ""
 
 
 def _derive_client_subnet(gateway_ip: str, mask: str) -> str:
@@ -265,7 +255,9 @@ class TcShaper:
         if not self.iface:
             self.iface = _find_interface_for(
                 getattr(getattr(cfg, "dhcp", None), "gateway_ip", ""),
-                self._run_command)
+                self._run_command,
+                uplink_ip=getattr(getattr(cfg, "dhcp", None), "uplink_ip", "") or "",
+                wan_interface=getattr(cfg, "wan_interface", "") or "")
         if not self.client_subnet:
             dhcp = getattr(cfg, "dhcp", None)
             self.client_subnet = _derive_client_subnet(
@@ -358,6 +350,37 @@ class TcShaper:
         nftables engine, a device that was capped stays capped if the service
         dies; a reboot clears all qdiscs and start() rebuilds fresh."""
         self.available = False
+
+    def rebind(self, selection: LanSelection) -> bool:
+        """Move the owned LAN trees and current rate policy to a new link."""
+        if self.iface == selection.name and self.available:
+            return True
+        previous = self.iface
+        if previous:
+            self._teardown()
+        self.iface = selection.name
+        self.own_addresses = _find_own_addresses(self.iface, self._run_command)
+        if not self.uplink_subnet:
+            self.uplink_subnet = _find_uplink_subnet(
+                self.iface, self.client_subnet, self._run_command)
+        self.available = True
+        self._warned = False
+        self._last_signature = None
+        self.start()
+        if not self.available:
+            # start() failed (tc/ifb unavailable): leave available False so
+            # the next rebind() retries start() instead of short-circuiting
+            # on `iface == selection.name and available` and reporting a
+            # healthy shaper that never programmed any tc rules. DHCP
+            # remains healthy even while tc is temporarily unavailable.
+            return False
+        self.update_state(
+            self._rate_map, self._enabled, self._total_down, self._total_up,
+            fair_sharing=self._fair_sharing, vpn_active=self._vpn_active,
+            rates_measured=self._rates_measured,
+            vpn_pct=getattr(self, "_vpn_pct", 0.0),
+        )
+        return self.available
 
     def _ensure_ifb(self) -> bool:
         """Load ifb so ``self.ifb`` (ifb0) exists and is up; False otherwise.

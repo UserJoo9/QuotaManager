@@ -146,6 +146,44 @@ automatically by the `.deb`'s `postinst`):
 
 The script is idempotent and refuses to run while the app is live.
 
+### LAN interface discovery and rebinding
+
+`quota.lan_interface` is the shared resolver for topology apply, startup repair,
+and the traffic shaper. It enumerates wired links from `/sys/class/net`, then
+requires Ethernet type 1, carrier, and `operstate=up`. It ignores loopback,
+wireless, virtual tunnel/bridge helper devices, and the configured WAN link.
+The resolver prefers a link already carrying `dhcp.gateway_ip`, then an active
+NetworkManager Ethernet device, then the configured uplink address or default
+route, and accepts a sole remaining link. If multiple links still qualify, it
+reports an actionable ambiguity instead of trusting `ip` output order. An
+existing explicit logical interface remains valid when it is up and has carrier.
+
+`shaping.interface` in `config.yaml` is the persisted LAN identity; when present,
+`dhcp.interface` is kept in sync. Older configurations are migrated at startup.
+The selected link receives the client gateway, uplink alias, and (when enabled)
+the IPv6 ULA gateway. NetworkManager profile addresses are updated for reboot
+persistence. The topology applier receives both the interface name and ifindex,
+and validates the link before changing addresses and before rendering DHCP
+configuration.
+
+Startup, topology apply, the periodic repair, and the authenticated
+`POST /api/wan/repair-lan` action reconcile the app-owned dnsmasq interface
+fragment. Interface changes and the IPv6 RA fragment are staged together; the
+whole effective `dnsmasq --test` runs before restart. DHCPv4 and enabled DHCPv6
+must then be visible on the selected device in `ss -lunp`, or in the current
+dnsmasq invocation's exclusive-bind log with the expected socket ports. Failed
+validation or verification restores the prior managed fragments and restarts
+the prior service configuration. Backups and quarantined legacy files live in
+`/var/backups/netrex/`, outside dnsmasq's include directory.
+
+The same selection is passed to `TcShaper.rebind`, which rebuilds the gateway's
+owned qdiscs on the new LAN device while retaining `ifb0` for ingress. IPv6
+per-interface sysctls follow the selected link, and WAN/PPPoE mode updates its
+peer and service description when the configured WAN device changes. The WAN
+status includes active, DHCPv4, DHCPv6, and shaper bindings; a warning and repair
+action appear when those bindings are degraded or disagree. Ambiguous links
+remain degraded until the operator selects a usable LAN device.
+
 ---
 
 ## The packet path (no Python)
@@ -2161,6 +2199,7 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | POST | `/api/updates/check` | forced release check now (still refuses when checks are disabled); returns the latest version + new changelog sections. 404 when unwired |
 | POST | `/api/updates/install` | install the latest release's `.deb` (`systemd-run` transient unit so the package's `prerm` service-stop can't kill the child apt-get); returns install status. 404 when unwired |
 | GET/POST | `/api/wan` | strong-mode topology: `GET` live status (topology/source/pending/ppp0 + the auto-renew `renew_enabled`/`renew_minutes`/`renew_last` schedule + saved creds), `POST {"topology": "lan"\|"wan", "pppoe_user", "pppoe_password", "wan_if"}` APPLIES the topology live — rewrites config.yaml + the DB together, runs `scripts/topology.sh` (NIC + dnsmasq + PPPoE dial) and schedules a restart (`restart_scheduled`, `script_output`). Creds travel to the applier via the environment, never argv. On an applier failure config.yaml + the DB are ROLLED BACK to the previous state (no restart) |
+| POST | `/api/wan/repair-lan` | **Admin session required** — redetect the active wired LAN link, persist it, and reconcile gateway addresses, dnsmasq DHCP sockets, traffic shaping and WAN/PPPoE references; returns observed bindings or an actionable error |
 | POST | `/api/wan/test` | test the PPPoE credentials WITHOUT changing anything (when `quota-wan-ppp` already holds the line it reports the live `ppp0` session instead of dialing a second one: We/ETIS allow one session per username): dials a throwaway `ppp200` link via `scripts/test_pppoe.sh` with `{"pppoe_user", "pppoe_password", "wan_if"}` and reports `status` (success/auth-failed/no-pppoe-server/link-down/error), the negotiated local/peer IPs, `internet` (ping check), and `detail` — never touches config.yaml, the DB, `ppp0`, routing or DNS |
 | POST | `/api/wan/renew` | renew the WAN public IP NOW (the WAN-tab Restart button): restarts the `quota-wan-ppp` PPPoE dial via the gateway's wired `wan_renew` callback → the ISP hands the new session a fresh public IP. Returns `{restarted, state: active\|inactive\|unknown, detail}`. **409** while ppp0 is down ("nothing to renew into") or WAN mode isn't active; **503** when no callback is wired (degraded boot); 500 on a raising callback. Internet drops for a few seconds while ppp0 re-dials |
 | POST | `/api/wan/renew-config` | set the auto-renew schedule: `{"enabled", "minutes"}` — `minutes` is **clamped to a 5-minute floor** (no upper bound, every renewal drops internet briefly), stored under `wan_ip_renew_enabled`/`wan_ip_renew_minutes`/`wan_ip_renew_last`; returns `{enabled, minutes, last}` |
