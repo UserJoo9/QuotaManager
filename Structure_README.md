@@ -48,6 +48,7 @@ the project layout, tests, and the release process.
 - [Topology: a one-armed gateway](#topology-a-one-armed-gateway)
 - [The packet path (no Python)](#the-packet-path-no-python)
 - [The maintenance loop](#the-maintenance-loop)
+- [UPnP / NAT-PMP](#upnp--nat-pmp-quotaupnppy)
 - [SQLite backup and restore](#sqlite-backup-and-restore)
 - [Quota model](#quota-model)
 - [Speed shaping](#speed-shaping)
@@ -883,6 +884,53 @@ Time-based internet cuts per person / device (issue #32).
 - Limits: a cut STARTS only while the service runs (the tick adds the device);
   the end is enforced by the kernel. DNS lookups to the box keep working
   (input hook), so allowed sites resolve.
+
+## UPnP / NAT-PMP (`quota/upnp.py`)
+
+Lets games, consoles, torrent clients and cameras open their own inbound ports
+(Security → UPnP). **Off by default**; the settings live in the DB
+(`settings.upnp_config`, no yaml twin) so they survive updates.
+
+- **Daemon**: the distro's `miniupnpd` (nftables build), supervised by
+  `UpnpManager` — its own `miniupnpd.conf` + pid + lease file next to the DB
+  (`/var/lib/quota-gateway/`), started/stopped by the tick (`Gateway._sync_upnp`,
+  step 7b, idempotent and subprocess-free while off). A config change restarts
+  it; mappings survive because it reloads them from the lease file. The distro's
+  own `miniupnpd.service` is stopped/disabled once (it would fight for the ports
+  with a default config). Never use the packaged `nft_init.sh`: it creates a
+  `forward` chain with `policy drop`.
+- **Kernel**: `inet quota_upnp`, app-owned and NEVER flushed while running
+  (miniupnpd keeps its rules in it). Only its DNAT hook is guarded: LAN mode
+  `ip daddr <uplink_ip> jump prerouting_miniupnpd`, WAN mode
+  `iifname "ppp0" jump ...`. Without the guard a single-NIC box (ext interface ==
+  LAN interface) would DNAT every LAN client's OUTBOUND traffic to a mapped port.
+  The table is re-checked every 60 s; if something removed it (an `nftables`
+  restart) it is re-created and the daemon restarted. IPv4 only
+  (`ipv6_disable=yes`, documented limit).
+- **Public address**: miniupnpd refuses a private one ("Port forwarding is
+  impossible"). WAN mode: the `ppp0` address (CGNAT `100.64/10` → state `cgnat`).
+  LAN mode (box behind the ISP router): the router's WAN address, read with
+  `upnpc -s`, or the manual `ext_ip`; with **relay** on, every mapping a device
+  creates is mirrored to the router (`upnpc -a <uplink_ip> P P proto`, same
+  external port) and removed when it expires / is deleted. The router must have
+  UPnP on and a public IP.
+- **Limits** (settings): `secure_mode` (a device maps only to itself, default on),
+  port range, longest lease, extra blocked ports; 22/23/53/67/68/80/443/3389 are
+  always blocked (deny rules are emitted BEFORE the allow rule).
+- **Firewall**: in WAN mode `quota_firewall` default-denies NEW inbound on
+  `ppp0`; while UPnP is live `Firewall.upnp_inbound` adds
+  `iifname "ppp0" ct status dnat ct state new accept` before that drop (flag
+  injected after `_merge_defaults`, which only keeps schema fields). The quota
+  engine's own blocks still apply afterwards.
+- **States** (`GET /api/upnp` → `status.state`): `off`, `running`, `installing`,
+  `waiting`, `not_installed`, `wrong_backend` (iptables build), `cgnat`,
+  `no_router_upnp`, `need_ext_ip`, `error`. One-click install uses apt
+  (`miniupnpd-nftables miniupnpc`); other distros install them manually.
+- **Removing one mapping** edits the lease file and restarts the daemon
+  (`secure_mode` forbids deleting someone else's mapping over UPnP).
+- Tested for real in a netns lab (internet → ISP-router miniupnpd → box → client,
+  outbound-not-hijacked, WAN/ppp0 and CGNAT cases) and with fakes in
+  `tests/test_upnp.py`.
 
 ## Rogue devices & the ARP gateway-lock
 
@@ -2152,6 +2200,8 @@ sets a session cookie. The dashboard client uses the same endpoints.
 | POST | `/api/tailscale/install` | install the official client in the background |
 | POST | `/api/tailscale/connect` | connect; returns the sign-in link when the box is not signed in |
 | POST | `/api/tailscale/disconnect` | disconnect (`{"logout": bool}` also signs the box out) |
+| GET/PUT | `/api/upnp` | UPnP settings + live state + the ports devices opened (`status.mappings`) / save + apply |
+| POST | `/api/upnp/install`, `/api/upnp/clear`, `/api/upnp/remove` | install miniupnpd (apt) / forget all mappings / remove one (`{"proto","port"}`) |
 | WS | `/ws` | pushes `{"type":"snapshot","data":{...}}` every 5 s |
 
 Interactive docs: `http://<gateway-ip>:8080/api/docs` (Swagger UI) — OFF by
@@ -2250,6 +2300,7 @@ QuotaManager/
 │   │                         #   traffic metrics, policy routing, persistent auto-healing
 │   ├── vpn_parser.py         # parse_vpn_link (VLESS/VMess/Trojan/Shadowsocks/WireGuard),
 │   │                         #   sing-box config generator, validation via sing-box check
+│   ├── upnp.py               # UPnP/NAT-PMP: miniupnpd supervisor, inet quota_upnp, router relay
 │   ├── tailscale.py          # built-in Tailscale remote access: status parse, install,
 │   │                         #   connect (sign-in link), disconnect; interface tailscale0
 │   ├── startup_health.py     # startup self-heal: ensure NAT table (+NAT66, ip6 DNS redirect),
@@ -2309,6 +2360,7 @@ QuotaManager/
     ├── test_netmgr.py        # TopologyManager WAN/LAN apply + rollback + PPPoE test
     ├── test_topology.py      # detect_ppp / check_internet probes (fake `ip`)
     ├── test_vpn.py           # VpnManager, link parsing, config generation, and REST API
+    ├── test_upnp.py          # UPnP settings/renderers, supervisor with a fake host, relay, firewall hook, REST
     ├── test_tailscale.py     # Tailscale status/states/install/connect, API routes, firewall rule
     ├── test_new_ui.py        # dashboard at /, /ui/ redirect, no inline script/external URL, AR/EN key parity
     ├── test_flows.py         # live-traffic destination naming (DNS names, RDAP owners)

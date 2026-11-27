@@ -3167,3 +3167,89 @@ def test_wan_watchdog_leaves_lan_mode_and_a_down_dial_alone(tmp_path, status):
         assert renews == []
     finally:
         loop.close()
+
+
+# -- UPnP wiring (quota/upnp.py) ---------------------------------------------
+
+class _FakeUpnp:
+    def __init__(self, state="running"):
+        self.state = state
+        self.calls = []
+
+    def sync(self, settings, ctx):
+        self.calls.append(("sync", settings.enabled, ctx.topology))
+        return {"state": self.state if settings.enabled else "off", "mappings": [],
+                "topology": ctx.topology}
+
+    def clear(self, settings, ctx):
+        self.calls.append(("clear",))
+        return self.sync(settings, ctx)
+
+    def status(self, settings, ctx):
+        return {"state": "off", "mappings": [], "topology": ctx.topology}
+
+    def stop(self):
+        self.calls.append(("stop",))
+
+
+class _FakeFw:
+    available = True
+    upnp_inbound = False
+
+    def __init__(self):
+        self.applied = 0
+
+    def apply(self):
+        self.applied += 1
+        return True
+
+    async def shutdown(self):
+        pass
+
+
+def _upnp_gateway(tmp_path):
+    gw = Gateway(_cfg(tmp_path))
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(gw.startup_core())     # DB only: no host side effects
+    gw.upnp, gw.firewall = _FakeUpnp(), _FakeFw()
+    return gw, loop
+
+
+def test_upnp_is_off_until_the_admin_enables_it(tmp_path):
+    gw, loop = _upnp_gateway(tmp_path)
+    try:
+        status = loop.run_until_complete(gw._sync_upnp())
+        assert status["state"] == "off" and gw.firewall.applied == 0
+        payload = loop.run_until_complete(gw.upnp_payload())
+        assert payload["settings"]["enabled"] is False
+    finally:
+        loop.run_until_complete(gw.database.close())
+
+
+def test_upnp_save_persists_and_wan_mode_opens_the_firewall_once(tmp_path):
+    gw, loop = _upnp_gateway(tmp_path)
+    try:
+        gw.cfg.engine.topology = "wan"
+        out = loop.run_until_complete(gw._upnp_save({"enabled": True, "port_min": 3000}))
+        assert out["settings"]["enabled"] is True and out["settings"]["port_min"] == 3000
+        assert gw.firewall.upnp_inbound is True and gw.firewall.applied == 1
+        loop.run_until_complete(gw._sync_upnp())          # steady state: no re-apply
+        assert gw.firewall.applied == 1
+        loop.run_until_complete(gw._upnp_save({"enabled": False}))
+        assert gw.firewall.upnp_inbound is False and gw.firewall.applied == 2
+        raw = loop.run_until_complete(gw.database.get_setting("upnp_config", ""))
+        assert '"enabled": false' in raw
+    finally:
+        loop.run_until_complete(gw.database.close())
+
+
+def test_upnp_in_lan_mode_never_touches_the_firewall(tmp_path):
+    gw, loop = _upnp_gateway(tmp_path)
+    try:
+        gw.cfg.engine.topology = "lan"
+        loop.run_until_complete(gw._upnp_save({"enabled": True}))
+        assert gw.firewall.applied == 0 and gw.firewall.upnp_inbound is False
+        loop.run_until_complete(gw._upnp_action("clear"))
+        assert ("clear",) in gw.upnp.calls
+    finally:
+        loop.run_until_complete(gw.database.close())

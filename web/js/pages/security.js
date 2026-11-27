@@ -5,6 +5,7 @@ import { sw, chip } from "../components/ui.js";
 import { openDialog } from "../components/dialog.js";
 import { toast } from "../components/toast.js";
 import dnsTab from "./securityDns.js";
+import upnpTab from "./securityUpnp.js";
 
 let tab = "firewall";
 const fw = { state: null, cfg: null, tls: null, loading: false, at: 0, failAt: 0, dirty: false, applying: false, warnings: [], banIp: "", armed: null };
@@ -173,8 +174,8 @@ function firewallTab(ctx) {
 }
 
 export default function security(ctx) {
-  const tabs = [["firewall", t("sec.tab.firewall")], ["dns", t("sec.tab.dns")]];
+  const tabs = [["firewall", t("sec.tab.firewall")], ["dns", t("sec.tab.dns")], ["upnp", t("sec.tab.upnp")]];
   return h("div", { class: "page" },
     h("div", { class: "tabs", role: "tablist" }, tabs.map(([k, l]) => h("button", { type: "button", role: "tab", class: tab === k ? "on" : "", "aria-selected": String(tab === k), onclick: () => { tab = k; ctx.touch(); } }, l))),
-    tab === "dns" ? dnsTab(ctx) : firewallTab(ctx));
+    tab === "dns" ? dnsTab(ctx) : tab === "upnp" ? upnpTab(ctx) : firewallTab(ctx));
 }

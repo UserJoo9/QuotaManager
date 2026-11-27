@@ -757,3 +757,43 @@ class ScheduleSites(BaseModel):
     """Sites that keep working while a schedule has the internet off."""
 
     sites: list[str] = Field(default_factory=list, max_length=200)
+
+
+class UpnpConfigUpdate(BaseModel):
+    """UPnP / NAT-PMP settings (sanitized again in ``quota.upnp``)."""
+
+    enabled: bool = False
+    natpmp: bool = True
+    secure_mode: bool = True
+    port_min: int = Field(1024, ge=1, le=65535)
+    port_max: int = Field(65535, ge=1, le=65535)
+    max_lifetime: int = Field(86400, ge=120, le=604800)
+    blocked_ports: list[int] = Field(default_factory=list, max_length=64)
+    relay: bool = True
+    ext_ip: str = Field("", max_length=15)
+
+    @field_validator("ext_ip")
+    @classmethod
+    def _ext_ip_valid(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            return ""
+        try:
+            addr = ipaddress.ip_address(value)
+        except ValueError as exc:
+            raise ValueError("ext_ip must be an IPv4 address") from exc
+        if addr.version != 4 or not addr.is_global:
+            raise ValueError("ext_ip must be a public IPv4 address")
+        return value
+
+    @field_validator("blocked_ports")
+    @classmethod
+    def _ports_valid(cls, value: list[int]) -> list[int]:
+        if any(not 1 <= p <= 65535 for p in value):
+            raise ValueError("blocked_ports must be between 1 and 65535")
+        return value
+
+
+class UpnpRemove(BaseModel):
+    proto: str = Field(..., pattern="^(TCP|UDP|tcp|udp)$")
+    port: int = Field(..., ge=1, le=65535)

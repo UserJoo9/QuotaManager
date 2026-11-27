@@ -142,6 +142,7 @@ nftables.conf, IPv6 host config).
 | `quota/ipv6_setup.py` | app-owned IPv6 host config: dnsmasq RA fragment, sysctl, box DNS fix, rollback, kill-switch | |
 | `quota/local_share.py` | LAN file sharing (`/api/share`) | |
 | `quota/updater.py` | GitHub self-update | |
+| `quota/upnp.py` | UPnP/NAT-PMP: miniupnpd supervisor, app-owned `inet quota_upnp` (never flushed, guarded DNAT hook), router relay (LAN mode) | kernel rules of other tables (the `ppp0` accept lives in `firewall.py`) |
 | `quota/tailscale.py` | built-in Tailscale remote access (status / install / connect / disconnect) | |
 | `scripts/setup_gateway_kali.sh` | first install: packages, sysctl, dnsmasq, NAT, systemd unit (`CONF_DIR=/etc/quota-gateway`) | day-2 changes — those belong in the app |
 | `scripts/topology.sh` | runtime LAN/WAN applier invoked by the panel | |

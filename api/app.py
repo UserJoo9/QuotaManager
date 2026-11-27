@@ -48,6 +48,7 @@ from api.schemas import (BundleUpdate, ConsumptionSpoofRequest, DeviceCreate,
                          DnsServerUpdate, DomainRuleCreate, DomainRuleUpdate,
                          FirewallBanRequest, FirewallConfigUpdate,
                          FirewallGeoUpdate, FirewallUnbanRequest,
+                         UpnpConfigUpdate, UpnpRemove,
                          GuestUpdate, GuestVoucherCreate, GuestVoucherRedeem,
                          LoginRequest, MacListsUpdate,
                          MilestoneNotify, MilestoneDailyPlan,
@@ -324,6 +325,9 @@ def create_app(
     disk_share_manager: Optional[object] = None,
     schedule_apply: Optional[Callable[[], object]] = None,
     schedule_sites_apply: Optional[Callable[[], object]] = None,
+    upnp_get: Optional[Callable[[], Any]] = None,
+    upnp_save: Optional[Callable[[dict], Any]] = None,
+    upnp_action: Optional[Callable[..., Any]] = None,
 ) -> FastAPI:
     web_cfg: WebConfig = web_config or WebConfig()
     tailscale = tailscale_manager or TailscaleManager()
@@ -2320,6 +2324,48 @@ def create_app(
             return bool(cfg_.get("wan_confirmed"))
         except Exception:
             return False
+
+    # -- UPnP / NAT-PMP (quota/upnp.py) ------------------------------------
+
+    def _upnp_unavailable() -> HTTPException:
+        return HTTPException(status_code=503, detail="UPnP is not available")
+
+    @app.get("/api/upnp", dependencies=[Depends(_require_auth)])
+    async def get_upnp() -> dict[str, Any]:
+        """UPnP settings, live state and the mappings devices have opened."""
+        if upnp_get is None:
+            raise _upnp_unavailable()
+        return await upnp_get()
+
+    @app.put("/api/upnp", dependencies=[Depends(_require_auth)])
+    async def put_upnp(body: UpnpConfigUpdate) -> dict[str, Any]:
+        """Save the UPnP settings and apply them right away."""
+        if upnp_save is None:
+            raise _upnp_unavailable()
+        return await upnp_save(body.model_dump())
+
+    @app.post("/api/upnp/install", dependencies=[Depends(_require_auth)])
+    async def install_upnp() -> dict[str, Any]:
+        """Install miniupnpd + miniupnpc through apt (background)."""
+        if upnp_action is None:
+            raise _upnp_unavailable()
+        await database.add_event("UPnP install started", "info")
+        return await upnp_action("install")
+
+    @app.post("/api/upnp/clear", dependencies=[Depends(_require_auth)])
+    async def clear_upnp() -> dict[str, Any]:
+        """Forget every mapping devices have opened."""
+        if upnp_action is None:
+            raise _upnp_unavailable()
+        await database.add_event("UPnP mappings cleared", "info")
+        return await upnp_action("clear")
+
+    @app.post("/api/upnp/remove", dependencies=[Depends(_require_auth)])
+    async def remove_upnp(body: UpnpRemove) -> dict[str, Any]:
+        """Remove one mapping."""
+        if upnp_action is None:
+            raise _upnp_unavailable()
+        return await upnp_action("remove", proto=body.proto.upper(), port=body.port)
 
     # -- Tailscale (built-in remote access) ---------------------------------
 
