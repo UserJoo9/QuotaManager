@@ -1,3 +1,32 @@
+Package: netrex
+Architecture: all
+Version: 0.6.0
+Priority: optional
+Section: net
+Maintainer: Youssef Alkhodary <youssef.alkhodary@users.noreply.github.com>
+Depends: python3 (>= 3.10), python3-venv, python3-pip, dnsmasq, nftables,
+         iproute2, kmod, ppp, ca-certificates
+Suggests: miniupnpd-nftables, miniupnpc
+Breaks: quota-manager (<< 0.6.0)
+Replaces: quota-manager (<< 0.6.0)
+Filename: pool/main/n/netrex/netrex_0.6.0_all.deb
+Size: 50634092
+MD5sum: 9c40ead9e91ecc8b929ac58cd99cdda0
+SHA1: 4a5bdb142e61efaee84f27576a1b4e7327afb6d4
+SHA256: a9d710b6c00fd380999f510fdabc86fdc91384471481442c23bb17e0ada85acb
+SHA512: 740d06cb180cb34ed43cfa602a7307bb6965e482e3c1b368030d6d7a3d22db280f86c0c2ce389b8defddc9e3e56ff64b38ba0174d94b84a07e71f50ae86904cd
+Homepage: https://github.com/UserJoo9/Netrex
+Description: Fair-split metered-internet quota gateway
+ Split a metered internet bundle fairly across users and devices. A person's
+ allowance covers all their devices; when it runs out every device they own is
+ cut at once (a per-device exemption keeps one device online). Per-device and
+ per-user speed caps with low-latency fq_codel queues, a dark-purple
+ glassmorphism admin dashboard, and a WebSocket live view.
+ .
+ The gateway needs a wired-NIC laptop running Debian/Kali as root. The package
+ configures the network stack (dnsmasq + nftables + tc), installs the Python
+ runtime into /opt/quota-manager, and runs the gateway as a systemd service.
+
 Package: quota-manager
 Architecture: all
 Version: 0.1.3
@@ -595,4 +624,23 @@ Description: Fair-split metered-internet quota gateway
  The gateway needs a wired-NIC laptop running Debian/Kali as root. The package
  configures the network stack (dnsmasq + nftables + tc), installs the Python
  runtime into /opt/quota-manager, and runs the gateway as a systemd service.
+
+Package: quota-manager
+Architecture: all
+Version: 0.6.0
+Priority: optional
+Section: oldlibs
+Maintainer: Youssef Alkhodary <youssef.alkhodary@users.noreply.github.com>
+Depends: netrex (>= 0.6.0)
+Filename: pool/main/q/quota-manager/quota-manager_0.6.0_all.deb
+Size: 672
+MD5sum: e078aea9c855fb14935a227097d06c0e
+SHA1: 427b48a9dff0d4c022f337306b2af1599562471d
+SHA256: d25c79a767b0b7a6056201e65c43a2c7249241062aa3903179004aa882508785
+SHA512: f0c26244ab81387e456c66c4b19ba071dc620c89ba62a8a0c87307445a8a1d189a57b3fcacedd92b9d90159f4fbe2bbc0ee7bb12ac6302e5ea911f32ff06983f
+Homepage: https://github.com/UserJoo9/Netrex
+Description: transitional package - Quota Manager is now Netrex
+ This empty package only exists so that existing installs of quota-manager
+ upgrade to the renamed netrex package. It can be removed once netrex is
+ installed.
 
