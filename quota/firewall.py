@@ -274,6 +274,22 @@ def _merge_defaults(data: dict[str, Any]) -> dict[str, Any]:
     return config_to_dict(dict_to_config(data))
 
 
+def _merge_keep_private(data: dict[str, Any]) -> dict[str, Any]:
+    """:func:`_merge_defaults` that keeps the runtime-injected ``_*`` keys.
+
+    ``_geo_cidrs`` / ``_web_port`` are injected per apply (never stored in the
+    user config), and the dataclass round-trip silently drops anything that is
+    not a schema field: geo-blocking rendered no rules and the web-port rules
+    always used 8080. Only the rendering path uses this; the stored config
+    keeps going through plain :func:`_merge_defaults`.
+    """
+    extras = {k: v for k, v in (data or {}).items()
+              if isinstance(k, str) and k.startswith("_")}
+    merged = _merge_defaults(data)
+    merged.update(extras)
+    return merged
+
+
 # ---------------------------------------------------------------------------
 # Rendering (pure) — the ruleset the manager programs
 # ---------------------------------------------------------------------------
@@ -325,7 +341,7 @@ def render_commands(
     box's own addresses (never denied, dnat-excluded). Returns argv suffix
     lists each prefixed with ``nft`` by the caller.
     """
-    cfg = _merge_defaults(cfg)
+    cfg = _merge_keep_private(cfg)
     cmds: list[list[str]] = []
     table = f"{FAMILY} {TABLE}"
     cmds.append(["add", "table", table])
@@ -999,8 +1015,8 @@ class FirewallManager:
         cfg = _merge_defaults(cfg if cfg is not None else self._config)
         topology = self.topology
         geo = self._geo_cidrs()
-        cfg = _merge_defaults({**cfg, "_geo_cidrs": geo,
-                               "_web_port": self._web_port})
+        cfg = _merge_keep_private({**cfg, "_geo_cidrs": geo,
+                                   "_web_port": self._web_port})
         try:
             cmds = render_commands(cfg, topology, self._local_nets, self._box_ips)
         except Exception as exc:  # noqa: BLE001 — never crash the tick
@@ -1014,7 +1030,8 @@ class FirewallManager:
                     self._last_error = (f"nft {cmd[0]} {cmd[1]} failed — "
                                         f"firewall unavailable")
                 return False
-        self._config = cfg
+        # Runtime-injected ``_*`` keys are per-apply, never part of the stored config.
+        self._config = {k: v for k, v in cfg.items() if not k.startswith("_")}
         self._last_apply_ok = True
         self._last_error = ""
         self._counters_last = {}

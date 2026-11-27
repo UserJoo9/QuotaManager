@@ -17,6 +17,7 @@ Changed:
 - A new version is now published only after all the tests and the install checks on Debian, Ubuntu, Fedora and Arch pass on exactly that version. Contributed by @compnew2006.
 
 Fixed:
+- **Country blocking and the dashboard port in the firewall rules.** Blocking countries had no effect even when switched on, and when the dashboard was opened on the internet (WAN mode) the firewall rule always used port 8080 instead of the port you set. Both now follow your settings.
 - A short hiccup while the gateway updated its list of cut-off devices could switch off counting and blocking for everyone until a restart, or let a cut-off device through for a moment. The list is now changed in one step: if that step fails, the old list stays in force and the gateway simply tries again 15 seconds later. Contributed by @compnew2006.
 - If saving usage failed for a moment (for example the database was busy), those 15 seconds of usage were lost and the check that cuts off people over their limit was skipped for that round. The usage is now kept and saved on the next round, and the check always runs. Reported by @compnew2006 in #52.
 - A guest who typed a valid code could get an error even though the code was accepted, and then be told the code was already used. The approval now always comes back, and a guest who retries gets the same approval again. Contributed by @compnew2006.
