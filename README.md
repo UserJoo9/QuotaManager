@@ -204,6 +204,14 @@ Password: **`admin`** — you'll be asked to change it right away.
 
 Many internet lines block or drop connections coming from outside, so opening a port on your public IP often does not work. Use the built-in **Tailscale** instead: **Internet → Remote access → Install**, sign in once, then install the Tailscale app on your phone with the same account and open the address shown on that card. Nothing is opened on your public IP, so keep the "Allow dashboard access from the internet" switch off.
 
+
+### Let games and apps open ports by themselves (UPnP)
+
+**Security → UPnP** lets games, consoles, torrent clients and cameras open the ports they need without you writing port-forwards. It is **off by default**. Turn it on, and each device can only open ports for itself (the dashboard and remote-admin ports can never be opened). The page lists every open port and the device that asked for it.
+
+- **Direct (PPPoE) connection:** works by itself.
+- **Behind your provider's router:** the gateway also asks the router to open the same port, so the router needs **UPnP turned on** and a **public IP** (not a shared CGNAT address). The page tells you which one is missing.
+- On Debian, Ubuntu and Kali the **Install** button on that page installs what it needs. IPv4 only.
 ---
 
 ## Using it
@@ -215,7 +223,7 @@ Many internet lines block or drop connections coming from outside, so opening a 
 | **Quota** | Bundle size, renewal day, top-up packs, optional daily quota switch |
 | **Network** | Guest mode, new-device rules, IP reservations, allow / block lists |
 | **Internet** | Line status, public IP, direct PPPoE mode, remote access with Tailscale |
-| **Security** | Firewall, ad & content blocking, HTTPS |
+| **Security** | Firewall, ad & content blocking, UPnP, HTTPS |
 | **VPN** | Add servers, choose who goes through the VPN |
 | **Insights** | Daily usage, top devices, most visited domains |
 | **Share** | Send files and folders between devices, even straight to a nearby device; share a hard disk with every device |

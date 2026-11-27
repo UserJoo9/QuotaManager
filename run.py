@@ -62,6 +62,8 @@ from quota.netmgr import TopologyManager
 from quota.nftables import NftablesEngine
 from quota.schedule_nft import ScheduleFirewall
 from quota.tailscale import TailscaleManager
+from quota.upnp import (SETTING_KEY as UPNP_SETTING_KEY, UpnpContext,
+                        UpnpManager, normalize_settings as upnp_settings)
 from quota.service import QuotaService
 from quota.topology import (check_internet, check_internet_dns, detect_ppp,
                             ensure_ppp_peer_options, is_cgnat, restart_pppoe)
@@ -329,6 +331,9 @@ class Gateway:
         #: topology override so its LAN/WAN posture derives from the effective
         #: topology. None when cfg.firewall.enabled is false.
         self.firewall: FirewallManager | None = None
+        #: UPnP / NAT-PMP server (miniupnpd supervisor + router relay);
+        #: OFF until the admin turns it on (quota/upnp.py).
+        self.upnp = UpnpManager(Path(cfg.db_path).parent)
         # Built in startup(), AFTER the DB topology override: the scanner
         # resolves its probe networks from cfg at construction, so building it
         # here (before the override exists) would probe the wrong subnets in
@@ -1813,6 +1818,12 @@ class Gateway:
         #    clients never ride a dead VPN into a blackhole).
         await self._timed("_sync_vpn_share", self._sync_vpn_share())
 
+        # 7b. UPnP / NAT-PMP (idempotent + cheap while off).
+        try:
+            await self._timed("_sync_upnp", self._sync_upnp())
+        except Exception:  # noqa: BLE001 — an optional feature never stalls a tick
+            log.exception("upnp sync failed")
+
         # 8. Reconcile the kernel firewall (quota_firewall). Re-applies ONLY
         #    when the stored config or the topology changed (signature-gated),
         #    drains the scan-watch + fw_* counters into the Firewall log view,
@@ -2273,6 +2284,81 @@ class Gateway:
             cache[srv_str] = (now, resolved or None)
             return resolved or None
 
+    async def _upnp_settings(self):
+        raw = await self.database.get_setting(UPNP_SETTING_KEY, "")
+        try:
+            return upnp_settings(json.loads(raw) if raw else {})
+        except ValueError:
+            return upnp_settings({})
+
+    def _upnp_context(self) -> UpnpContext:
+        dhcp = self.cfg.dhcp
+        try:
+            prefix = ipaddress.IPv4Network(f"0.0.0.0/{dhcp.subnet}").prefixlen
+        except ValueError:
+            prefix = 24
+        nic = (getattr(self.cfg.shaping, "interface", "")
+               or getattr(dhcp, "interface", "") or "")
+        return UpnpContext(
+            topology=(getattr(self.cfg.engine, "topology", "lan") or "lan").lower(),
+            gateway_ip=dhcp.gateway_ip, lan_prefix=prefix,
+            uplink_ip=getattr(dhcp, "uplink_ip", "") or "", uplink_iface=nic)
+
+    async def _sync_upnp(self, *, clear: bool = False) -> dict[str, object]:
+        """Converge miniupnpd + its nft table + the router relay on the setting."""
+        settings = await self._upnp_settings()
+        ctx = self._upnp_context()
+        work = self.upnp.clear if clear else self.upnp.sync
+        status = await asyncio.to_thread(work, settings, ctx)
+        # In WAN mode the firewall's default-deny on ppp0 must let DNAT'd
+        # (mapped) connections through; ask it to re-render only on change.
+        want = bool(settings.enabled and status.get("state") == "running"
+                    and ctx.topology == "wan")
+        fw = self.firewall
+        if fw is not None and getattr(fw, "upnp_inbound", False) != want:
+            fw.upnp_inbound = want
+            if getattr(fw, "available", False):
+                await asyncio.to_thread(fw.apply)
+        return status
+
+    async def upnp_payload(self, status: dict[str, object] | None = None
+                           ) -> dict[str, object]:
+        """Settings + live state + named mappings for the dashboard."""
+        settings = await self._upnp_settings()
+        ctx = self._upnp_context()
+        if status is None:
+            status = await asyncio.to_thread(self.upnp.status, settings, ctx)
+        names: dict[str, str] = {}
+        try:
+            by_mac = {d.mac: d.name for d in await self.database.list_devices()}
+            for lease in await self.database.list_leases():
+                names[lease.ip] = by_mac.get(lease.mac) or lease.mac
+        except Exception:  # noqa: BLE001 — names are cosmetic
+            log.debug("upnp: device names unavailable", exc_info=True)
+        status = dict(status)
+        status["mappings"] = [dict(m, device=names.get(m["ip"], ""))
+                              for m in status.get("mappings", [])]
+        return {"settings": settings.to_dict(), "status": status}
+
+    async def _upnp_save(self, data: dict[str, object]) -> dict[str, object]:
+        settings = upnp_settings(data)
+        await self.database.set_setting(UPNP_SETTING_KEY,
+                                        json.dumps(settings.to_dict()))
+        await self.database.add_event(
+            "UPnP " + ("enabled" if settings.enabled else "disabled"), "info")
+        return await self.upnp_payload(await self._sync_upnp())
+
+    async def _upnp_action(self, action: str, **kw: object) -> dict[str, object]:
+        if action == "install":
+            return await self.upnp_payload(await asyncio.to_thread(self.upnp.install))
+        if action == "clear":
+            return await self.upnp_payload(await self._sync_upnp(clear=True))
+        if action == "remove":
+            await asyncio.to_thread(self.upnp.remove, self._upnp_context(),
+                                    str(kw.get("proto", "")), int(kw.get("port", 0)))
+            return await self.upnp_payload(await self._sync_upnp())
+        return await self.upnp_payload()
+
     async def _sync_vpn_share(self) -> None:
         """Reconcile the VPN-share policy routing with the dashboard switch.
 
@@ -2661,6 +2747,10 @@ class Gateway:
                 pass
         if self.engine is not None:
             self.engine.stop()
+        try:
+            await asyncio.to_thread(self.upnp.stop)
+        except Exception:  # noqa: BLE001
+            log.debug("upnp stop failed", exc_info=True)
         if self.firewall is not None:
             # Cancel watchdogs; kernel rules are left in place (conservative).
             await self.firewall.shutdown()
@@ -2776,6 +2866,9 @@ def main() -> None:
                          active_ips_getter=gateway._latency_active_ips,
                          tailscale_manager=TailscaleManager(
                              on_system_change=gateway._network_heal),
+                         upnp_get=gateway.upnp_payload,
+                         upnp_save=gateway._upnp_save,
+                         upnp_action=gateway._upnp_action,
                          firewall=gateway.firewall,
                          firewall_wan_preapply=gateway._firewall_wan_preapply,
                          updater=gateway.updater,

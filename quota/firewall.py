@@ -538,6 +538,11 @@ def render_commands(
                             f"counter name {COUNTER_BAN_DROP} drop")
     # WAN-mode ppp0 drop MUST come before the SYN flood guard below —
     # same ordering fix as fw_input (see comment there).
+    if wan and cfg.get("_upnp"):
+        # UPnP mappings (quota_upnp DNATs on ppp0): the post-DNAT packet is
+        # addressed to the mapped LAN device, so let those NEW flows through
+        # the default deny. The quota engine's own blocks still apply after.
+        add_rule(CHAIN_FORWARD, 'iifname "ppp0" ct status dnat ct state new accept')
     if wan:
         add_rule(CHAIN_FORWARD,
                  f'iifname "ppp0" ct state new '
@@ -630,6 +635,8 @@ class FirewallManager:
         self._run_command = run_command or _default_run_command
         self._probe = probe
         self._web_port = web_port
+        #: UPnP is live in WAN mode: accept DNAT'd inbound (set by run.py).
+        self.upnp_inbound = False
         db_path = getattr(cfg, "db_path", "")
         #: Directory that SURVIVES an app-folder replacement (next to the DB).
         self._state_dir: Path | None = (
@@ -1016,7 +1023,8 @@ class FirewallManager:
         topology = self.topology
         geo = self._geo_cidrs()
         cfg = _merge_keep_private({**cfg, "_geo_cidrs": geo,
-                                   "_web_port": self._web_port})
+                                   "_web_port": self._web_port,
+                                   "_upnp": bool(self.upnp_inbound)})
         try:
             cmds = render_commands(cfg, topology, self._local_nets, self._box_ips)
         except Exception as exc:  # noqa: BLE001 — never crash the tick

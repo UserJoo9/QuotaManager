@@ -23,6 +23,8 @@ Requires:       iproute
 Requires:       kmod
 Requires:       ppp
 Requires:       ca-certificates
+Suggests:       miniupnpd
+Suggests:       miniupnpc
 
 %description
 Split a metered internet bundle fairly across users and devices. The package
