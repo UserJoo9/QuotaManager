@@ -368,9 +368,11 @@ class TcShaper:
         self._last_signature = None
         self.start()
         if not self.available:
-            # Keep the manager eligible for a later tick retry. DHCP remains
-            # healthy even while tc is temporarily unavailable.
-            self.available = True
+            # start() failed (tc/ifb unavailable): leave available False so
+            # the next rebind() retries start() instead of short-circuiting
+            # on `iface == selection.name and available` and reporting a
+            # healthy shaper that never programmed any tc rules. DHCP
+            # remains healthy even while tc is temporarily unavailable.
             return False
         self.update_state(
             self._rate_map, self._enabled, self._total_down, self._total_up,

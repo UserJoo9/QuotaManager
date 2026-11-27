@@ -481,10 +481,15 @@ def test_failed_rebind_stays_retryable():
     fake = FakeTc()
     shaper = TcShaper(make_cfg(), run_command=fake)
     shaper.start()
+    rates = [entry("192.168.2.100", device_id=1, user_id=1, down=10, up=5)]
+    shaper.update_state(rates, True, 100.0, 20.0)
     fake.fail_binary = "tc"
     assert shaper.rebind(LanSelection("enp10s0f1", 8, "gateway")) is False
     fake.fail_binary = None
     assert shaper.rebind(LanSelection("enp10s0f1", 8, "gateway")) is True
+    # The retry must actually re-program tc on the new interface, not just
+    # return True from the `iface == selection.name and available` shortcut.
+    assert fake.has("tc", "qdisc", "add", "dev", "enp10s0f1", "root")
 
 
 def test_lan_pass_through_respects_explicit_uplink_subnet():
