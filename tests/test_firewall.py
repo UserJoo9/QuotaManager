@@ -262,6 +262,33 @@ def test_wan_confirmed_exposes_dashboard_only_when_explicit():
     assert 'iifname "ppp0" tcp dport 8080 accept' in " | ".join(_rules(cmds))
 
 
+def test_render_keeps_runtime_web_port_and_geo_cidrs():
+    # Regression: the dataclass round-trip in _merge_defaults dropped every
+    # "_"-prefixed key, so the injected web port was always 8080 and geo-blocking
+    # rendered no rules at all.
+    cfg = _base_cfg(wan_confirmed=True, geo_block=True)
+    cfg["_web_port"] = 9191
+    cfg["_geo_cidrs"] = ["203.0.113.0/24", "198.51.100.0/24"]
+    text = " | ".join(_rules(render_commands(cfg, "wan", LOCAL_NETS, BOX_IPS)))
+    assert 'iifname "ppp0" tcp dport 9191 accept' in text
+    assert "dport 8080" not in text
+    assert "203.0.113.0/24" in text and "198.51.100.0/24" in text
+
+
+def test_apply_programs_configured_web_port_and_geo(env):
+    env.fw._web_port = 9292
+    env.fw._config["wan_confirmed"] = True
+    env.fw._config["geo_block"] = True
+    env.fw._geo_cidrs = lambda: ["203.0.113.0/24"]
+    env.fw.set_topology_override("wan")
+    assert env.fw.apply() is True
+    flat = " | ".join(c[-1] for c in env.fake.calls if c)
+    assert "tcp dport 9292" in flat
+    assert "203.0.113.0/24" in flat
+    # runtime-only keys must not leak into the stored config
+    assert not any(k.startswith("_") for k in env.fw._config)
+
+
 def test_all_named_counters_declared_before_use():
     # Real nftables rejects `counter name X` in a rule when the counter object
     # has not been declared first — "Could not process rule: No such file or
