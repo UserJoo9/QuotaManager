@@ -1655,11 +1655,17 @@ same release pipeline that publishes the `.deb` (see the release section):
   stale error/last-check, and re-enabling clears the last error. The
   config.yaml `updates.enabled` flag is the whole-subsystem master (false =
   `gw.updater` is None, endpoints 404, snapshot `update: None`).
-- **Auto-install** downloads the release `.deb` and runs `apt-get install`
-  under a **transient systemd unit** (`systemd-run --unit=quota-update-install`)
-  because the package's `prerm` stops the `quota-gateway` service — a plain
-  child `apt-get` would die with the cgroup. Falls back to a plain `apt-get`
-  when `systemd-run` is absent.
+- **Verified installs.** Manual and automatic updates use the same verification
+  path for .deb, RPM, Arch, and tarball downloads. The updater verifies
+  `SHA256SUMS.sig` over `SHA256SUMS` with `gpgv` and the public keyring
+  bundled with the installed app. It checks the SHA-256 of the exact
+  versioned package in a private staging directory before unpacking or
+  installing. Missing metadata, a missing key or verifier, and a signature
+  or checksum mismatch all stop the installation.
+- **Installer lifetime.** A transient systemd unit
+  (`systemd-run --unit=quota-update-install`) keeps the install running
+  when package hooks stop the gateway service. The updater falls back to
+  the foreground installer when systemd-run is unavailable.
 - **API:** `GET/POST /api/updates` (state + toggles), `POST /api/updates/check`
   (forced check), `POST /api/updates/install` — all 404 when unwired. The WS
   snapshot carries an `update` key so the banner appears without a reload; the
@@ -2490,6 +2496,20 @@ The `release` workflow (`.github/workflows/release.yml`) builds
 The release description is auto-composed from the `CHANGELOG.md` section for
 the released version (plus the install note), so keep the CHANGELOG current —
 it IS the release notes.
+
+The publish job signs the checksums of all four package formats with the
+existing `APT_REPO_GPG_KEY` secret and checks the detached signature against
+`quota-manager.gpg` before uploading the packages and both metadata files.
+A missing secret or a signer that does not match the bundled key blocks
+publication. Packages include the public keyring and the system verifier
+dependency. For a key rotation, distribute the new trusted public key through
+a trusted install or a release signed with the still-trusted key before
+signing with the replacement. A fork serving its own releases needs its
+matching keyring in the installed application and its own signing secret.
+
+Already installed versions without this check need to receive the first
+patched build through the signed APT repository or another trusted install
+path. Existing unsigned GitHub releases are not accepted by the patched updater.
 
 Tagging also **auto-publishes the `.deb` to a signed apt repository**
 (`.github/workflows/apt-repo.yml`, a `workflow_run` on the `release` workflow)

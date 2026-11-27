@@ -241,11 +241,11 @@ if [ -n "${QUOTA_NO_APT:-}" ]; then
     log "   QUOTA_NO_APT is set (package install) — assuming dnsmasq + nftables + iproute2 are installed"
 elif command -v apt-get >/dev/null; then
     DEBIAN_FRONTEND=noninteractive apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq dnsmasq nftables iproute2 >/dev/null
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq dnsmasq nftables iproute2 gpgv >/dev/null
 elif [ "$(qm_detect_pm)" != "unknown" ]; then
     _pm="$(qm_detect_pm)"
     # shellcheck disable=SC2046
-    qm_install_pkgs "$_pm" $(qm_net_pkgs "$_pm") >/dev/null \
+    qm_install_pkgs "$_pm" $(qm_net_pkgs "$_pm") $(qm_update_pkgs "$_pm") >/dev/null \
         || die "could not install $(qm_net_pkgs "$_pm") with $_pm — install them, then re-run"
 else
     warn "no apt/dnf/pacman/apk found — install dnsmasq + nftables + iproute2 manually"

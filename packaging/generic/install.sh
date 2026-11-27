@@ -48,7 +48,7 @@ if [ "$NO_DEPS" -eq 0 ]; then
     PM="$(qm_detect_pm)"
     [ "$PM" != "unknown" ] || die "no supported package manager found - install the dependencies yourself and re-run with --no-deps"
     # shellcheck disable=SC2046
-    PKGS="$(qm_net_pkgs "$PM") $(qm_python_pkgs "$PM")"
+    PKGS="$(qm_net_pkgs "$PM") $(qm_python_pkgs "$PM") $(qm_update_pkgs "$PM")"
     log "installing dependencies with $PM: $PKGS"
     # shellcheck disable=SC2086
     qm_install_pkgs "$PM" $PKGS || die "dependency install failed (re-run with --no-deps if you installed them manually)"
@@ -57,7 +57,7 @@ fi
 # Upgrade: stop the live service, keep the venv (pip is incremental), replace the code.
 systemctl stop "$SERVICE" 2>/dev/null || true
 mkdir -p "$APP_DIR"
-for item in run.py requirements-linux.txt LICENSE core quota api web scripts bin; do
+for item in run.py requirements-linux.txt LICENSE quota-manager.gpg core quota api web scripts bin; do
     [ -e "$HERE/$item" ] || continue
     rm -rf "${APP_DIR:?}/$item"
     cp -a "$HERE/$item" "$APP_DIR/$item"

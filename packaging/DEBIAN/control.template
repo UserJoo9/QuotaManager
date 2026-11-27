@@ -11,7 +11,7 @@ Architecture: all
 Breaks: quota-manager (<< 0.6.0)
 Replaces: quota-manager (<< 0.6.0)
 Depends: python3 (>= 3.10), python3-venv, python3-pip, dnsmasq, nftables,
-         iproute2, kmod, ppp, ca-certificates
+         iproute2, kmod, ppp, ca-certificates, gpgv
 Suggests: miniupnpd-nftables, miniupnpc
 Maintainer: Youssef Alkhodary <youssef.alkhodary@users.noreply.github.com>
 Homepage: https://github.com/UserJoo9/Netrex

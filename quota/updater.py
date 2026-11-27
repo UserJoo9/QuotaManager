@@ -1,5 +1,5 @@
 """Self-update support: check the GitHub repo for a newer release, surface the
-new versions' changelog, and (optionally) install the new .deb.
+new versions' changelog, and (optionally) install a verified release package.
 
 The version factor is the app version in ``quota/version.py``. Every network
 call is a blocking stdlib fetch that MUST be run off the event loop
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as _dt
+import hashlib
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ import tempfile
 import time
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any, Callable
 
 from quota.version import __version__
@@ -57,7 +59,7 @@ def repo_candidates(configured: str) -> list[str]:
         return [NEW_REPO, LEGACY_REPO]
     return [name]
 
-#: package type -> (asset suffix, deterministic asset name). The release
+#: package type -> deterministic asset name. The release
 #: pipeline names every asset this way, so a release with an empty asset list
 #: still resolves to a download URL. Assets are found by SUFFIX, never by name
 #: (every updater since 0.2 does the same), which is why the files could be
@@ -72,6 +74,15 @@ ASSET_KINDS: dict[str, tuple[str, str]] = {
 #: written by every installer (deb postinst, rpm %post, PKGBUILD, install.sh) so
 #: the updater knows which asset this box was installed from.
 INSTALL_KIND_FILE = "/opt/quota-manager/.install-kind"
+
+# Trust only the keyring shipped with the currently installed application.
+RELEASE_KEYRING = Path(__file__).resolve().parent.parent / "quota-manager.gpg"
+CHECKSUMS_NAME = "SHA256SUMS"
+SIGNATURE_NAME = "SHA256SUMS.sig"
+
+
+class UpdateVerificationError(ValueError):
+    """The release could not be authenticated."""
 
 
 def detect_install_kind(marker: str = INSTALL_KIND_FILE,
@@ -414,7 +425,7 @@ class Updater:
             self._checking = False
 
     async def install_latest(self) -> dict[str, Any]:
-        """Download + install the latest .deb (when one is available).
+        """Download, authenticate, and install the latest release package.
 
         Serialized (``_install_lock``) so a manual "Install now" and an
         auto-install never double-run. The install runs under a transient
@@ -431,15 +442,8 @@ class Updater:
                 if not st["available"]:
                     return {"ok": False, "reason": "no update available"}
                 release = await self._fetch_release()
-                kind = self.install_kind
-                asset_url = self._find_asset_url(release, latest, kind)
-                if not asset_url:
-                    return {"ok": False,
-                            "reason": f"no {ASSET_KINDS[kind][0]} asset in the release"}
-                dest = "/tmp/" + ASSET_KINDS[kind][1].format(v=latest)
-                await asyncio.to_thread(self._download, asset_url, dest)
                 ok, out = await asyncio.to_thread(
-                    self._install_package, kind, dest)
+                    self._install_verified, release, latest, self.install_kind)
                 if not ok:
                     log.error("update install failed: %s", out[-2000:])
                     return {"ok": False, "reason": "install failed (see logs)"}
@@ -465,16 +469,83 @@ class Updater:
             self._install_kind = detect_install_kind()
         return self._install_kind
 
+    def _find_named_asset_url(self, release: dict[str, Any], latest: str,
+                              name: str) -> str:
+        assets = release.get("assets") or []
+        if assets:
+            matches = [asset.get("browser_download_url") for asset in assets
+                       if asset.get("name") == name]
+            return matches[0] if len(matches) == 1 and matches[0] else ""
+        return f"https://github.com/{self.repo}/releases/download/v{latest}/{name}"
+
+    def _find_asset(self, release: dict[str, Any], latest: str,
+                    kind: str) -> tuple[str, str]:
+        """(real name, download URL) of the release asset for ``kind``.
+
+        The asset is found by SUFFIX, so the same code verifies old
+        ``quota-manager_*`` releases and new ``netrex_*`` ones: the checksum
+        check binds to the real name of the asset actually downloaded, never
+        to a name template. With an empty asset list, fall back to the
+        deterministic name and the constructed download URL.
+        """
+        suffix, template = ASSET_KINDS[kind]
+        assets = release.get("assets") or []
+        for asset in assets:
+            if (asset.get("name") or "").endswith(suffix):
+                return asset["name"], asset.get("browser_download_url") or ""
+        if assets:
+            return "", ""
+        name = template.format(v=latest)
+        return name, (f"https://github.com/{self.repo}/releases/download/"
+                      f"v{latest}/{name}")
+
     def _find_asset_url(self, release: dict[str, Any], latest: str,
                         kind: str) -> str:
-        suffix, name = ASSET_KINDS[kind]
-        for asset in release.get("assets") or []:
-            if (asset.get("name") or "").endswith(suffix):
-                return asset.get("browser_download_url") or ""
-        # the release pipeline names the asset deterministically; fall back to
-        # the constructed URL when the API's asset list is empty
-        return f"https://github.com/{self.repo}/releases/download/" \
-               f"v{latest}/{name.format(v=latest)}"
+        return self._find_asset(release, latest, kind)[1]
+
+    def _install_verified(self, release: dict[str, Any], latest: str,
+                          kind: str) -> tuple[bool, str]:
+        if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", latest):
+            raise UpdateVerificationError("Unexpected release version")
+        if release.get("tag_name") != f"v{latest}":
+            raise UpdateVerificationError("Release changed since the update check; check again")
+
+        # The package asset is found by suffix, so the checksum check binds
+        # to the real name of the asset actually downloaded (old
+        # quota-manager_* releases and new netrex_* ones alike), never to a
+        # name template.
+        name, package_url = self._find_asset(release, latest, kind)
+        if not package_url:
+            raise UpdateVerificationError(
+                f"Release is missing a unique *{ASSET_KINDS[kind][0]} asset")
+        urls = {asset: self._find_named_asset_url(release, latest, asset)
+                for asset in (CHECKSUMS_NAME, SIGNATURE_NAME)}
+        urls[name] = package_url
+        for asset, url in urls.items():
+            if not url:
+                raise UpdateVerificationError(f"Release is missing a unique {asset} asset")
+        if not RELEASE_KEYRING.is_file():
+            raise UpdateVerificationError("The installed release signing keyring is missing")
+
+        # A private directory keeps the verified bytes out of shared /tmp names.
+        # Download, verification, and install own the directory in one worker.
+        with tempfile.TemporaryDirectory(prefix="quota-update-") as directory:
+            root = Path(directory)
+            checksums = root / CHECKSUMS_NAME
+            signature = root / SIGNATURE_NAME
+            for asset in (CHECKSUMS_NAME, SIGNATURE_NAME):
+                self._download(urls[asset], str(root / asset))
+            _verify_signature(root, checksums, signature)
+            expected = _release_checksum(checksums, name)
+            package = root / name
+            self._download(urls[name], str(package))
+            actual = hashlib.sha256()
+            with package.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    actual.update(chunk)
+            if actual.hexdigest() != expected:
+                raise UpdateVerificationError("Downloaded package failed SHA-256 verification")
+            return self._install_package(kind, str(package))
 
     def _find_deb_url(self, release: dict[str, Any], latest: str) -> str:
         return self._find_asset_url(release, latest, "deb")
@@ -496,11 +567,16 @@ class Updater:
         elif kind == "arch":
             cmd = ["pacman", "-U", "--noconfirm", path]
         else:  # tarball: unpack, then run its installer in upgrade mode
-            try:
-                root = self._unpack_tarball(path)
-            except (OSError, ValueError, tarfile.TarError) as exc:
-                return False, f"bad tarball: {exc}"
-            cmd = ["bash", os.path.join(root, "install.sh"), "--upgrade"]
+            with tempfile.TemporaryDirectory(prefix="quota-unpack-") as directory:
+                try:
+                    root = self._unpack_tarball(path, directory)
+                except (OSError, ValueError, tarfile.TarError) as exc:
+                    return False, f"bad tarball: {exc}"
+                cmd = ["bash", os.path.join(root, "install.sh"), "--upgrade"]
+                return self._run_install_command(cmd, env)
+        return self._run_install_command(cmd, env)
+
+    def _run_install_command(self, cmd: list[str], env: list[str]) -> tuple[bool, str]:
         argv = ["systemd-run", "--unit=quota-update-install", "--collect",
                 "--quiet", "--wait", "--property=Type=oneshot", *env, *cmd]
         try:
@@ -521,10 +597,9 @@ class Updater:
         return self._install_package("deb", deb_path)
 
     @staticmethod
-    def _unpack_tarball(path: str) -> str:
+    def _unpack_tarball(path: str, dest: str) -> str:
         """Extract a release tarball to a fresh temp dir and return the
         directory holding ``install.sh``. Refuses absolute/escaping members."""
-        dest = tempfile.mkdtemp(prefix="quota-update-")
         base = os.path.realpath(dest)
         with tarfile.open(path, "r:gz") as tar:
             for m in tar.getmembers():
@@ -541,6 +616,32 @@ class Updater:
             if os.path.isfile(os.path.join(dest, name, "install.sh")):
                 return os.path.join(dest, name)
         raise ValueError("install.sh not found in the tarball")
+
+
+def _verify_signature(directory: Path, checksums: Path, signature: Path) -> None:
+    try:
+        rc, output = _run_command([
+            "gpgv", "--homedir", str(directory), "--keyring", str(RELEASE_KEYRING.resolve()),
+            "--weak-digest", "SHA1", str(signature), str(checksums),
+        ])
+    except FileNotFoundError as exc:
+        raise UpdateVerificationError("Release signature verifier gpgv is unavailable") from exc
+    if rc != 0:
+        log.warning("Release signature verification failed: %s", output[-1000:])
+        raise UpdateVerificationError("Release checksum signature could not be verified")
+
+
+def _release_checksum(checksums: Path, name: str) -> str:
+    """Read the unique checksum for the exact versioned filename."""
+    entries: dict[str, str] = {}
+    for line in checksums.read_text(encoding="ascii").splitlines():
+        match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9_.-]+)", line)
+        if not match or match[2] in entries:
+            raise UpdateVerificationError("Invalid release checksum manifest")
+        entries[match[2]] = match[1]
+    if name not in entries:
+        raise UpdateVerificationError(f"Signed checksums do not contain {name}")
+    return entries[name]
 
 
 def _now_iso() -> str:

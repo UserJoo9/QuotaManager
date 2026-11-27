@@ -19,7 +19,7 @@ rm -rf "$STAGE" "$W/tarball" "$W/rpmbuild" "$W/archpkg"
 mkdir -p dist "$STAGE/DEBIAN" "$STAGE/opt/quota-manager"
 
 # ---- payload (explicit allowlist) ----
-cp run.py requirements-linux.txt LICENSE "$STAGE/opt/quota-manager/"
+cp run.py requirements-linux.txt LICENSE quota-manager.gpg "$STAGE/opt/quota-manager/"
 cp -r core quota api web scripts "$STAGE/opt/quota-manager/"
 [ -d bin ] && cp -r bin "$STAGE/opt/quota-manager/" || true
 # Normalise modes explicitly: never inherit whatever the checkout/umask gave us.
@@ -62,7 +62,7 @@ A="$W/archpkg"
 mkdir -p "$A/opt"
 cp -a "$STAGE/opt/quota-manager" "$A/opt/"
 SIZE="$(du -sb "$A/opt" | cut -f1)"
-printf 'pkgname = quota-manager\npkgbase = quota-manager\npkgver = %s-1\npkgdesc = Fair-split metered-internet quota gateway\nurl = https://github.com/UserJoo9/Netrex\nbuilddate = %s\npackager = Netrex CI\nsize = %s\narch = any\nlicense = MIT\ndepend = python>=3.10\ndepend = python-pip\ndepend = dnsmasq\ndepend = nftables\ndepend = iproute2\ndepend = kmod\ndepend = ppp\ndepend = ca-certificates\n' \
+printf 'pkgname = quota-manager\npkgbase = quota-manager\npkgver = %s-1\npkgdesc = Fair-split metered-internet quota gateway\nurl = https://github.com/UserJoo9/Netrex\nbuilddate = %s\npackager = Netrex CI\nsize = %s\narch = any\nlicense = MIT\ndepend = python>=3.10\ndepend = python-pip\ndepend = dnsmasq\ndepend = nftables\ndepend = iproute2\ndepend = kmod\ndepend = ppp\ndepend = ca-certificates\ndepend = gnupg\n' \
     "${VERSION}" "$(date +%s)" "${SIZE}" > "$A/.PKGINFO"
 cp packaging/arch/netrex.install "$A/.INSTALL"
 tar -C "$A" --owner=0 --group=0 --numeric-owner --zstd \

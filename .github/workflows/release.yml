@@ -38,6 +38,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # The version is the single source of truth in quota/version.py. Import it
       # so the package metadata, the .deb filename and the Release all agree.
@@ -64,7 +66,7 @@ jobs:
       # the very same script, so what was smoke-tested is what ships.
       - name: Build all packages (.deb, .tar.gz, .rpm, .pkg.tar.zst)
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq rpm zstd
+          sudo apt-get update -qq && sudo apt-get install -y -qq rpm zstd gnupg gpgv
           bash packaging/build_packages.sh "${RUNNER_TEMP}/work"
 
       - name: Inspect the artifact (sanity)
@@ -127,11 +129,31 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Download packages built and gated in this tag run
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-assets
           path: release-assets
+
+      # Signing runs here, in publish — only after CI and the packaging
+      # smoke tests passed on this exact tag — so the secret is exposed
+      # solely to sign a release that already cleared every gate.
+      - name: Sign release checksums
+        env:
+          APT_REPO_GPG_KEY: ${{ secrets.APT_REPO_GPG_KEY }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq gnupg gpgv
+          if [ -z "$APT_REPO_GPG_KEY" ]; then
+            echo "::error::APT_REPO_GPG_KEY is required to sign release packages"
+            exit 1
+          fi
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          printf '%s\n' "$APT_REPO_GPG_KEY" | env -u APT_REPO_GPG_KEY \
+            bash packaging/sign_release.sh "$VERSION" release-assets/dist quota-manager.gpg
 
       - name: Upload to GitHub Releases
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
@@ -141,4 +163,7 @@ jobs:
             release-assets/dist/netrex-*.tar.gz
             release-assets/dist/netrex-*.rpm
             release-assets/dist/netrex-*.pkg.tar.zst
+            release-assets/dist/SHA256SUMS
+            release-assets/dist/SHA256SUMS.sig
+          fail_on_unmatched_files: true
           body_path: release-assets/release_body.md

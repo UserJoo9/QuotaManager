@@ -41,6 +41,15 @@ qm_python_pkgs() {
     esac
 }
 
+# Package supplying the updater's OpenPGP verifier.
+qm_update_pkgs() {
+    case "${1:-$(qm_detect_pm)}" in
+        apt|apk) echo gpgv ;;
+        dnf) echo /usr/bin/gpgv ;;
+        pacman) echo gnupg ;;
+    esac
+}
+
 # qm_install_pkgs <pm> <pkg>...   install non-interactively; returns the
 # package manager's status. Never prompts.
 qm_install_pkgs() {
