@@ -73,7 +73,7 @@ def _run_detect(tmp_path: Path, nics: dict[str, dict], default_if: str) -> str:
         "#!/bin/sh\n"
         "if [ \"$1 $2 $3 $4\" = '-j -4 addr show' ]; then echo '[]'; exit 0; fi\n"
         "if [ \"$1 $2 $3 $4\" = '-j route show default' ]; then\n"
-        "  if [ -n \"$FAKE_DEFAULT_IF\" ]; then printf '[{\\\"dev\\\":\\\"%s\\\"}]' \"$FAKE_DEFAULT_IF\"; else echo '[]'; fi; exit 0; fi\n"
+        "  if [ -n \"$FAKE_DEFAULT_IF\" ]; then printf '[{\"dev\":\"%s\"}]' \"$FAKE_DEFAULT_IF\"; else echo '[]'; fi; exit 0; fi\n"
         "exit 1\n")
     ip.chmod(0o755)
     nmcli = bin_dir / "nmcli"
